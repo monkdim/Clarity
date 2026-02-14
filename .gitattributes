@@ -1,0 +1,6 @@
+*.clarity linguist-language=Clarity
+*.clarity linguist-detectable=true
+*.py linguist-vendored
+editors/linguist/* linguist-documentation
+docs/* linguist-documentation
+playground/* linguist-documentation
