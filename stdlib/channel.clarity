@@ -1,0 +1,350 @@
+-- Clarity Channels — message passing for concurrent tasks.
+-- Provides Channel (unbuffered) and BufferedChannel for producer/consumer patterns.
+-- Channels are typed message queues with send/receive/close semantics.
+
+-- ── Channel (unbuffered) ────────────────────────────────
+-- An unbuffered channel holds at most one pending message.
+-- Send blocks (spins) until the message is received.
+
+class Channel {
+    fn init() {
+        this._queue = []
+        this._closed = false
+        this._receivers = []
+        this._name = ""
+    }
+
+    fn send(value) {
+        -- Send a value into the channel.
+        if this._closed {
+            throw "send on closed channel"
+        }
+        push(this._queue, value)
+
+        -- If there are waiting receivers, notify them
+        if len(this._receivers) > 0 {
+            let callback = this._receivers[0]
+            this._receivers = slice(this._receivers, 1)
+            callback(value)
+        }
+    }
+
+    fn receive() {
+        -- Receive a value from the channel.
+        -- Returns null if channel is closed and empty.
+        if len(this._queue) > 0 {
+            let val = this._queue[0]
+            this._queue = slice(this._queue, 1)
+            return val
+        }
+        if this._closed {
+            return null
+        }
+        return null
+    }
+
+    fn try_receive() {
+        -- Non-blocking receive. Returns {ok: true, value: v} or {ok: false}.
+        if len(this._queue) > 0 {
+            let val = this._queue[0]
+            this._queue = slice(this._queue, 1)
+            return {"ok": true, "value": val}
+        }
+        return {"ok": false, "value": null}
+    }
+
+    fn on_receive(callback) {
+        -- Register a callback for when a value is available.
+        push(this._receivers, callback)
+    }
+
+    fn close() {
+        -- Close the channel. No more sends allowed.
+        this._closed = true
+    }
+
+    fn is_closed() {
+        return this._closed
+    }
+
+    fn is_empty() {
+        return len(this._queue) == 0
+    }
+
+    fn pending() {
+        -- Number of pending messages.
+        return len(this._queue)
+    }
+
+    fn drain() {
+        -- Receive all pending messages as a list.
+        let result = this._queue
+        this._queue = []
+        return result
+    }
+
+    fn to_string() {
+        let status = if this._closed { "closed" } else { "open" }
+        return "Channel({status}, pending={len(this._queue)})"
+    }
+}
+
+-- ── BufferedChannel ─────────────────────────────────────
+-- A buffered channel holds up to N messages before send blocks.
+
+class BufferedChannel {
+    fn init(capacity) {
+        this._queue = []
+        this._capacity = if capacity != null and capacity > 0 { capacity } else { 16 }
+        this._closed = false
+        this._receivers = []
+        this._dropped = 0
+        this._name = ""
+    }
+
+    fn send(value) {
+        -- Send a value. If buffer is full, drops oldest message.
+        if this._closed {
+            throw "send on closed channel"
+        }
+        if len(this._queue) >= this._capacity {
+            -- Drop oldest (ring buffer behavior)
+            this._queue = slice(this._queue, 1)
+            this._dropped = this._dropped + 1
+        }
+        push(this._queue, value)
+
+        -- Notify receivers
+        if len(this._receivers) > 0 {
+            let callback = this._receivers[0]
+            this._receivers = slice(this._receivers, 1)
+            callback(value)
+        }
+    }
+
+    fn send_blocking(value) {
+        -- Send a value. If buffer is full, wait (poll) until space available.
+        if this._closed {
+            throw "send on closed channel"
+        }
+        -- Simple spin-wait: in a cooperative model we just check and retry
+        mut attempts = 0
+        while len(this._queue) >= this._capacity {
+            if attempts > 100 {
+                throw "channel buffer full (timeout)"
+            }
+            sleep(0.01)
+            attempts += 1
+        }
+        push(this._queue, value)
+    }
+
+    fn receive() {
+        if len(this._queue) > 0 {
+            let val = this._queue[0]
+            this._queue = slice(this._queue, 1)
+            return val
+        }
+        if this._closed {
+            return null
+        }
+        return null
+    }
+
+    fn try_receive() {
+        if len(this._queue) > 0 {
+            let val = this._queue[0]
+            this._queue = slice(this._queue, 1)
+            return {"ok": true, "value": val}
+        }
+        return {"ok": false, "value": null}
+    }
+
+    fn receive_all() {
+        -- Receive all buffered messages at once.
+        let result = this._queue
+        this._queue = []
+        return result
+    }
+
+    fn on_receive(callback) {
+        push(this._receivers, callback)
+    }
+
+    fn close() {
+        this._closed = true
+    }
+
+    fn is_closed() {
+        return this._closed
+    }
+
+    fn is_empty() {
+        return len(this._queue) == 0
+    }
+
+    fn is_full() {
+        return len(this._queue) >= this._capacity
+    }
+
+    fn pending() {
+        return len(this._queue)
+    }
+
+    fn capacity() {
+        return this._capacity
+    }
+
+    fn dropped() {
+        return this._dropped
+    }
+
+    fn drain() {
+        let result = this._queue
+        this._queue = []
+        return result
+    }
+
+    fn to_string() {
+        let status = if this._closed { "closed" } else { "open" }
+        return "BufferedChannel({status}, {len(this._queue)}/{this._capacity})"
+    }
+}
+
+-- ── Fan-out / Fan-in ────────────────────────────────────
+
+class FanOut {
+    -- Send to multiple channels simultaneously.
+    fn init() {
+        this._channels = []
+    }
+
+    fn add(channel) {
+        push(this._channels, channel)
+    }
+
+    fn remove(channel) {
+        mut new_channels = []
+        for ch in this._channels {
+            if ch != channel {
+                push(new_channels, ch)
+            }
+        }
+        this._channels = new_channels
+    }
+
+    fn send(value) {
+        for ch in this._channels {
+            if not ch.is_closed() {
+                ch.send(value)
+            }
+        }
+    }
+
+    fn close_all() {
+        for ch in this._channels {
+            ch.close()
+        }
+    }
+}
+
+class FanIn {
+    -- Receive from multiple channels, merging into one stream.
+    fn init() {
+        this._channels = []
+    }
+
+    fn add(channel) {
+        push(this._channels, channel)
+    }
+
+    fn receive() {
+        -- Round-robin receive from all channels.
+        for ch in this._channels {
+            if not ch.is_empty() {
+                return ch.receive()
+            }
+        }
+        return null
+    }
+
+    fn try_receive() {
+        for ch in this._channels {
+            let result = ch.try_receive()
+            if result["ok"] {
+                return result
+            }
+        }
+        return {"ok": false, "value": null}
+    }
+
+    fn drain_all() {
+        mut result = []
+        for ch in this._channels {
+            let items = ch.drain()
+            for item in items {
+                push(result, item)
+            }
+        }
+        return result
+    }
+
+    fn all_closed() {
+        for ch in this._channels {
+            if not ch.is_closed() { return false }
+        }
+        return true
+    }
+}
+
+-- ── Constructors ────────────────────────────────────────
+
+fn chan() {
+    -- Create an unbuffered channel.
+    return Channel()
+}
+
+fn buffered_chan(capacity) {
+    -- Create a buffered channel with given capacity.
+    return BufferedChannel(capacity)
+}
+
+fn named_chan(name) {
+    -- Create a named channel (for debugging/logging).
+    let ch = Channel()
+    ch._name = name
+    return ch
+}
+
+-- ── Select ──────────────────────────────────────────────
+
+fn select(channels) {
+    -- Wait on multiple channels, return the first available message.
+    -- channels: list of Channel objects
+    -- Returns {channel_index, value} or null if all empty/closed.
+    mut i = 0
+    while i < len(channels) {
+        let ch = channels[i]
+        let result = ch.try_receive()
+        if result["ok"] {
+            return {"channel_index": i, "value": result["value"]}
+        }
+        i += 1
+    }
+    return null
+}
+
+fn select_timeout(channels, timeout_seconds) {
+    -- Select with a timeout (in seconds).
+    let start = time()
+    let deadline = start + timeout_seconds
+
+    while time() < deadline {
+        let result = select(channels)
+        if result != null {
+            return result
+        }
+        sleep(0.01)
+    }
+    return null
+}

@@ -1,0 +1,439 @@
+-- Clarity Package Registry Server — self-hosted package registry.
+-- Written in Clarity (dogfooding). Backed by filesystem + JSON index.
+--
+-- Usage:
+--   clarity run registry.clarity                   Start on port 8080
+--   clarity run registry.clarity --port 3000       Custom port
+--   clarity run registry.clarity --data ./registry Data directory
+--
+-- API:
+--   GET  /packages                    List all packages
+--   GET  /packages/:name              Package metadata + versions
+--   GET  /packages/:name/:version     Specific version metadata
+--   GET  /packages/:name/:version/download   Download tarball
+--   POST /publish                     Upload package (multipart form)
+--   GET  /search?q=<query>            Search packages
+
+from "process.clarity" import _quote
+
+-- ── Constants ──────────────────────────────────────────
+
+let DEFAULT_PORT = 8080
+let DEFAULT_DATA_DIR = "./clarity_registry"
+
+-- ── Filesystem helpers ─────────────────────────────────
+
+fn _exists(path) {
+    let result = exec_full("test -e " + _quote(path) + " && echo yes || echo no")
+    return trim(result.stdout) == "yes"
+}
+
+fn _is_dir(path) {
+    let result = exec_full("test -d " + _quote(path) + " && echo yes || echo no")
+    return trim(result.stdout) == "yes"
+}
+
+fn _mkdir_p(path) {
+    exec_full("mkdir -p " + _quote(path))
+}
+
+fn _read_json(path) {
+    if not _exists(path) { return null }
+    try {
+        return json_parse(read(path))
+    } catch e {
+        return null
+    }
+}
+
+fn _write_json(path, data) {
+    write(path, json_string(data))
+}
+
+fn _join(a, b) {
+    if ends(a, "/") { return a + b }
+    return a + "/" + b
+}
+
+-- ── Registry data layer ────────────────────────────────
+
+class Registry {
+    fn init(data_dir) {
+        this.data_dir = data_dir
+        this.packages_dir = _join(data_dir, "packages")
+        this.index_path = _join(data_dir, "index.json")
+        this._ensure_dirs()
+    }
+
+    fn _ensure_dirs() {
+        _mkdir_p(this.data_dir)
+        _mkdir_p(this.packages_dir)
+        if not _exists(this.index_path) {
+            _write_json(this.index_path, {"packages": {}})
+        }
+    }
+
+    fn _read_index() {
+        return _read_json(this.index_path)
+    }
+
+    fn _write_index(index) {
+        _write_json(this.index_path, index)
+    }
+
+    fn list_packages() {
+        let index = this._read_index()
+        if index == null { return [] }
+        mut result = []
+        let pkg_entries = entries(index["packages"])
+        each(pkg_entries, fn(entry) {
+            let name = entry[0]
+            let info = entry[1]
+            push(result, {
+                "name": name,
+                "description": if has(info, "description") { info["description"] } else { "" },
+                "latest": if has(info, "latest") { info["latest"] } else { "" },
+                "versions": if has(info, "versions") { len(keys(info["versions"])) } else { 0 }
+            })
+        })
+        return result
+    }
+
+    fn get_package(name) {
+        let index = this._read_index()
+        if index == null { return null }
+        if not has(index["packages"], name) { return null }
+        return index["packages"][name]
+    }
+
+    fn get_version(name, version) {
+        let pkg = this.get_package(name)
+        if pkg == null { return null }
+        if not has(pkg, "versions") { return null }
+        if not has(pkg["versions"], version) { return null }
+        return pkg["versions"][version]
+    }
+
+    fn get_tarball_path(name, version) {
+        return _join(this.packages_dir, name + "-" + version + ".tar.gz")
+    }
+
+    fn publish(name, version, metadata, tarball_path) {
+        -- Store package version
+        let index = this._read_index()
+
+        if not has(index["packages"], name) {
+            index["packages"][name] = {
+                "name": name,
+                "description": if has(metadata, "description") { metadata["description"] } else { "" },
+                "versions": {},
+                "latest": version
+            }
+        }
+
+        let pkg = index["packages"][name]
+
+        -- Check if version already exists
+        if has(pkg, "versions") and has(pkg["versions"], version) {
+            return {"success": false, "error": "Version {version} already exists for {name}"}
+        }
+
+        if not has(pkg, "versions") {
+            pkg["versions"] = {}
+        }
+
+        -- Store version metadata
+        pkg["versions"][version] = {
+            "version": version,
+            "description": if has(metadata, "description") { metadata["description"] } else { "" },
+            "dependencies": if has(metadata, "dependencies") { metadata["dependencies"] } else { {} },
+            "entry": if has(metadata, "entry") { metadata["entry"] } else { "main.clarity" },
+            "published_at": _now_iso()
+        }
+
+        -- Update latest
+        pkg["latest"] = version
+
+        -- Update description if provided
+        if has(metadata, "description") and len(metadata["description"]) > 0 {
+            pkg["description"] = metadata["description"]
+        }
+
+        index["packages"][name] = pkg
+        this._write_index(index)
+
+        -- Copy tarball to storage
+        let dest = this.get_tarball_path(name, version)
+        exec_full("cp " + _quote(tarball_path) + " " + _quote(dest))
+
+        return {"success": true, "name": name, "version": version}
+    }
+
+    fn search(query) {
+        let index = this._read_index()
+        if index == null { return [] }
+        let q = lower(trim(query))
+        mut results = []
+        let pkg_entries = entries(index["packages"])
+        each(pkg_entries, fn(entry) {
+            let name = entry[0]
+            let info = entry[1]
+            let desc = if has(info, "description") { lower(info["description"]) } else { "" }
+            if contains(lower(name), q) or contains(desc, q) {
+                push(results, {
+                    "name": name,
+                    "description": if has(info, "description") { info["description"] } else { "" },
+                    "latest": if has(info, "latest") { info["latest"] } else { "" }
+                })
+            }
+        })
+        return results
+    }
+}
+
+-- ── Time helper ────────────────────────────────────────
+
+fn _now_iso() {
+    let result = exec_full("date -u '+%Y-%m-%dT%H:%M:%SZ'")
+    return trim(result.stdout)
+}
+
+-- ── HTTP request handling ──────────────────────────────
+
+fn _json_response(status, body) {
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json_string(body)
+    }
+}
+
+fn _file_response(path) {
+    if _exists(path) {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/gzip"},
+            "body_file": path
+        }
+    }
+    return _json_response(404, {"error": "File not found"})
+}
+
+fn _parse_path_segments(path) {
+    let segments = split(path, "/")
+    mut result = []
+    for seg in segments {
+        if len(trim(seg)) > 0 {
+            push(result, trim(seg))
+        }
+    }
+    return result
+}
+
+fn _parse_query_params(path) {
+    let q_idx = index_of(path, "?")
+    if q_idx < 0 { return {} }
+    let qs = substring(path, q_idx + 1, len(path))
+    let pairs = split(qs, "&")
+    mut params = {}
+    for pair in pairs {
+        let eq = index_of(pair, "=")
+        if eq >= 0 {
+            params[substring(pair, 0, eq)] = substring(pair, eq + 1, len(pair))
+        }
+    }
+    return params
+}
+
+fn _path_without_query(path) {
+    let q_idx = index_of(path, "?")
+    if q_idx >= 0 { return substring(path, 0, q_idx) }
+    return path
+}
+
+-- ── Route handler ──────────────────────────────────────
+
+fn create_handler(registry) {
+    return fn(req) {
+        let method = req.method
+        let raw_path = req.path
+        let path = _path_without_query(raw_path)
+        let segments = _parse_path_segments(path)
+        let params = _parse_query_params(raw_path)
+
+        -- GET /
+        if method == "GET" and len(segments) == 0 {
+            return _json_response(200, {
+                "name": "Clarity Package Registry",
+                "version": "1.0.0",
+                "packages": len(registry.list_packages())
+            })
+        }
+
+        -- GET /packages
+        if method == "GET" and len(segments) == 1 and segments[0] == "packages" {
+            let pkgs = registry.list_packages()
+            return _json_response(200, {"packages": pkgs})
+        }
+
+        -- GET /packages/:name
+        if method == "GET" and len(segments) == 2 and segments[0] == "packages" {
+            let name = segments[1]
+            let pkg = registry.get_package(name)
+            if pkg == null {
+                return _json_response(404, {"error": "Package not found: " + name})
+            }
+            return _json_response(200, pkg)
+        }
+
+        -- GET /packages/:name/:version
+        if method == "GET" and len(segments) == 3 and segments[0] == "packages" {
+            let name = segments[1]
+            let version = segments[2]
+            let ver = registry.get_version(name, version)
+            if ver == null {
+                return _json_response(404, {"error": "Version not found: " + name + "@" + version})
+            }
+            return _json_response(200, ver)
+        }
+
+        -- GET /packages/:name/:version/download
+        if method == "GET" and len(segments) == 4 and segments[0] == "packages" and segments[3] == "download" {
+            let name = segments[1]
+            let version = segments[2]
+            let tarball = registry.get_tarball_path(name, version)
+            return _file_response(tarball)
+        }
+
+        -- GET /search?q=<query>
+        if method == "GET" and len(segments) == 1 and segments[0] == "search" {
+            let query = if has(params, "q") { params["q"] } else { "" }
+            if len(query) == 0 {
+                return _json_response(400, {"error": "Missing query parameter 'q'"})
+            }
+            let results = registry.search(query)
+            return _json_response(200, {"packages": results, "query": query})
+        }
+
+        -- POST /publish
+        if method == "POST" and len(segments) == 1 and segments[0] == "publish" {
+            return _handle_publish(registry, req)
+        }
+
+        -- 404 fallback
+        return _json_response(404, {"error": "Not found: " + method + " " + path})
+    }
+}
+
+fn _handle_publish(registry, req) {
+    -- Parse the upload
+    -- The request body should be JSON with base64-encoded tarball
+    -- or multipart form data (simplified: expect JSON body)
+    try {
+        let body = if type(req.body) == "string" { json_parse(req.body) } else { req.body }
+
+        if not has(body, "name") or not has(body, "version") {
+            return _json_response(400, {"error": "Missing 'name' and 'version' fields"})
+        }
+
+        let name = body["name"]
+        let version = body["version"]
+
+        -- Validate package name
+        if len(name) == 0 or contains(name, "/") or contains(name, " ") {
+            return _json_response(400, {"error": "Invalid package name"})
+        }
+
+        -- Write tarball from base64 if provided
+        mut tarball_path = null
+        if has(body, "tarball") {
+            -- base64-encoded tarball
+            let tmp_path = _join(registry.data_dir, "tmp_" + name + "-" + version + ".tar.gz")
+            let decode_cmd = "echo " + _quote(body["tarball"]) + " | base64 -d > " + _quote(tmp_path)
+            exec_full(decode_cmd)
+            tarball_path = tmp_path
+        } elif has(body, "tarball_path") {
+            tarball_path = body["tarball_path"]
+        }
+
+        if tarball_path == null {
+            return _json_response(400, {"error": "No tarball provided"})
+        }
+
+        -- Metadata
+        let metadata = {
+            "description": if has(body, "description") { body["description"] } else { "" },
+            "dependencies": if has(body, "dependencies") { body["dependencies"] } else { {} },
+            "entry": if has(body, "entry") { body["entry"] } else { "main.clarity" }
+        }
+
+        let result = registry.publish(name, version, metadata, tarball_path)
+
+        -- Clean up tmp tarball
+        if has(body, "tarball") and tarball_path != null {
+            exec_full("rm -f " + _quote(tarball_path))
+        }
+
+        if result["success"] {
+            return _json_response(200, result)
+        } else {
+            return _json_response(409, result)
+        }
+    } catch e {
+        return _json_response(400, {"error": "Invalid request: " + str(e)})
+    }
+}
+
+-- ── Server startup ─────────────────────────────────────
+
+fn start_registry(port, data_dir) {
+    let reg = Registry(data_dir)
+
+    show ""
+    show "  +======================================+"
+    show "  |   Clarity Package Registry Server    |"
+    show "  +======================================+"
+    show ""
+    show "  Port:     {port}"
+    show "  Data:     {data_dir}"
+    show "  Packages: {len(reg.list_packages())}"
+    show ""
+    show "  API:"
+    show "    GET  /packages"
+    show "    GET  /packages/:name"
+    show "    GET  /packages/:name/:version"
+    show "    GET  /packages/:name/:version/download"
+    show "    POST /publish"
+    show "    GET  /search?q=<query>"
+    show ""
+
+    let handler = create_handler(reg)
+    serve(port, handler)
+}
+
+-- ── CLI entry point ────────────────────────────────────
+
+fn main() {
+    let cli_args = args()
+    mut port = DEFAULT_PORT
+    mut data_dir = DEFAULT_DATA_DIR
+
+    mut i = 0
+    while i < len(cli_args) {
+        if cli_args[i] == "--port" and i + 1 < len(cli_args) {
+            port = int(cli_args[i + 1])
+            i += 2
+            continue
+        }
+        if cli_args[i] == "--data" and i + 1 < len(cli_args) {
+            data_dir = cli_args[i + 1]
+            i += 2
+            continue
+        }
+        i += 1
+    }
+
+    start_registry(port, data_dir)
+}
+
+main()

@@ -1,0 +1,52 @@
+-- Working with data in Clarity
+-- Maps, lists, and transformations
+
+-- Maps (like objects/dicts)
+let person = {
+    name: "Alex",
+    age: 28,
+    city: "Austin"
+}
+
+show "Name: {person.name}"
+show "Age: {person.age}"
+show "City: {person.city}"
+
+-- Nested data
+let team = [
+    {name: "Alice", role: "engineer", level: 3},
+    {name: "Bob", role: "designer", level: 2},
+    {name: "Charlie", role: "engineer", level: 5},
+    {name: "Diana", role: "manager", level: 4}
+]
+
+-- Filter and transform
+let engineers = filter(team, fn(p) { return p.role == "engineer" })
+show "Engineers:", len(engineers)
+
+each(engineers, fn(eng) {
+    show "  {eng.name} — Level {eng.level}"
+})
+
+-- Aggregate
+let total_level = reduce(team, fn(sum, p) { return sum + p.level }, 0)
+show "Total team level:", total_level
+
+-- Working with strings
+let message = "Hello, Clarity World!"
+show "Upper:", message.upper()
+show "Words:", message.split(" ")
+show "Length:", message.length()
+show "Contains 'Clarity':", message.contains("Clarity")
+
+-- Ranges
+let nums = range(1, 11)
+show "1 to 10:", nums
+show "Sum:", sum(nums)
+show "Evens:", filter(nums, fn(x) { return x % 2 == 0 })
+
+-- Map merging
+let defaults = {color: "blue", size: 10, visible: true}
+let overrides = {color: "red", size: 20}
+let config = merge(defaults, overrides)
+show "Config:", config

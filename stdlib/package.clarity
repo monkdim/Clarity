@@ -1,0 +1,800 @@
+-- Clarity Package Manager — manage dependencies via clarity.toml
+-- Port of clarity/package.py to Clarity, extended with registry support.
+--
+-- Usage:
+--   clarity init            Create a new clarity.toml
+--   clarity install         Install dependencies from clarity.toml
+--   clarity install <pkg>   Add and install a dependency
+--   clarity publish         Pack and publish to registry
+--   clarity search <query>  Search the registry
+
+from "process.clarity" import run, run_output, _quote
+from "semver.clarity" import parse_semver, parse_range, max_satisfying, SemVer
+
+-- ── Constants ──────────────────────────────────────────
+
+let MODULES_DIR = "clarity_modules"
+let CONFIG_FILE = "clarity.toml"
+let LOCK_FILE = "clarity.lock"
+let DEFAULT_REGISTRY = "https://registry.clarity-lang.org"
+
+-- ── File helpers ───────────────────────────────────────
+
+fn file_exists(path) {
+    let result = exec_full("test -e " + _quote(path) + " && echo yes || echo no")
+    return trim(result.stdout) == "yes"
+}
+
+fn is_file(path) {
+    let result = exec_full("test -f " + _quote(path) + " && echo yes || echo no")
+    return trim(result.stdout) == "yes"
+}
+
+fn is_dir(path) {
+    let result = exec_full("test -d " + _quote(path) + " && echo yes || echo no")
+    return trim(result.stdout) == "yes"
+}
+
+fn join_path(a, b) {
+    if ends(a, "/") {
+        return a + b
+    }
+    return a + "/" + b
+}
+
+fn basename(path) {
+    let result = exec_full("basename " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn abspath(path) {
+    let result = exec_full("realpath " + _quote(path) + " 2>/dev/null || readlink -f " + _quote(path) + " 2>/dev/null || echo " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn mkdir_p(path) {
+    exec_full("mkdir -p " + _quote(path))
+}
+
+fn rm_rf(path) {
+    exec_full("rm -rf " + _quote(path))
+}
+
+fn cp_file(src, dst) {
+    let parent = exec_full("dirname " + _quote(dst))
+    mkdir_p(trim(parent.stdout))
+    exec_full("cp " + _quote(src) + " " + _quote(dst))
+}
+
+-- ── TOML-like parser (minimal, no external deps) ──────
+
+fn _parse_inline_table(text) {
+    mut t = trim(text)
+    if starts(t, "{") and ends(t, "}") {
+        t = substring(t, 1, len(t) - 1)
+    }
+    let result = {}
+    let parts = split(t, ",")
+    each(parts, fn(part) {
+        let p = trim(part)
+        if contains(p, "=") {
+            let eq = index_of(p, "=")
+            let k = trim(substring(p, 0, eq))
+            mut v = trim(substring(p, eq + 1))
+            if starts(v, "\"") and ends(v, "\"") {
+                v = substring(v, 1, len(v) - 1)
+            }
+            result[k] = v
+        }
+    })
+    return result
+}
+
+fn _parse_toml_value(value) {
+    if starts(value, "\"") and ends(value, "\"") {
+        return substring(value, 1, len(value) - 1)
+    }
+    if starts(value, "{") {
+        return _parse_inline_table(value)
+    }
+    if value == "true" {
+        return true
+    }
+    if value == "false" {
+        return false
+    }
+    try {
+        return int(value)
+    } catch e {
+        return value
+    }
+}
+
+fn parse_toml(text) {
+    let result = {}
+    mut current_section = null
+    let lines = split(text, "\n")
+
+    each(lines, fn(line) {
+        let l = trim(line)
+
+        if len(l) == 0 or starts(l, "#") {
+            return
+        }
+
+        if starts(l, "[") and ends(l, "]") {
+            let section = trim(substring(l, 1, len(l) - 1))
+            result[section] = {}
+            current_section = section
+            return
+        }
+
+        if contains(l, "=") {
+            let eq = index_of(l, "=")
+            let key = trim(substring(l, 0, eq))
+            let raw_value = trim(substring(l, eq + 1))
+            let value = _parse_toml_value(raw_value)
+
+            if current_section != null {
+                result[current_section][key] = value
+            } else {
+                result[key] = value
+            }
+        }
+    })
+
+    return result
+}
+
+-- ── TOML generator ─────────────────────────────────────
+
+fn _toml_value(v) {
+    if type(v) == "string" {
+        return "\"" + v + "\""
+    }
+    if type(v) == "bool" {
+        if v { return "true" }
+        return "false"
+    }
+    return str(v)
+}
+
+fn generate_toml(config) {
+    let lines = []
+
+    let top_entries = entries(config)
+    each(top_entries, fn(entry) {
+        let key = entry[0]
+        let value = entry[1]
+        if type(value) != "map" {
+            push(lines, key + " = " + _toml_value(value))
+        }
+    })
+
+    each(top_entries, fn(entry) {
+        let section = entry[0]
+        let values = entry[1]
+        if type(values) == "map" {
+            push(lines, "")
+            push(lines, "[" + section + "]")
+            let section_entries = entries(values)
+            each(section_entries, fn(kv) {
+                let key = kv[0]
+                let value = kv[1]
+                if type(value) == "map" {
+                    let inner_parts = []
+                    let inner_entries = entries(value)
+                    each(inner_entries, fn(iv) {
+                        push(inner_parts, iv[0] + " = \"" + str(iv[1]) + "\"")
+                    })
+                    let inner = join(inner_parts, ", ")
+                    push(lines, key + " = {" + inner + "}")
+                } else {
+                    push(lines, key + " = " + _toml_value(value))
+                }
+            })
+        }
+    })
+
+    return join(lines, "\n") + "\n"
+}
+
+-- ── Registry client ─────────────────────────────────────
+
+fn _get_registry_url(config) {
+    if has(config, "registry") and has(config["registry"], "url") {
+        return config["registry"]["url"]
+    }
+    return DEFAULT_REGISTRY
+}
+
+fn _registry_fetch(registry_url, endpoint) {
+    -- Fetch JSON from registry API
+    let url = registry_url + endpoint
+    let result = exec_full("curl -s -f " + _quote(url) + " 2>/dev/null")
+    if result.exit_code != 0 { return null }
+    try {
+        return json_parse(trim(result.stdout))
+    } catch e {
+        return null
+    }
+}
+
+fn _registry_get_package(registry_url, name) {
+    -- GET /packages/<name> — returns package metadata with versions
+    return _registry_fetch(registry_url, "/packages/" + name)
+}
+
+fn _registry_get_version(registry_url, name, version) {
+    -- GET /packages/<name>/<version> — returns specific version metadata
+    return _registry_fetch(registry_url, "/packages/" + name + "/" + version)
+}
+
+fn _registry_search(registry_url, query) {
+    -- GET /search?q=<query> — search packages
+    return _registry_fetch(registry_url, "/search?q=" + query)
+}
+
+fn _registry_publish(registry_url, tarball_path, token) {
+    -- POST /publish — upload package tarball
+    mut auth_header = ""
+    if token != null and len(token) > 0 {
+        auth_header = " -H 'Authorization: Bearer " + token + "'"
+    }
+    let result = exec_full("curl -s -f -X POST" + auth_header + " -F 'package=@" + tarball_path + "' " + _quote(registry_url + "/publish") + " 2>/dev/null")
+    if result.exit_code != 0 {
+        return {"success": false, "error": "Upload failed: " + trim(result.stdout)}
+    }
+    try {
+        return json_parse(trim(result.stdout))
+    } catch e {
+        return {"success": false, "error": "Invalid response"}
+    }
+}
+
+fn _download_package(registry_url, name, version, dest_path) {
+    -- Download and extract package tarball
+    let url = registry_url + "/packages/" + name + "/" + version + "/download"
+    let tarball = dest_path + ".tar.gz"
+
+    let dl_result = exec_full("curl -s -f -L -o " + _quote(tarball) + " " + _quote(url) + " 2>/dev/null")
+    if dl_result.exit_code != 0 {
+        return false
+    }
+
+    -- Extract tarball
+    mkdir_p(dest_path)
+    let extract = exec_full("tar xzf " + _quote(tarball) + " -C " + _quote(dest_path) + " 2>/dev/null")
+    exec_full("rm -f " + _quote(tarball))
+    return extract.exit_code == 0
+}
+
+-- ── Dependency resolution ───────────────────────────────
+
+fn _resolve_dependencies(deps, registry_url, resolved, depth) {
+    -- Recursively resolve dependencies with semver matching
+    -- resolved: map of {name: {version, source, deps}}
+    if depth > 20 {
+        show "  [error] Dependency resolution depth limit exceeded"
+        return resolved
+    }
+
+    let dep_entries = entries(deps)
+    each(dep_entries, fn(entry) {
+        let name = entry[0]
+        let spec = entry[1]
+
+        -- Skip if already resolved
+        if has(resolved, name) {
+            return
+        }
+
+        if type(spec) == "map" and has(spec, "path") {
+            -- Local path dependency — no resolution needed
+            resolved[name] = {
+                "version": "local",
+                "source": "path",
+                "path": spec["path"],
+                "deps": {}
+            }
+            return
+        }
+
+        -- Version spec (string like "^1.2.3", ">=1.0.0", "1.2.3")
+        mut version_spec = "*"
+        if type(spec) == "string" {
+            version_spec = spec
+        } elif type(spec) == "map" and has(spec, "version") {
+            version_spec = spec["version"]
+        }
+
+        -- Fetch package info from registry
+        let pkg_info = _registry_get_package(registry_url, name)
+        if pkg_info == null {
+            show "  [error] {name}: not found in registry"
+            return
+        }
+
+        -- Get available versions
+        mut available_versions = []
+        if has(pkg_info, "versions") {
+            let version_entries = entries(pkg_info["versions"])
+            each(version_entries, fn(ve) {
+                push(available_versions, ve[0])
+            })
+        }
+
+        if len(available_versions) == 0 {
+            show "  [error] {name}: no versions available"
+            return
+        }
+
+        -- Find best matching version
+        let best = max_satisfying(available_versions, version_spec)
+        if best == null {
+            show "  [error] {name}: no version satisfying {version_spec}"
+            return
+        }
+
+        let best_str = best.to_string()
+
+        -- Get the version metadata for transitive deps
+        mut transitive_deps = {}
+        if has(pkg_info, "versions") and has(pkg_info["versions"], best_str) {
+            let ver_info = pkg_info["versions"][best_str]
+            if has(ver_info, "dependencies") {
+                transitive_deps = ver_info["dependencies"]
+            }
+        }
+
+        resolved[name] = {
+            "version": best_str,
+            "source": "registry",
+            "deps": transitive_deps
+        }
+
+        -- Resolve transitive dependencies
+        if len(keys(transitive_deps)) > 0 {
+            _resolve_dependencies(transitive_deps, registry_url, resolved, depth + 1)
+        }
+    })
+
+    return resolved
+}
+
+-- ── Package operations ─────────────────────────────────
+
+fn init_package(...rest) {
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    let config_path = join_path(path, CONFIG_FILE)
+
+    if file_exists(config_path) {
+        show "  {CONFIG_FILE} already exists"
+        return false
+    }
+
+    let dirname = basename(abspath(path))
+    let config = {
+        "package": {
+            "name": dirname,
+            "version": "0.1.0",
+            "description": "",
+            "entry": "main.clarity",
+            "license": "MIT"
+        },
+        "dependencies": {}
+    }
+
+    write(config_path, generate_toml(config))
+    show "  Created {CONFIG_FILE}"
+    return true
+}
+
+fn _install_local(name, dep_path, modules_dir, base_path) {
+    let source = join_path(base_path, dep_path)
+
+    if not file_exists(source) {
+        show "  [error] {name}: path not found: {dep_path}"
+        return
+    }
+
+    let dest = join_path(modules_dir, name)
+
+    if is_file(source) {
+        mkdir_p(dest)
+        let fname = basename(source)
+        cp_file(source, join_path(dest, fname))
+        show "  [ok] {name} (file: {dep_path})"
+    } elif is_dir(source) {
+        if file_exists(dest) {
+            rm_rf(dest)
+        }
+        mkdir_p(dest)
+        let find_result = exec_full("find " + _quote(source) + " -name '*.clarity' -type f")
+        if find_result.exit_code == 0 and len(trim(find_result.stdout)) > 0 {
+            let files = split(trim(find_result.stdout), "\n")
+            mut count = 0
+            each(files, fn(src_file) {
+                if len(trim(src_file)) > 0 {
+                    let rel_result = exec_full("realpath --relative-to=" + _quote(source) + " " + _quote(src_file))
+                    let rel = trim(rel_result.stdout)
+                    let dst_file = join_path(dest, rel)
+                    cp_file(src_file, dst_file)
+                    count = count + 1
+                }
+            })
+            show "  [ok] {name} ({count} files from {dep_path})"
+        } else {
+            show "  [ok] {name} (0 files from {dep_path})"
+        }
+    } else {
+        show "  [error] {name}: not a file or directory: {dep_path}"
+    }
+}
+
+fn _install_from_registry(name, version, modules_dir, registry_url) {
+    let dest = join_path(modules_dir, name)
+
+    -- Check if already installed with correct version
+    let meta_path = join_path(dest, ".clarity_meta.json")
+    if file_exists(meta_path) {
+        try {
+            let meta = json_parse(read(meta_path))
+            if has(meta, "version") and meta["version"] == version {
+                show "  [ok] {name}@{version} (cached)"
+                return true
+            }
+        } catch e {}
+    }
+
+    -- Clean and download
+    if file_exists(dest) {
+        rm_rf(dest)
+    }
+
+    let success = _download_package(registry_url, name, version, dest)
+    if success {
+        -- Write metadata
+        write(meta_path, json_string({
+            "name": name,
+            "version": version,
+            "source": "registry",
+            "registry": registry_url
+        }))
+        show "  [ok] {name}@{version} (downloaded)"
+        return true
+    } else {
+        show "  [error] {name}@{version}: download failed"
+        return false
+    }
+}
+
+fn _write_lockfile(path, resolved) {
+    let lock_path = join_path(path, LOCK_FILE)
+    let packages = {}
+
+    let res_entries = entries(resolved)
+    each(res_entries, fn(entry) {
+        let name = entry[0]
+        let info = entry[1]
+        packages[name] = {
+            "version": info["version"],
+            "source": info["source"]
+        }
+        if has(info, "path") {
+            packages[name]["path"] = info["path"]
+        }
+        if has(info, "deps") and len(keys(info["deps"])) > 0 {
+            packages[name]["dependencies"] = info["deps"]
+        }
+    })
+
+    let lock = {
+        "lockfile_version": 1,
+        "packages": packages
+    }
+    write(lock_path, json_string(lock) + "\n")
+}
+
+fn _read_lockfile(path) {
+    let lock_path = join_path(path, LOCK_FILE)
+    if not file_exists(lock_path) { return null }
+    try {
+        return json_parse(read(lock_path))
+    } catch e {
+        return null
+    }
+}
+
+fn install_packages(...rest) {
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    let config_path = join_path(path, CONFIG_FILE)
+
+    if not file_exists(config_path) {
+        show "  No {CONFIG_FILE} found. Run 'clarity init' first."
+        return false
+    }
+
+    let config = parse_toml(read(config_path))
+    let deps = if has(config, "dependencies") { config.dependencies } else { {} }
+
+    if len(keys(deps)) == 0 {
+        show "  No dependencies to install."
+        return true
+    }
+
+    let modules_dir = join_path(path, MODULES_DIR)
+    mkdir_p(modules_dir)
+
+    let registry_url = _get_registry_url(config)
+
+    -- Check for lockfile
+    let lockfile = _read_lockfile(path)
+    mut use_lockfile = false
+    if lockfile != null and has(lockfile, "packages") {
+        use_lockfile = true
+    }
+
+    -- Resolve dependencies
+    mut resolved = {}
+    if use_lockfile {
+        -- Use lockfile versions
+        let lock_pkgs = lockfile["packages"]
+        let lock_entries = entries(lock_pkgs)
+        each(lock_entries, fn(entry) {
+            let name = entry[0]
+            let info = entry[1]
+            resolved[name] = {
+                "version": info["version"],
+                "source": if has(info, "source") { info["source"] } else { "path" }
+            }
+            if has(info, "path") {
+                resolved[name]["path"] = info["path"]
+            }
+            if has(info, "dependencies") {
+                resolved[name]["deps"] = info["dependencies"]
+            } else {
+                resolved[name]["deps"] = {}
+            }
+        })
+    } else {
+        -- Fresh resolution
+        resolved = _resolve_dependencies(deps, registry_url, {}, 0)
+    }
+
+    -- Install each resolved package
+    mut installed = 0
+    let res_entries = entries(resolved)
+    each(res_entries, fn(entry) {
+        let name = entry[0]
+        let info = entry[1]
+
+        if info["source"] == "path" or info["version"] == "local" {
+            -- Local path dependency
+            mut dep_path = ""
+            if has(info, "path") {
+                dep_path = info["path"]
+            } elif has(deps, name) {
+                let spec = deps[name]
+                if type(spec) == "map" and has(spec, "path") {
+                    dep_path = spec["path"]
+                } elif type(spec) == "string" {
+                    dep_path = spec
+                }
+            }
+            if len(dep_path) > 0 {
+                _install_local(name, dep_path, modules_dir, path)
+                installed = installed + 1
+            }
+        } elif info["source"] == "registry" {
+            -- Registry dependency
+            let success = _install_from_registry(name, info["version"], modules_dir, registry_url)
+            if success { installed = installed + 1 }
+        }
+    })
+
+    show "  Installed {installed} package(s) to {MODULES_DIR}/"
+
+    -- Write lockfile
+    _write_lockfile(path, resolved)
+    return true
+}
+
+fn add_package(name, spec, ...rest) {
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    let config_path = join_path(path, CONFIG_FILE)
+
+    if not file_exists(config_path) {
+        show "  No {CONFIG_FILE} found. Run 'clarity init' first."
+        return false
+    }
+
+    let config = parse_toml(read(config_path))
+
+    if not has(config, "dependencies") {
+        config["dependencies"] = {}
+    }
+
+    config["dependencies"][name] = spec
+
+    write(config_path, generate_toml(config))
+    show "  Added '{name}' to {CONFIG_FILE}"
+
+    -- Remove lockfile so resolution runs fresh
+    let lock_path = join_path(path, LOCK_FILE)
+    if file_exists(lock_path) {
+        rm_rf(lock_path)
+    }
+
+    return install_packages(path)
+}
+
+fn get_package_info(...rest) {
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    let config_path = join_path(path, CONFIG_FILE)
+
+    if not file_exists(config_path) {
+        return null
+    }
+
+    return parse_toml(read(config_path))
+}
+
+-- ── Publish ────────────────────────────────────────────
+
+fn pack_package(...rest) {
+    -- Create a tarball of the current package
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    let config_path = join_path(path, CONFIG_FILE)
+
+    if not file_exists(config_path) {
+        show "  No {CONFIG_FILE} found. Run 'clarity init' first."
+        return null
+    }
+
+    let config = parse_toml(read(config_path))
+    if not has(config, "package") or not has(config["package"], "name") {
+        show "  [error] Invalid {CONFIG_FILE}: missing [package] name"
+        return null
+    }
+
+    let pkg_name = config["package"]["name"]
+    let pkg_version = if has(config["package"], "version") { config["package"]["version"] } else { "0.0.0" }
+
+    -- Validate version
+    let ver = parse_semver(pkg_version)
+    if ver == null {
+        show "  [error] Invalid version: {pkg_version}"
+        return null
+    }
+
+    -- Create tarball name
+    let tarball_name = pkg_name + "-" + pkg_version + ".tar.gz"
+
+    -- Collect .clarity files
+    let find_result = exec_full("find " + _quote(path) + " -name '*.clarity' -type f -not -path '*/clarity_modules/*' -not -path '*/.git/*'")
+    mut files_to_pack = [CONFIG_FILE]
+    if find_result.exit_code == 0 and len(trim(find_result.stdout)) > 0 {
+        let found = split(trim(find_result.stdout), "\n")
+        each(found, fn(f) {
+            let tf = trim(f)
+            if len(tf) > 0 {
+                -- Make relative to path
+                let rel = exec_full("realpath --relative-to=" + _quote(path) + " " + _quote(tf))
+                push(files_to_pack, trim(rel.stdout))
+            }
+        })
+    }
+
+    -- Also include README if present
+    if file_exists(join_path(path, "README.md")) {
+        push(files_to_pack, "README.md")
+    }
+
+    -- Create tarball
+    let file_list = join(files_to_pack, " ")
+    let tar_cmd = "cd " + _quote(path) + " && tar czf " + _quote(tarball_name) + " " + file_list
+    let tar_result = exec_full(tar_cmd)
+
+    if tar_result.exit_code != 0 {
+        show "  [error] Failed to create tarball"
+        return null
+    }
+
+    let tarball_path = join_path(path, tarball_name)
+    let size_result = exec_full("stat -c%s " + _quote(tarball_path) + " 2>/dev/null || stat -f%z " + _quote(tarball_path) + " 2>/dev/null")
+    let size_bytes = int(trim(size_result.stdout))
+    let size_kb = round(size_bytes / 1024)
+
+    show "  Packed {tarball_name} ({size_kb} KB, {len(files_to_pack)} files)"
+    return tarball_path
+}
+
+fn publish_package(...rest) {
+    -- Pack and publish to registry
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    let config_path = join_path(path, CONFIG_FILE)
+
+    if not file_exists(config_path) {
+        show "  No {CONFIG_FILE} found. Run 'clarity init' first."
+        return false
+    }
+
+    let config = parse_toml(read(config_path))
+    let registry_url = _get_registry_url(config)
+
+    -- Read auth token
+    mut token = ""
+    let token_path = env("HOME", "") + "/.clarity/token"
+    if file_exists(token_path) {
+        token = trim(read(token_path))
+    }
+
+    -- Pack first
+    let tarball_path = pack_package(path)
+    if tarball_path == null {
+        return false
+    }
+
+    -- Upload
+    show "  Publishing to {registry_url}..."
+    let result = _registry_publish(registry_url, tarball_path, token)
+
+    -- Clean up tarball
+    rm_rf(tarball_path)
+
+    if has(result, "success") and result["success"] {
+        let pkg = config["package"]
+        show "  Published {pkg[\"name\"]}@{pkg[\"version\"]}"
+        return true
+    } else {
+        let err = if has(result, "error") { result["error"] } else { "Unknown error" }
+        show "  [error] Publish failed: {err}"
+        return false
+    }
+}
+
+fn search_packages(query, ...rest) {
+    -- Search the registry
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    mut registry_url = DEFAULT_REGISTRY
+
+    let config_path = join_path(path, CONFIG_FILE)
+    if file_exists(config_path) {
+        let config = parse_toml(read(config_path))
+        registry_url = _get_registry_url(config)
+    }
+
+    let results = _registry_search(registry_url, query)
+    if results == null {
+        show "  No results (registry may be unavailable)"
+        return []
+    }
+
+    if has(results, "packages") {
+        return results["packages"]
+    }
+    return []
+}
+
+-- ── Info ────────────────────────────────────────────────
+
+fn show_package_info(name, ...rest) {
+    -- Show info about a registry package
+    let path = if len(rest) > 0 { rest[0] } else { "." }
+    mut registry_url = DEFAULT_REGISTRY
+
+    let config_path = join_path(path, CONFIG_FILE)
+    if file_exists(config_path) {
+        let config = parse_toml(read(config_path))
+        registry_url = _get_registry_url(config)
+    }
+
+    let pkg_info = _registry_get_package(registry_url, name)
+    if pkg_info == null {
+        show "  Package '{name}' not found"
+        return null
+    }
+
+    return pkg_info
+}

@@ -1,0 +1,408 @@
+-- Clarity Collections — Set, OrderedMap, Queue, Stack, PriorityQueue.
+-- Standard library module for common data structures.
+
+-- ── Set ───────────────────────────────────────────────────
+-- Unordered collection of unique values.
+
+class Set {
+    fn init(...items) {
+        this._items = {}
+        if len(items) == 1 and type(items[0]) == "list" {
+            for item in items[0] {
+                this._items[str(item)] = item
+            }
+        } else {
+            for item in items {
+                this._items[str(item)] = item
+            }
+        }
+    }
+
+    fn add(value) {
+        this._items[str(value)] = value
+        return this
+    }
+
+    fn remove(value) {
+        let key = str(value)
+        if has(this._items, key) {
+            let new_items = {}
+            let ks = keys(this._items)
+            for k in ks {
+                if k != key {
+                    new_items[k] = this._items[k]
+                }
+            }
+            this._items = new_items
+        }
+        return this
+    }
+
+    fn has_val(value) {
+        return has(this._items, str(value))
+    }
+
+    fn size() {
+        return len(keys(this._items))
+    }
+
+    fn to_list() {
+        return values(this._items)
+    }
+
+    fn clear() {
+        this._items = {}
+        return this
+    }
+
+    fn union(other) {
+        let result = Set()
+        let ks = keys(this._items)
+        for k in ks { result._items[k] = this._items[k] }
+        let oks = keys(other._items)
+        for k in oks { result._items[k] = other._items[k] }
+        return result
+    }
+
+    fn intersection(other) {
+        let result = Set()
+        let ks = keys(this._items)
+        for k in ks {
+            if has(other._items, k) {
+                result._items[k] = this._items[k]
+            }
+        }
+        return result
+    }
+
+    fn difference(other) {
+        let result = Set()
+        let ks = keys(this._items)
+        for k in ks {
+            if not has(other._items, k) {
+                result._items[k] = this._items[k]
+            }
+        }
+        return result
+    }
+
+    fn is_subset(other) {
+        let ks = keys(this._items)
+        for k in ks {
+            if not has(other._items, k) { return false }
+        }
+        return true
+    }
+
+    fn each(callback) {
+        let vals = values(this._items)
+        for v in vals { callback(v) }
+    }
+
+    fn to_string() {
+        let vals = values(this._items)
+        mut parts = []
+        for v in vals { push(parts, str(v)) }
+        return "Set{" + join(parts, ", ") + "}"
+    }
+}
+
+-- ── OrderedMap ────────────────────────────────────────────
+-- Map that preserves insertion order.
+
+class OrderedMap {
+    fn init() {
+        this._keys = []
+        this._values = {}
+    }
+
+    fn set(key, value) {
+        let k = str(key)
+        if not has(this._values, k) {
+            push(this._keys, k)
+        }
+        this._values[k] = value
+        return this
+    }
+
+    fn get(key, default_val) {
+        let k = str(key)
+        if has(this._values, k) { return this._values[k] }
+        return default_val
+    }
+
+    fn has_key(key) {
+        return has(this._values, str(key))
+    }
+
+    fn remove(key) {
+        let k = str(key)
+        if has(this._values, k) {
+            mut new_keys = []
+            for existing in this._keys {
+                if existing != k { push(new_keys, existing) }
+            }
+            this._keys = new_keys
+            let new_values = {}
+            for nk in this._keys {
+                new_values[nk] = this._values[nk]
+            }
+            this._values = new_values
+        }
+        return this
+    }
+
+    fn size() {
+        return len(this._keys)
+    }
+
+    fn get_keys() {
+        -- Return copy
+        mut result = []
+        for k in this._keys { push(result, k) }
+        return result
+    }
+
+    fn get_values() {
+        mut result = []
+        for k in this._keys { push(result, this._values[k]) }
+        return result
+    }
+
+    fn get_entries() {
+        mut result = []
+        for k in this._keys { push(result, [k, this._values[k]]) }
+        return result
+    }
+
+    fn clear() {
+        this._keys = []
+        this._values = {}
+        return this
+    }
+
+    fn each(callback) {
+        for k in this._keys { callback(k, this._values[k]) }
+    }
+
+    fn first() {
+        if len(this._keys) == 0 { return null }
+        let k = this._keys[0]
+        return [k, this._values[k]]
+    }
+
+    fn last() {
+        if len(this._keys) == 0 { return null }
+        let k = this._keys[len(this._keys) - 1]
+        return [k, this._values[k]]
+    }
+
+    fn to_string() {
+        mut parts = []
+        for k in this._keys {
+            push(parts, str(k) + ": " + str(this._values[k]))
+        }
+        return "OrderedMap{" + join(parts, ", ") + "}"
+    }
+}
+
+-- ── Queue (FIFO) ──────────────────────────────────────────
+
+class Queue {
+    fn init() {
+        this._items = []
+    }
+
+    fn enqueue(value) {
+        push(this._items, value)
+        return this
+    }
+
+    fn dequeue() {
+        if len(this._items) == 0 { return null }
+        let item = this._items[0]
+        mut new_items = []
+        mut i = 1
+        while i < len(this._items) {
+            push(new_items, this._items[i])
+            i += 1
+        }
+        this._items = new_items
+        return item
+    }
+
+    fn peek() {
+        if len(this._items) == 0 { return null }
+        return this._items[0]
+    }
+
+    fn size() {
+        return len(this._items)
+    }
+
+    fn is_empty() {
+        return len(this._items) == 0
+    }
+
+    fn clear() {
+        this._items = []
+        return this
+    }
+
+    fn to_list() {
+        mut result = []
+        for item in this._items { push(result, item) }
+        return result
+    }
+
+    fn to_string() {
+        mut parts = []
+        for item in this._items { push(parts, str(item)) }
+        return "Queue[" + join(parts, ", ") + "]"
+    }
+}
+
+-- ── Stack (LIFO) ──────────────────────────────────────────
+
+class Stack {
+    fn init() {
+        this._items = []
+    }
+
+    fn push_val(value) {
+        push(this._items, value)
+        return this
+    }
+
+    fn pop_val() {
+        if len(this._items) == 0 { return null }
+        return pop(this._items)
+    }
+
+    fn peek() {
+        if len(this._items) == 0 { return null }
+        return this._items[len(this._items) - 1]
+    }
+
+    fn size() {
+        return len(this._items)
+    }
+
+    fn is_empty() {
+        return len(this._items) == 0
+    }
+
+    fn clear() {
+        this._items = []
+        return this
+    }
+
+    fn to_list() {
+        mut result = []
+        for item in this._items { push(result, item) }
+        return result
+    }
+
+    fn to_string() {
+        mut parts = []
+        for item in this._items { push(parts, str(item)) }
+        return "Stack[" + join(parts, ", ") + "]"
+    }
+}
+
+-- ── PriorityQueue ─────────────────────────────────────────
+-- Min-heap: lowest priority value dequeues first.
+
+class PriorityQueue {
+    fn init() {
+        this._heap = []
+    }
+
+    fn enqueue(value, priority) {
+        push(this._heap, {"value": value, "priority": priority})
+        this._bubble_up(len(this._heap) - 1)
+        return this
+    }
+
+    fn dequeue() {
+        if len(this._heap) == 0 { return null }
+        let top = this._heap[0]
+        let last_idx = len(this._heap) - 1
+        if last_idx > 0 {
+            this._heap[0] = this._heap[last_idx]
+        }
+        pop(this._heap)
+        if len(this._heap) > 0 {
+            this._sink_down(0)
+        }
+        return top["value"]
+    }
+
+    fn peek() {
+        if len(this._heap) == 0 { return null }
+        return this._heap[0]["value"]
+    }
+
+    fn peek_priority() {
+        if len(this._heap) == 0 { return null }
+        return this._heap[0]["priority"]
+    }
+
+    fn size() {
+        return len(this._heap)
+    }
+
+    fn is_empty() {
+        return len(this._heap) == 0
+    }
+
+    fn clear() {
+        this._heap = []
+        return this
+    }
+
+    fn _bubble_up(idx) {
+        while idx > 0 {
+            let parent = floor((idx - 1) / 2)
+            if this._heap[idx]["priority"] < this._heap[parent]["priority"] {
+                let tmp = this._heap[idx]
+                this._heap[idx] = this._heap[parent]
+                this._heap[parent] = tmp
+                idx = parent
+            } else {
+                return null
+            }
+        }
+    }
+
+    fn _sink_down(idx) {
+        let size = len(this._heap)
+        while true {
+            let left = 2 * idx + 1
+            let right = 2 * idx + 2
+            mut smallest = idx
+            if left < size and this._heap[left]["priority"] < this._heap[smallest]["priority"] {
+                smallest = left
+            }
+            if right < size and this._heap[right]["priority"] < this._heap[smallest]["priority"] {
+                smallest = right
+            }
+            if smallest != idx {
+                let tmp = this._heap[idx]
+                this._heap[idx] = this._heap[smallest]
+                this._heap[smallest] = tmp
+                idx = smallest
+            } else {
+                return null
+            }
+        }
+    }
+
+    fn to_string() {
+        mut parts = []
+        for item in this._heap {
+            push(parts, str(item["value"]) + "(" + str(item["priority"]) + ")")
+        }
+        return "PriorityQueue[" + join(parts, ", ") + "]"
+    }
+}

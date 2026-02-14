@@ -1,0 +1,447 @@
+-- Clarity Tasks — structured concurrency with spawn, task groups, and futures.
+-- Tasks run as background subprocesses via exec_full, providing real parallelism.
+
+from "process.clarity" import _quote
+
+-- ── Task Status ─────────────────────────────────────────
+
+let TASK_PENDING = "pending"
+let TASK_RUNNING = "running"
+let TASK_DONE = "done"
+let TASK_FAILED = "failed"
+let TASK_CANCELLED = "cancelled"
+
+-- ── Task ────────────────────────────────────────────────
+-- Represents an asynchronous unit of work.
+
+class Task {
+    fn init(name, work_fn) {
+        this.name = name
+        this._work_fn = work_fn
+        this.status = TASK_PENDING
+        this.result = null
+        this.error = null
+        this._start_time = null
+        this._end_time = null
+    }
+
+    fn run() {
+        -- Execute the task synchronously and capture result.
+        this.status = TASK_RUNNING
+        this._start_time = time()
+        try {
+            this.result = this._work_fn()
+            this.status = TASK_DONE
+        } catch e {
+            this.error = str(e)
+            this.status = TASK_FAILED
+        }
+        this._end_time = time()
+        return this
+    }
+
+    fn is_done() {
+        return this.status == TASK_DONE or this.status == TASK_FAILED or this.status == TASK_CANCELLED
+    }
+
+    fn is_ok() {
+        return this.status == TASK_DONE
+    }
+
+    fn elapsed() {
+        if this._start_time == null { return 0 }
+        let end = if this._end_time != null { this._end_time } else { time() }
+        return end - this._start_time
+    }
+
+    fn cancel() {
+        if not this.is_done() {
+            this.status = TASK_CANCELLED
+            this._end_time = time()
+        }
+    }
+
+    fn to_string() {
+        return "Task(\"{this.name}\", {this.status})"
+    }
+}
+
+-- ── BackgroundTask ──────────────────────────────────────
+-- Runs a Clarity expression in a background subprocess for true parallelism.
+
+class BackgroundTask {
+    fn init(name, command) {
+        this.name = name
+        this._command = command
+        this.status = TASK_PENDING
+        this.result = null
+        this.error = null
+        this._pid = null
+        this._output_file = null
+        this._start_time = null
+        this._end_time = null
+    }
+
+    fn start() {
+        -- Launch the task as a background subprocess.
+        this.status = TASK_RUNNING
+        this._start_time = time()
+
+        -- Create a temp file for output
+        let tmp_result = exec_full("mktemp /tmp/clarity_task_XXXXXX")
+        this._output_file = trim(tmp_result.stdout)
+
+        -- Run command in background, redirect output to temp file
+        let bg_cmd = "(" + this._command + ") > " + _quote(this._output_file) + " 2>&1 &"
+        let bg_result = exec_full(bg_cmd + " echo $!")
+        this._pid = trim(bg_result.stdout)
+
+        return this
+    }
+
+    fn poll() {
+        -- Check if the background task is still running.
+        if this.status != TASK_RUNNING { return this.status }
+
+        if this._pid != null {
+            let check = exec_full("kill -0 " + this._pid + " 2>/dev/null && echo running || echo done")
+            if trim(check.stdout) == "done" {
+                this._finish()
+            }
+        }
+        return this.status
+    }
+
+    fn wait() {
+        -- Wait for the task to complete.
+        if this.status != TASK_RUNNING { return this }
+
+        -- Poll until done
+        mut attempts = 0
+        while this.status == TASK_RUNNING {
+            sleep(0.05)
+            this.poll()
+            attempts += 1
+            if attempts > 6000 {
+                -- 5 minute timeout
+                this.cancel()
+                this.error = "timeout"
+                break
+            }
+        }
+        return this
+    }
+
+    fn _finish() {
+        this._end_time = time()
+        -- Read output
+        if this._output_file != null {
+            try {
+                this.result = trim(read(this._output_file))
+                this.status = TASK_DONE
+            } catch e {
+                this.error = str(e)
+                this.status = TASK_FAILED
+            }
+            -- Clean up temp file
+            exec_full("rm -f " + _quote(this._output_file))
+        } else {
+            this.status = TASK_DONE
+        }
+    }
+
+    fn cancel() {
+        if this._pid != null and this.status == TASK_RUNNING {
+            exec_full("kill " + this._pid + " 2>/dev/null")
+        }
+        this.status = TASK_CANCELLED
+        this._end_time = time()
+        if this._output_file != null {
+            exec_full("rm -f " + _quote(this._output_file))
+        }
+    }
+
+    fn is_done() {
+        if this.status == TASK_RUNNING { this.poll() }
+        return this.status == TASK_DONE or this.status == TASK_FAILED or this.status == TASK_CANCELLED
+    }
+
+    fn is_ok() {
+        return this.status == TASK_DONE
+    }
+
+    fn elapsed() {
+        if this._start_time == null { return 0 }
+        let end = if this._end_time != null { this._end_time } else { time() }
+        return end - this._start_time
+    }
+
+    fn to_string() {
+        return "BackgroundTask(\"{this.name}\", {this.status})"
+    }
+}
+
+-- ── TaskGroup ───────────────────────────────────────────
+-- Run multiple tasks and wait for all to complete (structured concurrency).
+
+class TaskGroup {
+    fn init(name) {
+        this.name = if name != null { name } else { "group" }
+        this._tasks = []
+    }
+
+    fn add(task) {
+        push(this._tasks, task)
+        return this
+    }
+
+    fn spawn(name, work_fn) {
+        -- Create and add a new Task.
+        let t = Task(name, work_fn)
+        push(this._tasks, t)
+        return t
+    }
+
+    fn spawn_bg(name, command) {
+        -- Create and add a new BackgroundTask.
+        let t = BackgroundTask(name, command)
+        push(this._tasks, t)
+        return t
+    }
+
+    fn run_all() {
+        -- Run all tasks sequentially.
+        for t in this._tasks {
+            if t.status == TASK_PENDING {
+                t.run()
+            }
+        }
+        return this
+    }
+
+    fn start_all() {
+        -- Start all background tasks concurrently.
+        for t in this._tasks {
+            if t.status == TASK_PENDING {
+                t.start()
+            }
+        }
+        return this
+    }
+
+    fn wait_all() {
+        -- Wait for all tasks to complete.
+        for t in this._tasks {
+            if t.status == TASK_RUNNING {
+                t.wait()
+            }
+        }
+        return this
+    }
+
+    fn cancel_all() {
+        for t in this._tasks {
+            t.cancel()
+        }
+    }
+
+    fn results() {
+        -- Get all task results as a list.
+        mut res = []
+        for t in this._tasks {
+            push(res, {
+                "name": t.name,
+                "status": t.status,
+                "result": t.result,
+                "error": t.error
+            })
+        }
+        return res
+    }
+
+    fn all_done() {
+        for t in this._tasks {
+            if not t.is_done() { return false }
+        }
+        return true
+    }
+
+    fn all_ok() {
+        for t in this._tasks {
+            if not t.is_ok() { return false }
+        }
+        return true
+    }
+
+    fn count_done() {
+        mut n = 0
+        for t in this._tasks {
+            if t.is_done() { n += 1 }
+        }
+        return n
+    }
+
+    fn count_failed() {
+        mut n = 0
+        for t in this._tasks {
+            if t.status == TASK_FAILED { n += 1 }
+        }
+        return n
+    }
+
+    fn tasks() {
+        return this._tasks
+    }
+
+    fn to_string() {
+        return "TaskGroup(\"{this.name}\", {len(this._tasks)} tasks)"
+    }
+}
+
+-- ── Future / Promise ────────────────────────────────────
+-- A placeholder for a value that will be available later.
+
+class Future {
+    fn init() {
+        this.status = "pending"
+        this._value = null
+        this._error = null
+        this._callbacks = []
+    }
+
+    fn resolve(value) {
+        -- Complete the future with a value.
+        if this.status != "pending" { return }
+        this.status = "resolved"
+        this._value = value
+        for cb in this._callbacks {
+            cb(value)
+        }
+    }
+
+    fn reject(error) {
+        -- Complete the future with an error.
+        if this.status != "pending" { return }
+        this.status = "rejected"
+        this._error = error
+    }
+
+    fn then(callback) {
+        -- Register a callback for when the future resolves.
+        if this.status == "resolved" {
+            callback(this._value)
+        } else {
+            push(this._callbacks, callback)
+        }
+        return this
+    }
+
+    fn value() {
+        if this.status == "resolved" { return this._value }
+        if this.status == "rejected" { throw this._error }
+        return null
+    }
+
+    fn is_done() {
+        return this.status != "pending"
+    }
+
+    fn is_resolved() {
+        return this.status == "resolved"
+    }
+
+    fn is_rejected() {
+        return this.status == "rejected"
+    }
+
+    fn to_string() {
+        return "Future({this.status})"
+    }
+}
+
+-- ── Constructors ────────────────────────────────────────
+
+fn spawn(name, work_fn) {
+    -- Spawn a task and immediately run it.
+    let t = Task(name, work_fn)
+    t.run()
+    return t
+}
+
+fn spawn_bg(name, command) {
+    -- Spawn a background task (subprocess).
+    let t = BackgroundTask(name, command)
+    t.start()
+    return t
+}
+
+fn task_group(...rest) {
+    -- Create a new task group.
+    let name = if len(rest) > 0 { rest[0] } else { "group" }
+    return TaskGroup(name)
+}
+
+fn future() {
+    return Future()
+}
+
+-- ── Parallel execution ──────────────────────────────────
+
+fn parallel(tasks_list) {
+    -- Run a list of {name, fn} tasks and return all results.
+    let group = TaskGroup("parallel")
+    for t in tasks_list {
+        let name = if has(t, "name") { t["name"] } else { "task" }
+        group.spawn(name, t["fn"])
+    }
+    group.run_all()
+    return group.results()
+}
+
+fn race(tasks_list) {
+    -- Run tasks, return the first one that completes successfully.
+    for t in tasks_list {
+        let name = if has(t, "name") { t["name"] } else { "task" }
+        let task = Task(name, t["fn"])
+        task.run()
+        if task.is_ok() {
+            return task.result
+        }
+    }
+    return null
+}
+
+fn with_timeout(work_fn, timeout_seconds) {
+    -- Run a function with a timeout. Returns {ok, result, error}.
+    let start = time()
+    let t = Task("timed", work_fn)
+    t.run()
+    let elapsed = time() - start
+    if elapsed > timeout_seconds {
+        return {"ok": false, "result": null, "error": "timeout"}
+    }
+    if t.is_ok() {
+        return {"ok": true, "result": t.result, "error": null}
+    }
+    return {"ok": false, "result": null, "error": t.error}
+}
+
+fn retry(work_fn, max_attempts, delay) {
+    -- Retry a function up to max_attempts times with delay between attempts.
+    let d = if delay != null { delay } else { 1 }
+    mut last_error = null
+    mut attempt = 0
+    while attempt < max_attempts {
+        try {
+            let result = work_fn()
+            return {"ok": true, "result": result, "attempts": attempt + 1}
+        } catch e {
+            last_error = str(e)
+            if attempt < max_attempts - 1 {
+                sleep(d)
+            }
+        }
+        attempt += 1
+    }
+    return {"ok": false, "error": last_error, "attempts": max_attempts}
+}

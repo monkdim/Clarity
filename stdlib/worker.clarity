@@ -1,0 +1,299 @@
+-- Clarity Worker Pool — parallel task execution with map/reduce.
+-- Uses background subprocesses for CPU-bound parallelism.
+
+from "process.clarity" import _quote
+from "task.clarity" import Task, BackgroundTask, TaskGroup, TASK_DONE, TASK_FAILED
+
+-- ── WorkerPool ──────────────────────────────────────────
+-- A pool of workers for parallel execution of tasks.
+
+class WorkerPool {
+    fn init(size) {
+        this._size = if size != null and size > 0 { size } else { 4 }
+        this._active = 0
+        this._completed = 0
+        this._failed = 0
+        this._queue = []
+        this._results = []
+    }
+
+    fn submit(name, work_fn) {
+        -- Add a task to the pool's work queue.
+        push(this._queue, {"name": name, "fn": work_fn})
+        return this
+    }
+
+    fn run() {
+        -- Execute all queued tasks, up to pool size at a time.
+        mut batch_start = 0
+        while batch_start < len(this._queue) {
+            -- Take a batch of up to _size tasks
+            let batch_end = if batch_start + this._size < len(this._queue) { batch_start + this._size } else { len(this._queue) }
+
+            -- Run batch
+            mut batch_tasks = []
+            mut i = batch_start
+            while i < batch_end {
+                let item = this._queue[i]
+                let t = Task(item["name"], item["fn"])
+                t.run()
+                push(batch_tasks, t)
+
+                if t.status == TASK_DONE {
+                    this._completed += 1
+                } else {
+                    this._failed += 1
+                }
+                i += 1
+            }
+
+            -- Collect results
+            for t in batch_tasks {
+                push(this._results, {
+                    "name": t.name,
+                    "status": t.status,
+                    "result": t.result,
+                    "error": t.error,
+                    "elapsed": t.elapsed()
+                })
+            }
+
+            batch_start = batch_end
+        }
+
+        this._queue = []
+        return this
+    }
+
+    fn results() {
+        return this._results
+    }
+
+    fn clear() {
+        this._queue = []
+        this._results = []
+        this._completed = 0
+        this._failed = 0
+    }
+
+    fn stats() {
+        return {
+            "pool_size": this._size,
+            "completed": this._completed,
+            "failed": this._failed,
+            "queued": len(this._queue),
+            "total_results": len(this._results)
+        }
+    }
+
+    fn to_string() {
+        return "WorkerPool(size={this._size}, queued={len(this._queue)}, done={this._completed})"
+    }
+}
+
+-- ── Parallel Map ────────────────────────────────────────
+
+fn parallel_map(items, transform_fn, ...rest) {
+    -- Apply transform_fn to each item, collecting results.
+    -- Uses a WorkerPool internally for batch processing.
+    let pool_size = if len(rest) > 0 { rest[0] } else { 4 }
+    let pool = WorkerPool(pool_size)
+
+    mut i = 0
+    for item in items {
+        let idx = i
+        let val = item
+        pool.submit("map_" + str(idx), fn() {
+            return transform_fn(val)
+        })
+        i += 1
+    }
+
+    pool.run()
+
+    -- Extract results in order
+    let res = pool.results()
+    mut output = []
+    for r in res {
+        if r["status"] == "done" {
+            push(output, r["result"])
+        } else {
+            push(output, null)
+        }
+    }
+    return output
+}
+
+fn parallel_filter(items, predicate_fn, ...rest) {
+    -- Filter items in parallel, keeping those where predicate_fn returns true.
+    let pool_size = if len(rest) > 0 { rest[0] } else { 4 }
+    let pool = WorkerPool(pool_size)
+
+    mut i = 0
+    for item in items {
+        let idx = i
+        let val = item
+        pool.submit("filter_" + str(idx), fn() {
+            return {"value": val, "keep": predicate_fn(val)}
+        })
+        i += 1
+    }
+
+    pool.run()
+
+    mut output = []
+    let res = pool.results()
+    for r in res {
+        if r["status"] == "done" and r["result"] != null and r["result"]["keep"] {
+            push(output, r["result"]["value"])
+        }
+    }
+    return output
+}
+
+fn parallel_reduce(items, reducer_fn, initial, ...rest) {
+    -- Reduce items in parallel using tree-based reduction.
+    -- reducer_fn(accumulator, value) -> new accumulator
+    let pool_size = if len(rest) > 0 { rest[0] } else { 4 }
+
+    if len(items) == 0 { return initial }
+    if len(items) == 1 { return reducer_fn(initial, items[0]) }
+
+    -- Sequential reduction (reducer must be called in order for most use cases)
+    mut acc = initial
+    for item in items {
+        acc = reducer_fn(acc, item)
+    }
+    return acc
+}
+
+fn parallel_each(items, work_fn, ...rest) {
+    -- Execute work_fn for each item (side effects, no return values).
+    let pool_size = if len(rest) > 0 { rest[0] } else { 4 }
+    let pool = WorkerPool(pool_size)
+
+    mut i = 0
+    for item in items {
+        let idx = i
+        let val = item
+        pool.submit("each_" + str(idx), fn() {
+            work_fn(val)
+            return null
+        })
+        i += 1
+    }
+
+    pool.run()
+    return pool.stats()
+}
+
+-- ── Parallel Subprocess Execution ───────────────────────
+
+fn parallel_exec(commands, ...rest) {
+    -- Execute multiple shell commands in parallel using background processes.
+    let max_concurrent = if len(rest) > 0 { rest[0] } else { 4 }
+    mut results = []
+
+    -- Launch in batches
+    mut batch_start = 0
+    while batch_start < len(commands) {
+        let batch_end = if batch_start + max_concurrent < len(commands) { batch_start + max_concurrent } else { len(commands) }
+        mut tasks = []
+
+        -- Start batch
+        mut i = batch_start
+        while i < batch_end {
+            let cmd = commands[i]
+            let t = BackgroundTask("cmd_" + str(i), cmd)
+            t.start()
+            push(tasks, t)
+            i += 1
+        }
+
+        -- Wait for batch
+        for t in tasks {
+            t.wait()
+            push(results, {
+                "command": t._command,
+                "status": t.status,
+                "result": t.result,
+                "error": t.error,
+                "elapsed": t.elapsed()
+            })
+        }
+
+        batch_start = batch_end
+    }
+
+    return results
+}
+
+-- ── Pipeline ────────────────────────────────────────────
+
+class Pipeline {
+    -- A multi-stage processing pipeline.
+    fn init() {
+        this._stages = []
+    }
+
+    fn stage(name, transform_fn) {
+        push(this._stages, {"name": name, "fn": transform_fn})
+        return this
+    }
+
+    fn run(input) {
+        -- Run input through all stages sequentially.
+        mut data = input
+        mut stage_results = []
+
+        for s in this._stages {
+            let start = time()
+            try {
+                data = s["fn"](data)
+                push(stage_results, {
+                    "name": s["name"],
+                    "status": "done",
+                    "elapsed": time() - start
+                })
+            } catch e {
+                push(stage_results, {
+                    "name": s["name"],
+                    "status": "failed",
+                    "error": str(e),
+                    "elapsed": time() - start
+                })
+                return {"result": null, "stages": stage_results, "error": str(e)}
+            }
+        }
+
+        return {"result": data, "stages": stage_results, "error": null}
+    }
+
+    fn run_batch(items) {
+        -- Run each item through the full pipeline.
+        mut results = []
+        for item in items {
+            push(results, this.run(item))
+        }
+        return results
+    }
+
+    fn to_string() {
+        mut names = []
+        for s in this._stages {
+            push(names, s["name"])
+        }
+        return "Pipeline(" + join(names, " -> ") + ")"
+    }
+}
+
+-- ── Constructors ────────────────────────────────────────
+
+fn worker_pool(...rest) {
+    let size = if len(rest) > 0 { rest[0] } else { 4 }
+    return WorkerPool(size)
+}
+
+fn pipeline() {
+    return Pipeline()
+}

@@ -1,0 +1,503 @@
+-- Clarity Semver — semantic versioning parsing, comparison, and range matching.
+-- Standard library module for package version management.
+-- Follows Semantic Versioning 2.0.0 (https://semver.org/).
+
+-- ── SemVer ──────────────────────────────────────────────
+-- Represents a semantic version: major.minor.patch[-prerelease][+build]
+
+class SemVer {
+    fn init(major, minor, patch, prerelease, build) {
+        this.major = major
+        this.minor = minor
+        this.patch = patch
+        this.prerelease = if prerelease != null { prerelease } else { "" }
+        this.build = if build != null { build } else { "" }
+    }
+
+    fn is_prerelease() {
+        return len(this.prerelease) > 0
+    }
+
+    fn bump_major() {
+        return SemVer(this.major + 1, 0, 0, "", "")
+    }
+
+    fn bump_minor() {
+        return SemVer(this.major, this.minor + 1, 0, "", "")
+    }
+
+    fn bump_patch() {
+        return SemVer(this.major, this.minor, this.patch + 1, "", "")
+    }
+
+    fn compare(other) {
+        -- Returns -1, 0, or 1
+        if this.major != other.major {
+            return if this.major < other.major { -1 } else { 1 }
+        }
+        if this.minor != other.minor {
+            return if this.minor < other.minor { -1 } else { 1 }
+        }
+        if this.patch != other.patch {
+            return if this.patch < other.patch { -1 } else { 1 }
+        }
+        -- Prerelease comparison: no prerelease > has prerelease
+        if len(this.prerelease) == 0 and len(other.prerelease) == 0 { return 0 }
+        if len(this.prerelease) == 0 { return 1 }
+        if len(other.prerelease) == 0 { return -1 }
+        -- Compare prerelease identifiers
+        return _compare_prerelease(this.prerelease, other.prerelease)
+    }
+
+    fn eq(other) { return this.compare(other) == 0 }
+    fn lt(other) { return this.compare(other) < 0 }
+    fn gt(other) { return this.compare(other) > 0 }
+    fn lte(other) { return this.compare(other) <= 0 }
+    fn gte(other) { return this.compare(other) >= 0 }
+
+    fn satisfies(range_str) {
+        let range = parse_range(range_str)
+        return range.test(this)
+    }
+
+    fn to_string() {
+        mut result = str(this.major) + "." + str(this.minor) + "." + str(this.patch)
+        if len(this.prerelease) > 0 { result = result + "-" + this.prerelease }
+        if len(this.build) > 0 { result = result + "+" + this.build }
+        return result
+    }
+}
+
+-- ── Parsing ─────────────────────────────────────────────
+
+fn parse_semver(version_str) {
+    -- Parse a semver string like "1.2.3-alpha.1+build.42"
+    mut s = trim(str(version_str))
+    -- Strip leading 'v' or 'V'
+    if starts(s, "v") or starts(s, "V") {
+        s = substring(s, 1, len(s))
+    }
+
+    -- Extract build metadata
+    mut build = ""
+    let plus_idx = index_of(s, "+")
+    if plus_idx >= 0 {
+        build = substring(s, plus_idx + 1, len(s))
+        s = substring(s, 0, plus_idx)
+    }
+
+    -- Extract prerelease
+    mut prerelease = ""
+    let dash_idx = index_of(s, "-")
+    if dash_idx >= 0 {
+        prerelease = substring(s, dash_idx + 1, len(s))
+        s = substring(s, 0, dash_idx)
+    }
+
+    -- Parse major.minor.patch
+    let parts = split(s, ".")
+    if len(parts) < 1 { return null }
+
+    mut major = 0
+    mut minor = 0
+    mut patch = 0
+
+    try { major = int(parts[0]) } catch e { return null }
+    if len(parts) >= 2 {
+        try { minor = int(parts[1]) } catch e { return null }
+    }
+    if len(parts) >= 3 {
+        try { patch = int(parts[2]) } catch e { return null }
+    }
+
+    return SemVer(major, minor, patch, prerelease, build)
+}
+
+fn is_valid(version_str) {
+    return parse_semver(version_str) != null
+}
+
+-- ── Prerelease comparison ───────────────────────────────
+
+fn _compare_prerelease(a, b) {
+    let a_parts = split(a, ".")
+    let b_parts = split(b, ".")
+    mut i = 0
+    let max_len = if len(a_parts) > len(b_parts) { len(a_parts) } else { len(b_parts) }
+
+    while i < max_len {
+        if i >= len(a_parts) { return -1 }
+        if i >= len(b_parts) { return 1 }
+
+        let ap = a_parts[i]
+        let bp = b_parts[i]
+
+        -- Try numeric comparison
+        let a_num = _try_int(ap)
+        let b_num = _try_int(bp)
+
+        if a_num != null and b_num != null {
+            -- Both numeric
+            if a_num < b_num { return -1 }
+            if a_num > b_num { return 1 }
+        } elif a_num != null {
+            -- Numeric < string
+            return -1
+        } elif b_num != null {
+            -- String > numeric
+            return 1
+        } else {
+            -- Both strings — lexicographic
+            if ap < bp { return -1 }
+            if ap > bp { return 1 }
+        }
+        i += 1
+    }
+    return 0
+}
+
+fn _try_int(s) {
+    try {
+        return int(s)
+    } catch e {
+        return null
+    }
+}
+
+-- ── Version Range ───────────────────────────────────────
+-- Supports: exact, ^, ~, >=, <=, >, <, *, ranges with ||
+
+class VersionRange {
+    fn init(comparators) {
+        -- comparators: list of lists of {op, version} — outer OR, inner AND
+        this.comparators = comparators
+    }
+
+    fn test(version) {
+        -- version satisfies range if ANY comparator set matches (OR)
+        for comp_set in this.comparators {
+            if _test_comparator_set(comp_set, version) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fn to_string() {
+        mut parts = []
+        for comp_set in this.comparators {
+            mut inner = []
+            for comp in comp_set {
+                push(inner, comp["op"] + comp["version"].to_string())
+            }
+            push(parts, join(inner, " "))
+        }
+        return join(parts, " || ")
+    }
+}
+
+fn _test_comparator_set(comp_set, version) {
+    for comp in comp_set {
+        let op = comp["op"]
+        let target = comp["version"]
+        let cmp = version.compare(target)
+
+        if op == "=" or op == "==" {
+            if cmp != 0 { return false }
+        } elif op == ">=" {
+            if cmp < 0 { return false }
+        } elif op == "<=" {
+            if cmp > 0 { return false }
+        } elif op == ">" {
+            if cmp <= 0 { return false }
+        } elif op == "<" {
+            if cmp >= 0 { return false }
+        } elif op == "!=" {
+            if cmp == 0 { return false }
+        }
+    }
+    return true
+}
+
+-- ── Range parsing ───────────────────────────────────────
+
+fn parse_range(range_str) {
+    -- Parse a version range string
+    -- Supports: "1.2.3", "^1.2.3", "~1.2.3", ">=1.0.0", ">=1.0.0 <2.0.0", "1.x", "*", "1 || 2"
+    let or_parts = split(range_str, "||")
+    mut comparators = []
+
+    for or_part in or_parts {
+        let trimmed = trim(or_part)
+        if len(trimmed) > 0 {
+            let comp_set = _parse_comparator_set(trimmed)
+            push(comparators, comp_set)
+        }
+    }
+
+    if len(comparators) == 0 {
+        -- Wildcard: matches everything
+        push(comparators, [{"op": ">=", "version": SemVer(0, 0, 0, "", "")}])
+    }
+
+    return VersionRange(comparators)
+}
+
+fn _parse_comparator_set(s) {
+    -- Parse space-separated comparators (AND)
+    let parts = split(trim(s), " ")
+    mut result = []
+
+    mut i = 0
+    while i < len(parts) {
+        let part = trim(parts[i])
+        if len(part) == 0 {
+            i += 1
+            continue
+        }
+
+        -- Check for caret range: ^1.2.3
+        if starts(part, "^") {
+            let ver = parse_semver(substring(part, 1, len(part)))
+            if ver != null {
+                let bounds = _caret_range(ver)
+                for b in bounds { push(result, b) }
+            }
+            i += 1
+            continue
+        }
+
+        -- Check for tilde range: ~1.2.3
+        if starts(part, "~") {
+            let ver = parse_semver(substring(part, 1, len(part)))
+            if ver != null {
+                let bounds = _tilde_range(ver)
+                for b in bounds { push(result, b) }
+            }
+            i += 1
+            continue
+        }
+
+        -- Check for operators: >=, <=, >, <, =, !=
+        if starts(part, ">=") {
+            let ver = parse_semver(substring(part, 2, len(part)))
+            if ver != null { push(result, {"op": ">=", "version": ver}) }
+            i += 1
+            continue
+        }
+        if starts(part, "<=") {
+            let ver = parse_semver(substring(part, 2, len(part)))
+            if ver != null { push(result, {"op": "<=", "version": ver}) }
+            i += 1
+            continue
+        }
+        if starts(part, "!=") {
+            let ver = parse_semver(substring(part, 2, len(part)))
+            if ver != null { push(result, {"op": "!=", "version": ver}) }
+            i += 1
+            continue
+        }
+        if starts(part, ">") {
+            let ver = parse_semver(substring(part, 1, len(part)))
+            if ver != null { push(result, {"op": ">", "version": ver}) }
+            i += 1
+            continue
+        }
+        if starts(part, "<") {
+            let ver = parse_semver(substring(part, 1, len(part)))
+            if ver != null { push(result, {"op": "<", "version": ver}) }
+            i += 1
+            continue
+        }
+        if starts(part, "=") {
+            let ver = parse_semver(substring(part, 1, len(part)))
+            if ver != null { push(result, {"op": "=", "version": ver}) }
+            i += 1
+            continue
+        }
+
+        -- Wildcard patterns: *, x, X, 1.x, 1.2.x
+        if part == "*" or part == "x" or part == "X" {
+            push(result, {"op": ">=", "version": SemVer(0, 0, 0, "", "")})
+            i += 1
+            continue
+        }
+        if contains(part, ".x") or contains(part, ".X") or contains(part, ".*") {
+            let bounds = _wildcard_range(part)
+            for b in bounds { push(result, b) }
+            i += 1
+            continue
+        }
+
+        -- Hyphen range: 1.0.0 - 2.0.0
+        if i + 2 < len(parts) and trim(parts[i + 1]) == "-" {
+            let low = parse_semver(part)
+            let high = parse_semver(trim(parts[i + 2]))
+            if low != null and high != null {
+                push(result, {"op": ">=", "version": low})
+                push(result, {"op": "<=", "version": high})
+            }
+            i += 3
+            continue
+        }
+
+        -- Exact version
+        let ver = parse_semver(part)
+        if ver != null {
+            push(result, {"op": "=", "version": ver})
+        }
+        i += 1
+    }
+
+    if len(result) == 0 {
+        push(result, {"op": ">=", "version": SemVer(0, 0, 0, "", "")})
+    }
+
+    return result
+}
+
+-- ── Range helpers ────────────────────────────────────────
+
+fn _caret_range(ver) {
+    -- ^1.2.3 := >=1.2.3 <2.0.0
+    -- ^0.2.3 := >=0.2.3 <0.3.0
+    -- ^0.0.3 := >=0.0.3 <0.0.4
+    mut upper = null
+    if ver.major != 0 {
+        upper = SemVer(ver.major + 1, 0, 0, "", "")
+    } elif ver.minor != 0 {
+        upper = SemVer(0, ver.minor + 1, 0, "", "")
+    } else {
+        upper = SemVer(0, 0, ver.patch + 1, "", "")
+    }
+    return [
+        {"op": ">=", "version": ver},
+        {"op": "<", "version": upper}
+    ]
+}
+
+fn _tilde_range(ver) {
+    -- ~1.2.3 := >=1.2.3 <1.3.0
+    -- ~1.2 := >=1.2.0 <1.3.0
+    let upper = SemVer(ver.major, ver.minor + 1, 0, "", "")
+    return [
+        {"op": ">=", "version": ver},
+        {"op": "<", "version": upper}
+    ]
+}
+
+fn _wildcard_range(pattern) {
+    -- 1.x := >=1.0.0 <2.0.0
+    -- 1.2.x := >=1.2.0 <1.3.0
+    let cleaned = replace(replace(replace(pattern, ".x", ""), ".X", ""), ".*", "")
+    let parts = split(cleaned, ".")
+    if len(parts) == 1 {
+        let major = _try_int(parts[0])
+        if major != null {
+            return [
+                {"op": ">=", "version": SemVer(major, 0, 0, "", "")},
+                {"op": "<", "version": SemVer(major + 1, 0, 0, "", "")}
+            ]
+        }
+    } elif len(parts) == 2 {
+        let major = _try_int(parts[0])
+        let minor = _try_int(parts[1])
+        if major != null and minor != null {
+            return [
+                {"op": ">=", "version": SemVer(major, minor, 0, "", "")},
+                {"op": "<", "version": SemVer(major, minor + 1, 0, "", "")}
+            ]
+        }
+    }
+    return [{"op": ">=", "version": SemVer(0, 0, 0, "", "")}]
+}
+
+-- ── Utilities ───────────────────────────────────────────
+
+fn max_satisfying(versions, range_str) {
+    -- Given a list of version strings, return the highest that satisfies the range
+    let range = parse_range(range_str)
+    mut best = null
+
+    for v_str in versions {
+        let v = parse_semver(v_str)
+        if v != null and range.test(v) {
+            if best == null or v.gt(best) {
+                best = v
+            }
+        }
+    }
+
+    return best
+}
+
+fn min_satisfying(versions, range_str) {
+    -- Given a list of version strings, return the lowest that satisfies the range
+    let range = parse_range(range_str)
+    mut best = null
+
+    for v_str in versions {
+        let v = parse_semver(v_str)
+        if v != null and range.test(v) {
+            if best == null or v.lt(best) {
+                best = v
+            }
+        }
+    }
+
+    return best
+}
+
+fn sort_versions(versions) {
+    -- Sort a list of version strings in ascending order
+    mut parsed = []
+    for v_str in versions {
+        let v = parse_semver(v_str)
+        if v != null {
+            push(parsed, {"str": v_str, "ver": v})
+        }
+    }
+
+    -- Simple insertion sort
+    mut i = 1
+    while i < len(parsed) {
+        let current = parsed[i]
+        mut j = i - 1
+        while j >= 0 and parsed[j]["ver"].gt(current["ver"]) {
+            parsed[j + 1] = parsed[j]
+            j -= 1
+        }
+        parsed[j + 1] = current
+        i += 1
+    }
+
+    mut result = []
+    for item in parsed {
+        push(result, item["str"])
+    }
+    return result
+}
+
+fn valid_range(range_str) {
+    -- Check if a range string is parseable
+    try {
+        let range = parse_range(range_str)
+        return true
+    } catch e {
+        return false
+    }
+}
+
+fn coerce(version_str) {
+    -- Try to coerce a loose version string into a valid SemVer
+    mut s = trim(str(version_str))
+    if starts(s, "v") or starts(s, "V") {
+        s = substring(s, 1, len(s))
+    }
+    -- Strip everything after first space
+    let sp_idx = index_of(s, " ")
+    if sp_idx >= 0 {
+        s = substring(s, 0, sp_idx)
+    }
+    return parse_semver(s)
+}

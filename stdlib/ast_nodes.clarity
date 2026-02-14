@@ -1,0 +1,504 @@
+-- Clarity AST Node Definitions — self-hosting implementation
+-- Faithful port of clarity/ast_nodes.py, written in Clarity itself.
+
+-- ── Program ──────────────────────────────────────────────
+
+class Program {
+    fn init(body) {
+        this.node_type = "Program"
+        this.body = body
+        this.line = null
+        this.column = null
+    }
+}
+
+-- ── Statements ───────────────────────────────────────────
+
+class LetStatement {
+    fn init(name, value, mutable, type_annotation, line, column) {
+        this.node_type = "LetStatement"
+        this.name = name
+        this.value = value
+        this.mutable = mutable ?? false
+        this.type_annotation = type_annotation
+        this.line = line
+        this.column = column
+    }
+}
+
+class DestructureLetStatement {
+    fn init(targets, value, mutable, kind, line, column) {
+        this.node_type = "DestructureLetStatement"
+        this.targets = targets
+        this.value = value
+        this.mutable = mutable ?? false
+        this.kind = kind ?? "list"
+        this.line = line
+        this.column = column
+    }
+}
+
+class AssignStatement {
+    fn init(target, operator, value, line, column) {
+        this.node_type = "AssignStatement"
+        this.target = target
+        this.operator = operator
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class FnStatement {
+    fn init(name, params, body, is_async, param_types, return_type, line, column) {
+        this.node_type = "FnStatement"
+        this.name = name
+        this.params = params
+        this.body = body
+        this.is_async = is_async ?? false
+        this.param_types = param_types ?? {}
+        this.return_type = return_type
+        this.line = line
+        this.column = column
+    }
+}
+
+class ReturnStatement {
+    fn init(value, line, column) {
+        this.node_type = "ReturnStatement"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class IfStatement {
+    fn init(condition, body, elif_clauses, else_body, line, column) {
+        this.node_type = "IfStatement"
+        this.condition = condition
+        this.body = body
+        this.elif_clauses = elif_clauses ?? []
+        this.else_body = else_body
+        this.line = line
+        this.column = column
+    }
+}
+
+class ForStatement {
+    fn init(variable, iterable, body, line, column) {
+        this.node_type = "ForStatement"
+        this.variable = variable
+        this.iterable = iterable
+        this.body = body
+        this.line = line
+        this.column = column
+    }
+}
+
+class WhileStatement {
+    fn init(condition, body, line, column) {
+        this.node_type = "WhileStatement"
+        this.condition = condition
+        this.body = body
+        this.line = line
+        this.column = column
+    }
+}
+
+class TryCatch {
+    fn init(try_body, catch_var, catch_body, finally_body, line, column) {
+        this.node_type = "TryCatch"
+        this.try_body = try_body
+        this.catch_var = catch_var
+        this.catch_body = catch_body
+        this.finally_body = finally_body
+        this.line = line
+        this.column = column
+    }
+}
+
+class BreakStatement {
+    fn init(line, column) {
+        this.node_type = "BreakStatement"
+        this.line = line
+        this.column = column
+    }
+}
+
+class ContinueStatement {
+    fn init(line, column) {
+        this.node_type = "ContinueStatement"
+        this.line = line
+        this.column = column
+    }
+}
+
+class ThrowStatement {
+    fn init(value, line, column) {
+        this.node_type = "ThrowStatement"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class ShowStatement {
+    fn init(values, line, column) {
+        this.node_type = "ShowStatement"
+        this.values = values
+        this.line = line
+        this.column = column
+    }
+}
+
+class ImportStatement {
+    fn init(module, alias, names, path, line, column) {
+        this.node_type = "ImportStatement"
+        this.module = module
+        this.alias = alias
+        this.names = names
+        this.path = path
+        this.line = line
+        this.column = column
+    }
+}
+
+class ClassStatement {
+    fn init(name, methods, parent, interfaces, line, column) {
+        this.node_type = "ClassStatement"
+        this.name = name
+        this.methods = methods
+        this.parent = parent
+        this.interfaces = interfaces ?? []
+        this.line = line
+        this.column = column
+    }
+}
+
+class InterfaceStatement {
+    fn init(name, method_sigs, line, column) {
+        this.node_type = "InterfaceStatement"
+        this.name = name
+        this.method_sigs = method_sigs
+        this.line = line
+        this.column = column
+    }
+}
+
+class MatchStatement {
+    fn init(subject, arms, default, line, column) {
+        this.node_type = "MatchStatement"
+        this.subject = subject
+        this.arms = arms
+        this.default = default
+        this.line = line
+        this.column = column
+    }
+}
+
+class MultiAssignStatement {
+    fn init(targets, values, line, column) {
+        this.node_type = "MultiAssignStatement"
+        this.targets = targets
+        this.values = values
+        this.line = line
+        this.column = column
+    }
+}
+
+class EnumStatement {
+    fn init(name, members, line, column) {
+        this.node_type = "EnumStatement"
+        this.name = name
+        this.members = members
+        this.line = line
+        this.column = column
+    }
+}
+
+class DecoratedStatement {
+    fn init(target, decorators, line, column) {
+        this.node_type = "DecoratedStatement"
+        this.target = target
+        this.decorators = decorators
+        this.line = line
+        this.column = column
+    }
+}
+
+class ExpressionStatement {
+    fn init(expression, line, column) {
+        this.node_type = "ExpressionStatement"
+        this.expression = expression
+        this.line = line
+        this.column = column
+    }
+}
+
+class Block {
+    fn init(statements, line, column) {
+        this.node_type = "Block"
+        this.statements = statements
+        this.line = line
+        this.column = column
+    }
+}
+
+-- ── Expressions ──────────────────────────────────────────
+
+class NumberLiteral {
+    fn init(value, line, column) {
+        this.node_type = "NumberLiteral"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class StringLiteral {
+    fn init(value, line, column, raw) {
+        this.node_type = "StringLiteral"
+        this.value = value
+        this.raw = raw ?? false
+        this.line = line
+        this.column = column
+    }
+}
+
+class BoolLiteral {
+    fn init(value, line, column) {
+        this.node_type = "BoolLiteral"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class NullLiteral {
+    fn init(line, column) {
+        this.node_type = "NullLiteral"
+        this.line = line
+        this.column = column
+    }
+}
+
+class Identifier {
+    fn init(name, line, column) {
+        this.node_type = "Identifier"
+        this.name = name
+        this.line = line
+        this.column = column
+    }
+}
+
+class ThisExpression {
+    fn init(line, column) {
+        this.node_type = "ThisExpression"
+        this.line = line
+        this.column = column
+    }
+}
+
+class ListLiteral {
+    fn init(elements, line, column) {
+        this.node_type = "ListLiteral"
+        this.elements = elements
+        this.line = line
+        this.column = column
+    }
+}
+
+class MapLiteral {
+    fn init(pairs, line, column) {
+        this.node_type = "MapLiteral"
+        this.pairs = pairs
+        this.line = line
+        this.column = column
+    }
+}
+
+class BinaryOp {
+    fn init(left, operator, right, line, column) {
+        this.node_type = "BinaryOp"
+        this.left = left
+        this.operator = operator
+        this.right = right
+        this.line = line
+        this.column = column
+    }
+}
+
+class UnaryOp {
+    fn init(operator, operand, line, column) {
+        this.node_type = "UnaryOp"
+        this.operator = operator
+        this.operand = operand
+        this.line = line
+        this.column = column
+    }
+}
+
+class CallExpression {
+    fn init(callee, arguments, line, column) {
+        this.node_type = "CallExpression"
+        this.callee = callee
+        this.arguments = arguments
+        this.line = line
+        this.column = column
+    }
+}
+
+class MemberExpression {
+    fn init(object, property, line, column) {
+        this.node_type = "MemberExpression"
+        this.object = object
+        this.property = property
+        this.line = line
+        this.column = column
+    }
+}
+
+class OptionalMemberExpression {
+    fn init(object, property, line, column) {
+        this.node_type = "OptionalMemberExpression"
+        this.object = object
+        this.property = property
+        this.line = line
+        this.column = column
+    }
+}
+
+class IndexExpression {
+    fn init(object, index, line, column) {
+        this.node_type = "IndexExpression"
+        this.object = object
+        this.index = index
+        this.line = line
+        this.column = column
+    }
+}
+
+class SliceExpression {
+    fn init(object, start, end, line, column) {
+        this.node_type = "SliceExpression"
+        this.object = object
+        this.start = start
+        this.end = end
+        this.line = line
+        this.column = column
+    }
+}
+
+class FnExpression {
+    fn init(params, body, param_types, return_type, line, column) {
+        this.node_type = "FnExpression"
+        this.params = params
+        this.body = body
+        this.param_types = param_types ?? {}
+        this.return_type = return_type
+        this.line = line
+        this.column = column
+    }
+}
+
+class PipeExpression {
+    fn init(value, function, line, column) {
+        this.node_type = "PipeExpression"
+        this.value = value
+        this.function = function
+        this.line = line
+        this.column = column
+    }
+}
+
+class RangeExpression {
+    fn init(start, end, line, column) {
+        this.node_type = "RangeExpression"
+        this.start = start
+        this.end = end
+        this.line = line
+        this.column = column
+    }
+}
+
+class AskExpression {
+    fn init(prompt, line, column) {
+        this.node_type = "AskExpression"
+        this.prompt = prompt
+        this.line = line
+        this.column = column
+    }
+}
+
+class NullCoalesce {
+    fn init(left, right, line, column) {
+        this.node_type = "NullCoalesce"
+        this.left = left
+        this.right = right
+        this.line = line
+        this.column = column
+    }
+}
+
+class SpreadExpression {
+    fn init(value, line, column) {
+        this.node_type = "SpreadExpression"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class IfExpression {
+    fn init(condition, true_expr, false_expr, line, column) {
+        this.node_type = "IfExpression"
+        this.condition = condition
+        this.true_expr = true_expr
+        this.false_expr = false_expr
+        this.line = line
+        this.column = column
+    }
+}
+
+class ComprehensionExpression {
+    fn init(expr, variable, iterable, condition, line, column) {
+        this.node_type = "ComprehensionExpression"
+        this.expr = expr
+        this.variable = variable
+        this.iterable = iterable
+        this.condition = condition
+        this.line = line
+        this.column = column
+    }
+}
+
+class MapComprehensionExpression {
+    fn init(key_expr, value_expr, variables, iterable, condition, line, column) {
+        this.node_type = "MapComprehensionExpression"
+        this.key_expr = key_expr
+        this.value_expr = value_expr
+        this.variables = variables
+        this.iterable = iterable
+        this.condition = condition
+        this.line = line
+        this.column = column
+    }
+}
+
+class AwaitExpression {
+    fn init(value, line, column) {
+        this.node_type = "AwaitExpression"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}
+
+class YieldExpression {
+    fn init(value, line, column) {
+        this.node_type = "YieldExpression"
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+}

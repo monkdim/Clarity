@@ -1,0 +1,28 @@
+-- Hello World in Clarity
+-- This is our language. Simple and powerful.
+
+let name = "World"
+show "Hello {name}!"
+
+-- Variables and math
+let x = 42
+let y = 8
+show "The answer is {x} and {x + y} is even better"
+
+-- Lists are first-class
+let colors = ["red", "green", "blue", "gold"]
+show "Colors:", colors
+show "First color:", colors[0]
+show "We have {len(colors)} colors"
+
+-- Simple loops
+for color in colors {
+    show "  -> {color}"
+}
+
+-- Functions
+fn greet(person) {
+    show "Hey there, {person}!"
+}
+
+greet("Clarity Developer")

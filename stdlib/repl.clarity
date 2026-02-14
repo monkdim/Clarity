@@ -1,0 +1,446 @@
+-- Clarity Shell REPL — interactive terminal
+-- Runs both Clarity code and shell commands in one interface.
+-- Features: syntax highlighting, tab completion, persistent history, pretty output.
+
+from "terminal.clarity" import bold, green, cyan, red, yellow, gray, dim, clear_screen, columns, hr, magenta, blue
+from "shell.clarity" import shell_exec, execute, expand_tilde
+from "process.clarity" import get_path, home_dir, ls, pwd, _quote
+from "highlight.clarity" import highlight_line
+from "completer.clarity" import Completer, format_completions, common_prefix
+from "pretty.clarity" import pretty, pretty_show, pretty_json
+
+-- ── Constants ───────────────────────────────────────────
+
+let HISTORY_FILE = ".clarity_history"
+let MAX_HISTORY = 1000
+
+-- ── REPL State ───────────────────────────────────────────
+
+class ReplState {
+    fn init() {
+        this.running = true
+        this.env_vars = {}
+        this.history = []
+        this.history_pos = -1
+        this.brace_depth = 0
+        this.buffer = []
+        this.clarity_mode = true
+        this.completer = Completer()
+        this.show_highlighted = true
+        this.pretty_output = true
+    }
+}
+
+-- ── Persistent History ──────────────────────────────────
+
+fn _history_path() {
+    return home_dir() + "/" + HISTORY_FILE
+}
+
+fn _load_history() {
+    -- Load history from ~/.clarity_history
+    let path = _history_path()
+    let check = exec_full("test -f " + _quote(path) + " && echo yes || echo no")
+    if trim(check.stdout) != "yes" { return [] }
+
+    try {
+        let content = read(path)
+        let all_lines = split(content, "\n")
+        mut history = []
+        for line in all_lines {
+            if len(trim(line)) > 0 {
+                push(history, line)
+            }
+        }
+        -- Keep only last MAX_HISTORY entries
+        if len(history) > MAX_HISTORY {
+            history = slice(history, len(history) - MAX_HISTORY)
+        }
+        return history
+    } catch e {
+        return []
+    }
+}
+
+fn _save_history(history) {
+    -- Save history to ~/.clarity_history
+    let path = _history_path()
+    try {
+        -- Keep only last MAX_HISTORY entries
+        mut to_save = history
+        if len(to_save) > MAX_HISTORY {
+            to_save = slice(to_save, len(to_save) - MAX_HISTORY)
+        }
+        write(path, join(to_save, "\n") + "\n")
+    } catch e {
+        -- Silently ignore write errors
+    }
+}
+
+fn _search_history(history, query) {
+    -- Search history for lines containing query (reverse chronological)
+    let q = lower(query)
+    mut results = []
+    mut i = len(history) - 1
+    while i >= 0 {
+        if contains(lower(history[i]), q) {
+            push(results, {"index": i, "line": history[i]})
+        }
+        if len(results) >= 20 { break }
+        i -= 1
+    }
+    return results
+}
+
+-- ── Detect if input is a shell command ───────────────────
+
+fn is_shell_command(line) {
+    let trimmed = trim(line)
+    if starts(trimmed, "$ ") or starts(trimmed, "! ") {
+        return true
+    }
+    let shell_cmds = ["ls", "cd", "pwd", "cat", "grep", "find", "mkdir", "rm", "cp", "mv",
+                       "echo", "head", "tail", "wc", "sort", "uniq", "curl", "wget", "git",
+                       "docker", "npm", "pip", "python", "node", "make", "gcc", "cargo",
+                       "ps", "kill", "top", "df", "du", "chmod", "chown", "tar", "zip",
+                       "ssh", "scp", "rsync", "vi", "vim", "nano", "man", "which", "whoami",
+                       "date", "cal", "uname", "clear", "touch", "diff", "sed", "awk"]
+    let first_word = if contains(trimmed, " ") { substring(trimmed, 0, index_of(trimmed, " ")) } else { trimmed }
+    return contains(shell_cmds, first_word)
+}
+
+-- ── Built-in REPL commands ───────────────────────────────
+
+fn handle_builtin(line, state) {
+    let trimmed = trim(line)
+
+    if trimmed == ".help" or trimmed == "help" {
+        show ""
+        show bold("  Clarity Shell — Commands")
+        show ""
+        show "  " + cyan(".help") + "          Show this help"
+        show "  " + cyan(".clear") + "         Clear the screen"
+        show "  " + cyan(".reset") + "         Reset interpreter state"
+        show "  " + cyan(".env") + "           Show environment variables"
+        show "  " + cyan(".mode") + "          Toggle shell/clarity auto-detect"
+        show "  " + cyan(".cd DIR") + "        Change directory"
+        show "  " + cyan(".pwd") + "           Print working directory"
+        show "  " + cyan(".ls") + "            List files"
+        show "  " + cyan(".history") + "       Show recent history"
+        show "  " + cyan(".history N") + "     Show last N entries"
+        show "  " + cyan(".search TERM") + "   Search history"
+        show "  " + cyan(".highlight") + "     Toggle syntax highlighting"
+        show "  " + cyan(".pretty") + "        Toggle pretty output"
+        show "  " + cyan(".complete X") + "    Show completions for X"
+        show "  " + cyan("quit") + "           Exit the shell"
+        show ""
+        show "  " + dim("Prefix with $ or ! to force shell mode")
+        show "  " + dim("Clarity code runs directly (let, fn, show, etc.)")
+        show ""
+        return true
+    }
+
+    if trimmed == ".clear" or trimmed == "clear" {
+        show clear_screen()
+        return true
+    }
+
+    if trimmed == ".reset" {
+        state.completer = Completer()
+        show yellow("  -- State reset --")
+        return true
+    }
+
+    if trimmed == ".env" {
+        show bold("  Environment:")
+        let env_keys = keys(state.env_vars)
+        if len(env_keys) == 0 {
+            show gray("  (no custom variables)")
+        } else {
+            each(env_keys, fn(k) {
+                show "  " + cyan(k) + " = " + str(state.env_vars[k])
+            })
+        }
+        return true
+    }
+
+    if trimmed == ".mode" {
+        state.clarity_mode = not state.clarity_mode
+        let mode_name = if state.clarity_mode { "Clarity (auto-detect)" } else { "Shell" }
+        show yellow("  Mode: " + mode_name)
+        return true
+    }
+
+    -- History commands
+    if trimmed == ".history" {
+        _show_history(state.history, 20)
+        return true
+    }
+    if starts(trimmed, ".history ") {
+        let count_str = trim(substring(trimmed, 9, len(trimmed)))
+        try {
+            let count = int(count_str)
+            _show_history(state.history, count)
+        } catch e {
+            show red("  Invalid number: " + count_str)
+        }
+        return true
+    }
+
+    -- Search history
+    if starts(trimmed, ".search ") {
+        let query = trim(substring(trimmed, 8, len(trimmed)))
+        if len(query) == 0 {
+            show red("  Usage: .search <term>")
+            return true
+        }
+        let results = _search_history(state.history, query)
+        if len(results) == 0 {
+            show gray("  No matches for '" + query + "'")
+        } else {
+            show ""
+            show bold("  History matches for '" + query + "':")
+            for r in results {
+                show "  " + dim(str(r["index"])) + "  " + r["line"]
+            }
+            show ""
+        }
+        return true
+    }
+
+    -- Toggle highlighting
+    if trimmed == ".highlight" {
+        state.show_highlighted = not state.show_highlighted
+        let status = if state.show_highlighted { "ON" } else { "OFF" }
+        show yellow("  Syntax highlighting: " + status)
+        return true
+    }
+
+    -- Toggle pretty output
+    if trimmed == ".pretty" {
+        state.pretty_output = not state.pretty_output
+        let status = if state.pretty_output { "ON" } else { "OFF" }
+        show yellow("  Pretty output: " + status)
+        return true
+    }
+
+    -- Tab completion
+    if starts(trimmed, ".complete ") {
+        let partial = trim(substring(trimmed, 10, len(trimmed)))
+        let completions = state.completer.complete(partial)
+        if len(completions) == 0 {
+            show gray("  No completions for '" + partial + "'")
+        } else {
+            show format_completions(completions, 20)
+        }
+        return true
+    }
+
+    if starts(trimmed, ".cd ") or starts(trimmed, "cd ") {
+        let prefix_len = if starts(trimmed, ".cd ") { 4 } else { 3 }
+        let dir = expand_tilde(trim(substring(trimmed, prefix_len)))
+        try {
+            let result = exec("cd " + dir + " && pwd")
+            show cyan("  " + trim(result))
+        } catch e {
+            show red("  cd: " + str(e))
+        }
+        return true
+    }
+
+    if trimmed == ".pwd" or trimmed == "pwd" {
+        show cyan("  " + pwd())
+        return true
+    }
+
+    if trimmed == ".ls" {
+        let files = ls(null)
+        each(files, fn(f) { show "  " + f })
+        return true
+    }
+
+    if trimmed == "quit" or trimmed == "exit" {
+        -- Save history before exiting
+        _save_history(state.history)
+        state.running = false
+        show dim("  -- Goodbye! --")
+        return true
+    }
+
+    return false
+}
+
+-- ── Show history ────────────────────────────────────────
+
+fn _show_history(history, count) {
+    let n = len(history)
+    let start = if n > count { n - count } else { 0 }
+    show ""
+    show bold("  History:")
+    mut i = start
+    while i < n {
+        show "  " + dim(str(i)) + "  " + history[i]
+        i += 1
+    }
+    show ""
+    show dim("  " + str(n) + " total entries")
+}
+
+-- ── Format the prompt ────────────────────────────────────
+
+fn format_prompt(state) {
+    let dir = pwd()
+    let home = home_dir()
+    mut display_dir = dir
+    if starts(dir, home) {
+        display_dir = "~" + substring(dir, len(home))
+    }
+    return bold(green("clarity")) + " " + cyan(display_dir) + bold(green(" > "))
+}
+
+-- ── Banner ───────────────────────────────────────────────
+
+fn show_banner() {
+    show ""
+    show bold(cyan("  Clarity Shell v0.5"))
+    show dim("  Type .help for commands. Syntax highlighting + tab completion enabled.")
+    show ""
+}
+
+-- ── Main REPL loop ───────────────────────────────────────
+
+fn start() {
+    let state = ReplState()
+
+    -- Load persistent history
+    state.history = _load_history()
+
+    show_banner()
+
+    while state.running {
+        -- Build prompt
+        mut prompt_str = ""
+        if len(state.buffer) > 0 {
+            prompt_str = dim("   ...> ")
+        } else {
+            prompt_str = format_prompt(state)
+        }
+
+        -- Read input
+        mut line = ""
+        try {
+            line = ask(prompt_str)
+        } catch e {
+            -- EOF or interrupt — save history before exit
+            _save_history(state.history)
+            state.running = false
+            show ""
+            show dim("  -- Goodbye! --")
+            break
+        }
+
+        -- Empty line
+        if len(trim(line)) == 0 and len(state.buffer) == 0 {
+            continue
+        }
+
+        -- Add to history (avoid duplicating last entry)
+        if len(trim(line)) > 0 {
+            if len(state.history) == 0 or state.history[len(state.history) - 1] != line {
+                push(state.history, line)
+            }
+        }
+
+        -- Check for builtin commands (only if not in multi-line mode)
+        if len(state.buffer) == 0 and handle_builtin(line, state) {
+            continue
+        }
+
+        -- Multi-line support: track brace depth
+        state.brace_depth = state.brace_depth + _count_char(line, from_char_code(123)) - _count_char(line, from_char_code(125))
+        push(state.buffer, line)
+
+        if state.brace_depth > 0 {
+            continue
+        }
+
+        -- Complete input
+        let source = join(state.buffer, "\n")
+        state.buffer = []
+        state.brace_depth = 0
+
+        if len(trim(source)) == 0 {
+            continue
+        }
+
+        -- Learn from the input for future completions
+        state.completer.learn_from_source(source)
+
+        -- Determine mode and execute
+        if is_shell_command(source) {
+            -- Strip $ or ! prefix if present
+            mut cmd = source
+            if starts(trim(cmd), "$ ") {
+                cmd = substring(trim(cmd), 2)
+            } elif starts(trim(cmd), "! ") {
+                cmd = substring(trim(cmd), 2)
+            }
+            -- Execute as shell command
+            let result = execute(cmd, state.env_vars)
+            if len(trim(result.stdout)) > 0 {
+                show result.stdout
+            }
+            if len(trim(result.stderr)) > 0 {
+                show red(result.stderr)
+            }
+            if not result.success and len(trim(result.stderr)) == 0 {
+                show red("  exit code: " + str(result.exit_code))
+            }
+        } else {
+            -- Execute as Clarity code
+            try {
+                from "lexer.clarity" import tokenize
+                from "parser.clarity" import parse
+                let tokens = tokenize(source, "<repl>")
+                let tree = parse(tokens, source)
+
+                -- Show highlighted version of multi-line input
+                if state.show_highlighted and len(split(source, "\n")) > 1 {
+                    show ""
+                    show dim("  ┌─ input ─")
+                    let highlighted = highlight_line(source)
+                    let h_lines = split(highlighted, "\n")
+                    for hl in h_lines {
+                        show dim("  │ ") + hl
+                    }
+                    show dim("  └─")
+                }
+
+                show gray("  [parsed: " + str(len(tree.body)) + " statement(s)]")
+            } catch e {
+                show red("  " + str(e))
+            }
+        }
+    }
+
+    -- Final history save
+    _save_history(state.history)
+}
+
+-- ── Helper: count occurrences of a character ─────────────
+
+fn _count_char(s, ch) {
+    mut count = 0
+    mut i = 0
+    while i < len(s) {
+        if s[i] == ch {
+            count += 1
+        }
+        i += 1
+    }
+    return count
+}
+
+-- ── Entry point ──────────────────────────────────────────
+
+start()

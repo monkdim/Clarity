@@ -1,0 +1,374 @@
+-- Clarity Pretty Printer — colorized, indented display of complex values.
+-- Handles nested maps, lists, class instances, enums, and long collections.
+
+from "terminal.clarity" import bold, dim, green, cyan, yellow, magenta, red, blue, gray
+
+-- ── Configuration ───────────────────────────────────────
+
+let DEFAULT_INDENT = 2
+let MAX_DEPTH = 10
+let MAX_INLINE_LEN = 60
+let MAX_ITEMS = 50
+
+-- ── Pretty-print a value ────────────────────────────────
+
+fn pretty(value, ...rest) {
+    -- Pretty-print any Clarity value with colors and indentation.
+    -- Returns a colored string.
+    let indent = if len(rest) > 0 { rest[0] } else { DEFAULT_INDENT }
+    return _pretty_val(value, 0, indent, 0)
+}
+
+fn pretty_show(value, ...rest) {
+    -- Pretty-print and display to stdout.
+    let indent = if len(rest) > 0 { rest[0] } else { DEFAULT_INDENT }
+    show _pretty_val(value, 0, indent, 0)
+}
+
+-- ── Core formatter ──────────────────────────────────────
+
+fn _pretty_val(value, depth, indent, parent_indent) {
+    if depth > MAX_DEPTH {
+        return dim("...")
+    }
+
+    let t = type(value)
+
+    -- null
+    if value == null {
+        return bold(red("null"))
+    }
+
+    -- Boolean
+    if t == "bool" {
+        return bold(yellow(str(value)))
+    }
+
+    -- Number
+    if t == "number" {
+        return green(str(value))
+    }
+
+    -- String
+    if t == "string" {
+        return _pretty_string(value)
+    }
+
+    -- List
+    if t == "list" {
+        return _pretty_list(value, depth, indent, parent_indent)
+    }
+
+    -- Map
+    if t == "map" {
+        return _pretty_map(value, depth, indent, parent_indent)
+    }
+
+    -- Class instance
+    if t == "ClarityInstance" {
+        return _pretty_instance(value, depth, indent, parent_indent)
+    }
+
+    -- Enum
+    if t == "ClarityEnum" {
+        return _pretty_enum(value)
+    }
+
+    -- Function
+    if t == "function" or t == "ClarityFunction" {
+        return cyan("[function]")
+    }
+
+    -- Fallback
+    return str(value)
+}
+
+-- ── String formatting ───────────────────────────────────
+
+fn _pretty_string(s) {
+    -- Colorize and truncate strings
+    mut display = s
+    if len(display) > 200 {
+        display = substring(display, 0, 197) + "..."
+    }
+    -- Escape special chars for display
+    display = replace(display, "\\", "\\\\")
+    display = replace(display, "\n", "\\n")
+    display = replace(display, "\t", "\\t")
+    return green("\"" + display + "\"")
+}
+
+-- ── List formatting ─────────────────────────────────────
+
+fn _pretty_list(lst, depth, indent, parent_indent) {
+    let n = len(lst)
+
+    -- Empty list
+    if n == 0 {
+        return dim("[]")
+    }
+
+    -- Try inline format first
+    let inline = _try_inline_list(lst, depth, indent)
+    if inline != null and len(inline) < MAX_INLINE_LEN {
+        return inline
+    }
+
+    -- Multi-line format
+    let pad = repeat(" ", parent_indent + indent)
+    let close_pad = repeat(" ", parent_indent)
+    mut lines = ["["]
+
+    mut i = 0
+    let show_count = if n > MAX_ITEMS { MAX_ITEMS } else { n }
+    while i < show_count {
+        let item = _pretty_val(lst[i], depth + 1, indent, parent_indent + indent)
+        let comma = if i < n - 1 { "," } else { "" }
+        push(lines, pad + item + comma)
+        i += 1
+    }
+
+    if n > MAX_ITEMS {
+        push(lines, pad + dim("... " + str(n - MAX_ITEMS) + " more items"))
+    }
+
+    push(lines, close_pad + "]")
+    return join(lines, "\n")
+}
+
+fn _try_inline_list(lst, depth, indent) {
+    -- Try to format list on a single line
+    if len(lst) > 10 { return null }
+    if depth > 2 { return null }
+
+    mut parts = []
+    for item in lst {
+        let t = type(item)
+        if t == "list" or t == "map" or t == "ClarityInstance" { return null }
+        push(parts, _pretty_val(item, depth + 1, indent, 0))
+    }
+    return "[" + join(parts, ", ") + "]"
+}
+
+-- ── Map formatting ──────────────────────────────────────
+
+fn _pretty_map(m, depth, indent, parent_indent) {
+    let k = keys(m)
+    let n = len(k)
+
+    -- Empty map
+    if n == 0 {
+        return dim("{}")
+    }
+
+    -- Try inline format first
+    let inline = _try_inline_map(m, depth, indent)
+    if inline != null and len(inline) < MAX_INLINE_LEN {
+        return inline
+    }
+
+    -- Multi-line format
+    let pad = repeat(" ", parent_indent + indent)
+    let close_pad = repeat(" ", parent_indent)
+    mut lines = ["{"]
+
+    let ent = entries(m)
+    mut i = 0
+    let show_count = if n > MAX_ITEMS { MAX_ITEMS } else { n }
+    while i < show_count {
+        let key = ent[i][0]
+        let val = ent[i][1]
+        let key_str = cyan(str(key))
+        let val_str = _pretty_val(val, depth + 1, indent, parent_indent + indent)
+        let comma = if i < n - 1 { "," } else { "" }
+        push(lines, pad + key_str + ": " + val_str + comma)
+        i += 1
+    }
+
+    if n > MAX_ITEMS {
+        push(lines, pad + dim("... " + str(n - MAX_ITEMS) + " more entries"))
+    }
+
+    push(lines, close_pad + "}")
+    return join(lines, "\n")
+}
+
+fn _try_inline_map(m, depth, indent) {
+    let k = keys(m)
+    if len(k) > 5 { return null }
+    if depth > 2 { return null }
+
+    mut parts = []
+    let ent = entries(m)
+    for pair in ent {
+        let key = pair[0]
+        let val = pair[1]
+        let t = type(val)
+        if t == "list" or t == "map" or t == "ClarityInstance" { return null }
+        let key_str = cyan(str(key))
+        let val_str = _pretty_val(val, depth + 1, indent, 0)
+        push(parts, key_str + ": " + val_str)
+    }
+    return "{" + join(parts, ", ") + "}"
+}
+
+-- ── Instance formatting ─────────────────────────────────
+
+fn _pretty_instance(instance, depth, indent, parent_indent) {
+    -- Try to get class name and properties
+    mut class_name = "Instance"
+    try { class_name = instance.__class_name__ } catch e {}
+    try {
+        if has(instance, "__name__") { class_name = instance.__name__ }
+    } catch e2 {}
+
+    let header = bold(magenta(class_name))
+
+    -- Try to get instance properties
+    mut props = {}
+    try {
+        let k = keys(instance)
+        for key in k {
+            if not starts(key, "__") {
+                try {
+                    props[key] = instance[key]
+                } catch e {}
+            }
+        }
+    } catch e {}
+
+    if len(keys(props)) == 0 {
+        return header + " " + dim("{}")
+    }
+
+    -- Format like a map with the class name as header
+    let pad = repeat(" ", parent_indent + indent)
+    let close_pad = repeat(" ", parent_indent)
+    mut lines = [header + " {"]
+
+    let prop_entries = entries(props)
+    mut i = 0
+    while i < len(prop_entries) {
+        let key = prop_entries[i][0]
+        let val = prop_entries[i][1]
+        let key_str = dim(str(key))
+        let val_str = _pretty_val(val, depth + 1, indent, parent_indent + indent)
+        let comma = if i < len(prop_entries) - 1 { "," } else { "" }
+        push(lines, pad + key_str + ": " + val_str + comma)
+        i += 1
+    }
+
+    push(lines, close_pad + "}")
+    return join(lines, "\n")
+}
+
+-- ── Enum formatting ─────────────────────────────────────
+
+fn _pretty_enum(e) {
+    return bold(blue(str(e)))
+}
+
+-- ── Table formatting ────────────────────────────────────
+
+fn pretty_table(data, ...rest) {
+    -- Format a list of maps as a table.
+    -- data: list of maps with consistent keys.
+    if len(data) == 0 {
+        show dim("  (empty)")
+        return
+    }
+
+    -- Collect all columns
+    mut cols = []
+    let first_keys = keys(data[0])
+    for k in first_keys {
+        push(cols, k)
+    }
+
+    -- Calculate column widths
+    mut widths = {}
+    for col in cols {
+        widths[col] = len(str(col))
+    }
+    for row in data {
+        for col in cols {
+            let val = if has(row, col) { str(row[col]) } else { "" }
+            if len(val) > widths[col] {
+                widths[col] = len(val)
+            }
+        }
+    }
+
+    -- Header
+    mut header_parts = []
+    for col in cols {
+        push(header_parts, pad_right(bold(col), widths[col]))
+    }
+    show "  " + join(header_parts, "  ")
+
+    -- Separator
+    mut sep_parts = []
+    for col in cols {
+        push(sep_parts, repeat("-", widths[col]))
+    }
+    show "  " + dim(join(sep_parts, "  "))
+
+    -- Rows
+    for row in data {
+        mut row_parts = []
+        for col in cols {
+            let val = if has(row, col) { str(row[col]) } else { "" }
+            push(row_parts, pad_right(val, widths[col]))
+        }
+        show "  " + join(row_parts, "  ")
+    }
+}
+
+-- ── JSON-like output ────────────────────────────────────
+
+fn pretty_json(value, ...rest) {
+    -- Format value as colorized JSON (no trailing commas).
+    let indent = if len(rest) > 0 { rest[0] } else { 2 }
+    return _json_val(value, 0, indent)
+}
+
+fn _json_val(value, depth, indent) {
+    if value == null { return bold(red("null")) }
+    let t = type(value)
+    if t == "bool" { return bold(yellow(str(value))) }
+    if t == "number" { return green(str(value)) }
+    if t == "string" { return green("\"" + value + "\"") }
+    if t == "list" {
+        if len(value) == 0 { return "[]" }
+        let pad = repeat(" ", (depth + 1) * indent)
+        let close_pad = repeat(" ", depth * indent)
+        mut lines = ["["]
+        mut i = 0
+        while i < len(value) {
+            let comma = if i < len(value) - 1 { "," } else { "" }
+            push(lines, pad + _json_val(value[i], depth + 1, indent) + comma)
+            i += 1
+        }
+        push(lines, close_pad + "]")
+        return join(lines, "\n")
+    }
+    if t == "map" {
+        let k = keys(value)
+        if len(k) == 0 { return "{}" }
+        let pad = repeat(" ", (depth + 1) * indent)
+        let close_pad = repeat(" ", depth * indent)
+        mut lines = ["{"]
+        let ent = entries(value)
+        mut i = 0
+        while i < len(ent) {
+            let key = cyan("\"" + ent[i][0] + "\"")
+            let val = _json_val(ent[i][1], depth + 1, indent)
+            let comma = if i < len(ent) - 1 { "," } else { "" }
+            push(lines, pad + key + ": " + val + comma)
+            i += 1
+        }
+        push(lines, close_pad + "}")
+        return join(lines, "\n")
+    }
+    return str(value)
+}

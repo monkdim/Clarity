@@ -1,0 +1,217 @@
+-- Clarity Path/Filesystem — path manipulation and file system operations.
+-- Standard library module for working with files and directories.
+
+-- ── Path manipulation ─────────────────────────────────────
+
+fn path_join(...parts) {
+    mut result = ""
+    for part in parts {
+        if len(result) == 0 {
+            result = part
+        } elif starts(part, "/") {
+            result = part
+        } else {
+            if not ends(result, "/") { result = result + "/" }
+            result = result + part
+        }
+    }
+    return result
+}
+
+fn dirname(path) {
+    let result = exec_full("dirname " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn basename(path) {
+    let parts = split(path, "/")
+    if len(parts) == 0 { return "" }
+    return parts[len(parts) - 1]
+}
+
+fn extname(path) {
+    let base = basename(path)
+    let idx = _last_index_of(base, ".")
+    if idx <= 0 { return "" }
+    return substring(base, idx, len(base))
+}
+
+fn stem(path) {
+    let base = basename(path)
+    let idx = _last_index_of(base, ".")
+    if idx <= 0 { return base }
+    return substring(base, 0, idx)
+}
+
+fn resolve(path) {
+    let result = exec_full("realpath " + _quote(path) + " 2>/dev/null || readlink -f " + _quote(path) + " 2>/dev/null || echo " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn normalize(path) {
+    -- Remove . and .. components
+    let parts = split(path, "/")
+    mut stack = []
+    let is_abs = starts(path, "/")
+    for part in parts {
+        if part == "" or part == "." {
+            continue
+        } elif part == ".." {
+            if len(stack) > 0 and stack[len(stack) - 1] != ".." {
+                pop(stack)
+            } elif not is_abs {
+                push(stack, part)
+            }
+        } else {
+            push(stack, part)
+        }
+    }
+    mut result = join(stack, "/")
+    if is_abs { result = "/" + result }
+    if len(result) == 0 { return "." }
+    return result
+}
+
+fn is_absolute(path) {
+    return starts(path, "/")
+}
+
+fn is_relative(path) {
+    return not starts(path, "/")
+}
+
+fn relative(from_path, to_path) {
+    let result = exec_full("realpath --relative-to=" + _quote(from_path) + " " + _quote(to_path) + " 2>/dev/null")
+    if len(trim(result.stdout)) > 0 {
+        return trim(result.stdout)
+    }
+    return to_path
+}
+
+-- ── Filesystem queries ────────────────────────────────────
+
+fn is_file(path) {
+    let result = exec_full("test -f " + _quote(path) + " && echo true || echo false")
+    return trim(result.stdout) == "true"
+}
+
+fn is_dir(path) {
+    let result = exec_full("test -d " + _quote(path) + " && echo true || echo false")
+    return trim(result.stdout) == "true"
+}
+
+fn is_symlink(path) {
+    let result = exec_full("test -L " + _quote(path) + " && echo true || echo false")
+    return trim(result.stdout) == "true"
+}
+
+fn file_size(path) {
+    let result = exec_full("stat -c%s " + _quote(path) + " 2>/dev/null || stat -f%z " + _quote(path) + " 2>/dev/null")
+    return int(trim(result.stdout))
+}
+
+fn modified_time(path) {
+    let result = exec_full("stat -c%Y " + _quote(path) + " 2>/dev/null || stat -f%m " + _quote(path) + " 2>/dev/null")
+    return int(trim(result.stdout))
+}
+
+-- ── Directory operations ──────────────────────────────────
+
+fn list_dir(path) {
+    let result = exec_full("ls -1 " + _quote(path) + " 2>/dev/null")
+    let items = split(trim(result.stdout), "\n")
+    mut filtered = []
+    for item in items {
+        if len(trim(item)) > 0 { push(filtered, trim(item)) }
+    }
+    return filtered
+}
+
+fn glob_files(pattern) {
+    -- Use find with name matching
+    let result = exec_full("find . -name " + _quote(pattern) + " -type f 2>/dev/null | sort")
+    let items = split(trim(result.stdout), "\n")
+    mut filtered = []
+    for item in items {
+        if len(trim(item)) > 0 { push(filtered, trim(item)) }
+    }
+    return filtered
+}
+
+fn walk_dir(dir_path) {
+    -- Returns list of all files recursively
+    let result = exec_full("find " + _quote(dir_path) + " -type f 2>/dev/null | sort")
+    let items = split(trim(result.stdout), "\n")
+    mut filtered = []
+    for item in items {
+        if len(trim(item)) > 0 { push(filtered, trim(item)) }
+    }
+    return filtered
+}
+
+fn walk_dirs(dir_path) {
+    -- Returns list of all directories recursively
+    let result = exec_full("find " + _quote(dir_path) + " -type d 2>/dev/null | sort")
+    let items = split(trim(result.stdout), "\n")
+    mut filtered = []
+    for item in items {
+        if len(trim(item)) > 0 { push(filtered, trim(item)) }
+    }
+    return filtered
+}
+
+fn mkdir_p(path) {
+    exec("mkdir -p " + _quote(path))
+}
+
+fn rmdir(path) {
+    exec("rm -rf " + _quote(path))
+}
+
+fn copy_file(src, dst) {
+    exec("cp " + _quote(src) + " " + _quote(dst))
+}
+
+fn move_file(src, dst) {
+    exec("mv " + _quote(src) + " " + _quote(dst))
+}
+
+fn remove_file(path) {
+    exec("rm -f " + _quote(path))
+}
+
+fn temp_dir() {
+    let result = exec_full("mktemp -d 2>/dev/null")
+    return trim(result.stdout)
+}
+
+fn temp_file(suffix) {
+    mut sfx = ""
+    if suffix != null { sfx = " --suffix=" + _quote(suffix) }
+    let result = exec_full("mktemp" + sfx + " 2>/dev/null")
+    return trim(result.stdout)
+}
+
+fn home_dir() {
+    let result = env("HOME", "")
+    if len(result) > 0 { return result }
+    let r2 = exec_full("echo $HOME")
+    return trim(r2.stdout)
+}
+
+-- ── Helpers ───────────────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _last_index_of(s, ch) {
+    mut last = -1
+    mut i = 0
+    while i < len(s) {
+        if char_at(s, i) == ch { last = i }
+        i += 1
+    }
+    return last
+}
