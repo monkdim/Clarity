@@ -1,0 +1,546 @@
+-- Clarity code formatter — AST pretty-printer.
+-- Self-hosted port of clarity/formatter.py, written in Clarity itself.
+--
+-- Parses source to AST, then re-emits it with consistent style:
+--   - Consistent indentation (4 spaces)
+--   - Blank lines between definitions
+--   - Clean spacing around operators
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+-- ── Formatter ─────────────────────────────────────────────
+
+class Formatter {
+    fn init(indent_size, max_width) {
+        this.indent_size = indent_size
+        this.max_width = max_width
+        this.indent_level = 0
+    }
+
+    fn format(tree) {
+        mut parts = []
+        mut prev_kind = null
+        for stmt in tree.body {
+            let kind = this.stmt_kind(stmt)
+            if prev_kind != null and len(parts) > 0 and this.needs_blank(prev_kind, kind) {
+                push(parts, "")
+            }
+            push(parts, this.fmt_stmt(stmt))
+            prev_kind = kind
+        }
+        mut result = join(parts, "\n")
+        if len(result) > 0 and not ends(result, "\n") {
+            result = result + "\n"
+        }
+        return result
+    }
+
+    fn indent() {
+        return repeat(" ", this.indent_size * this.indent_level)
+    }
+
+    fn stmt_kind(node) {
+        let nt = node.node_type
+        if nt == "FnStatement" or nt == "ClassStatement" or nt == "InterfaceStatement" or nt == "EnumStatement" {
+            return "definition"
+        }
+        if nt == "ImportStatement" { return "import" }
+        return "statement"
+    }
+
+    fn needs_blank(prev, current) {
+        if prev == "import" and current != "import" { return true }
+        if current == "definition" { return true }
+        if prev == "definition" { return true }
+        return false
+    }
+
+    -- ── Statements ────────────────────────────────────────
+
+    fn fmt_stmt(node) {
+        let nt = node.node_type
+
+        if nt == "LetStatement" { return this.fmt_let(node) }
+        if nt == "DestructureLetStatement" { return this.fmt_destructure_let(node) }
+        if nt == "AssignStatement" { return this.fmt_assign(node) }
+        if nt == "MultiAssignStatement" { return this.fmt_multi_assign(node) }
+        if nt == "FnStatement" { return this.fmt_fn(node) }
+        if nt == "ReturnStatement" { return this.fmt_return(node) }
+        if nt == "IfStatement" { return this.fmt_if(node) }
+        if nt == "ForStatement" { return this.fmt_for(node) }
+        if nt == "WhileStatement" { return this.fmt_while(node) }
+        if nt == "TryCatch" { return this.fmt_try(node) }
+        if nt == "BreakStatement" { return this.indent() + "break" }
+        if nt == "ContinueStatement" { return this.indent() + "continue" }
+        if nt == "ThrowStatement" { return this.indent() + "throw " + this.fmt_expr(node.value) }
+        if nt == "ShowStatement" { return this.fmt_show(node) }
+        if nt == "ImportStatement" { return this.fmt_import(node) }
+        if nt == "ClassStatement" { return this.fmt_class(node) }
+        if nt == "InterfaceStatement" { return this.fmt_interface(node) }
+        if nt == "MatchStatement" { return this.fmt_match(node) }
+        if nt == "EnumStatement" { return this.fmt_enum(node) }
+        if nt == "DecoratedStatement" { return this.fmt_decorated(node) }
+        if nt == "ExpressionStatement" { return this.indent() + this.fmt_expr(node.expression) }
+        if nt == "Block" { return this.fmt_block(node) }
+
+        return this.indent() + "-- TODO: " + nt
+    }
+
+    fn fmt_let(node) {
+        let kw = if node.mutable { "mut" } else { "let" }
+        let val = this.fmt_expr(node.value)
+        mut ann = ""
+        try {
+            if node.type_annotation != null {
+                ann = ": " + node.type_annotation
+            }
+        } catch e {}
+        return this.indent() + kw + " " + node.name + ann + " = " + val
+    }
+
+    fn fmt_destructure_let(node) {
+        let kw = if node.mutable { "mut" } else { "let" }
+        let val = this.fmt_expr(node.value)
+        mut targets_parts = []
+        for t in node.targets {
+            if type(t) == "string" {
+                push(targets_parts, t)
+            } else {
+                push(targets_parts, this.fmt_expr(t))
+            }
+        }
+        let targets_str = join(targets_parts, ", ")
+        if node.kind == "list" {
+            return this.indent() + kw + " [" + targets_str + "] = " + val
+        }
+        return this.indent() + kw + " {" + targets_str + "} = " + val
+    }
+
+    fn fmt_assign(node) {
+        return this.indent() + this.fmt_expr(node.target) + " " + node.operator + " " + this.fmt_expr(node.value)
+    }
+
+    fn fmt_multi_assign(node) {
+        mut parts = []
+        mut i = 0
+        while i < len(node.targets) {
+            push(parts, this.indent() + this.fmt_expr(node.targets[i]) + " = " + this.fmt_expr(node.values[i]))
+            i += 1
+        }
+        return join(parts, "\n")
+    }
+
+    fn fmt_fn(node) {
+        mut prefix = ""
+        try { if node.is_async { prefix = "async " } } catch e {}
+        mut params_parts = []
+        for p in node.params {
+            push(params_parts, this.fmt_param(p))
+        }
+        let params = join(params_parts, ", ")
+        let body = this.fmt_block_body(node.body)
+        return this.indent() + prefix + "fn " + node.name + "(" + params + ") {\n" + body + "\n" + this.indent() + "}"
+    }
+
+    fn fmt_return(node) {
+        if node.value != null {
+            return this.indent() + "return " + this.fmt_expr(node.value)
+        }
+        return this.indent() + "return"
+    }
+
+    fn fmt_if(node) {
+        let cond = this.fmt_expr(node.condition)
+        let body = this.fmt_block_body(node.body)
+        mut result = this.indent() + "if " + cond + " {\n" + body + "\n" + this.indent() + "}"
+
+        if node.elif_clauses != null {
+            for clause in node.elif_clauses {
+                let c = this.fmt_expr(clause[0])
+                let b = this.fmt_block_body(clause[1])
+                result = result + " elif " + c + " {\n" + b + "\n" + this.indent() + "}"
+            }
+        }
+
+        if node.else_body != null {
+            let b = this.fmt_block_body(node.else_body)
+            result = result + " else {\n" + b + "\n" + this.indent() + "}"
+        }
+
+        return result
+    }
+
+    fn fmt_for(node) {
+        let var_name = node.variable
+        let iterable = this.fmt_expr(node.iterable)
+        let body = this.fmt_block_body(node.body)
+        return this.indent() + "for " + str(var_name) + " in " + iterable + " {\n" + body + "\n" + this.indent() + "}"
+    }
+
+    fn fmt_while(node) {
+        let cond = this.fmt_expr(node.condition)
+        let body = this.fmt_block_body(node.body)
+        return this.indent() + "while " + cond + " {\n" + body + "\n" + this.indent() + "}"
+    }
+
+    fn fmt_try(node) {
+        let try_body = this.fmt_block_body(node.try_body)
+        mut var_name = "e"
+        if node.catch_var != null { var_name = node.catch_var }
+        let catch_body = this.fmt_block_body(node.catch_body)
+        mut result = this.indent() + "try {\n" + try_body + "\n" + this.indent() + "}"
+        result = result + " catch " + var_name + " {\n" + catch_body + "\n" + this.indent() + "}"
+        if node.finally_body != null {
+            let fin = this.fmt_block_body(node.finally_body)
+            result = result + " finally {\n" + fin + "\n" + this.indent() + "}"
+        }
+        return result
+    }
+
+    fn fmt_show(node) {
+        mut parts = []
+        for v in node.values {
+            push(parts, this.fmt_expr(v))
+        }
+        return this.indent() + "show " + join(parts, ", ")
+    }
+
+    fn fmt_import(node) {
+        if node.path != null {
+            if node.names != null and len(node.names) > 0 {
+                let names = join(node.names, ", ")
+                return this.indent() + "from \"" + node.path + "\" import " + names
+            } elif node.alias != null {
+                return this.indent() + "from \"" + node.path + "\" import " + node.alias
+            }
+            return this.indent() + "import \"" + node.path + "\""
+        }
+        if node.module != null {
+            if node.alias != null {
+                return this.indent() + "import " + node.module + " as " + node.alias
+            }
+            return this.indent() + "import " + node.module
+        }
+        return this.indent() + "import ..."
+    }
+
+    fn fmt_class(node) {
+        mut parent = ""
+        if node.parent != null { parent = " : " + node.parent }
+        mut lines_list = [this.indent() + "class " + node.name + parent + " {"]
+        this.indent_level += 1
+        mut i = 0
+        for method in node.methods {
+            if i > 0 { push(lines_list, "") }
+            push(lines_list, this.fmt_stmt(method))
+            i += 1
+        }
+        this.indent_level -= 1
+        push(lines_list, this.indent() + "}")
+        return join(lines_list, "\n")
+    }
+
+    fn fmt_interface(node) {
+        mut lines_list = [this.indent() + "interface " + node.name + " {"]
+        this.indent_level += 1
+        for sig in node.method_sigs {
+            let name = sig[0]
+            mut params = []
+            if len(sig) > 1 { params = sig[1] }
+            mut p_str = ""
+            if type(params) == "list" {
+                mut pp = []
+                for p in params { push(pp, str(p)) }
+                p_str = join(pp, ", ")
+            }
+            push(lines_list, this.indent() + "fn " + str(name) + "(" + p_str + ")")
+        }
+        this.indent_level -= 1
+        push(lines_list, this.indent() + "}")
+        return join(lines_list, "\n")
+    }
+
+    fn fmt_match(node) {
+        let subject = this.fmt_expr(node.subject)
+        mut lines_list = [this.indent() + "match " + subject + " {"]
+        this.indent_level += 1
+        for arm in node.arms {
+            if len(arm) == 3 {
+                let pat = this.fmt_expr(arm[0])
+                let g = this.fmt_expr(arm[1])
+                let b = this.fmt_block_body(arm[2])
+                push(lines_list, this.indent() + "when " + pat + " if " + g + " {")
+                push(lines_list, b)
+                push(lines_list, this.indent() + "}")
+            } else {
+                let pat = this.fmt_expr(arm[0])
+                let b = this.fmt_block_body(arm[1])
+                push(lines_list, this.indent() + "when " + pat + " {")
+                push(lines_list, b)
+                push(lines_list, this.indent() + "}")
+            }
+        }
+        if node.default != null {
+            let b = this.fmt_block_body(node.default)
+            push(lines_list, this.indent() + "else {")
+            push(lines_list, b)
+            push(lines_list, this.indent() + "}")
+        }
+        this.indent_level -= 1
+        push(lines_list, this.indent() + "}")
+        return join(lines_list, "\n")
+    }
+
+    fn fmt_enum(node) {
+        mut parts = []
+        for member in node.members {
+            let name = member[0]
+            let val = member[1]
+            if val != null {
+                push(parts, name + " = " + this.fmt_expr(val))
+            } else {
+                push(parts, name)
+            }
+        }
+        return this.indent() + "enum " + node.name + " { " + join(parts, ", ") + " }"
+    }
+
+    fn fmt_decorated(node) {
+        mut lines_list = []
+        for dec in node.decorators {
+            push(lines_list, this.indent() + "@" + this.fmt_expr(dec))
+        }
+        push(lines_list, this.fmt_stmt(node.target))
+        return join(lines_list, "\n")
+    }
+
+    fn fmt_block(node) {
+        return this.fmt_block_body(node)
+    }
+
+    -- ── Expressions ───────────────────────────────────────
+
+    fn fmt_expr(node) {
+        if node == null { return "null" }
+
+        let nt = null
+        try { nt = node.node_type } catch e { return str(node) }
+        if nt == null { return str(node) }
+
+        if nt == "NumberLiteral" { return str(node.value) }
+        if nt == "StringLiteral" {
+            let escaped = replace(replace(node.value, "\\", "\\\\"), "\"", "\\\"")
+            return "\"" + escaped + "\""
+        }
+        if nt == "BoolLiteral" { return if node.value { "true" } else { "false" } }
+        if nt == "NullLiteral" { return "null" }
+        if nt == "Identifier" { return node.name }
+        if nt == "ThisExpression" { return "this" }
+
+        if nt == "ListLiteral" {
+            if len(node.elements) == 0 { return "[]" }
+            mut parts = []
+            for el in node.elements {
+                try {
+                    if el.node_type == "SpreadExpression" {
+                        push(parts, "..." + this.fmt_expr(el.value))
+                        continue
+                    }
+                } catch e {}
+                push(parts, this.fmt_expr(el))
+            }
+            return "[" + join(parts, ", ") + "]"
+        }
+
+        if nt == "MapLiteral" {
+            if len(node.pairs) == 0 { return "{}" }
+            mut parts = []
+            for pair in node.pairs {
+                let k = pair[0]
+                let v = pair[1]
+                if k == null {
+                    try {
+                        if v.node_type == "SpreadExpression" {
+                            push(parts, "..." + this.fmt_expr(v.value))
+                            continue
+                        }
+                    } catch e {}
+                }
+                push(parts, this.fmt_expr(k) + ": " + this.fmt_expr(v))
+            }
+            return "{" + join(parts, ", ") + "}"
+        }
+
+        if nt == "BinaryOp" {
+            return this.fmt_expr(node.left) + " " + node.operator + " " + this.fmt_expr(node.right)
+        }
+
+        if nt == "UnaryOp" {
+            if node.operator == "not" {
+                return "not " + this.fmt_expr(node.operand)
+            }
+            return node.operator + this.fmt_expr(node.operand)
+        }
+
+        if nt == "CallExpression" {
+            let callee = this.fmt_expr(node.callee)
+            mut arg_parts = []
+            for a in node.arguments {
+                push(arg_parts, this.fmt_expr(a))
+            }
+            return callee + "(" + join(arg_parts, ", ") + ")"
+        }
+
+        if nt == "MemberExpression" {
+            return this.fmt_expr(node.object) + "." + node.property
+        }
+
+        if nt == "OptionalMemberExpression" {
+            return this.fmt_expr(node.object) + "?." + node.property
+        }
+
+        if nt == "IndexExpression" {
+            return this.fmt_expr(node.object) + "[" + this.fmt_expr(node.index) + "]"
+        }
+
+        if nt == "SliceExpression" {
+            mut s = ""
+            mut e = ""
+            if node.start != null { s = this.fmt_expr(node.start) }
+            if node.end != null { e = this.fmt_expr(node.end) }
+            return this.fmt_expr(node.object) + "[" + s + ":" + e + "]"
+        }
+
+        if nt == "FnExpression" {
+            mut params_parts = []
+            for p in node.params {
+                push(params_parts, this.fmt_param(p))
+            }
+            let params = join(params_parts, ", ")
+            -- Single-expression body
+            mut stmts = []
+            try { stmts = node.body.statements } catch e {
+                try { stmts = node.body.body } catch e2 {}
+            }
+            if len(stmts) == 1 and stmts[0].node_type == "ReturnStatement" and stmts[0].value != null {
+                return "fn(" + params + ") { return " + this.fmt_expr(stmts[0].value) + " }"
+            }
+            let body = this.fmt_block_body(node.body)
+            return "fn(" + params + ") {\n" + body + "\n" + this.indent() + "}"
+        }
+
+        if nt == "PipeExpression" {
+            return this.fmt_expr(node.value) + " |> " + this.fmt_expr(node.function)
+        }
+
+        if nt == "RangeExpression" {
+            if node.end != null {
+                return this.fmt_expr(node.start) + ".." + this.fmt_expr(node.end)
+            }
+            return this.fmt_expr(node.start) + ".."
+        }
+
+        if nt == "AskExpression" {
+            return "ask(" + this.fmt_expr(node.prompt) + ")"
+        }
+
+        if nt == "NullCoalesce" {
+            return this.fmt_expr(node.left) + " ?? " + this.fmt_expr(node.right)
+        }
+
+        if nt == "SpreadExpression" {
+            return "..." + this.fmt_expr(node.value)
+        }
+
+        if nt == "IfExpression" {
+            return "if " + this.fmt_expr(node.condition) + " { " + this.fmt_expr(node.true_expr) + " } else { " + this.fmt_expr(node.false_expr) + " }"
+        }
+
+        if nt == "ComprehensionExpression" {
+            let expr = this.fmt_expr(node.expr)
+            let iter = this.fmt_expr(node.iterable)
+            if node.condition != null {
+                return "[" + expr + " for " + str(node.variable) + " in " + iter + " if " + this.fmt_expr(node.condition) + "]"
+            }
+            return "[" + expr + " for " + str(node.variable) + " in " + iter + "]"
+        }
+
+        if nt == "MapComprehensionExpression" {
+            let k = this.fmt_expr(node.key_expr)
+            let v = this.fmt_expr(node.value_expr)
+            mut var_name = node.variables
+            if type(var_name) == "list" { var_name = join(var_name, ", ") }
+            let iter = this.fmt_expr(node.iterable)
+            if node.condition != null {
+                return "{" + k + ": " + v + " for " + str(var_name) + " in " + iter + " if " + this.fmt_expr(node.condition) + "}"
+            }
+            return "{" + k + ": " + v + " for " + str(var_name) + " in " + iter + "}"
+        }
+
+        if nt == "AwaitExpression" {
+            return "await " + this.fmt_expr(node.value)
+        }
+
+        if nt == "YieldExpression" {
+            if node.value != null {
+                return "yield " + this.fmt_expr(node.value)
+            }
+            return "yield"
+        }
+
+        return "/* " + nt + " */"
+    }
+
+    -- ── Helpers ───────────────────────────────────────────
+
+    fn fmt_block_body(block) {
+        mut stmts = []
+        if type(block) == "list" {
+            stmts = block
+        } else {
+            try { stmts = block.statements } catch e {
+                try { stmts = block.body } catch e2 {
+                    return ""
+                }
+            }
+        }
+        this.indent_level += 1
+        mut lines_list = []
+        for stmt in stmts {
+            let formatted = this.fmt_stmt(stmt)
+            if len(formatted) > 0 {
+                push(lines_list, formatted)
+            }
+        }
+        this.indent_level -= 1
+        return join(lines_list, "\n")
+    }
+
+    fn fmt_param(param) {
+        if type(param) == "string" { return param }
+        if type(param) == "list" {
+            let name = param[0]
+            if len(param) > 1 and param[1] != null {
+                return str(name) + " = " + this.fmt_expr(param[1])
+            }
+            if type(name) == "string" and starts(name, "...") { return name }
+            return str(name)
+        }
+        return str(param)
+    }
+}
+
+-- ── Public API ────────────────────────────────────────────
+
+fn format_source(source, filename) {
+    let tokens = tokenize(source, filename)
+    let tree = parse(tokens, source)
+    let formatter = Formatter(4, 100)
+    return formatter.format(tree)
+}
+
+fn format_tree(tree) {
+    let formatter = Formatter(4, 100)
+    return formatter.format(tree)
+}

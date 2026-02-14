@@ -1,0 +1,244 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Clarity",
+  "scopeName": "source.clarity",
+  "fileTypes": ["clarity"],
+  "patterns": [
+    {"include": "#comments"},
+    {"include": "#strings"},
+    {"include": "#numbers"},
+    {"include": "#keywords"},
+    {"include": "#declarations"},
+    {"include": "#imports"},
+    {"include": "#builtins"},
+    {"include": "#constants"},
+    {"include": "#operators"},
+    {"include": "#decorators"},
+    {"include": "#function-call"},
+    {"include": "#identifiers"},
+    {"include": "#punctuation"}
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-dash.clarity",
+          "match": "--.*$"
+        },
+        {
+          "name": "comment.line.double-slash.clarity",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.clarity",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.clarity",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.clarity",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": {"0": {"name": "punctuation.section.interpolation.begin.clarity"}},
+              "endCaptures": {"0": {"name": "punctuation.section.interpolation.end.clarity"}},
+              "patterns": [
+                {"include": "$self"}
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.clarity",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.clarity",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.clarity",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.clarity",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.clarity",
+          "match": "\\b(if|else|elif|for|in|while|return|break|continue|try|catch|finally|throw|match|when|yield|await)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.clarity",
+          "match": "\\b(and|or|not|is)\\b"
+        },
+        {
+          "name": "keyword.other.clarity",
+          "match": "\\b(from|import|as)\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "keyword.declaration.clarity",
+          "match": "\\b(let|mut|fn|class|enum|interface|impl|async)\\b"
+        },
+        {
+          "name": "variable.language.this.clarity",
+          "match": "\\bthis\\b"
+        }
+      ]
+    },
+    "imports": {
+      "patterns": [
+        {
+          "match": "\\b(from)\\s+(\"[^\"]+\")\\s+(import)\\b",
+          "captures": {
+            "1": {"name": "keyword.other.clarity"},
+            "2": {"name": "string.quoted.double.clarity"},
+            "3": {"name": "keyword.other.clarity"}
+          }
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.clarity",
+          "match": "\\b(show|ask|read|write|append|exists|lines|int|float|str|bool|type|len|push|pop|sort|reverse|range|map|filter|reduce|each|find|every|some|flat|zip|unique|keys|values|entries|merge|has|split|join|replace|trim|upper|lower|contains|starts|ends|chars|repeat|pad_left|pad_right|char_at|char_code|from_char_code|index_of|substring|is_digit|is_alpha|is_alnum|is_space|abs|round|floor|ceil|min|max|sum|random|pow|sqrt|sin|cos|tan|log|exec|exec_full|exit|sleep|time|env|args|cwd|json_parse|json_string|hash|encode64|decode64|fetch|serve|display|repr)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.clarity",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.clarity",
+          "match": "\\bnull\\b"
+        },
+        {
+          "name": "support.constant.math.clarity",
+          "match": "\\b(pi|e)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pipe.clarity",
+          "match": "\\|>"
+        },
+        {
+          "name": "keyword.operator.arrow.clarity",
+          "match": "=>|->'"
+        },
+        {
+          "name": "keyword.operator.spread.clarity",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.range.clarity",
+          "match": "\\.\\."
+        },
+        {
+          "name": "keyword.operator.nullcoalesce.clarity",
+          "match": "\\?\\?"
+        },
+        {
+          "name": "keyword.operator.optional.clarity",
+          "match": "\\?\\."
+        },
+        {
+          "name": "keyword.operator.comparison.clarity",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.assignment.clarity",
+          "match": "\\+=|-=|\\*=|/=|="
+        },
+        {
+          "name": "keyword.operator.arithmetic.clarity",
+          "match": "\\*\\*|[+\\-*/%]"
+        }
+      ]
+    },
+    "decorators": {
+      "patterns": [
+        {
+          "name": "meta.decorator.clarity",
+          "match": "@(\\w+)",
+          "captures": {
+            "1": {"name": "entity.name.function.decorator.clarity"}
+          }
+        }
+      ]
+    },
+    "function-call": {
+      "patterns": [
+        {
+          "match": "\\b([a-zA-Z_]\\w*)\\s*(?=\\()",
+          "captures": {
+            "1": {"name": "entity.name.function.clarity"}
+          }
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.clarity",
+          "match": "\\b[a-zA-Z_]\\w*\\b"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.clarity",
+          "match": ","
+        },
+        {
+          "name": "punctuation.separator.colon.clarity",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.clarity",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.bracket.round.clarity",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.bracket.curly.clarity",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.bracket.square.clarity",
+          "match": "[\\[\\]]"
+        }
+      ]
+    }
+  }
+}

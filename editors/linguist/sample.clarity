@@ -1,0 +1,165 @@
+-- Clarity Language Sample — showcases core syntax and features.
+-- Used for GitHub Linguist language detection.
+
+from "math.clarity" import sqrt, pi
+from "collections.clarity" import HashMap
+
+-- ── Variables ──────────────────────────────────────────
+
+let greeting = "Hello, Clarity!"
+mut counter = 0
+
+-- ── Functions ──────────────────────────────────────────
+
+fn fibonacci(n) {
+    if n <= 1 { return n }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+fn factorial(n) {
+    mut result = 1
+    for i in range(2, n + 1) {
+        result *= i
+    }
+    return result
+}
+
+-- ── Classes ────────────────────────────────────────────
+
+class Vector {
+    fn init(x, y) {
+        this.x = x
+        this.y = y
+    }
+
+    fn magnitude() {
+        return sqrt(this.x ** 2 + this.y ** 2)
+    }
+
+    fn add(other) {
+        return Vector(this.x + other.x, this.y + other.y)
+    }
+
+    fn to_string() {
+        return "Vector(" + str(this.x) + ", " + str(this.y) + ")"
+    }
+}
+
+class Circle < Shape {
+    fn init(radius) {
+        this.radius = radius
+    }
+
+    fn area() {
+        return pi * this.radius ** 2
+    }
+}
+
+-- ── Interfaces ─────────────────────────────────────────
+
+interface Printable {
+    fn to_string()
+}
+
+interface Comparable {
+    fn compare(other)
+}
+
+-- ── Enums ──────────────────────────────────────────────
+
+enum Color {
+    Red = "red",
+    Green = "green",
+    Blue = "blue"
+}
+
+enum Direction {
+    North = 0,
+    East = 1,
+    South = 2,
+    West = 3
+}
+
+-- ── Control Flow ───────────────────────────────────────
+
+fn classify(value) {
+    match type(value) {
+        when "number" {
+            if value > 0 { return "positive" }
+            elif value < 0 { return "negative" }
+            else { return "zero" }
+        }
+        when "string" { return "text: " + value }
+        when "list" { return "list of " + str(len(value)) }
+        else { return "unknown" }
+    }
+}
+
+-- ── Higher-order functions ─────────────────────────────
+
+let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+let evens = filter(numbers, fn(n) { n % 2 == 0 })
+let doubled = map(numbers, fn(n) { n * 2 })
+let total = reduce(numbers, 0, fn(acc, n) { acc + n })
+
+-- Pipe operator
+let result = numbers
+    |> filter(fn(n) { n > 3 })
+    |> map(fn(n) { n * n })
+    |> reduce(0, fn(a, b) { a + b })
+
+-- List comprehension
+let squares = [x ** 2 for x in range(1, 11)]
+let cubed = [x ** 3 for x in range(1, 6)]
+
+-- ── Async / Await ──────────────────────────────────────
+
+async fn fetch_data(url) {
+    let response = await fetch(url)
+    return json_parse(response)
+}
+
+-- ── Error handling ─────────────────────────────────────
+
+fn safe_divide(a, b) {
+    try {
+        if b == 0 { throw "Division by zero" }
+        return a / b
+    } catch e {
+        show "Error: " + str(e)
+        return null
+    }
+}
+
+-- ── Decorators ─────────────────────────────────────────
+
+@memoize
+fn expensive_computation(n) {
+    if n < 2 { return n }
+    return expensive_computation(n - 1) + expensive_computation(n - 2)
+}
+
+-- ── String interpolation and I/O ──────────────────────
+
+fn main() {
+    show greeting
+
+    let v1 = Vector(3, 4)
+    let v2 = Vector(1, 2)
+    let v3 = v1.add(v2)
+
+    show "v1 = " + v1.to_string()
+    show "v1 magnitude = " + str(v1.magnitude())
+    show "v1 + v2 = " + v3.to_string()
+
+    show "10! = " + str(factorial(10))
+    show "fib(20) = " + str(fibonacci(20))
+    show "Sum 1..10 = " + str(total)
+    show "Squares: " + str(squares)
+
+    let color = Color.Red
+    show "Color: " + str(color)
+}
+
+main()

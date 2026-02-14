@@ -1,0 +1,175 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:params}) {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "Async Function": {
+    "prefix": "afn",
+    "body": [
+      "async fn ${1:name}(${2:params}) {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Async function declaration"
+  },
+  "Class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} {",
+      "    fn init(${2:params}) {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Class declaration"
+  },
+  "Class with Parent": {
+    "prefix": "classx",
+    "body": [
+      "class ${1:Name} < ${2:Parent} {",
+      "    fn init(${3:params}) {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Class with inheritance"
+  },
+  "Interface": {
+    "prefix": "iface",
+    "body": [
+      "interface ${1:Name} {",
+      "    fn ${2:method}(${3:params})",
+      "}"
+    ],
+    "description": "Interface declaration"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:Member1} = ${3:value1},",
+      "    ${4:Member2} = ${5:value2}",
+      "}"
+    ],
+    "description": "Enum declaration"
+  },
+  "If": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "If statement"
+  },
+  "If-Else": {
+    "prefix": "ife",
+    "body": [
+      "if ${1:condition} {",
+      "    ${2}",
+      "} else {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "If-else statement"
+  },
+  "For Loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:item} in ${2:iterable} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "For loop"
+  },
+  "While Loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "While loop"
+  },
+  "Try-Catch": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "    ${1}",
+      "} catch ${2:e} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Try-catch block"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    when ${2:pattern} { ${3} }",
+      "    else { ${0} }",
+      "}"
+    ],
+    "description": "Match expression"
+  },
+  "Let": {
+    "prefix": "let",
+    "body": "let ${1:name} = ${0}",
+    "description": "Immutable variable"
+  },
+  "Mut": {
+    "prefix": "mut",
+    "body": "mut ${1:name} = ${0}",
+    "description": "Mutable variable"
+  },
+  "Import": {
+    "prefix": "from",
+    "body": "from \"${1:module}.clarity\" import ${0}",
+    "description": "Import from module"
+  },
+  "Show": {
+    "prefix": "show",
+    "body": "show \"${0}\"",
+    "description": "Print output"
+  },
+  "Lambda": {
+    "prefix": "lam",
+    "body": "fn(${1:params}) { ${0} }",
+    "description": "Lambda / anonymous function"
+  },
+  "Arrow Lambda": {
+    "prefix": "=>",
+    "body": "${1:param} => ${0}",
+    "description": "Arrow function"
+  },
+  "Decorator": {
+    "prefix": "@",
+    "body": [
+      "@${1:decorator}",
+      "fn ${2:name}(${3:params}) {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Decorated function"
+  },
+  "List Comprehension": {
+    "prefix": "lc",
+    "body": "[${1:expr} for ${2:x} in ${3:iterable}]",
+    "description": "List comprehension"
+  },
+  "Map Comprehension": {
+    "prefix": "mc",
+    "body": "{${1:key}: ${2:value} for ${3:x} in ${4:iterable}}",
+    "description": "Map comprehension"
+  },
+  "Pipe": {
+    "prefix": "pipe",
+    "body": "|> ${1:fn}(${0})",
+    "description": "Pipe operator"
+  }
+}

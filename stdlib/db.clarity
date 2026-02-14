@@ -1,0 +1,452 @@
+-- Clarity Database — key-value store, query builder, and migrations.
+-- Standard library module for data persistence.
+-- Provides both a file-backed KV store and a SQL query builder for SQLite.
+
+-- ── Key-Value Store ───────────────────────────────────────
+-- Simple persistent key-value storage backed by a JSON file.
+
+class KVStore {
+    fn init(path) {
+        this.path = path
+        this._data = {}
+        this._load()
+    }
+
+    fn _load() {
+        if exists(this.path) {
+            let content = read(this.path)
+            if len(trim(content)) > 0 {
+                try {
+                    this._data = json_parse(content)
+                } catch e {
+                    this._data = {}
+                }
+            }
+        }
+    }
+
+    fn _save() {
+        write(this.path, json_string(this._data))
+    }
+
+    fn get(key, default_val) {
+        if has(this._data, key) { return this._data[key] }
+        return default_val
+    }
+
+    fn set(key, value) {
+        this._data[key] = value
+        this._save()
+        return this
+    }
+
+    fn remove(key) {
+        if has(this._data, key) {
+            let new_data = {}
+            let ks = keys(this._data)
+            for k in ks {
+                if k != key { new_data[k] = this._data[k] }
+            }
+            this._data = new_data
+            this._save()
+        }
+        return this
+    }
+
+    fn has_key(key) {
+        return has(this._data, key)
+    }
+
+    fn get_keys() {
+        return keys(this._data)
+    }
+
+    fn get_values() {
+        return values(this._data)
+    }
+
+    fn get_entries() {
+        return entries(this._data)
+    }
+
+    fn size() {
+        return len(keys(this._data))
+    }
+
+    fn clear() {
+        this._data = {}
+        this._save()
+        return this
+    }
+
+    fn all() {
+        -- Return copy
+        let result = {}
+        let ks = keys(this._data)
+        for k in ks { result[k] = this._data[k] }
+        return result
+    }
+
+    fn to_string() {
+        return "KVStore(" + this.path + ", " + str(this.size()) + " entries)"
+    }
+}
+
+-- ── Table (in-memory with JSON persistence) ───────────────
+-- Lightweight document store: list of records with query methods.
+
+class Table {
+    fn init(path) {
+        this.path = path
+        this._records = []
+        this._next_id = 1
+        this._load()
+    }
+
+    fn _load() {
+        if exists(this.path) {
+            let content = read(this.path)
+            if len(trim(content)) > 0 {
+                try {
+                    let data = json_parse(content)
+                    this._records = data["records"]
+                    this._next_id = data["next_id"]
+                } catch e {
+                    this._records = []
+                    this._next_id = 1
+                }
+            }
+        }
+    }
+
+    fn _save() {
+        write(this.path, json_string({
+            "records": this._records,
+            "next_id": this._next_id
+        }))
+    }
+
+    fn insert(record) {
+        let new_record = merge({"_id": this._next_id}, record)
+        this._next_id += 1
+        push(this._records, new_record)
+        this._save()
+        return new_record
+    }
+
+    fn find_all() {
+        mut result = []
+        for r in this._records { push(result, r) }
+        return result
+    }
+
+    fn find_by_id(id) {
+        for r in this._records {
+            if r["_id"] == id { return r }
+        }
+        return null
+    }
+
+    fn find_where(field, value) {
+        mut result = []
+        for r in this._records {
+            if has(r, field) and r[field] == value {
+                push(result, r)
+            }
+        }
+        return result
+    }
+
+    fn find_one(field, value) {
+        for r in this._records {
+            if has(r, field) and r[field] == value {
+                return r
+            }
+        }
+        return null
+    }
+
+    fn query(predicate) {
+        mut result = []
+        for r in this._records {
+            if predicate(r) { push(result, r) }
+        }
+        return result
+    }
+
+    fn update(id, updates) {
+        mut i = 0
+        while i < len(this._records) {
+            if this._records[i]["_id"] == id {
+                let ks = keys(updates)
+                for k in ks {
+                    this._records[i][k] = updates[k]
+                }
+                this._save()
+                return this._records[i]
+            }
+            i += 1
+        }
+        return null
+    }
+
+    fn update_where(field, value, updates) {
+        mut count = 0
+        mut i = 0
+        while i < len(this._records) {
+            if has(this._records[i], field) and this._records[i][field] == value {
+                let ks = keys(updates)
+                for k in ks {
+                    this._records[i][k] = updates[k]
+                }
+                count += 1
+            }
+            i += 1
+        }
+        if count > 0 { this._save() }
+        return count
+    }
+
+    fn delete_by_id(id) {
+        mut new_records = []
+        mut found = false
+        for r in this._records {
+            if r["_id"] == id {
+                found = true
+            } else {
+                push(new_records, r)
+            }
+        }
+        if found {
+            this._records = new_records
+            this._save()
+        }
+        return found
+    }
+
+    fn delete_where(field, value) {
+        mut new_records = []
+        mut count = 0
+        for r in this._records {
+            if has(r, field) and r[field] == value {
+                count += 1
+            } else {
+                push(new_records, r)
+            }
+        }
+        if count > 0 {
+            this._records = new_records
+            this._save()
+        }
+        return count
+    }
+
+    fn count() {
+        return len(this._records)
+    }
+
+    fn count_where(field, value) {
+        mut count = 0
+        for r in this._records {
+            if has(r, field) and r[field] == value { count += 1 }
+        }
+        return count
+    }
+
+    fn clear() {
+        this._records = []
+        this._next_id = 1
+        this._save()
+        return this
+    }
+
+    fn to_string() {
+        return "Table(" + this.path + ", " + str(this.count()) + " records)"
+    }
+}
+
+-- ── SQL Query Builder ─────────────────────────────────────
+-- Generates SQL strings for SQLite. Does not execute — pipe to sqlite3.
+
+class Query {
+    fn init(table_name) {
+        this._table = table_name
+        this._type = null
+        this._columns = ["*"]
+        this._wheres = []
+        this._values = {}
+        this._order = null
+        this._limit = null
+        this._offset = null
+    }
+
+    fn select(...columns) {
+        this._type = "SELECT"
+        if len(columns) > 0 { this._columns = columns }
+        return this
+    }
+
+    fn insert(record) {
+        this._type = "INSERT"
+        this._values = record
+        return this
+    }
+
+    fn update(updates) {
+        this._type = "UPDATE"
+        this._values = updates
+        return this
+    }
+
+    fn delete_rows() {
+        this._type = "DELETE"
+        return this
+    }
+
+    fn where(condition) {
+        push(this._wheres, condition)
+        return this
+    }
+
+    fn where_eq(field, value) {
+        if type(value) == "string" {
+            push(this._wheres, field + " = '" + replace(value, "'", "''") + "'")
+        } else {
+            push(this._wheres, field + " = " + str(value))
+        }
+        return this
+    }
+
+    fn order_by(column, direction) {
+        mut dir = "ASC"
+        if direction != null { dir = upper(str(direction)) }
+        this._order = column + " " + dir
+        return this
+    }
+
+    fn limit_rows(n) {
+        this._limit = n
+        return this
+    }
+
+    fn offset_rows(n) {
+        this._offset = n
+        return this
+    }
+
+    fn build() {
+        if this._type == "SELECT" {
+            return this._build_select()
+        }
+        if this._type == "INSERT" {
+            return this._build_insert()
+        }
+        if this._type == "UPDATE" {
+            return this._build_update()
+        }
+        if this._type == "DELETE" {
+            return this._build_delete()
+        }
+        return ""
+    }
+
+    fn _build_select() {
+        mut sql = "SELECT " + join(this._columns, ", ") + " FROM " + this._table
+        if len(this._wheres) > 0 {
+            sql = sql + " WHERE " + join(this._wheres, " AND ")
+        }
+        if this._order != null { sql = sql + " ORDER BY " + this._order }
+        if this._limit != null { sql = sql + " LIMIT " + str(this._limit) }
+        if this._offset != null { sql = sql + " OFFSET " + str(this._offset) }
+        return sql + ";"
+    }
+
+    fn _build_insert() {
+        let ks = keys(this._values)
+        mut vals = []
+        for k in ks {
+            let v = this._values[k]
+            if type(v) == "string" {
+                push(vals, "'" + replace(v, "'", "''") + "'")
+            } elif v == null {
+                push(vals, "NULL")
+            } else {
+                push(vals, str(v))
+            }
+        }
+        return "INSERT INTO " + this._table + " (" + join(ks, ", ") + ") VALUES (" + join(vals, ", ") + ");"
+    }
+
+    fn _build_update() {
+        let ks = keys(this._values)
+        mut sets = []
+        for k in ks {
+            let v = this._values[k]
+            if type(v) == "string" {
+                push(sets, k + " = '" + replace(v, "'", "''") + "'")
+            } elif v == null {
+                push(sets, k + " = NULL")
+            } else {
+                push(sets, k + " = " + str(v))
+            }
+        }
+        mut sql = "UPDATE " + this._table + " SET " + join(sets, ", ")
+        if len(this._wheres) > 0 {
+            sql = sql + " WHERE " + join(this._wheres, " AND ")
+        }
+        return sql + ";"
+    }
+
+    fn _build_delete() {
+        mut sql = "DELETE FROM " + this._table
+        if len(this._wheres) > 0 {
+            sql = sql + " WHERE " + join(this._wheres, " AND ")
+        }
+        return sql + ";"
+    }
+
+    fn to_string() {
+        return this.build()
+    }
+}
+
+-- ── Schema / Migration helpers ────────────────────────────
+
+fn create_table_sql(name, columns) {
+    -- columns: [["name", "TEXT NOT NULL"], ["age", "INTEGER"], ...]
+    mut col_defs = ["_id INTEGER PRIMARY KEY AUTOINCREMENT"]
+    for col in columns {
+        push(col_defs, col[0] + " " + col[1])
+    }
+    return "CREATE TABLE IF NOT EXISTS " + name + " (\n  " + join(col_defs, ",\n  ") + "\n);"
+}
+
+fn drop_table_sql(name) {
+    return "DROP TABLE IF EXISTS " + name + ";"
+}
+
+fn add_column_sql(table, column_name, column_type) {
+    return "ALTER TABLE " + table + " ADD COLUMN " + column_name + " " + column_type + ";"
+}
+
+fn sqlite_exec(db_path, sql) {
+    let result = exec_full("sqlite3 " + _quote(db_path) + " " + _quote(sql) + " 2>&1")
+    return {"output": trim(result.stdout), "success": result.exit_code == 0}
+}
+
+fn sqlite_query(db_path, sql) {
+    let result = exec_full("sqlite3 -json " + _quote(db_path) + " " + _quote(sql) + " 2>&1")
+    if result.exit_code != 0 { return [] }
+    try {
+        return json_parse(trim(result.stdout))
+    } catch e {
+        return []
+    }
+}
+
+-- ── Helpers ───────────────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}

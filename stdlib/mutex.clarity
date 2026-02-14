@@ -1,0 +1,381 @@
+-- Clarity Mutex & Atomic — synchronization primitives.
+-- Mutex for mutual exclusion, Atomic for lock-free counters/flags,
+-- RWLock for reader-writer patterns, and Once for one-time initialization.
+
+from "process.clarity" import _quote
+
+-- ── Mutex ───────────────────────────────────────────────
+-- In-memory mutual exclusion lock. Protects shared mutable state
+-- in cooperative concurrency scenarios.
+
+class Mutex {
+    fn init() {
+        this._locked = false
+        this._owner = null
+        this._wait_queue = []
+    }
+
+    fn lock() {
+        -- Acquire the lock. Spins with backoff if already locked.
+        mut attempts = 0
+        while this._locked {
+            attempts += 1
+            if attempts > 1000 {
+                throw "mutex deadlock detected (1000 attempts)"
+            }
+            sleep(0.001 * attempts)
+        }
+        this._locked = true
+    }
+
+    fn unlock() {
+        -- Release the lock.
+        if not this._locked {
+            throw "unlock of unlocked mutex"
+        }
+        this._locked = false
+    }
+
+    fn try_lock() {
+        -- Try to acquire without blocking. Returns true if acquired.
+        if this._locked { return false }
+        this._locked = true
+        return true
+    }
+
+    fn is_locked() {
+        return this._locked
+    }
+
+    fn with_lock(work_fn) {
+        -- Execute work_fn while holding the lock. Guarantees unlock.
+        this.lock()
+        try {
+            let result = work_fn()
+            this.unlock()
+            return result
+        } catch e {
+            this.unlock()
+            throw e
+        }
+    }
+
+    fn to_string() {
+        let status = if this._locked { "locked" } else { "unlocked" }
+        return "Mutex({status})"
+    }
+}
+
+-- ── RWLock ──────────────────────────────────────────────
+-- Reader-writer lock. Multiple readers OR one writer at a time.
+
+class RWLock {
+    fn init() {
+        this._readers = 0
+        this._writer = false
+    }
+
+    fn read_lock() {
+        -- Acquire a read lock. Multiple readers allowed.
+        mut attempts = 0
+        while this._writer {
+            attempts += 1
+            if attempts > 1000 {
+                throw "rwlock deadlock (waiting for writer)"
+            }
+            sleep(0.001 * attempts)
+        }
+        this._readers = this._readers + 1
+    }
+
+    fn read_unlock() {
+        if this._readers <= 0 {
+            throw "read_unlock: no readers"
+        }
+        this._readers = this._readers - 1
+    }
+
+    fn write_lock() {
+        -- Acquire exclusive write lock.
+        mut attempts = 0
+        while this._writer or this._readers > 0 {
+            attempts += 1
+            if attempts > 1000 {
+                throw "rwlock deadlock (waiting for readers/writer)"
+            }
+            sleep(0.001 * attempts)
+        }
+        this._writer = true
+    }
+
+    fn write_unlock() {
+        if not this._writer {
+            throw "write_unlock: not locked for writing"
+        }
+        this._writer = false
+    }
+
+    fn with_read(work_fn) {
+        this.read_lock()
+        try {
+            let result = work_fn()
+            this.read_unlock()
+            return result
+        } catch e {
+            this.read_unlock()
+            throw e
+        }
+    }
+
+    fn with_write(work_fn) {
+        this.write_lock()
+        try {
+            let result = work_fn()
+            this.write_unlock()
+            return result
+        } catch e {
+            this.write_unlock()
+            throw e
+        }
+    }
+
+    fn to_string() {
+        if this._writer { return "RWLock(writing)" }
+        if this._readers > 0 { return "RWLock(reading, {this._readers} readers)" }
+        return "RWLock(idle)"
+    }
+}
+
+-- ── Atomic ──────────────────────────────────────────────
+-- Atomic counter/flag. Operations are single-expression and
+-- non-interruptible in a cooperative model.
+
+class Atomic {
+    fn init(initial_value) {
+        this._value = if initial_value != null { initial_value } else { 0 }
+    }
+
+    fn load() {
+        return this._value
+    }
+
+    fn store(value) {
+        this._value = value
+    }
+
+    fn add(delta) {
+        -- Add and return old value.
+        let old = this._value
+        this._value = this._value + delta
+        return old
+    }
+
+    fn sub(delta) {
+        let old = this._value
+        this._value = this._value - delta
+        return old
+    }
+
+    fn increment() {
+        this._value = this._value + 1
+        return this._value
+    }
+
+    fn decrement() {
+        this._value = this._value - 1
+        return this._value
+    }
+
+    fn compare_and_swap(expected, new_value) {
+        -- CAS: if current == expected, set to new_value and return true.
+        if this._value == expected {
+            this._value = new_value
+            return true
+        }
+        return false
+    }
+
+    fn exchange(new_value) {
+        -- Set and return old value.
+        let old = this._value
+        this._value = new_value
+        return old
+    }
+
+    fn to_string() {
+        return "Atomic({this._value})"
+    }
+}
+
+-- ── AtomicFlag ──────────────────────────────────────────
+-- Boolean atomic flag for simple signaling.
+
+class AtomicFlag {
+    fn init() {
+        this._set = false
+    }
+
+    fn test() {
+        return this._set
+    }
+
+    fn set() {
+        this._set = true
+    }
+
+    fn clear() {
+        this._set = false
+    }
+
+    fn test_and_set() {
+        let was = this._set
+        this._set = true
+        return was
+    }
+
+    fn to_string() {
+        return "AtomicFlag({this._set})"
+    }
+}
+
+-- ── Once ────────────────────────────────────────────────
+-- Execute a function exactly once, even if called multiple times.
+
+class Once {
+    fn init() {
+        this._done = false
+        this._result = null
+    }
+
+    fn do(work_fn) {
+        if not this._done {
+            this._result = work_fn()
+            this._done = true
+        }
+        return this._result
+    }
+
+    fn is_done() {
+        return this._done
+    }
+
+    fn reset() {
+        this._done = false
+        this._result = null
+    }
+
+    fn to_string() {
+        let status = if this._done { "done" } else { "pending" }
+        return "Once({status})"
+    }
+}
+
+-- ── Semaphore ───────────────────────────────────────────
+-- Counting semaphore for limiting concurrent access.
+
+class Semaphore {
+    fn init(permits) {
+        this._max = if permits != null { permits } else { 1 }
+        this._available = this._max
+    }
+
+    fn acquire() {
+        mut attempts = 0
+        while this._available <= 0 {
+            attempts += 1
+            if attempts > 1000 {
+                throw "semaphore acquire timeout"
+            }
+            sleep(0.001 * attempts)
+        }
+        this._available = this._available - 1
+    }
+
+    fn release() {
+        if this._available >= this._max {
+            throw "semaphore release: already at max permits"
+        }
+        this._available = this._available + 1
+    }
+
+    fn try_acquire() {
+        if this._available > 0 {
+            this._available = this._available - 1
+            return true
+        }
+        return false
+    }
+
+    fn with_permit(work_fn) {
+        this.acquire()
+        try {
+            let result = work_fn()
+            this.release()
+            return result
+        } catch e {
+            this.release()
+            throw e
+        }
+    }
+
+    fn available() {
+        return this._available
+    }
+
+    fn to_string() {
+        return "Semaphore({this._available}/{this._max})"
+    }
+}
+
+-- ── File-based lock (for multi-process) ─────────────────
+
+class FileLock {
+    fn init(path) {
+        this._path = if path != null { path } else { "/tmp/clarity.lock" }
+    }
+
+    fn lock() {
+        mut attempts = 0
+        while this._file_exists() {
+            attempts += 1
+            if attempts > 300 {
+                throw "file lock timeout: " + this._path
+            }
+            sleep(0.1)
+        }
+        -- Create lock file with PID
+        let pid_result = exec_full("echo $$ > " + _quote(this._path))
+    }
+
+    fn unlock() {
+        exec_full("rm -f " + _quote(this._path))
+    }
+
+    fn try_lock() {
+        if this._file_exists() { return false }
+        exec_full("echo $$ > " + _quote(this._path))
+        return true
+    }
+
+    fn with_lock(work_fn) {
+        this.lock()
+        try {
+            let result = work_fn()
+            this.unlock()
+            return result
+        } catch e {
+            this.unlock()
+            throw e
+        }
+    }
+
+    fn _file_exists() {
+        let check = exec_full("test -f " + _quote(this._path) + " && echo yes || echo no")
+        return trim(check.stdout) == "yes"
+    }
+
+    fn to_string() {
+        let status = if this._file_exists() { "locked" } else { "unlocked" }
+        return "FileLock({status}, \"{this._path}\")"
+    }
+}

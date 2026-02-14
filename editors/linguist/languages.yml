@@ -1,0 +1,22 @@
+# GitHub Linguist language definition for Clarity
+# Submit this to https://github.com/github-linguist/linguist
+#
+# Instructions:
+# 1. Fork github-linguist/linguist
+# 2. Add this entry to lib/linguist/languages.yml
+# 3. Place sample.clarity in samples/Clarity/
+# 4. Add grammar reference to grammars.yml
+# 5. Submit pull request
+
+Clarity:
+  type: programming
+  color: "#4A90D9"
+  extensions:
+    - ".clarity"
+  tm_scope: "source.clarity"
+  ace_mode: text
+  language_id: 1099511627776  # placeholder — assigned by Linguist maintainers
+  filenames:
+    - clarity.toml
+  aliases:
+    - clarity-lang

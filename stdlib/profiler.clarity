@@ -1,0 +1,320 @@
+-- Clarity profiler — measure execution time, call counts, and hotspots.
+-- Self-hosted port of clarity/profiler.py, written in Clarity itself.
+--
+-- Profiles a Clarity program by running it through the interpreter
+-- and measuring function/line timing, then prints a report.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "terminal.clarity" import bold, cyan, green, yellow, red, dim
+
+-- ── Profiler ──────────────────────────────────────────────
+
+class Profiler {
+    fn init(source_path) {
+        this.source_path = source_path
+        this.source = read(source_path)
+        this.source_lines = split(this.source, "\n")
+
+        -- Profile data
+        this.function_stats = {}
+        this.line_stats = {}
+        this.call_stack = []
+        this.wall_start = 0.0
+        this.wall_end = 0.0
+
+        -- Interpreter
+        let dir_result = exec_full("dirname " + this.quote(source_path))
+        let source_dir = trim(dir_result.stdout)
+        this.interp = Interpreter(null, source_dir)
+    }
+
+    fn quote(s) {
+        let escaped = replace(str(s), "'", "'\\''")
+        return "'" + escaped + "'"
+    }
+
+    fn run() {
+        show ""
+        show "  " + bold("Clarity Profiler")
+        show "  " + dim("File: " + this.source_path)
+        show ""
+
+        try {
+            let tokens = tokenize(this.source, this.source_path)
+            let tree = parse(tokens, this.source)
+
+            this.wall_start = time()
+
+            -- Profile by running with timing around each statement
+            this.profile_stmts(tree.body, "<main>")
+
+            this.wall_end = time()
+
+            this.print_report()
+        } catch e {
+            this.wall_end = time()
+            show ""
+            show "  " + red("Runtime error: " + str(e))
+            show ""
+            this.print_report()
+        }
+    }
+
+    fn profile_stmts(stmts, context) {
+        for stmt in stmts {
+            let line = stmt.line
+            let t0 = time()
+
+            -- Track which function/context we're in
+            try {
+                if stmt.node_type == "FnStatement" {
+                    -- Register function but don't profile its definition execution
+                    this.interp.execute_stmt(stmt, this.interp.global_env)
+                    let elapsed = time() - t0
+                    this.record_line(line, elapsed)
+                    continue
+                }
+            } catch e {}
+
+            -- Execute and time
+            try {
+                this.interp.execute_stmt(stmt, this.interp.global_env)
+            } catch e {
+                -- Rethrow after recording
+                let elapsed = time() - t0
+                this.record_line(line, elapsed)
+                throw e
+            }
+            let elapsed = time() - t0
+            this.record_line(line, elapsed)
+
+            -- Track calls for expression statements with calls
+            try {
+                if stmt.node_type == "ExpressionStatement" and stmt.expression.node_type == "CallExpression" {
+                    let callee_name = this.get_callee_name(stmt.expression.callee)
+                    this.record_call(callee_name, context, elapsed)
+                }
+            } catch e {}
+        }
+    }
+
+    fn get_callee_name(callee) {
+        try {
+            if callee.node_type == "Identifier" { return callee.name }
+            if callee.node_type == "MemberExpression" {
+                return this.get_callee_name(callee.object) + "." + callee.property
+            }
+        } catch e {}
+        return "<anonymous>"
+    }
+
+    fn record_line(line, elapsed) {
+        if line == null { return null }
+        let key = str(line)
+        if not has(this.line_stats, key) {
+            this.line_stats[key] = {"line": line, "hits": 0, "total_time": 0.0}
+        }
+        this.line_stats[key]["hits"] += 1
+        this.line_stats[key]["total_time"] += elapsed
+    }
+
+    fn record_call(name, caller, elapsed) {
+        if not has(this.function_stats, name) {
+            this.function_stats[name] = {
+                "name": name,
+                "calls": 0,
+                "total_time": 0.0,
+                "callers": {}
+            }
+        }
+        this.function_stats[name]["calls"] += 1
+        this.function_stats[name]["total_time"] += elapsed
+        if not has(this.function_stats[name]["callers"], caller) {
+            this.function_stats[name]["callers"][caller] = 0
+        }
+        this.function_stats[name]["callers"][caller] += 1
+    }
+
+    -- ── Report output ─────────────────────────────────────
+
+    fn print_report() {
+        let wall_time = this.wall_end - this.wall_start
+
+        show ""
+        show "  " + repeat("=", 62)
+        show "  " + bold("Profile Report")
+        show "  " + repeat("=", 62)
+        show "  Wall time: " + yellow(this.fmt_time(wall_time))
+        show ""
+
+        this.print_function_report()
+        this.print_hotlines_report()
+        this.print_callers_report()
+    }
+
+    fn print_function_report() {
+        let fn_names = keys(this.function_stats)
+        if len(fn_names) == 0 {
+            show "  " + dim("No function calls recorded.")
+            return null
+        }
+
+        show "  " + bold("Function Profile") + " (sorted by total time)"
+        show "  " + dim(pad_right("Function", 30, " ") + pad_left("Calls", 6, " ") + pad_left("Total", 10, " ") + pad_left("Avg", 10, " "))
+        show "  " + repeat("-", 58)
+
+        -- Sort by total_time (simple insertion sort)
+        mut sorted_fns = []
+        for name in fn_names {
+            push(sorted_fns, this.function_stats[name])
+        }
+        -- Sort descending by total_time
+        mut i = 0
+        while i < len(sorted_fns) {
+            mut max_idx = i
+            mut j = i + 1
+            while j < len(sorted_fns) {
+                if sorted_fns[j]["total_time"] > sorted_fns[max_idx]["total_time"] {
+                    max_idx = j
+                }
+                j += 1
+            }
+            if max_idx != i {
+                let tmp = sorted_fns[i]
+                sorted_fns[i] = sorted_fns[max_idx]
+                sorted_fns[max_idx] = tmp
+            }
+            i += 1
+        }
+
+        mut count = 0
+        for stats in sorted_fns {
+            if count >= 20 { break }
+            mut name = stats["name"]
+            if len(name) > 29 { name = substring(name, 0, 26) + "..." }
+            let avg = if stats["calls"] > 0 { stats["total_time"] / stats["calls"] } else { 0.0 }
+            show "  " + pad_right(name, 30, " ") + pad_left(str(stats["calls"]), 6, " ") + pad_left(this.fmt_time(stats["total_time"]), 10, " ") + pad_left(this.fmt_time(avg), 10, " ")
+            count += 1
+        }
+        show ""
+    }
+
+    fn print_hotlines_report() {
+        let line_keys = keys(this.line_stats)
+        if len(line_keys) == 0 { return null }
+
+        show "  " + bold("Hot Lines") + " (top 15 by total time)"
+        show "  " + dim(pad_left("Line", 6, " ") + pad_left("Hits", 8, " ") + pad_left("Total", 10, " ") + "  Source")
+        show "  " + repeat("-", 58)
+
+        -- Collect and sort
+        mut sorted_lines = []
+        for key in line_keys {
+            push(sorted_lines, this.line_stats[key])
+        }
+        -- Sort descending by total_time
+        mut i = 0
+        while i < len(sorted_lines) {
+            mut max_idx = i
+            mut j = i + 1
+            while j < len(sorted_lines) {
+                if sorted_lines[j]["total_time"] > sorted_lines[max_idx]["total_time"] {
+                    max_idx = j
+                }
+                j += 1
+            }
+            if max_idx != i {
+                let tmp = sorted_lines[i]
+                sorted_lines[i] = sorted_lines[max_idx]
+                sorted_lines[max_idx] = tmp
+            }
+            i += 1
+        }
+
+        let max_time = if len(sorted_lines) > 0 { sorted_lines[0]["total_time"] } else { 0.0 }
+        mut count = 0
+        for stats in sorted_lines {
+            if count >= 15 { break }
+            mut src = ""
+            if stats["line"] > 0 and stats["line"] <= len(this.source_lines) {
+                src = trim(this.source_lines[stats["line"] - 1])
+                if len(src) > 40 { src = substring(src, 0, 37) + "..." }
+            }
+            let bar = this.heat_bar(stats["total_time"], max_time)
+            show "  " + pad_left(str(stats["line"]), 6, " ") + pad_left(str(stats["hits"]), 8, " ") + pad_left(this.fmt_time(stats["total_time"]), 10, " ") + "  " + bar + " " + src
+            count += 1
+        }
+        show ""
+    }
+
+    fn print_callers_report() {
+        mut has_callers = false
+        let fn_names = keys(this.function_stats)
+        for name in fn_names {
+            if len(keys(this.function_stats[name]["callers"])) > 0 {
+                has_callers = true
+            }
+        }
+        if not has_callers { return null }
+
+        show "  " + bold("Call Graph")
+        show "  " + dim(pad_right("Callee", 25, " ") + " <- " + pad_right("Caller", 25, " ") + pad_left("Count", 6, " "))
+        show "  " + repeat("-", 58)
+
+        for name in fn_names {
+            let stats = this.function_stats[name]
+            let caller_names = keys(stats["callers"])
+            for caller in caller_names {
+                mut callee_name = name
+                if len(callee_name) > 24 { callee_name = substring(callee_name, 0, 21) + "..." }
+                mut caller_name = caller
+                if len(caller_name) > 24 { caller_name = substring(caller_name, 0, 21) + "..." }
+                show "  " + pad_right(callee_name, 25, " ") + " <- " + pad_right(caller_name, 25, " ") + pad_left(str(stats["callers"][caller]), 6, " ")
+            }
+        }
+        show ""
+    }
+
+    -- ── Formatting helpers ────────────────────────────────
+
+    fn fmt_time(seconds) {
+        if seconds < 0.001 {
+            return str(round(seconds * 1000000)) + "us"
+        }
+        if seconds < 1.0 {
+            return str(round(seconds * 1000 * 100) / 100) + "ms"
+        }
+        return str(round(seconds * 1000) / 1000) + "s"
+    }
+
+    fn heat_bar(value, max_value) {
+        if max_value == 0 { return "" }
+        let ratio = value / max_value
+        let width = round(ratio * 10)
+        mut color_fn = green
+        if ratio > 0.7 { color_fn = red }
+        elif ratio > 0.3 { color_fn = yellow }
+        return color_fn(repeat("█", width) + repeat("░", 10 - width))
+    }
+
+    fn get_stats() {
+        return {
+            "wall_time": this.wall_end - this.wall_start,
+            "functions": this.function_stats,
+            "lines": this.line_stats
+        }
+    }
+}
+
+-- ── Public API ────────────────────────────────────────────
+
+fn profile_file(path) {
+    if not exists(path) {
+        show "  " + red(">> File not found: " + path)
+        exit(1)
+    }
+    let prof = Profiler(path)
+    prof.run()
+}

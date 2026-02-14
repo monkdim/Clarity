@@ -1,0 +1,1597 @@
+-- Clarity Interpreter — self-hosting implementation
+-- Faithful port of clarity/interpreter.py, written in Clarity itself.
+-- Tree-walking interpreter: AST -> execution
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+-- ── Environment (scope) ─────────────────────────────────
+
+class Environment {
+    fn init(parent) {
+        this.vars = {}
+        this.mutables = {}
+        this.parent = parent ?? null
+    }
+
+    fn get(name, line) {
+        if has(this.vars, name) {
+            return this.vars[name]
+        }
+        if this.parent != null {
+            return this.parent.get(name, line)
+        }
+        throw "NameError: '{name}' is not defined (line {line})"
+    }
+
+    fn set(name, value, mutable) {
+        this.vars[name] = value
+        if mutable {
+            this.mutables[name] = true
+        }
+    }
+
+    fn assign(name, value, line) {
+        if has(this.vars, name) {
+            -- Check mutability
+            if not has(this.mutables, name) {
+                -- Walk up to find if mutable in any parent
+                mut env = this
+                mut found_mutable = false
+                while env != null {
+                    if has(env.mutables, name) {
+                        found_mutable = true
+                        break
+                    }
+                    env = env.parent
+                }
+                if not found_mutable {
+                    throw "RuntimeError: Cannot reassign '{name}' — use 'mut' to make it mutable (line {line})"
+                }
+            }
+            this.vars[name] = value
+            return null
+        }
+        if this.parent != null {
+            this.parent.assign(name, value, line)
+            return null
+        }
+        throw "NameError: '{name}' is not defined — use 'let' to create it (line {line})"
+    }
+
+    fn has_var(name) {
+        if has(this.vars, name) {
+            return true
+        }
+        if this.parent != null {
+            return this.parent.has_var(name)
+        }
+        return false
+    }
+}
+
+-- ── Clarity Types ────────────────────────────────────────
+
+class ClarityFunction {
+    fn init(name, params, body, closure, is_async) {
+        this.name = name ?? "<anonymous>"
+        this.params = params
+        this.body = body
+        this.closure = closure
+        this.is_async = is_async ?? false
+    }
+
+    fn to_string() {
+        return "<fn {this.name}>"
+    }
+}
+
+class ClarityClass {
+    fn init(name, methods, parent) {
+        this.name = name
+        this.methods = methods
+        this.parent = parent ?? null
+    }
+
+    fn to_string() {
+        return "<class {this.name}>"
+    }
+}
+
+class ClarityInstance {
+    fn init(klass) {
+        this.klass = klass
+        this.properties = {}
+    }
+
+    fn get_prop(name) {
+        if has(this.properties, name) {
+            return this.properties[name]
+        }
+        let method = this.find_method(name)
+        if method != null {
+            return method
+        }
+        return null
+    }
+
+    fn find_method(name) {
+        mut klass = this.klass
+        while klass != null {
+            if has(klass.methods, name) {
+                return klass.methods[name]
+            }
+            klass = klass.parent
+        }
+        return null
+    }
+
+    fn to_string() {
+        return "<{this.klass.name} instance>"
+    }
+}
+
+class ClarityInterface {
+    fn init(name, method_sigs) {
+        this.name = name
+        this.method_sigs = method_sigs
+    }
+
+    fn to_string() {
+        return "<interface {this.name}>"
+    }
+}
+
+class ClarityEnum {
+    fn init(name, members) {
+        this.name = name
+        this.members = members
+    }
+
+    fn to_string() {
+        return "<enum {this.name}>"
+    }
+}
+
+-- ── Signal helpers ───────────────────────────────────────
+-- We use maps with __signal__ to propagate control flow through throw/catch
+
+fn make_return_signal(value) {
+    return {"__signal__": "return", "value": value}
+}
+
+fn make_break_signal() {
+    return {"__signal__": "break"}
+}
+
+fn make_continue_signal() {
+    return {"__signal__": "continue"}
+}
+
+fn make_throw_signal(value) {
+    return {"__signal__": "throw", "value": value}
+}
+
+fn is_signal(val) {
+    return type(val) == "map" and has(val, "__signal__")
+}
+
+fn signal_type(val) {
+    if type(val) == "map" and has(val, "__signal__") {
+        return val["__signal__"]
+    }
+    return null
+}
+
+-- ── Type name helper ────────────────────────────────────
+
+fn cl_type_name(value) {
+    if value == null {
+        return "null"
+    }
+    let t = type(value)
+    if t == "bool" {
+        return "bool"
+    }
+    if t == "number" {
+        -- Clarity doesn't distinguish int/float at host level
+        return "number"
+    }
+    if t == "string" {
+        return "string"
+    }
+    if t == "list" {
+        return "list"
+    }
+    if t == "map" {
+        return "map"
+    }
+    if t == "function" or t == "builtin" {
+        return "function"
+    }
+    if t == "ClarityFunction" {
+        return "function"
+    }
+    if t == "ClarityClass" {
+        return "class"
+    }
+    if t == "ClarityInstance" {
+        return value.klass.name
+    }
+    if t == "ClarityEnum" {
+        return "enum"
+    }
+    if t == "ClarityInterface" {
+        return "interface"
+    }
+    return t
+}
+
+-- ── Interpreter ──────────────────────────────────────────
+
+class Interpreter {
+    fn init(builtins, source_dir) {
+        this.global_env = Environment(null)
+        this.output = []
+        this.source_dir = source_dir ?? cwd()
+        this._imported = {}
+        this._call_stack = []
+        this._gen_collection = null
+        this._setup_builtins(builtins ?? {})
+    }
+
+    fn _setup_builtins(extra_builtins) {
+        -- Register host builtins that the self-hosted interpreter exposes
+        -- to programs it interprets. These bridge to the host Clarity runtime.
+        let interp = this
+
+        -- I/O
+        this.global_env.set("print", fn(...args) {
+            let out = join(map(args, fn(a) { interp._to_display(a) }), " ")
+            show out
+            push(interp.output, out)
+        }, true)
+        this.global_env.set("show", fn(...args) {
+            let out = join(map(args, fn(a) { interp._to_display(a) }), " ")
+            show out
+            push(interp.output, out)
+        }, true)
+        this.global_env.set("ask", fn(prompt) {
+            return ask(interp._to_display(prompt ?? ""))
+        }, true)
+
+        -- Type conversions
+        this.global_env.set("int", fn(v) { return int(v) }, true)
+        this.global_env.set("float", fn(v) { return float(v) }, true)
+        this.global_env.set("str", fn(v) { return interp._to_display(v) }, true)
+        this.global_env.set("bool", fn(v) { return interp._is_truthy(v) }, true)
+        this.global_env.set("type", fn(v) { return cl_type_name(v) }, true)
+
+        -- Collections
+        this.global_env.set("len", fn(v) { return len(v) }, true)
+        this.global_env.set("push", fn(lst, item) { return push(lst, item) }, true)
+        this.global_env.set("pop", fn(lst) { return pop(lst) }, true)
+        this.global_env.set("sort", fn(lst) { return sort(lst) }, true)
+        this.global_env.set("reverse", fn(v) { return reverse(v) }, true)
+        this.global_env.set("range", fn(...args) {
+            if len(args) == 1 { return range(args[0]) }
+            if len(args) == 2 { return range(args[0], args[1]) }
+            if len(args) == 3 { return range(args[0], args[1], args[2]) }
+            throw "range() takes 1-3 arguments"
+        }, true)
+        this.global_env.set("map", fn(lst, f) {
+            return map(lst, fn(item) { return interp._call(f, [item], 0) })
+        }, true)
+        this.global_env.set("filter", fn(lst, f) {
+            return filter(lst, fn(item) { return interp._is_truthy(interp._call(f, [item], 0)) })
+        }, true)
+        this.global_env.set("reduce", fn(lst, f, initial) {
+            mut acc = if initial != null { initial } else { lst[0] }
+            mut start = if initial != null { 0 } else { 1 }
+            mut i = start
+            while i < len(lst) {
+                acc = interp._call(f, [acc, lst[i]], 0)
+                i += 1
+            }
+            return acc
+        }, true)
+        this.global_env.set("each", fn(lst, f) {
+            each(lst, fn(item) { interp._call(f, [item], 0) })
+        }, true)
+        this.global_env.set("find", fn(lst, f) {
+            return find(lst, fn(item) { return interp._is_truthy(interp._call(f, [item], 0)) })
+        }, true)
+        this.global_env.set("every", fn(lst, f) {
+            return every(lst, fn(item) { return interp._is_truthy(interp._call(f, [item], 0)) })
+        }, true)
+        this.global_env.set("some", fn(lst, f) {
+            return some(lst, fn(item) { return interp._is_truthy(interp._call(f, [item], 0)) })
+        }, true)
+        this.global_env.set("flat", fn(lst) { return flat(lst) }, true)
+        this.global_env.set("zip", fn(...lists) { return zip(...lists) }, true)
+        this.global_env.set("unique", fn(lst) { return unique(lst) }, true)
+        this.global_env.set("keys", fn(m) { return keys(m) }, true)
+        this.global_env.set("values", fn(m) { return values(m) }, true)
+        this.global_env.set("entries", fn(m) { return entries(m) }, true)
+        this.global_env.set("merge", fn(...maps) { return merge(...maps) }, true)
+        this.global_env.set("has", fn(col, key) { return has(col, key) }, true)
+
+        -- Strings
+        this.global_env.set("split", fn(s, sep) { return split(s, sep ?? " ") }, true)
+        this.global_env.set("join", fn(lst, sep) { return join(lst, sep ?? "") }, true)
+        this.global_env.set("replace", fn(s, old, new_s) { return replace(s, old, new_s) }, true)
+        this.global_env.set("trim", fn(s) { return trim(s) }, true)
+        this.global_env.set("upper", fn(s) { return upper(s) }, true)
+        this.global_env.set("lower", fn(s) { return lower(s) }, true)
+        this.global_env.set("contains", fn(h, n) { return contains(h, n) }, true)
+        this.global_env.set("starts", fn(s, p) { return starts(s, p) }, true)
+        this.global_env.set("ends", fn(s, p) { return ends(s, p) }, true)
+        this.global_env.set("chars", fn(s) { return chars(s) }, true)
+        this.global_env.set("char_at", fn(s, i) { return char_at(s, i) }, true)
+        this.global_env.set("char_code", fn(c) { return char_code(c) }, true)
+        this.global_env.set("from_char_code", fn(n) { return from_char_code(n) }, true)
+        this.global_env.set("index_of", fn(s, sub) { return index_of(s, sub) }, true)
+        this.global_env.set("substring", fn(s, start, end_idx) { return substring(s, start, end_idx) }, true)
+        this.global_env.set("is_digit", fn(c) { return is_digit(c) }, true)
+        this.global_env.set("is_alpha", fn(c) { return is_alpha(c) }, true)
+        this.global_env.set("is_alnum", fn(c) { return is_alnum(c) }, true)
+        this.global_env.set("is_space", fn(c) { return is_space(c) }, true)
+        this.global_env.set("repeat", fn(s, n) { return repeat(s, n) }, true)
+
+        -- Math
+        this.global_env.set("abs", fn(n) { return abs(n) }, true)
+        this.global_env.set("round", fn(n) { return round(n) }, true)
+        this.global_env.set("floor", fn(n) { return floor(n) }, true)
+        this.global_env.set("ceil", fn(n) { return ceil(n) }, true)
+        this.global_env.set("min", fn(...a) { if len(a) == 1 and type(a[0]) == "list" { return min(a[0]) } return min(...a) }, true)
+        this.global_env.set("max", fn(...a) { if len(a) == 1 and type(a[0]) == "list" { return max(a[0]) } return max(...a) }, true)
+        this.global_env.set("sum", fn(lst) { return sum(lst) }, true)
+        this.global_env.set("random", fn(...a) { return random(...a) }, true)
+        this.global_env.set("pi", pi, true)
+        this.global_env.set("e", e, true)
+        this.global_env.set("sqrt", fn(n) { return sqrt(n) }, true)
+        this.global_env.set("sin", fn(n) { return sin(n) }, true)
+        this.global_env.set("cos", fn(n) { return cos(n) }, true)
+        this.global_env.set("tan", fn(n) { return tan(n) }, true)
+        this.global_env.set("log", fn(n) { return log(n) }, true)
+        this.global_env.set("pow", fn(a, b) { return pow(a, b) }, true)
+
+        -- System
+        this.global_env.set("exec", fn(cmd) { return exec(cmd) }, true)
+        this.global_env.set("exit", fn(code) { exit(code ?? 0) }, true)
+        this.global_env.set("sleep", fn(s) { sleep(s) }, true)
+        this.global_env.set("time", fn() { return time() }, true)
+        this.global_env.set("env", fn(k, d) { return env(k, d) }, true)
+        this.global_env.set("args", fn() { return args() }, true)
+        this.global_env.set("cwd", fn() { return cwd() }, true)
+
+        -- JSON
+        this.global_env.set("json_parse", fn(t) { return json_parse(t) }, true)
+        this.global_env.set("json_string", fn(v) { return json_string(v) }, true)
+
+        -- File I/O
+        this.global_env.set("read", fn(p) { return read(p) }, true)
+        this.global_env.set("write", fn(p, c) { return write(p, c) }, true)
+        this.global_env.set("append", fn(p, c) { return append(p, c) }, true)
+        this.global_env.set("exists", fn(p) { return exists(p) }, true)
+        this.global_env.set("lines", fn(p) { return lines(p) }, true)
+
+        -- Errors
+        this.global_env.set("error", fn(msg) { return str(msg) }, true)
+
+        -- Merge extra builtins
+        let extra_keys = keys(extra_builtins)
+        each(extra_keys, fn(k) {
+            interp.global_env.set(k, extra_builtins[k], true)
+        })
+    }
+
+    -- ── Main entry point ─────────────────────────────────
+
+    fn run(program) {
+        return this.exec_block_body(program.body, this.global_env)
+    }
+
+    fn exec_block_body(statements, env) {
+        mut result = null
+        mut i = 0
+        while i < len(statements) {
+            result = this.execute(statements[i], env)
+            i += 1
+        }
+        return result
+    }
+
+    -- ── Dispatch ─────────────────────────────────────────
+
+    fn execute(node, env) {
+        let nt = node.node_type
+        if nt == "LetStatement" { return this.exec_LetStatement(node, env) }
+        if nt == "DestructureLetStatement" { return this.exec_DestructureLetStatement(node, env) }
+        if nt == "AssignStatement" { return this.exec_AssignStatement(node, env) }
+        if nt == "MultiAssignStatement" { return this.exec_MultiAssignStatement(node, env) }
+        if nt == "FnStatement" { return this.exec_FnStatement(node, env) }
+        if nt == "ReturnStatement" { return this.exec_ReturnStatement(node, env) }
+        if nt == "IfStatement" { return this.exec_IfStatement(node, env) }
+        if nt == "ForStatement" { return this.exec_ForStatement(node, env) }
+        if nt == "WhileStatement" { return this.exec_WhileStatement(node, env) }
+        if nt == "TryCatch" { return this.exec_TryCatch(node, env) }
+        if nt == "ThrowStatement" { return this.exec_ThrowStatement(node, env) }
+        if nt == "BreakStatement" { return this.exec_BreakStatement(node, env) }
+        if nt == "ContinueStatement" { return this.exec_ContinueStatement(node, env) }
+        if nt == "ShowStatement" { return this.exec_ShowStatement(node, env) }
+        if nt == "ClassStatement" { return this.exec_ClassStatement(node, env) }
+        if nt == "InterfaceStatement" { return this.exec_InterfaceStatement(node, env) }
+        if nt == "MatchStatement" { return this.exec_MatchStatement(node, env) }
+        if nt == "EnumStatement" { return this.exec_EnumStatement(node, env) }
+        if nt == "ImportStatement" { return this.exec_ImportStatement(node, env) }
+        if nt == "DecoratedStatement" { return this.exec_DecoratedStatement(node, env) }
+        if nt == "ExpressionStatement" { return this.exec_ExpressionStatement(node, env) }
+        if nt == "Block" { return this.exec_Block(node, env) }
+        throw "RuntimeError: Unknown node type: {nt} (line {node.line})"
+    }
+
+    fn evaluate(node, env) {
+        let nt = node.node_type
+        if nt == "NumberLiteral" { return node.value }
+        if nt == "StringLiteral" {
+            if node.raw { return node.value }
+            return this._interpolate_string(node.value, env, node.line)
+        }
+        if nt == "BoolLiteral" { return node.value }
+        if nt == "NullLiteral" { return null }
+        if nt == "Identifier" { return env.get(node.name, node.line) }
+        if nt == "ThisExpression" { return env.get("this", node.line) }
+        if nt == "ListLiteral" { return this.eval_ListLiteral(node, env) }
+        if nt == "MapLiteral" { return this.eval_MapLiteral(node, env) }
+        if nt == "BinaryOp" { return this.eval_BinaryOp(node, env) }
+        if nt == "UnaryOp" { return this.eval_UnaryOp(node, env) }
+        if nt == "CallExpression" { return this.eval_CallExpression(node, env) }
+        if nt == "MemberExpression" { return this.eval_MemberExpression(node, env) }
+        if nt == "OptionalMemberExpression" { return this.eval_OptionalMemberExpression(node, env) }
+        if nt == "IndexExpression" { return this.eval_IndexExpression(node, env) }
+        if nt == "SliceExpression" { return this.eval_SliceExpression(node, env) }
+        if nt == "FnExpression" { return this.eval_FnExpression(node, env) }
+        if nt == "PipeExpression" { return this.eval_PipeExpression(node, env) }
+        if nt == "RangeExpression" { return this.eval_RangeExpression(node, env) }
+        if nt == "AskExpression" { return this.eval_AskExpression(node, env) }
+        if nt == "NullCoalesce" { return this.eval_NullCoalesce(node, env) }
+        if nt == "SpreadExpression" { return this.evaluate(node.value, env) }
+        if nt == "IfExpression" { return this.eval_IfExpression(node, env) }
+        if nt == "ComprehensionExpression" { return this.eval_ComprehensionExpression(node, env) }
+        if nt == "MapComprehensionExpression" { return this.eval_MapComprehensionExpression(node, env) }
+        if nt == "AwaitExpression" { return this.evaluate(node.value, env) }
+        if nt == "YieldExpression" { return this.eval_YieldExpression(node, env) }
+        throw "RuntimeError: Unknown expression type: {nt} (line {node.line})"
+    }
+
+    -- ── Statement executors ──────────────────────────────
+
+    fn exec_LetStatement(node, env) {
+        let value = this.evaluate(node.value, env)
+        env.set(node.name, value, node.mutable)
+        return value
+    }
+
+    fn exec_DestructureLetStatement(node, env) {
+        let value = this.evaluate(node.value, env)
+        if node.kind == "list" {
+            if type(value) != "list" {
+                throw "TypeError: Cannot destructure non-list into list pattern (line {node.line})"
+            }
+            mut i = 0
+            while i < len(node.targets) {
+                let target = node.targets[i]
+                if starts(target, "...") {
+                    let rest_name = substring(target, 3)
+                    mut rest_val = []
+                    if i < len(value) {
+                        mut ri = i
+                        while ri < len(value) {
+                            push(rest_val, value[ri])
+                            ri += 1
+                        }
+                    }
+                    env.set(rest_name, rest_val, node.mutable)
+                    break
+                } elif i < len(value) {
+                    env.set(target, value[i], node.mutable)
+                } else {
+                    env.set(target, null, node.mutable)
+                }
+                i += 1
+            }
+        } elif node.kind == "map" {
+            if type(value) != "map" {
+                throw "TypeError: Cannot destructure non-map into map pattern (line {node.line})"
+            }
+            each(node.targets, fn(target) {
+                let v = if has(value, target) { value[target] } else { null }
+                env.set(target, v, node.mutable)
+            })
+        }
+        return value
+    }
+
+    fn exec_AssignStatement(node, env) {
+        let value = this.evaluate(node.value, env)
+        let target = node.target
+
+        if target.node_type == "Identifier" {
+            if node.operator == "=" {
+                env.assign(target.name, value, node.line)
+            } else {
+                let current = env.get(target.name, node.line)
+                let new_val = this._compound_assign(current, node.operator, value, node.line)
+                env.assign(target.name, new_val, node.line)
+            }
+        } elif target.node_type == "MemberExpression" {
+            let obj = this.evaluate(target.object, env)
+            let t = type(obj)
+            if t == "ClarityInstance" {
+                if node.operator == "=" {
+                    obj.properties[target.property] = value
+                } else {
+                    let current = if has(obj.properties, target.property) { obj.properties[target.property] } else { null }
+                    obj.properties[target.property] = this._compound_assign(current, node.operator, value, node.line)
+                }
+            } elif t == "map" {
+                if node.operator == "=" {
+                    obj[target.property] = value
+                } else {
+                    let current = if has(obj, target.property) { obj[target.property] } else { null }
+                    obj[target.property] = this._compound_assign(current, node.operator, value, node.line)
+                }
+            } else {
+                throw "TypeError: Cannot set property on {cl_type_name(obj)} (line {node.line})"
+            }
+        } elif target.node_type == "IndexExpression" {
+            let obj = this.evaluate(target.object, env)
+            let index = this.evaluate(target.index, env)
+            if node.operator == "=" {
+                obj[index] = value
+            } else {
+                let current = obj[index]
+                obj[index] = this._compound_assign(current, node.operator, value, node.line)
+            }
+        } else {
+            throw "RuntimeError: Invalid assignment target (line {node.line})"
+        }
+        return value
+    }
+
+    fn exec_MultiAssignStatement(node, env) {
+        -- Evaluate all values first (enables swaps)
+        let vals = map(node.values, fn(v) { return this.evaluate(v, env) })
+        if len(vals) != len(node.targets) {
+            throw "RuntimeError: Multi-assignment: {len(node.targets)} targets but {len(vals)} values (line {node.line})"
+        }
+        mut i = 0
+        while i < len(node.targets) {
+            let target = node.targets[i]
+            let val = vals[i]
+            if target.node_type == "Identifier" {
+                env.assign(target.name, val, node.line)
+            } elif target.node_type == "MemberExpression" {
+                let obj = this.evaluate(target.object, env)
+                if type(obj) == "ClarityInstance" {
+                    obj.properties[target.property] = val
+                } elif type(obj) == "map" {
+                    obj[target.property] = val
+                }
+            } elif target.node_type == "IndexExpression" {
+                let obj = this.evaluate(target.object, env)
+                let index = this.evaluate(target.index, env)
+                obj[index] = val
+            }
+            i += 1
+        }
+        return null
+    }
+
+    fn _compound_assign(current, operator, value, line) {
+        if operator == "+=" { return this._binary_op(current, "+", value, line) }
+        if operator == "-=" { return this._binary_op(current, "-", value, line) }
+        if operator == "*=" { return this._binary_op(current, "*", value, line) }
+        if operator == "/=" { return this._binary_op(current, "/", value, line) }
+        throw "RuntimeError: Unknown compound operator: {operator} (line {line})"
+    }
+
+    fn exec_FnStatement(node, env) {
+        let f = ClarityFunction(node.name, node.params, node.body, env, node.is_async)
+        env.set(node.name, f, true)
+        return f
+    }
+
+    fn exec_ReturnStatement(node, env) {
+        let value = if node.value != null { this.evaluate(node.value, env) } else { null }
+        throw make_return_signal(value)
+    }
+
+    fn exec_IfStatement(node, env) {
+        if this._is_truthy(this.evaluate(node.condition, env)) {
+            return this.exec_Block(node.body, env)
+        }
+        -- elif clauses
+        mut i = 0
+        while i < len(node.elif_clauses) {
+            let clause = node.elif_clauses[i]
+            let cond = clause[0]
+            let body = clause[1]
+            if this._is_truthy(this.evaluate(cond, env)) {
+                return this.exec_Block(body, env)
+            }
+            i += 1
+        }
+        if node.else_body != null {
+            return this.exec_Block(node.else_body, env)
+        }
+        return null
+    }
+
+    fn exec_ForStatement(node, env) {
+        let iterable = this.evaluate(node.iterable, env)
+        mut result = null
+        mut i = 0
+        while i < len(iterable) {
+            let item = iterable[i]
+            let loop_env = Environment(env)
+            loop_env.set(node.variable, item, true)
+            try {
+                result = this.exec_Block(node.body, loop_env)
+            } catch sig {
+                if is_signal(sig) {
+                    let st = signal_type(sig)
+                    if st == "break" {
+                        break
+                    }
+                    if st == "continue" {
+                        i += 1
+                        continue
+                    }
+                    -- Re-throw return and throw signals
+                    throw sig
+                }
+                -- Re-throw non-signal errors
+                throw sig
+            }
+            i += 1
+        }
+        return result
+    }
+
+    fn exec_WhileStatement(node, env) {
+        mut result = null
+        while this._is_truthy(this.evaluate(node.condition, env)) {
+            try {
+                result = this.exec_Block(node.body, env)
+            } catch sig {
+                if is_signal(sig) {
+                    let st = signal_type(sig)
+                    if st == "break" {
+                        break
+                    }
+                    if st == "continue" {
+                        continue
+                    }
+                    throw sig
+                }
+                throw sig
+            }
+        }
+        return result
+    }
+
+    fn exec_TryCatch(node, env) {
+        try {
+            let result = this.exec_Block(node.try_body, env)
+            if node.finally_body != null {
+                this.exec_Block(node.finally_body, env)
+            }
+            return result
+        } catch caught {
+            -- Re-throw control flow signals (return, break, continue)
+            if is_signal(caught) {
+                let st = signal_type(caught)
+                if st == "return" or st == "break" or st == "continue" {
+                    if node.finally_body != null {
+                        this.exec_Block(node.finally_body, env)
+                    }
+                    throw caught
+                }
+                -- User-level throw signal
+                if st == "throw" {
+                    let catch_env = Environment(env)
+                    if node.catch_var != null {
+                        catch_env.set(node.catch_var, caught["value"], true)
+                    }
+                    let result = this.exec_Block(node.catch_body, catch_env)
+                    if node.finally_body != null {
+                        this.exec_Block(node.finally_body, env)
+                    }
+                    return result
+                }
+            }
+            -- Regular error (string from host or runtime error)
+            let catch_env = Environment(env)
+            if node.catch_var != null {
+                catch_env.set(node.catch_var, caught, true)
+            }
+            let result = this.exec_Block(node.catch_body, catch_env)
+            if node.finally_body != null {
+                this.exec_Block(node.finally_body, env)
+            }
+            return result
+        }
+    }
+
+    fn exec_ThrowStatement(node, env) {
+        let value = this.evaluate(node.value, env)
+        throw make_throw_signal(value)
+    }
+
+    fn exec_BreakStatement(node, env) {
+        throw make_break_signal()
+    }
+
+    fn exec_ContinueStatement(node, env) {
+        throw make_continue_signal()
+    }
+
+    fn exec_ShowStatement(node, env) {
+        let vals = map(node.values, fn(v) { return this.evaluate(v, env) })
+        let out = join(map(vals, fn(v) { return this._to_display(v) }), " ")
+        show out
+        push(this.output, out)
+        return null
+    }
+
+    fn exec_InterfaceStatement(node, env) {
+        let iface = ClarityInterface(node.name, node.method_sigs)
+        env.set(node.name, iface, true)
+        return iface
+    }
+
+    fn exec_ClassStatement(node, env) {
+        mut parent = null
+        if node.parent != null {
+            parent = env.get(node.parent, node.line)
+            if type(parent) != "ClarityClass" {
+                throw "TypeError: '{node.parent}' is not a class (line {node.line})"
+            }
+        }
+
+        let methods = {}
+        each(node.methods, fn(fn_node) {
+            let f = ClarityFunction(fn_node.name, fn_node.params, fn_node.body, env, false)
+            methods[fn_node.name] = f
+        })
+
+        -- Check interface compliance
+        each(node.interfaces, fn(iface_name) {
+            let iface = env.get(iface_name, node.line)
+            if type(iface) != "ClarityInterface" {
+                throw "TypeError: '{iface_name}' is not an interface (line {node.line})"
+            }
+            each(iface.method_sigs, fn(sig) {
+                let sig_name = sig[0]
+                if not has(methods, sig_name) {
+                    -- Check parent methods
+                    mut found = false
+                    mut p = parent
+                    while p != null {
+                        if has(p.methods, sig_name) {
+                            found = true
+                            break
+                        }
+                        p = p.parent
+                    }
+                    if not found {
+                        throw "TypeError: Class '{node.name}' must implement '{sig_name}()' from interface '{iface_name}' (line {node.line})"
+                    }
+                }
+            })
+        })
+
+        let klass = ClarityClass(node.name, methods, parent)
+        env.set(node.name, klass, true)
+        return klass
+    }
+
+    fn exec_MatchStatement(node, env) {
+        let subject = this.evaluate(node.subject, env)
+        mut i = 0
+        while i < len(node.arms) {
+            let arm = node.arms[i]
+            let pattern_expr = arm[0]
+            let body = arm[1]
+            let pattern_val = this.evaluate(pattern_expr, env)
+            if subject == pattern_val {
+                return this.exec_Block(body, env)
+            }
+            i += 1
+        }
+        if node.default != null {
+            return this.exec_Block(node.default, env)
+        }
+        return null
+    }
+
+    fn exec_DecoratedStatement(node, env) {
+        this.execute(node.target, env)
+        let name = node.target.name
+        mut current = env.get(name, node.line)
+        -- Apply decorators innermost first (reversed)
+        mut i = len(node.decorators) - 1
+        while i >= 0 {
+            let decorator_fn = this.evaluate(node.decorators[i], env)
+            current = this._call(decorator_fn, [current], node.line)
+            i -= 1
+        }
+        env.assign(name, current, node.line)
+        return current
+    }
+
+    fn exec_EnumStatement(node, env) {
+        let members = {}
+        mut i = 0
+        while i < len(node.members) {
+            let member = node.members[i]
+            let member_name = member[0]
+            let value_node = member[1]
+            if value_node != null {
+                members[member_name] = this.evaluate(value_node, env)
+            } else {
+                members[member_name] = i
+            }
+            i += 1
+        }
+        let en = ClarityEnum(node.name, members)
+        env.set(node.name, en, true)
+        return en
+    }
+
+    fn exec_ImportStatement(node, env) {
+        if node.path != null {
+            return this._import_file(node, env)
+        }
+        -- Module import — delegate to host
+        throw "RuntimeError: Module imports not yet supported in self-hosted interpreter (line {node.line})"
+    }
+
+    fn _import_file(node, env) {
+        mut path = node.path
+        if not ends(path, ".clarity") {
+            path = path + ".clarity"
+        }
+
+        -- Check cache
+        if has(this._imported, path) {
+            let module_env = this._imported[path]
+            let module_dict = module_env.vars
+            if node.names != null and len(node.names) > 0 {
+                each(node.names, fn(name) {
+                    if not has(module_dict, name) {
+                        throw "RuntimeError: '{name}' not found in '{node.path}' (line {node.line})"
+                    }
+                    env.set(name, module_dict[name], true)
+                })
+            } else {
+                let alias = node.alias ?? replace(replace(node.path, ".clarity", ""), "/", "_")
+                env.set(alias, module_dict, true)
+            }
+            return null
+        }
+
+        if not exists(path) {
+            throw "RuntimeError: Cannot find module: {path} (line {node.line})"
+        }
+
+        let source = read(path)
+        let tokens = tokenize(source, path)
+        let tree = parse(tokens, source)
+
+        let module_env = Environment(this.global_env)
+        this.exec_block_body(tree.body, module_env)
+        this._imported[path] = module_env
+
+        let module_dict = module_env.vars
+        if node.names != null and len(node.names) > 0 {
+            each(node.names, fn(name) {
+                if not has(module_dict, name) {
+                    throw "RuntimeError: '{name}' not found in '{node.path}' (line {node.line})"
+                }
+                env.set(name, module_dict[name], true)
+            })
+        } else {
+            let alias = node.alias ?? replace(replace(node.path, ".clarity", ""), "/", "_")
+            env.set(alias, module_dict, true)
+        }
+        return null
+    }
+
+    fn exec_ExpressionStatement(node, env) {
+        return this.evaluate(node.expression, env)
+    }
+
+    fn exec_Block(node, env) {
+        let block_env = Environment(env)
+        mut result = null
+        mut i = 0
+        while i < len(node.statements) {
+            result = this.execute(node.statements[i], block_env)
+            i += 1
+        }
+        return result
+    }
+
+    -- ── Expression evaluators ────────────────────────────
+
+    fn eval_ListLiteral(node, env) {
+        let result = []
+        each(node.elements, fn(el) {
+            if el.node_type == "SpreadExpression" {
+                let spread_val = this.evaluate(el.value, env)
+                if type(spread_val) == "list" {
+                    each(spread_val, fn(item) { push(result, item) })
+                } else {
+                    throw "TypeError: Can only spread a list into a list (line {el.line})"
+                }
+            } else {
+                push(result, this.evaluate(el, env))
+            }
+        })
+        return result
+    }
+
+    fn eval_MapLiteral(node, env) {
+        let result = {}
+        each(node.pairs, fn(pair) {
+            let key_node = pair[0]
+            let val_node = pair[1]
+            if key_node == null and val_node.node_type == "SpreadExpression" {
+                let spread_val = this.evaluate(val_node.value, env)
+                if type(spread_val) == "map" {
+                    let ks = keys(spread_val)
+                    each(ks, fn(k) { result[k] = spread_val[k] })
+                } else {
+                    throw "TypeError: Can only spread a map into a map (line {val_node.line})"
+                }
+            } else {
+                let key = this.evaluate(key_node, env)
+                let value = this.evaluate(val_node, env)
+                result[key] = value
+            }
+        })
+        return result
+    }
+
+    fn eval_BinaryOp(node, env) {
+        -- Short-circuit for and/or
+        if node.operator == "and" {
+            let left = this.evaluate(node.left, env)
+            if not this._is_truthy(left) { return left }
+            return this.evaluate(node.right, env)
+        }
+        if node.operator == "or" {
+            let left = this.evaluate(node.left, env)
+            if this._is_truthy(left) { return left }
+            return this.evaluate(node.right, env)
+        }
+        let left = this.evaluate(node.left, env)
+        let right = this.evaluate(node.right, env)
+        return this._binary_op(left, node.operator, right, node.line)
+    }
+
+    fn _binary_op(left, op, right, line) {
+        if op == "+" {
+            if type(left) == "string" or type(right) == "string" {
+                return this._to_display(left) + this._to_display(right)
+            }
+            if type(left) == "list" and type(right) == "list" {
+                return left + right
+            }
+            return left + right
+        }
+        if op == "-" { return left - right }
+        if op == "*" {
+            if type(left) == "string" and type(right) == "number" {
+                return repeat(left, right)
+            }
+            return left * right
+        }
+        if op == "/" {
+            if right == 0 {
+                throw "RuntimeError: Division by zero (line {line})"
+            }
+            let result = left / right
+            -- Integer division when both operands are whole numbers and result is whole
+            if result == floor(result) {
+                return int(result)
+            }
+            return result
+        }
+        if op == "%" { return left % right }
+        if op == "**" { return pow(left, right) }
+        if op == "==" { return left == right }
+        if op == "!=" { return left != right }
+        if op == "<" { return left < right }
+        if op == ">" { return left > right }
+        if op == "<=" { return left <= right }
+        if op == ">=" { return left >= right }
+        if op == "is" { return left == right }
+        throw "RuntimeError: Unknown operator: {op} (line {line})"
+    }
+
+    fn eval_UnaryOp(node, env) {
+        let operand = this.evaluate(node.operand, env)
+        if node.operator == "-" { return -operand }
+        if node.operator == "not" { return not this._is_truthy(operand) }
+        throw "RuntimeError: Unknown unary operator: {node.operator} (line {node.line})"
+    }
+
+    fn eval_CallExpression(node, env) {
+        let callee = this.evaluate(node.callee, env)
+        let call_args = []
+        each(node.arguments, fn(arg_node) {
+            if arg_node.node_type == "SpreadExpression" {
+                let spread_val = this.evaluate(arg_node.value, env)
+                if type(spread_val) == "list" {
+                    each(spread_val, fn(item) { push(call_args, item) })
+                } else {
+                    push(call_args, spread_val)
+                }
+            } else {
+                push(call_args, this.evaluate(arg_node, env))
+            }
+        })
+        return this._call(callee, call_args, node.line)
+    }
+
+    fn _call(callee, args, line) {
+        let t = type(callee)
+
+        -- Class instantiation
+        if t == "ClarityClass" {
+            return this._instantiate(callee, args, line)
+        }
+
+        -- Enum lookup
+        if t == "ClarityEnum" {
+            if len(args) == 1 {
+                let target = args[0]
+                let member_names = keys(callee.members)
+                mut i = 0
+                while i < len(member_names) {
+                    if callee.members[member_names[i]] == target {
+                        return member_names[i]
+                    }
+                    i += 1
+                }
+                return null
+            }
+            throw "RuntimeError: Enum lookup takes 1 argument (line {line})"
+        }
+
+        -- ClarityFunction call
+        if t == "ClarityFunction" {
+            let fn_env = Environment(callee.closure)
+            -- Separate regular params and rest param
+            let regular_params = []
+            mut rest_param = null
+            each(callee.params, fn(p) {
+                if starts(p, "...") {
+                    rest_param = p
+                } else {
+                    push(regular_params, p)
+                }
+            })
+
+            -- Bind params
+            mut i = 0
+            while i < len(regular_params) {
+                let val = if i < len(args) { args[i] } else { null }
+                fn_env.set(regular_params[i], val, true)
+                i += 1
+            }
+            if rest_param != null {
+                let rest_name = substring(rest_param, 3)
+                mut rest_vals = []
+                if len(regular_params) < len(args) {
+                    rest_vals = _slice_from(args, len(regular_params))
+                }
+                fn_env.set(rest_name, rest_vals, true)
+            }
+
+            push(this._call_stack, {"name": callee.name, "line": line})
+            try {
+                this.exec_Block(callee.body, fn_env)
+                pop(this._call_stack)
+                return null
+            } catch sig {
+                pop(this._call_stack)
+                if is_signal(sig) and signal_type(sig) == "return" {
+                    return sig["value"]
+                }
+                throw sig
+            }
+        }
+
+        -- Host builtin function (from Clarity runtime)
+        if t == "function" or t == "builtin" {
+            try {
+                return callee(...args)
+            } catch e_call {
+                if is_signal(e_call) {
+                    throw e_call
+                }
+                throw "RuntimeError: {e_call} (line {line})"
+            }
+        }
+
+        throw "TypeError: '{cl_type_name(callee)}' is not callable (line {line})"
+    }
+
+    fn _instantiate(klass, args, line) {
+        let instance = ClarityInstance(klass)
+        let init_method = instance.find_method("init")
+        if init_method != null {
+            let fn_env = Environment(init_method.closure)
+            fn_env.set("this", instance, true)
+            let regular_params = []
+            mut rest_param = null
+            each(init_method.params, fn(p) {
+                if starts(p, "...") { rest_param = p } else { push(regular_params, p) }
+            })
+            mut i = 0
+            while i < len(regular_params) {
+                let val = if i < len(args) { args[i] } else { null }
+                fn_env.set(regular_params[i], val, true)
+                i += 1
+            }
+            if rest_param != null {
+                mut inst_rest = []
+                if len(regular_params) < len(args) {
+                    inst_rest = _slice_from(args, len(regular_params))
+                }
+                fn_env.set(substring(rest_param, 3), inst_rest, true)
+            }
+            try {
+                this.exec_Block(init_method.body, fn_env)
+            } catch sig {
+                if is_signal(sig) and signal_type(sig) == "return" {
+                    -- Ignore return from init
+                } else {
+                    throw sig
+                }
+            }
+        }
+        return instance
+    }
+
+    fn eval_MemberExpression(node, env) {
+        let obj = this.evaluate(node.object, env)
+        return this._access_member(obj, node.property, node.line)
+    }
+
+    fn eval_OptionalMemberExpression(node, env) {
+        let obj = this.evaluate(node.object, env)
+        if obj == null { return null }
+        try {
+            return this._access_member(obj, node.property, node.line)
+        } catch e_opt {
+            return null
+        }
+    }
+
+    fn _access_member(obj, prop, line) {
+        let t = type(obj)
+
+        -- Enum member access
+        if t == "ClarityEnum" {
+            if has(obj.members, prop) {
+                return obj.members[prop]
+            }
+            if prop == "values" { return fn() { return values(obj.members) } }
+            if prop == "names" { return fn() { return keys(obj.members) } }
+            if prop == "entries" { return fn() { return entries(obj.members) } }
+            if prop == "has" { return fn(name) { return has(obj.members, name) } }
+            throw "RuntimeError: Enum {obj.name} has no member '{prop}' (line {line})"
+        }
+
+        -- Instance property/method access
+        if t == "ClarityInstance" {
+            let val = obj.get_prop(prop)
+            if val != null {
+                -- If it's a ClarityFunction (method), bind it
+                if type(val) == "ClarityFunction" {
+                    let bound_instance = obj
+                    let bound_method = val
+                    let interp = this
+                    return fn(...method_args) {
+                        let m_env = Environment(bound_method.closure)
+                        m_env.set("this", bound_instance, true)
+                        let reg_params = []
+                        mut rp = null
+                        each(bound_method.params, fn(p) {
+                            if starts(p, "...") { rp = p } else { push(reg_params, p) }
+                        })
+                        mut mi = 0
+                        while mi < len(reg_params) {
+                            m_env.set(reg_params[mi], if mi < len(method_args) { method_args[mi] } else { null }, true)
+                            mi += 1
+                        }
+                        if rp != null {
+                            mut m_rest = []
+                            if len(reg_params) < len(method_args) {
+                                m_rest = _slice_from(method_args, len(reg_params))
+                            }
+                            m_env.set(substring(rp, 3), m_rest, true)
+                        }
+                        try {
+                            interp.exec_Block(bound_method.body, m_env)
+                            return null
+                        } catch sig {
+                            if is_signal(sig) and signal_type(sig) == "return" {
+                                return sig["value"]
+                            }
+                            throw sig
+                        }
+                    }
+                }
+                return val
+            }
+            throw "RuntimeError: {obj.klass.name} has no property '{prop}' (line {line})"
+        }
+
+        -- Map property access
+        if t == "map" {
+            if has(obj, prop) { return obj[prop] }
+            return null
+        }
+
+        -- List methods
+        if t == "list" {
+            if prop == "length" { return fn() { return len(obj) } }
+            if prop == "push" { return fn(v) { push(obj, v) } }
+            if prop == "pop" { return fn() { return pop(obj) } }
+            if prop == "first" { return fn() { return if len(obj) > 0 { obj[0] } else { null } } }
+            if prop == "last" { return fn() { return if len(obj) > 0 { obj[len(obj) - 1] } else { null } } }
+            if prop == "reverse" { return fn() { return reverse(obj) } }
+            if prop == "sort" { return fn() { return sort(obj) } }
+            if prop == "join" { return fn(sep) { return join(obj, sep ?? "") } }
+            if prop == "contains" { return fn(v) { return contains(obj, v) } }
+            if prop == "empty" { return fn() { return len(obj) == 0 } }
+            if prop == "count" { return fn() { return len(obj) } }
+            if prop == "slice" { return fn(s, e) { if e != null { return _slice_range(obj, s, e) } return _slice_from(obj, s) } }
+            if prop == "index" { return fn(v) { return index_of(obj, v) } }
+            if prop == "copy" { return fn() { return _list_copy(obj) } }
+            throw "RuntimeError: List has no property '{prop}' (line {line})"
+        }
+
+        -- String methods
+        if t == "string" {
+            if prop == "length" { return fn() { return len(obj) } }
+            if prop == "upper" { return fn() { return upper(obj) } }
+            if prop == "lower" { return fn() { return lower(obj) } }
+            if prop == "trim" { return fn() { return trim(obj) } }
+            if prop == "split" { return fn(sep) { return split(obj, sep ?? " ") } }
+            if prop == "replace" { return fn(old, new_s) { return replace(obj, old, new_s) } }
+            if prop == "contains" { return fn(s) { return contains(obj, s) } }
+            if prop == "starts" { return fn(s) { return starts(obj, s) } }
+            if prop == "ends" { return fn(s) { return ends(obj, s) } }
+            if prop == "chars" { return fn() { return chars(obj) } }
+            if prop == "count" { return fn() { return len(obj) } }
+            if prop == "reverse" { return fn() { return reverse(obj) } }
+            if prop == "empty" { return fn() { return len(obj) == 0 } }
+            if prop == "slice" { return fn(s, e) { if e != null { return substring(obj, s, e) } return substring(obj, s) } }
+            if prop == "find" { return fn(s) { return index_of(obj, s) } }
+            if prop == "repeat" { return fn(n) { return repeat(obj, n) } }
+            throw "RuntimeError: String has no property '{prop}' (line {line})"
+        }
+
+        -- Number methods
+        if t == "number" {
+            if prop == "abs" { return fn() { return abs(obj) } }
+            if prop == "str" { return fn() { return str(obj) } }
+            throw "RuntimeError: Number has no property '{prop}' (line {line})"
+        }
+
+        throw "TypeError: Cannot access property on {cl_type_name(obj)} (line {line})"
+    }
+
+    fn eval_IndexExpression(node, env) {
+        let obj = this.evaluate(node.object, env)
+        let index = this.evaluate(node.index, env)
+        let t = type(obj)
+
+        if t == "list" {
+            if index < -len(obj) or index >= len(obj) {
+                throw "RuntimeError: Index {index} out of bounds (list has {len(obj)} items) (line {node.line})"
+            }
+            return obj[index]
+        }
+        if t == "map" {
+            if not has(obj, index) { return null }
+            return obj[index]
+        }
+        if t == "string" {
+            if index < -len(obj) or index >= len(obj) {
+                throw "RuntimeError: Index {index} out of bounds (line {node.line})"
+            }
+            return obj[index]
+        }
+        throw "TypeError: Cannot index into {cl_type_name(obj)} (line {node.line})"
+    }
+
+    fn eval_SliceExpression(node, env) {
+        let obj = this.evaluate(node.object, env)
+        let s = if node.start != null { this.evaluate(node.start, env) } else { null }
+        let e = if node.end != null { this.evaluate(node.end, env) } else { null }
+        if s != null and e != null { return _slice_range(obj, s, e) }
+        if s != null { return _slice_from(obj, s) }
+        if e != null { return _slice_to(obj, e) }
+        return _list_copy(obj)
+    }
+
+    fn eval_FnExpression(node, env) {
+        return ClarityFunction(null, node.params, node.body, env, false)
+    }
+
+    fn eval_PipeExpression(node, env) {
+        let value = this.evaluate(node.value, env)
+        if node.function.node_type == "CallExpression" {
+            let callee = this.evaluate(node.function.callee, env)
+            let extra_args = map(node.function.arguments, fn(a) { return this.evaluate(a, env) })
+            let all_args = [value]
+            each(extra_args, fn(a) { push(all_args, a) })
+            return this._call(callee, all_args, node.line)
+        }
+        let f = this.evaluate(node.function, env)
+        return this._call(f, [value], node.line)
+    }
+
+    fn eval_RangeExpression(node, env) {
+        let s = this.evaluate(node.start, env)
+        if node.end == null {
+            throw "RuntimeError: Open-ended range can only be used in slicing (line {node.line})"
+        }
+        let e = this.evaluate(node.end, env)
+        return range(s, e)
+    }
+
+    fn eval_AskExpression(node, env) {
+        let prompt = this.evaluate(node.prompt, env)
+        return ask(this._to_display(prompt))
+    }
+
+    fn eval_NullCoalesce(node, env) {
+        let left = this.evaluate(node.left, env)
+        if left != null { return left }
+        return this.evaluate(node.right, env)
+    }
+
+    fn eval_IfExpression(node, env) {
+        if this._is_truthy(this.evaluate(node.condition, env)) {
+            return this.evaluate(node.true_expr, env)
+        }
+        return this.evaluate(node.false_expr, env)
+    }
+
+    fn eval_ComprehensionExpression(node, env) {
+        let iterable = this.evaluate(node.iterable, env)
+        let result = []
+        each(iterable, fn(item) {
+            let comp_env = Environment(env)
+            comp_env.set(node.variable, item, true)
+            if node.condition != null {
+                if not this._is_truthy(this.evaluate(node.condition, comp_env)) {
+                    return null
+                }
+            }
+            push(result, this.evaluate(node.expr, comp_env))
+        })
+        return result
+    }
+
+    fn eval_MapComprehensionExpression(node, env) {
+        let iterable = this.evaluate(node.iterable, env)
+        let result = {}
+        each(iterable, fn(item) {
+            let comp_env = Environment(env)
+            if len(node.variables) == 1 {
+                comp_env.set(node.variables[0], item, true)
+            } else {
+                if type(item) == "list" {
+                    mut vi = 0
+                    while vi < len(node.variables) {
+                        let val = if vi < len(item) { item[vi] } else { null }
+                        comp_env.set(node.variables[vi], val, true)
+                        vi += 1
+                    }
+                } else {
+                    comp_env.set(node.variables[0], item, true)
+                }
+            }
+            if node.condition != null {
+                if not this._is_truthy(this.evaluate(node.condition, comp_env)) {
+                    return null
+                }
+            }
+            let k = this.evaluate(node.key_expr, comp_env)
+            let v = this.evaluate(node.value_expr, comp_env)
+            result[k] = v
+        })
+        return result
+    }
+
+    fn eval_YieldExpression(node, env) {
+        let value = if node.value != null { this.evaluate(node.value, env) } else { null }
+        if this._gen_collection != null {
+            push(this._gen_collection, value)
+            return value
+        }
+        return value
+    }
+
+    -- ── Helpers ──────────────────────────────────────────
+
+    fn _is_truthy(value) {
+        if value == null { return false }
+        let t = type(value)
+        if t == "bool" { return value }
+        if t == "number" { return value != 0 }
+        if t == "string" { return len(value) > 0 }
+        if t == "list" { return len(value) > 0 }
+        if t == "map" { return len(keys(value)) > 0 }
+        return true
+    }
+
+    fn _to_display(value) {
+        if value == null { return "null" }
+        let t = type(value)
+        if t == "bool" {
+            if value { return "true" }
+            return "false"
+        }
+        if t == "number" { return str(value) }
+        if t == "string" { return value }
+        if t == "list" {
+            let items = join(map(value, fn(v) { return this._to_repr(v) }), ", ")
+            return "[{items}]"
+        }
+        if t == "map" {
+            let ks = keys(value)
+            let pairs = join(map(ks, fn(k) {
+                return "{k}: {this._to_repr(value[k])}"
+            }), ", ")
+            return "\{{pairs}\}"
+        }
+        if t == "ClarityFunction" { return value.to_string() }
+        if t == "ClarityClass" { return value.to_string() }
+        if t == "ClarityInstance" {
+            -- Check for to_string method
+            let ts_method = value.find_method("to_string")
+            if ts_method != null {
+                try {
+                    let bound_result = this._call_bound_method(value, ts_method, [])
+                    return this._to_display(bound_result)
+                } catch e_ts {
+                    -- fall through
+                }
+            }
+            return value.to_string()
+        }
+        if t == "ClarityEnum" { return value.to_string() }
+        if t == "ClarityInterface" { return value.to_string() }
+        if t == "function" or t == "builtin" { return "<builtin>" }
+        return str(value)
+    }
+
+    fn _to_repr(value) {
+        if type(value) == "string" {
+            return "\"{value}\""
+        }
+        return this._to_display(value)
+    }
+
+    fn _call_bound_method(instance, method, args) {
+        let m_env = Environment(method.closure)
+        m_env.set("this", instance, true)
+        mut i = 0
+        while i < len(method.params) and i < len(args) {
+            m_env.set(method.params[i], args[i], true)
+            i += 1
+        }
+        try {
+            this.exec_Block(method.body, m_env)
+            return null
+        } catch sig {
+            if is_signal(sig) and signal_type(sig) == "return" {
+                return sig["value"]
+            }
+            throw sig
+        }
+    }
+
+    fn _interpolate_string(text, env, line) {
+        -- Walk through text, find {expr} patterns, evaluate them
+        mut result = ""
+        mut i = 0
+        let text_len = len(text)
+        while i < text_len {
+            let ch = text[i]
+            if ch == "{" {
+                -- Find matching }
+                mut j = i + 1
+                mut depth = 1
+                while j < text_len and depth > 0 {
+                    if text[j] == "{" { depth += 1 }
+                    if text[j] == "}" { depth -= 1 }
+                    if depth > 0 { j += 1 }
+                }
+                if depth == 0 {
+                    let expr_str = substring(text, i + 1, j)
+                    try {
+                        let tokens = tokenize(expr_str, "<interp>")
+                        let tree = parse(tokens, expr_str)
+                        if len(tree.body) > 0 {
+                            let val = this.evaluate(tree.body[0].expression, env)
+                            result = result + this._to_display(val)
+                        }
+                    } catch e_interp {
+                        result = result + "{" + expr_str + "}"
+                    }
+                    i = j + 1
+                } else {
+                    result = result + ch
+                    i += 1
+                }
+            } else {
+                result = result + ch
+                i += 1
+            }
+        }
+        return result
+    }
+}
+
+-- ── Slice helpers (parser doesn't support [x:] without end) ──
+
+fn _slice_from(lst, start) {
+    let result = []
+    mut i = start
+    while i < len(lst) {
+        push(result, lst[i])
+        i += 1
+    }
+    return result
+}
+
+fn _slice_range(lst, start, end_idx) {
+    let result = []
+    mut i = start
+    while i < end_idx and i < len(lst) {
+        push(result, lst[i])
+        i += 1
+    }
+    return result
+}
+
+fn _slice_to(lst, end_idx) {
+    return _slice_range(lst, 0, end_idx)
+}
+
+fn _list_copy(lst) {
+    return _slice_from(lst, 0)
+}
+
+-- ── Convenience function ────────────────────────────────
+
+fn interpret(source, source_dir) {
+    let tokens = tokenize(source, "<main>")
+    let tree = parse(tokens, source)
+    let interp = Interpreter(null, source_dir)
+    interp.run(tree)
+    return interp
+}

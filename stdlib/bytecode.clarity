@@ -1,0 +1,1403 @@
+-- Clarity Bytecode Compiler and Virtual Machine — self-hosting implementation
+-- Faithful port of clarity/bytecode.py, written in Clarity itself.
+--
+-- Compiles AST to stack-based bytecode, then executes on a simple VM.
+-- Usage:
+--   from "bytecode.clarity" import compile_to_bytecode, VM
+--   let code = compile_to_bytecode(ast_tree)
+--   let vm = VM()
+--   vm.run(code)
+
+-- ── Opcodes ──────────────────────────────────────────────
+
+let OP_CONST = 0        -- Push constant from pool
+let OP_POP = 1          -- Discard top of stack
+let OP_ADD = 2
+let OP_SUB = 3
+let OP_MUL = 4
+let OP_DIV = 5
+let OP_MOD = 6
+let OP_POW = 7
+let OP_NEG = 8
+let OP_NOT = 9
+let OP_EQ = 10
+let OP_NEQ = 11
+let OP_LT = 12
+let OP_GT = 13
+let OP_LTE = 14
+let OP_GTE = 15
+let OP_LOAD = 16        -- Load variable by name (from constant pool)
+let OP_STORE = 17       -- Store into existing variable
+let OP_STORE_NEW = 18   -- Declare new variable (0=immutable, 1=mutable)
+let OP_JUMP = 19        -- Unconditional jump
+let OP_JUMP_FALSE = 20  -- Jump if top is falsy (pops)
+let OP_CALL = 21        -- Call function with N args
+let OP_RETURN = 22      -- Return from function
+let OP_MAKE_LIST = 23   -- Create list from N items on stack
+let OP_MAKE_MAP = 24    -- Create map from N key-value pairs on stack
+let OP_GET_IDX = 25     -- Index access
+let OP_SET_IDX = 26     -- Index assignment
+let OP_GET_PROP = 27    -- Property access
+let OP_SET_PROP = 28    -- Property assignment
+let OP_PRINT = 29       -- Show statement — print N values
+let OP_MAKE_FN = 30     -- Create function from code object
+let OP_DUP = 31         -- Duplicate top
+let OP_ITER_INIT = 32   -- Create iterator from iterable
+let OP_ITER_NEXT = 33   -- Get next from iterator (pushes value + bool)
+let OP_AND = 34
+let OP_OR = 35
+let OP_BIT_AND = 36
+let OP_BIT_OR = 37
+let OP_BIT_XOR = 38
+let OP_BIT_NOT = 39
+let OP_LSHIFT = 40
+let OP_RSHIFT = 41
+let OP_RANGE = 42       -- Create range from two ints
+let OP_NULL = 43        -- Push null
+let OP_TRUE = 44        -- Push true
+let OP_FALSE = 45       -- Push false
+let OP_CONCAT = 46      -- String concatenation
+let OP_PIPE = 47        -- Pipe: call function with value as first arg
+let OP_HALT = 255
+
+-- Opcode names for disassembly
+let OP_NAMES = {
+    0: "CONST",
+    1: "POP",
+    2: "ADD",
+    3: "SUB",
+    4: "MUL",
+    5: "DIV",
+    6: "MOD",
+    7: "POW",
+    8: "NEG",
+    9: "NOT",
+    10: "EQ",
+    11: "NEQ",
+    12: "LT",
+    13: "GT",
+    14: "LTE",
+    15: "GTE",
+    16: "LOAD",
+    17: "STORE",
+    18: "STORE_NEW",
+    19: "JUMP",
+    20: "JUMP_FALSE",
+    21: "CALL",
+    22: "RETURN",
+    23: "MAKE_LIST",
+    24: "MAKE_MAP",
+    25: "GET_IDX",
+    26: "SET_IDX",
+    27: "GET_PROP",
+    28: "SET_PROP",
+    29: "PRINT",
+    30: "MAKE_FN",
+    31: "DUP",
+    32: "ITER_INIT",
+    33: "ITER_NEXT",
+    34: "AND",
+    35: "OR",
+    36: "BIT_AND",
+    37: "BIT_OR",
+    38: "BIT_XOR",
+    39: "BIT_NOT",
+    40: "LSHIFT",
+    41: "RSHIFT",
+    42: "RANGE",
+    43: "NULL",
+    44: "TRUE",
+    45: "FALSE",
+    46: "CONCAT",
+    47: "PIPE",
+    255: "HALT"
+}
+
+-- ── Bytecode container ──────────────────────────────────
+
+class CodeObject {
+    -- Holds bytecode instructions and constant pool.
+
+    fn init(name) {
+        this.name = name ?? "<main>"
+        this.instructions = []   -- list of [op, operand]
+        this.constants = []      -- constant pool
+        this.lines = []          -- line numbers for each instruction
+    }
+
+    fn emit(op, operand, line) {
+        let op_val = op ?? 0
+        let operand_val = operand ?? 0
+        let line_val = line ?? 0
+        push(this.instructions, [op_val, operand_val])
+        push(this.lines, line_val)
+        return len(this.instructions) - 1
+    }
+
+    fn add_const(value) {
+        -- Check if constant already exists in pool
+        mut i = 0
+        while i < len(this.constants) {
+            let existing = this.constants[i]
+            -- Only de-duplicate simple values (not code objects or lists)
+            if type(existing) == type(value) {
+                let t = type(value)
+                if t == "number" or t == "string" or t == "bool" or t == "null" {
+                    if existing == value {
+                        return i
+                    }
+                }
+            }
+            i += 1
+        }
+        push(this.constants, value)
+        return len(this.constants) - 1
+    }
+
+    fn patch_jump(idx) {
+        -- Patch a jump instruction to point to current position.
+        let instr = this.instructions[idx]
+        let op = instr[0]
+        this.instructions[idx] = [op, len(this.instructions)]
+    }
+
+    fn disassemble() {
+        -- Pretty-print the bytecode.
+        mut lines = ["=== {this.name} ==="]
+        push(lines, "Constants: {_bc_display_list(this.constants)}")
+        mut i = 0
+        while i < len(this.instructions) {
+            let instr = this.instructions[i]
+            let op = instr[0]
+            let operand = instr[1]
+            let name = if has(OP_NAMES, op) { OP_NAMES[op] } else { str(op) }
+            mut extra = ""
+            if op == OP_CONST or op == OP_LOAD or op == OP_STORE or op == OP_STORE_NEW or op == OP_GET_PROP or op == OP_SET_PROP {
+                if operand < len(this.constants) {
+                    extra = "  ; {_bc_repr(this.constants[operand])}"
+                }
+            }
+            -- Format: index  OPNAME  operand  extra
+            push(lines, "  {_pad_left(str(i), 4)}  {_pad_right(name, 14)} {_pad_right(str(operand), 6)}{extra}")
+            i += 1
+        }
+        return join(lines, "\n")
+    }
+}
+
+-- ── Compiler ─────────────────────────────────────────────
+
+class Compiler {
+    -- Compiles an AST to bytecode.
+
+    fn init() {
+        this.code = CodeObject(null)
+    }
+
+    fn compile(program) {
+        mut i = 0
+        while i < len(program.body) {
+            this.compile_node(program.body[i])
+            i += 1
+        }
+        this.code.emit(OP_HALT)
+        return this.code
+    }
+
+    fn compile_node(node) {
+        let nt = node.node_type
+        if nt == "ExpressionStatement" { return this.compile_ExpressionStatement(node) }
+        if nt == "LetStatement" { return this.compile_LetStatement(node) }
+        if nt == "AssignStatement" { return this.compile_AssignStatement(node) }
+        if nt == "FnStatement" { return this.compile_FnStatement(node) }
+        if nt == "ReturnStatement" { return this.compile_ReturnStatement(node) }
+        if nt == "ShowStatement" { return this.compile_ShowStatement(node) }
+        if nt == "IfStatement" { return this.compile_IfStatement(node) }
+        if nt == "WhileStatement" { return this.compile_WhileStatement(node) }
+        if nt == "ForStatement" { return this.compile_ForStatement(node) }
+        if nt == "Block" { return this.compile_Block(node) }
+        -- Expressions (when used as statements or sub-expressions)
+        if nt == "NumberLiteral" { return this.compile_NumberLiteral(node) }
+        if nt == "StringLiteral" { return this.compile_StringLiteral(node) }
+        if nt == "BoolLiteral" { return this.compile_BoolLiteral(node) }
+        if nt == "NullLiteral" { return this.compile_NullLiteral(node) }
+        if nt == "Identifier" { return this.compile_Identifier(node) }
+        if nt == "BinaryOp" { return this.compile_BinaryOp(node) }
+        if nt == "UnaryOp" { return this.compile_UnaryOp(node) }
+        if nt == "CallExpression" { return this.compile_CallExpression(node) }
+        if nt == "ListLiteral" { return this.compile_ListLiteral(node) }
+        if nt == "MapLiteral" { return this.compile_MapLiteral(node) }
+        if nt == "IndexExpression" { return this.compile_IndexExpression(node) }
+        if nt == "MemberExpression" { return this.compile_MemberExpression(node) }
+        if nt == "RangeExpression" { return this.compile_RangeExpression(node) }
+        if nt == "PipeExpression" { return this.compile_PipeExpression(node) }
+        if nt == "FnExpression" { return this.compile_FnExpression(node) }
+        if nt == "IfExpression" { return this.compile_IfExpression(node) }
+        throw "CompileError: Cannot compile node type: {nt}"
+    }
+
+    -- ── Statement compilers ─────────────────────────────
+
+    fn compile_ExpressionStatement(node) {
+        this.compile_node(node.expression)
+        let line = node.line ?? 0
+        this.code.emit(OP_POP, 0, line)
+    }
+
+    fn compile_LetStatement(node) {
+        this.compile_node(node.value)
+        let name_idx = this.code.add_const(node.name)
+        let line = node.line ?? 0
+        this.code.emit(OP_STORE_NEW, name_idx, line)
+    }
+
+    fn compile_AssignStatement(node) {
+        this.compile_node(node.value)
+        let target = node.target
+        let line = node.line ?? 0
+
+        if target.node_type == "Identifier" {
+            if node.operator != "=" {
+                -- Compound assignment: load current value, apply op, store
+                let name_idx = this.code.add_const(target.name)
+                this.code.emit(OP_LOAD, name_idx, line)
+                -- Stack now has: value (from compile_node above), then current
+                -- We need: current OP value
+                if node.operator == "+=" {
+                    this.code.emit(OP_ADD, 0, line)
+                } elif node.operator == "-=" {
+                    this.code.emit(OP_SUB, 0, line)
+                } elif node.operator == "*=" {
+                    this.code.emit(OP_MUL, 0, line)
+                } elif node.operator == "/=" {
+                    this.code.emit(OP_DIV, 0, line)
+                }
+            }
+            let name_idx = this.code.add_const(target.name)
+            this.code.emit(OP_STORE, name_idx, line)
+        } elif target.node_type == "IndexExpression" {
+            this.compile_node(target.object)
+            this.compile_node(target.index)
+            this.code.emit(OP_SET_IDX, 0, line)
+        } elif target.node_type == "MemberExpression" {
+            this.compile_node(target.object)
+            let prop_idx = this.code.add_const(target.property)
+            this.code.emit(OP_SET_PROP, prop_idx, line)
+        }
+    }
+
+    fn compile_FnStatement(node) {
+        let fn_compiler = Compiler()
+        fn_compiler.code = CodeObject(node.name)
+        mut i = 0
+        while i < len(node.body.statements) {
+            fn_compiler.compile_node(node.body.statements[i])
+            i += 1
+        }
+        -- Implicit null return at end
+        fn_compiler.code.emit(OP_CONST, fn_compiler.code.add_const(null))
+        fn_compiler.code.emit(OP_RETURN)
+        -- Store the compiled code and params in the constant pool
+        let fn_code_idx = this.code.add_const(fn_compiler.code)
+        let params_idx = this.code.add_const(node.params)
+        let line = node.line ?? 0
+        this.code.emit(OP_MAKE_FN, fn_code_idx, line)
+        let name_idx = this.code.add_const(node.name)
+        this.code.emit(OP_STORE_NEW, name_idx, line)
+    }
+
+    fn compile_ReturnStatement(node) {
+        if node.value != null {
+            this.compile_node(node.value)
+        } else {
+            this.code.emit(OP_NULL)
+        }
+        let line = node.line ?? 0
+        this.code.emit(OP_RETURN, 0, line)
+    }
+
+    fn compile_ShowStatement(node) {
+        mut i = 0
+        while i < len(node.values) {
+            this.compile_node(node.values[i])
+            i += 1
+        }
+        let line = node.line ?? 0
+        this.code.emit(OP_PRINT, len(node.values), line)
+    }
+
+    fn compile_IfStatement(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.condition)
+        let jump_false = this.code.emit(OP_JUMP_FALSE, 0, line)
+        this.compile_block(node.body)
+        let jump_end = this.code.emit(OP_JUMP, 0)
+        this.code.patch_jump(jump_false)
+
+        -- Handle elif clauses
+        if has(node, "elif_clauses") and node.elif_clauses != null and len(node.elif_clauses) > 0 {
+            mut ei = 0
+            -- We need to collect jump-to-end positions for each elif
+            mut elif_end_jumps = []
+            while ei < len(node.elif_clauses) {
+                let clause = node.elif_clauses[ei]
+                let elif_cond = clause[0]
+                let elif_body = clause[1]
+                this.compile_node(elif_cond)
+                let elif_jump_false = this.code.emit(OP_JUMP_FALSE, 0, line)
+                this.compile_block(elif_body)
+                let elif_jump_end = this.code.emit(OP_JUMP, 0)
+                push(elif_end_jumps, elif_jump_end)
+                this.code.patch_jump(elif_jump_false)
+                ei += 1
+            }
+            -- Now compile else body if present
+            if node.else_body != null {
+                this.compile_block(node.else_body)
+            }
+            -- Patch all elif end jumps
+            mut ji = 0
+            while ji < len(elif_end_jumps) {
+                this.code.patch_jump(elif_end_jumps[ji])
+                ji += 1
+            }
+        } else {
+            if node.else_body != null {
+                this.compile_block(node.else_body)
+            }
+        }
+        this.code.patch_jump(jump_end)
+    }
+
+    fn compile_WhileStatement(node) {
+        let line = node.line ?? 0
+        let loop_start = len(this.code.instructions)
+        this.compile_node(node.condition)
+        let jump_false = this.code.emit(OP_JUMP_FALSE, 0, line)
+        this.compile_block(node.body)
+        this.code.emit(OP_JUMP, loop_start)
+        this.code.patch_jump(jump_false)
+    }
+
+    fn compile_ForStatement(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.iterable)
+        this.code.emit(OP_ITER_INIT, 0, line)
+        let loop_start = len(this.code.instructions)
+        this.code.emit(OP_DUP)        -- dup iterator
+        this.code.emit(OP_ITER_NEXT)   -- push (value, has_next)
+        let jump_end = this.code.emit(OP_JUMP_FALSE, 0)
+        let name_idx = this.code.add_const(node.variable)
+        this.code.emit(OP_STORE_NEW, name_idx)
+        this.compile_block(node.body)
+        this.code.emit(OP_JUMP, loop_start)
+        this.code.patch_jump(jump_end)
+        this.code.emit(OP_POP)         -- pop iterator
+    }
+
+    fn compile_block(block) {
+        mut i = 0
+        while i < len(block.statements) {
+            this.compile_node(block.statements[i])
+            i += 1
+        }
+    }
+
+    fn compile_Block(node) {
+        this.compile_block(node)
+    }
+
+    -- ── Expression compilers ────────────────────────────
+
+    fn compile_NumberLiteral(node) {
+        let idx = this.code.add_const(node.value)
+        let line = node.line ?? 0
+        this.code.emit(OP_CONST, idx, line)
+    }
+
+    fn compile_StringLiteral(node) {
+        let idx = this.code.add_const(node.value)
+        let line = node.line ?? 0
+        this.code.emit(OP_CONST, idx, line)
+    }
+
+    fn compile_BoolLiteral(node) {
+        let line = node.line ?? 0
+        if node.value {
+            this.code.emit(OP_TRUE, 0, line)
+        } else {
+            this.code.emit(OP_FALSE, 0, line)
+        }
+    }
+
+    fn compile_NullLiteral(node) {
+        let line = node.line ?? 0
+        this.code.emit(OP_NULL, 0, line)
+    }
+
+    fn compile_Identifier(node) {
+        let idx = this.code.add_const(node.name)
+        let line = node.line ?? 0
+        this.code.emit(OP_LOAD, idx, line)
+    }
+
+    fn compile_BinaryOp(node) {
+        let line = node.line ?? 0
+        let op = node.operator
+
+        -- Build operator-to-opcode mapping
+        this.compile_node(node.left)
+        this.compile_node(node.right)
+
+        if op == "+" { this.code.emit(OP_ADD, 0, line) }
+        elif op == "-" { this.code.emit(OP_SUB, 0, line) }
+        elif op == "*" { this.code.emit(OP_MUL, 0, line) }
+        elif op == "/" { this.code.emit(OP_DIV, 0, line) }
+        elif op == "%" { this.code.emit(OP_MOD, 0, line) }
+        elif op == "**" { this.code.emit(OP_POW, 0, line) }
+        elif op == "==" { this.code.emit(OP_EQ, 0, line) }
+        elif op == "!=" { this.code.emit(OP_NEQ, 0, line) }
+        elif op == "<" { this.code.emit(OP_LT, 0, line) }
+        elif op == ">" { this.code.emit(OP_GT, 0, line) }
+        elif op == "<=" { this.code.emit(OP_LTE, 0, line) }
+        elif op == ">=" { this.code.emit(OP_GTE, 0, line) }
+        elif op == "and" { this.code.emit(OP_AND, 0, line) }
+        elif op == "or" { this.code.emit(OP_OR, 0, line) }
+        elif op == "&" { this.code.emit(OP_BIT_AND, 0, line) }
+        elif op == "|" { this.code.emit(OP_BIT_OR, 0, line) }
+        elif op == "^" { this.code.emit(OP_BIT_XOR, 0, line) }
+        elif op == "<<" { this.code.emit(OP_LSHIFT, 0, line) }
+        elif op == ">>" { this.code.emit(OP_RSHIFT, 0, line) }
+        else {
+            throw "CompileError: Unknown binary operator: {op}"
+        }
+    }
+
+    fn compile_UnaryOp(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.operand)
+        if node.operator == "-" {
+            this.code.emit(OP_NEG, 0, line)
+        } elif node.operator == "not" {
+            this.code.emit(OP_NOT, 0, line)
+        } elif node.operator == "~" {
+            this.code.emit(OP_BIT_NOT, 0, line)
+        }
+    }
+
+    fn compile_CallExpression(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.callee)
+        mut i = 0
+        while i < len(node.arguments) {
+            this.compile_node(node.arguments[i])
+            i += 1
+        }
+        this.code.emit(OP_CALL, len(node.arguments), line)
+    }
+
+    fn compile_ListLiteral(node) {
+        let line = node.line ?? 0
+        mut i = 0
+        while i < len(node.elements) {
+            this.compile_node(node.elements[i])
+            i += 1
+        }
+        this.code.emit(OP_MAKE_LIST, len(node.elements), line)
+    }
+
+    fn compile_MapLiteral(node) {
+        let line = node.line ?? 0
+        mut i = 0
+        while i < len(node.pairs) {
+            let pair = node.pairs[i]
+            let key_node = pair[0]
+            let val_node = pair[1]
+            this.compile_node(key_node)
+            this.compile_node(val_node)
+            i += 1
+        }
+        this.code.emit(OP_MAKE_MAP, len(node.pairs), line)
+    }
+
+    fn compile_IndexExpression(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.object)
+        this.compile_node(node.index)
+        this.code.emit(OP_GET_IDX, 0, line)
+    }
+
+    fn compile_MemberExpression(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.object)
+        let prop_idx = this.code.add_const(node.property)
+        this.code.emit(OP_GET_PROP, prop_idx, line)
+    }
+
+    fn compile_RangeExpression(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.start)
+        if node.end != null {
+            this.compile_node(node.end)
+        } else {
+            this.code.emit(OP_NULL)
+        }
+        this.code.emit(OP_RANGE, 0, line)
+    }
+
+    fn compile_PipeExpression(node) {
+        let line = node.line ?? 0
+        this.compile_node(node.value)
+        if node.function.node_type == "CallExpression" {
+            this.compile_node(node.function.callee)
+            mut i = 0
+            while i < len(node.function.arguments) {
+                this.compile_node(node.function.arguments[i])
+                i += 1
+            }
+            this.code.emit(OP_PIPE, len(node.function.arguments) + 1, line)
+        } else {
+            this.compile_node(node.function)
+            this.code.emit(OP_CALL, 1, line)
+        }
+    }
+
+    fn compile_FnExpression(node) {
+        let line = node.line ?? 0
+        let fn_compiler = Compiler()
+        fn_compiler.code = CodeObject("<lambda>")
+        mut i = 0
+        while i < len(node.body.statements) {
+            fn_compiler.compile_node(node.body.statements[i])
+            i += 1
+        }
+        -- Implicit null return at end
+        fn_compiler.code.emit(OP_CONST, fn_compiler.code.add_const(null))
+        fn_compiler.code.emit(OP_RETURN)
+        let fn_code_idx = this.code.add_const(fn_compiler.code)
+        this.code.emit(OP_MAKE_FN, fn_code_idx, line)
+    }
+
+    fn compile_IfExpression(node) {
+        this.compile_node(node.condition)
+        let jump_false = this.code.emit(OP_JUMP_FALSE, 0)
+        this.compile_node(node.true_expr)
+        let jump_end = this.code.emit(OP_JUMP, 0)
+        this.code.patch_jump(jump_false)
+        this.compile_node(node.false_expr)
+        this.code.patch_jump(jump_end)
+    }
+}
+
+-- ── Virtual Machine ──────────────────────────────────────
+
+class VMFrame {
+    -- A call frame in the VM.
+
+    fn init(code, base_pointer) {
+        this.code = code
+        this.ip = 0
+        this.locals = {}
+        this.base_pointer = base_pointer ?? 0
+    }
+}
+
+class VMFunction {
+    -- A compiled function.
+
+    fn init(code, params, name) {
+        this.code = code
+        this.params = params
+        this.name = name ?? "<fn>"
+    }
+
+    fn to_string() {
+        return "<compiled fn {this.name}>"
+    }
+}
+
+class VMIterator {
+    -- Simple index-based iterator for lists and ranges in the VM.
+
+    fn init(items) {
+        this.items = items
+        this.index = 0
+    }
+
+    fn has_next() {
+        return this.index < len(this.items)
+    }
+
+    fn next() {
+        let val = this.items[this.index]
+        this.index = this.index + 1
+        return val
+    }
+}
+
+class VM {
+    -- Stack-based virtual machine for Clarity bytecode.
+
+    fn init() {
+        this.stack = []
+        this.frames = []
+        this.globals = {}
+        this.output = []
+        this._setup_builtins()
+    }
+
+    fn _setup_builtins() {
+        -- Register built-in functions.
+        let vm = this
+
+        this.globals["len"] = fn(x) { return len(x) }
+        this.globals["push"] = fn(lst, item) { push(lst, item); return lst }
+        this.globals["pop"] = fn(lst) { return pop(lst) }
+        this.globals["str"] = fn(x) { return vm._display(x) }
+        this.globals["int"] = fn(x) { return int(x) }
+        this.globals["float"] = fn(x) { return float(x) }
+        this.globals["type"] = fn(x) { return vm._type_name(x) }
+        this.globals["range"] = fn(...a) {
+            if len(a) == 1 { return range(a[0]) }
+            if len(a) == 2 { return range(a[0], a[1]) }
+            if len(a) == 3 { return range(a[0], a[1], a[2]) }
+            throw "range() takes 1-3 arguments"
+        }
+        this.globals["map"] = fn(lst, f) {
+            return map(lst, fn(x) { return vm._call_fn(f, [x]) })
+        }
+        this.globals["filter"] = fn(lst, f) {
+            return filter(lst, fn(x) { return vm._is_truthy(vm._call_fn(f, [x])) })
+        }
+        this.globals["sort"] = fn(lst) { return sort(lst) }
+        this.globals["reverse"] = fn(lst) { return reverse(lst) }
+        this.globals["keys"] = fn(m) { return keys(m) }
+        this.globals["values"] = fn(m) { return values(m) }
+        this.globals["entries"] = fn(m) { return entries(m) }
+        this.globals["has"] = fn(col, key) { return has(col, key) }
+        this.globals["sum"] = fn(lst) { return sum(lst) }
+        this.globals["abs"] = fn(n) { return abs(n) }
+        this.globals["min"] = fn(...a) {
+            if len(a) == 1 and type(a[0]) == "list" { return min(a[0]) }
+            return min(...a)
+        }
+        this.globals["max"] = fn(...a) {
+            if len(a) == 1 and type(a[0]) == "list" { return max(a[0]) }
+            return max(...a)
+        }
+        this.globals["join"] = fn(lst, sep) {
+            let s = sep ?? ""
+            return join(map(lst, fn(x) { return vm._display(x) }), s)
+        }
+        this.globals["split"] = fn(s, sep) { return split(s, sep ?? " ") }
+        this.globals["trim"] = fn(s) { return trim(s) }
+        this.globals["upper"] = fn(s) { return upper(s) }
+        this.globals["lower"] = fn(s) { return lower(s) }
+        this.globals["contains"] = fn(h, n) { return contains(h, n) }
+        this.globals["starts"] = fn(s, p) { return starts(s, p) }
+        this.globals["ends"] = fn(s, p) { return ends(s, p) }
+        this.globals["replace"] = fn(s, old, new_s) { return replace(s, old, new_s) }
+        this.globals["chars"] = fn(s) { return chars(s) }
+        this.globals["index_of"] = fn(s, sub) { return index_of(s, sub) }
+        this.globals["substring"] = fn(s, start, end_idx) { return substring(s, start, end_idx) }
+        this.globals["repeat"] = fn(s, n) { return repeat(s, n) }
+        this.globals["each"] = fn(lst, f) {
+            each(lst, fn(x) { vm._call_fn(f, [x]) })
+        }
+        this.globals["find"] = fn(lst, f) {
+            return find(lst, fn(x) { return vm._is_truthy(vm._call_fn(f, [x])) })
+        }
+        this.globals["every"] = fn(lst, f) {
+            return every(lst, fn(x) { return vm._is_truthy(vm._call_fn(f, [x])) })
+        }
+        this.globals["some"] = fn(lst, f) {
+            return some(lst, fn(x) { return vm._is_truthy(vm._call_fn(f, [x])) })
+        }
+        this.globals["reduce"] = fn(lst, f, initial) {
+            mut acc = if initial != null { initial } else { lst[0] }
+            mut start = if initial != null { 0 } else { 1 }
+            mut i = start
+            while i < len(lst) {
+                acc = vm._call_fn(f, [acc, lst[i]])
+                i += 1
+            }
+            return acc
+        }
+        this.globals["flat"] = fn(lst) { return flat(lst) }
+        this.globals["unique"] = fn(lst) { return unique(lst) }
+        this.globals["merge"] = fn(...maps) { return merge(...maps) }
+        this.globals["zip"] = fn(...lists) { return zip(...lists) }
+
+        -- Math
+        this.globals["pi"] = pi
+        this.globals["e"] = e
+        this.globals["sqrt"] = fn(n) { return sqrt(n) }
+        this.globals["sin"] = fn(n) { return sin(n) }
+        this.globals["cos"] = fn(n) { return cos(n) }
+        this.globals["tan"] = fn(n) { return tan(n) }
+        this.globals["log"] = fn(n) { return log(n) }
+        this.globals["pow"] = fn(a, b) { return pow(a, b) }
+        this.globals["floor"] = fn(n) { return floor(n) }
+        this.globals["ceil"] = fn(n) { return ceil(n) }
+        this.globals["round"] = fn(n) { return round(n) }
+        this.globals["random"] = fn(...a) { return random(...a) }
+
+        -- I/O
+        this.globals["print"] = fn(...args) {
+            let out = join(map(args, fn(a) { return vm._display(a) }), " ")
+            show out
+            push(vm.output, out)
+        }
+        this.globals["show"] = fn(...args) {
+            let out = join(map(args, fn(a) { return vm._display(a) }), " ")
+            show out
+            push(vm.output, out)
+        }
+        this.globals["ask"] = fn(prompt) { return ask(vm._display(prompt ?? "")) }
+
+        -- Type conversions
+        this.globals["bool"] = fn(v) { return vm._is_truthy(v) }
+
+        -- System
+        this.globals["exec"] = fn(cmd) { return exec(cmd) }
+        this.globals["exit"] = fn(code) { exit(code ?? 0) }
+        this.globals["sleep"] = fn(s) { sleep(s) }
+        this.globals["time"] = fn() { return time() }
+        this.globals["env"] = fn(k, d) { return env(k, d) }
+        this.globals["cwd"] = fn() { return cwd() }
+        this.globals["args"] = fn() { return args() }
+
+        -- File I/O
+        this.globals["read"] = fn(p) { return read(p) }
+        this.globals["write"] = fn(p, c) { return write(p, c) }
+        this.globals["exists"] = fn(p) { return exists(p) }
+
+        -- JSON
+        this.globals["json_parse"] = fn(t) { return json_parse(t) }
+        this.globals["json_string"] = fn(v) { return json_string(v) }
+
+        -- Errors
+        this.globals["error"] = fn(msg) { return str(msg) }
+    }
+
+    fn _call_fn(f, call_args) {
+        -- Call a function (compiled VMFunction or host builtin).
+        let t = type(f)
+        if t == "VMFunction" {
+            return this._call_vm_fn(f, call_args)
+        }
+        if t == "function" or t == "builtin" {
+            return f(...call_args)
+        }
+        throw "RuntimeError: Not callable: {this._display(f)}"
+    }
+
+    fn _call_vm_fn(f, call_args) {
+        -- Execute a VMFunction.
+        let frame = VMFrame(f.code, len(this.stack))
+        -- Bind params
+        let params = if type(f.params) == "list" { f.params } else { [] }
+        mut i = 0
+        while i < len(params) {
+            let val = if i < len(call_args) { call_args[i] } else { null }
+            frame.locals[params[i]] = val
+            i += 1
+        }
+        push(this.frames, frame)
+        try {
+            let result = this._execute_frame()
+            pop(this.frames)
+            return result
+        } catch err {
+            pop(this.frames)
+            throw err
+        }
+    }
+
+    fn run(code) {
+        -- Run a compiled CodeObject.
+        let frame = VMFrame(code)
+        -- Copy globals into frame locals
+        let gkeys = keys(this.globals)
+        mut i = 0
+        while i < len(gkeys) {
+            let k = gkeys[i]
+            frame.locals[k] = this.globals[k]
+            i += 1
+        }
+        push(this.frames, frame)
+        try {
+            let result = this._execute_frame()
+            pop(this.frames)
+            return result
+        } catch err {
+            pop(this.frames)
+            throw err
+        }
+    }
+
+    fn _execute_frame() {
+        let frame = this.frames[len(this.frames) - 1]
+        let code = frame.code
+
+        while frame.ip < len(code.instructions) {
+            let instr = code.instructions[frame.ip]
+            let op = instr[0]
+            let operand = instr[1]
+            frame.ip = frame.ip + 1
+
+            -- ── Halt ────────────────────────────────
+            if op == OP_HALT {
+                if len(this.stack) > 0 {
+                    return this.stack[len(this.stack) - 1]
+                }
+                return null
+            }
+
+            -- ── Constants & literals ────────────────
+            elif op == OP_CONST {
+                push(this.stack, code.constants[operand])
+            }
+            elif op == OP_NULL {
+                push(this.stack, null)
+            }
+            elif op == OP_TRUE {
+                push(this.stack, true)
+            }
+            elif op == OP_FALSE {
+                push(this.stack, false)
+            }
+
+            -- ── Stack manipulation ──────────────────
+            elif op == OP_POP {
+                if len(this.stack) > 0 {
+                    pop(this.stack)
+                }
+            }
+            elif op == OP_DUP {
+                push(this.stack, this.stack[len(this.stack) - 1])
+            }
+
+            -- ── Variables ───────────────────────────
+            elif op == OP_LOAD {
+                let name = code.constants[operand]
+                if has(frame.locals, name) {
+                    push(this.stack, frame.locals[name])
+                } elif has(this.globals, name) {
+                    push(this.stack, this.globals[name])
+                } else {
+                    throw "RuntimeError: Undefined variable: {name}"
+                }
+            }
+            elif op == OP_STORE {
+                let name = code.constants[operand]
+                let value = this.stack[len(this.stack) - 1]  -- peek, don't pop
+                frame.locals[name] = value
+            }
+            elif op == OP_STORE_NEW {
+                let name = code.constants[operand]
+                let value = pop(this.stack)
+                frame.locals[name] = value
+            }
+
+            -- ── Arithmetic ──────────────────────────
+            elif op == OP_ADD {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                if type(a) == "string" or type(b) == "string" {
+                    push(this.stack, this._display(a) + this._display(b))
+                } elif type(a) == "list" and type(b) == "list" {
+                    push(this.stack, a + b)
+                } else {
+                    push(this.stack, a + b)
+                }
+            }
+            elif op == OP_SUB {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a - b)
+            }
+            elif op == OP_MUL {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a * b)
+            }
+            elif op == OP_DIV {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                if b == 0 {
+                    throw "RuntimeError: Division by zero"
+                }
+                let result = a / b
+                -- Integer division when result is whole
+                if result == floor(result) {
+                    push(this.stack, int(result))
+                } else {
+                    push(this.stack, result)
+                }
+            }
+            elif op == OP_MOD {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a % b)
+            }
+            elif op == OP_POW {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, pow(a, b))
+            }
+            elif op == OP_NEG {
+                push(this.stack, -pop(this.stack))
+            }
+            elif op == OP_NOT {
+                push(this.stack, not this._is_truthy(pop(this.stack)))
+            }
+
+            -- ── Comparison ──────────────────────────
+            elif op == OP_EQ {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a == b)
+            }
+            elif op == OP_NEQ {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a != b)
+            }
+            elif op == OP_LT {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a < b)
+            }
+            elif op == OP_GT {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a > b)
+            }
+            elif op == OP_LTE {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a <= b)
+            }
+            elif op == OP_GTE {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, a >= b)
+            }
+
+            -- ── Logical ─────────────────────────────
+            elif op == OP_AND {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                if this._is_truthy(a) {
+                    push(this.stack, b)
+                } else {
+                    push(this.stack, a)
+                }
+            }
+            elif op == OP_OR {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                if this._is_truthy(a) {
+                    push(this.stack, a)
+                } else {
+                    push(this.stack, b)
+                }
+            }
+
+            -- ── Bitwise ─────────────────────────────
+            elif op == OP_BIT_AND {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, int(a) & int(b))
+            }
+            elif op == OP_BIT_OR {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, int(a) | int(b))
+            }
+            elif op == OP_BIT_XOR {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, int(a) ^ int(b))
+            }
+            elif op == OP_BIT_NOT {
+                push(this.stack, ~int(pop(this.stack)))
+            }
+            elif op == OP_LSHIFT {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, int(a) << int(b))
+            }
+            elif op == OP_RSHIFT {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, int(a) >> int(b))
+            }
+
+            -- ── Control flow ────────────────────────
+            elif op == OP_JUMP {
+                frame.ip = operand
+            }
+            elif op == OP_JUMP_FALSE {
+                if not this._is_truthy(pop(this.stack)) {
+                    frame.ip = operand
+                }
+            }
+
+            -- ── Functions ───────────────────────────
+            elif op == OP_MAKE_FN {
+                let fn_code = code.constants[operand]
+                -- Get params: stored as next constant after the code object
+                -- The compiler stores params_idx right after fn_code_idx
+                mut params = []
+                if len(fn_code.constants) > 0 {
+                    let last_const = fn_code.constants[len(fn_code.constants) - 1]
+                    if type(last_const) == "list" {
+                        -- Check if it looks like a param list (list of strings)
+                        mut is_param_list = true
+                        mut pi = 0
+                        while pi < len(last_const) {
+                            if type(last_const[pi]) != "string" {
+                                is_param_list = false
+                                break
+                            }
+                            pi += 1
+                        }
+                        if is_param_list {
+                            params = last_const
+                        }
+                    }
+                }
+                -- Also check the parent code's constant pool for params
+                -- The compiler emits: add_const(fn_code), add_const(params)
+                -- So params should be at operand + 1 in the parent constants
+                if len(params) == 0 and operand + 1 < len(code.constants) {
+                    let maybe_params = code.constants[operand + 1]
+                    if type(maybe_params) == "list" {
+                        params = maybe_params
+                    }
+                }
+                let vm_fn = VMFunction(fn_code, params, fn_code.name)
+                push(this.stack, vm_fn)
+            }
+            elif op == OP_CALL {
+                let nargs = operand
+                -- Pop args in reverse order
+                mut call_args = []
+                mut ai = 0
+                while ai < nargs {
+                    push(call_args, pop(this.stack))
+                    ai += 1
+                }
+                -- Reverse to get correct order
+                call_args = reverse(call_args)
+                let callee = pop(this.stack)
+                let result = this._call_fn(callee, call_args)
+                push(this.stack, result)
+            }
+            elif op == OP_RETURN {
+                if len(this.stack) > 0 {
+                    return pop(this.stack)
+                }
+                return null
+            }
+
+            -- ── Collections ─────────────────────────
+            elif op == OP_MAKE_LIST {
+                mut items = []
+                mut li = 0
+                while li < operand {
+                    push(items, pop(this.stack))
+                    li += 1
+                }
+                items = reverse(items)
+                push(this.stack, items)
+            }
+            elif op == OP_MAKE_MAP {
+                mut pairs = []
+                mut mi = 0
+                while mi < operand {
+                    let v = pop(this.stack)
+                    let k = pop(this.stack)
+                    push(pairs, [k, v])
+                    mi += 1
+                }
+                pairs = reverse(pairs)
+                let result_map = {}
+                mut mj = 0
+                while mj < len(pairs) {
+                    let pair = pairs[mj]
+                    result_map[pair[0]] = pair[1]
+                    mj += 1
+                }
+                push(this.stack, result_map)
+            }
+            elif op == OP_GET_IDX {
+                let idx = pop(this.stack)
+                let obj = pop(this.stack)
+                let t = type(obj)
+                if t == "list" {
+                    push(this.stack, obj[idx])
+                } elif t == "map" {
+                    if has(obj, idx) {
+                        push(this.stack, obj[idx])
+                    } else {
+                        push(this.stack, null)
+                    }
+                } elif t == "string" {
+                    push(this.stack, obj[idx])
+                } else {
+                    throw "RuntimeError: Cannot index into {t}"
+                }
+            }
+            elif op == OP_SET_IDX {
+                let idx = pop(this.stack)
+                let obj = pop(this.stack)
+                let value = pop(this.stack)
+                obj[idx] = value
+            }
+            elif op == OP_GET_PROP {
+                let prop = code.constants[operand]
+                let obj = pop(this.stack)
+                let t = type(obj)
+                if t == "map" {
+                    if has(obj, prop) {
+                        push(this.stack, obj[prop])
+                    } else {
+                        push(this.stack, null)
+                    }
+                } elif t == "list" {
+                    if prop == "length" {
+                        push(this.stack, len(obj))
+                    } elif prop == "first" {
+                        if len(obj) > 0 { push(this.stack, obj[0]) }
+                        else { push(this.stack, null) }
+                    } elif prop == "last" {
+                        if len(obj) > 0 { push(this.stack, obj[len(obj) - 1]) }
+                        else { push(this.stack, null) }
+                    } else {
+                        throw "RuntimeError: List has no property '{prop}'"
+                    }
+                } elif t == "string" {
+                    if prop == "length" {
+                        push(this.stack, len(obj))
+                    } elif prop == "upper" {
+                        push(this.stack, upper(obj))
+                    } elif prop == "lower" {
+                        push(this.stack, lower(obj))
+                    } else {
+                        throw "RuntimeError: String has no property '{prop}'"
+                    }
+                } else {
+                    throw "RuntimeError: Cannot access property '{prop}' on {t}"
+                }
+            }
+            elif op == OP_SET_PROP {
+                let prop = code.constants[operand]
+                let obj = pop(this.stack)
+                let value = pop(this.stack)
+                obj[prop] = value
+            }
+
+            -- ── Range ───────────────────────────────
+            elif op == OP_RANGE {
+                let end_val = pop(this.stack)
+                let start_val = pop(this.stack)
+                if end_val == null {
+                    push(this.stack, range(start_val, start_val))
+                } else {
+                    push(this.stack, range(start_val, end_val))
+                }
+            }
+
+            -- ── Print (show) ────────────────────────
+            elif op == OP_PRINT {
+                mut print_vals = []
+                mut pi = 0
+                while pi < operand {
+                    push(print_vals, pop(this.stack))
+                    pi += 1
+                }
+                print_vals = reverse(print_vals)
+                let out = join(map(print_vals, fn(v) { return this._display(v) }), " ")
+                show out
+                push(this.output, out)
+            }
+
+            -- ── Iteration ───────────────────────────
+            elif op == OP_ITER_INIT {
+                let iterable = pop(this.stack)
+                let iter = VMIterator(iterable)
+                push(this.stack, iter)
+            }
+            elif op == OP_ITER_NEXT {
+                let iterator = this.stack[len(this.stack) - 1]  -- peek
+                if iterator.has_next() {
+                    let value = iterator.next()
+                    push(this.stack, value)
+                    push(this.stack, true)
+                } else {
+                    push(this.stack, false)
+                }
+            }
+
+            -- ── String concatenation ────────────────
+            elif op == OP_CONCAT {
+                let b = pop(this.stack)
+                let a = pop(this.stack)
+                push(this.stack, this._display(a) + this._display(b))
+            }
+
+            -- ── Pipe ────────────────────────────────
+            elif op == OP_PIPE {
+                let nargs = operand
+                mut pipe_args = []
+                mut pai = 0
+                while pai < nargs {
+                    push(pipe_args, pop(this.stack))
+                    pai += 1
+                }
+                pipe_args = reverse(pipe_args)
+                let callee = pop(this.stack)
+                let piped_value = if len(pipe_args) > 0 { pipe_args[0] } else { null }
+                -- Build full arg list: piped value first, then remaining args
+                mut full_args = [piped_value]
+                mut fai = 1
+                while fai < len(pipe_args) {
+                    push(full_args, pipe_args[fai])
+                    fai += 1
+                }
+                let result = this._call_fn(callee, full_args)
+                push(this.stack, result)
+            }
+
+            else {
+                throw "RuntimeError: Unknown opcode: {op}"
+            }
+        }
+
+        -- Reached end of instructions
+        if len(this.stack) > 0 {
+            return this.stack[len(this.stack) - 1]
+        }
+        return null
+    }
+
+    -- ── Helper methods ──────────────────────────────────
+
+    fn _is_truthy(value) {
+        if value == null { return false }
+        let t = type(value)
+        if t == "bool" { return value }
+        if t == "number" { return value != 0 }
+        if t == "string" { return len(value) > 0 }
+        if t == "list" { return len(value) > 0 }
+        if t == "map" { return len(keys(value)) > 0 }
+        return true
+    }
+
+    fn _display(value) {
+        if value == null { return "null" }
+        let t = type(value)
+        if t == "bool" {
+            if value { return "true" }
+            return "false"
+        }
+        if t == "number" {
+            -- Show integers without decimal point
+            if value == floor(value) {
+                return str(int(value))
+            }
+            return str(value)
+        }
+        if t == "string" { return value }
+        if t == "list" {
+            let items = join(map(value, fn(v) { return this._repr(v) }), ", ")
+            return "[{items}]"
+        }
+        if t == "map" {
+            let ks = keys(value)
+            let pair_strs = map(ks, fn(k) {
+                return "{k}: {this._repr(value[k])}"
+            })
+            let sep = ", "
+            let inner = join(pair_strs, sep)
+            return "\{" + inner + "\}"
+        }
+        if t == "VMFunction" {
+            return value.to_string()
+        }
+        return str(value)
+    }
+
+    fn _repr(value) {
+        if type(value) == "string" {
+            return "\"{value}\""
+        }
+        return this._display(value)
+    }
+
+    fn _type_name(value) {
+        if value == null { return "null" }
+        let t = type(value)
+        if t == "bool" { return "bool" }
+        if t == "number" {
+            if value == floor(value) { return "int" }
+            return "float"
+        }
+        if t == "string" { return "string" }
+        if t == "list" { return "list" }
+        if t == "map" { return "map" }
+        if t == "function" or t == "builtin" { return "function" }
+        if t == "VMFunction" { return "function" }
+        return "unknown"
+    }
+}
+
+-- ── Helper functions ────────────────────────────────────
+
+fn _pad_left(s, width) {
+    mut result = s
+    while len(result) < width {
+        result = " " + result
+    }
+    return result
+}
+
+fn _pad_right(s, width) {
+    mut result = s
+    while len(result) < width {
+        result = result + " "
+    }
+    return result
+}
+
+fn _bc_display_list(lst) {
+    let items = map(lst, fn(v) { return _bc_repr(v) })
+    let sep = ", "
+    let inner = join(items, sep)
+    return "[" + inner + "]"
+}
+
+fn _bc_repr(value) {
+    if value == null { return "null" }
+    let t = type(value)
+    if t == "string" { return "\"{value}\"" }
+    if t == "bool" {
+        if value { return "true" }
+        return "false"
+    }
+    if t == "number" { return str(value) }
+    if t == "list" { return _bc_display_list(value) }
+    if t == "CodeObject" { return "<code {value.name}>" }
+    return str(value)
+}
+
+-- ── Public API ───────────────────────────────────────────
+
+fn compile_to_bytecode(program) {
+    -- Compile an AST Program to bytecode.
+    let compiler = Compiler()
+    return compiler.compile(program)
+}

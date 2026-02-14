@@ -1,0 +1,466 @@
+-- Clarity Test Suite — the language tests itself
+-- Ported from Python test files to pure Clarity
+
+mut passed = 0
+mut failed = 0
+mut total_sections = 0
+
+fn assert_eq(name, actual, expected) {
+    if actual == expected {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — expected {expected}, got {actual}"
+        failed += 1
+    }
+}
+
+fn assert_true(name, value) {
+    assert_eq(name, value, true)
+}
+
+fn assert_false(name, value) {
+    assert_eq(name, value, false)
+}
+
+fn section(name) {
+    show ""
+    show "{name}:"
+    total_sections += 1
+}
+
+-- ═══════════════════════════════════════════════════════
+-- CORE LANGUAGE
+-- ═══════════════════════════════════════════════════════
+
+section("Variables")
+
+let x = 42
+assert_eq("let binding", x, 42)
+
+mut counter = 0
+counter += 1
+assert_eq("mut binding", counter, 1)
+
+mut ma = 0
+mut mb = 0
+ma, mb = 1, 2
+assert_eq("multi-assign a", ma, 1)
+assert_eq("multi-assign b", mb, 2)
+
+-- ─────────────────────────────────────────────────────
+
+section("Arithmetic")
+
+assert_eq("addition", 3 + 4, 7)
+assert_eq("subtraction", 10 - 3, 7)
+assert_eq("multiplication", 6 * 7, 42)
+assert_eq("division", 15 / 3, 5)
+assert_eq("modulo", 17 % 5, 2)
+assert_eq("power", 2 ** 10, 1024)
+assert_eq("precedence", 2 + 3 * 4, 14)
+assert_eq("negative", -5 + 3, -2)
+
+-- ─────────────────────────────────────────────────────
+
+section("Strings")
+
+assert_eq("concatenation", "hello" + " " + "world", "hello world")
+let name = "Clarity"
+assert_eq("interpolation", "Hello {name}!", "Hello Clarity!")
+assert_eq("len", len("hello"), 5)
+assert_eq("upper", upper("hello"), "HELLO")
+assert_eq("lower", lower("HELLO"), "hello")
+assert_eq("trim", trim("  hi  "), "hi")
+assert_eq("split", split("a,b,c", ","), ["a", "b", "c"])
+assert_eq("join", join(["a", "b", "c"], "-"), "a-b-c")
+assert_eq("replace", replace("hello world", "world", "clarity"), "hello clarity")
+assert_eq("contains", contains("hello", "ell"), true)
+assert_eq("starts", starts("hello", "hel"), true)
+assert_eq("ends", ends("hello", "llo"), true)
+assert_eq("chars", chars("abc"), ["a", "b", "c"])
+assert_eq("repeat", repeat("ab", 3), "ababab")
+assert_eq("reverse string", reverse("hello"), "olleh")
+
+-- New self-hosting builtins
+assert_eq("char_at", char_at("hello", 1), "e")
+assert_eq("char_at out of bounds", char_at("hi", 5), null)
+assert_eq("char_code", char_code("A"), 65)
+assert_eq("from_char_code", from_char_code(65), "A")
+assert_eq("index_of found", index_of("hello world", "world"), 6)
+assert_eq("index_of not found", index_of("hello", "xyz"), -1)
+assert_eq("substring", substring("hello world", 6), "world")
+assert_eq("substring range", substring("hello world", 0, 5), "hello")
+assert_true("is_digit", is_digit("5"))
+assert_false("is_digit letter", is_digit("a"))
+assert_true("is_alpha", is_alpha("a"))
+assert_false("is_alpha digit", is_alpha("5"))
+assert_true("is_alnum letter", is_alnum("a"))
+assert_true("is_alnum digit", is_alnum("5"))
+assert_false("is_alnum space", is_alnum(" "))
+assert_true("is_space", is_space(" "))
+assert_false("is_space letter", is_space("a"))
+
+-- ─────────────────────────────────────────────────────
+
+section("Functions")
+
+fn add(a, b) {
+    return a + b
+}
+assert_eq("basic function", add(3, 4), 7)
+
+fn factorial(n) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+assert_eq("recursion", factorial(6), 720)
+
+fn make_adder(n) {
+    return x => x + n
+}
+let add5 = make_adder(5)
+assert_eq("closure", add5(10), 15)
+
+fn greet(person, greeting) {
+    return "{greeting}, {person}!"
+}
+assert_eq("multi-param", greet("World", "Hello"), "Hello, World!")
+
+fn first(head, ...tail) {
+    return head
+}
+assert_eq("rest params", first(1, 2, 3), 1)
+
+-- ─────────────────────────────────────────────────────
+
+section("Lambdas")
+
+let double = x => x * 2
+assert_eq("single param lambda", double(5), 10)
+
+let multiply = (a, b) => a * b
+assert_eq("multi param lambda", multiply(3, 4), 12)
+
+let get_pi = () => 3.14
+assert_eq("no param lambda", get_pi(), 3.14)
+
+-- ─────────────────────────────────────────────────────
+
+section("Control Flow")
+
+let result_if = if 10 > 5 { "big" } else { "small" }
+assert_eq("if expression", result_if, "big")
+
+mut sum_loop = 0
+for i in 1..6 {
+    sum_loop += i
+}
+assert_eq("for range", sum_loop, 15)
+
+mut items = []
+for item in ["a", "b", "c"] {
+    push(items, item)
+}
+assert_eq("for in list", items, ["a", "b", "c"])
+
+mut while_count = 0
+while while_count < 5 {
+    while_count += 1
+}
+assert_eq("while loop", while_count, 5)
+
+mut break_val = 0
+for i in 0..100 {
+    if i == 5 { break }
+    break_val = i
+}
+assert_eq("break", break_val, 4)
+
+mut cont_items = []
+for i in 0..6 {
+    if i % 2 == 0 { continue }
+    push(cont_items, i)
+}
+assert_eq("continue", cont_items, [1, 3, 5])
+
+-- ─────────────────────────────────────────────────────
+
+section("Lists")
+
+let lst = [1, 2, 3, 4, 5]
+assert_eq("list literal", len(lst), 5)
+assert_eq("index", lst[2], 3)
+assert_eq("negative index", lst[-1], 5)
+assert_eq("slice", lst[1..3], [2, 3])
+assert_eq("slice from start", lst[..2], [1, 2])
+assert_eq("slice to end", lst[3..], [4, 5])
+
+let mapped = lst |> map(x => x * 2)
+assert_eq("map", mapped, [2, 4, 6, 8, 10])
+
+let filtered = lst |> filter(x => x > 3)
+assert_eq("filter", filtered, [4, 5])
+
+let reduced = reduce(lst, (a, b) => a + b, 0)
+assert_eq("reduce", reduced, 15)
+
+assert_eq("sort", sort([3, 1, 2]), [1, 2, 3])
+assert_eq("reverse", reverse([1, 2, 3]), [3, 2, 1])
+assert_eq("unique", unique([1, 2, 2, 3, 3]), [1, 2, 3])
+assert_eq("flat", flat([[1, 2], [3, 4]]), [1, 2, 3, 4])
+assert_eq("min", min([3, 1, 2]), 1)
+assert_eq("max", max([3, 1, 2]), 3)
+assert_eq("sum", sum([1, 2, 3]), 6)
+
+-- Comprehension
+let squares = [x * x for x in 1..6]
+assert_eq("list comprehension", squares, [1, 4, 9, 16, 25])
+
+let evens = [x for x in 0..10 if x % 2 == 0]
+assert_eq("filtered comprehension", evens, [0, 2, 4, 6, 8])
+
+-- Spread
+let combined = [...[1, 2], ...[3, 4]]
+assert_eq("list spread", combined, [1, 2, 3, 4])
+
+-- ─────────────────────────────────────────────────────
+
+section("Maps")
+
+let m = {name: "Alice", age: 30}
+assert_eq("map access", m.name, "Alice")
+assert_eq("map bracket", m["age"], 30)
+assert_eq("keys", sort(keys(m)), ["age", "name"])
+assert_eq("values length", len(values(m)), 2)
+assert_eq("has key", has(m, "name"), true)
+assert_eq("has missing", has(m, "foo"), false)
+
+let merged = merge({a: 1}, {b: 2})
+assert_eq("merge", merged, {a: 1, b: 2})
+
+-- Map comprehension
+let lengths = {w: len(w) for w in ["hi", "hello", "hey"]}
+assert_eq("map comprehension", lengths, {hi: 2, hello: 5, hey: 3})
+
+-- Spread
+let m2 = {...{a: 1}, ...{b: 2, c: 3}}
+assert_eq("map spread", m2, {a: 1, b: 2, c: 3})
+
+-- ─────────────────────────────────────────────────────
+
+section("Destructuring")
+
+let [da, db, dc] = [10, 20, 30]
+assert_eq("list destructure a", da, 10)
+assert_eq("list destructure c", dc, 30)
+
+let {dx, dy} = {dx: 100, dy: 200}
+assert_eq("map destructure dx", dx, 100)
+assert_eq("map destructure dy", dy, 200)
+
+let [head, ...rest] = [1, 2, 3, 4, 5]
+assert_eq("rest destructure head", head, 1)
+assert_eq("rest destructure rest", rest, [2, 3, 4, 5])
+
+-- ─────────────────────────────────────────────────────
+
+section("Pipes")
+
+let pipe_result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    |> filter(x => x % 2 == 0)
+    |> map(x => x * x)
+assert_eq("pipe chain", pipe_result, [4, 16, 36, 64, 100])
+
+-- ─────────────────────────────────────────────────────
+
+section("Pattern Matching")
+
+fn describe(val) {
+    match val {
+        when 0 { return "zero" }
+        when 1 { return "one" }
+        when "hello" { return "greeting" }
+        else { return "other" }
+    }
+}
+assert_eq("match 0", describe(0), "zero")
+assert_eq("match 1", describe(1), "one")
+assert_eq("match string", describe("hello"), "greeting")
+assert_eq("match else", describe(99), "other")
+
+-- ─────────────────────────────────────────────────────
+
+section("Classes")
+
+class Animal {
+    fn init(name, sound) {
+        this.name = name
+        this.sound = sound
+    }
+    fn speak() {
+        return "{this.name} says {this.sound}"
+    }
+}
+
+class Dog < Animal {
+    fn init(name) {
+        this.name = name
+        this.sound = "woof"
+    }
+    fn fetch(item) {
+        return "{this.name} fetches {item}"
+    }
+}
+
+let dog = Dog("Rex")
+assert_eq("class method", dog.speak(), "Rex says woof")
+assert_eq("subclass method", dog.fetch("ball"), "Rex fetches ball")
+assert_eq("class property", dog.name, "Rex")
+
+-- ─────────────────────────────────────────────────────
+
+section("Enums")
+
+enum Color { Red, Green, Blue }
+assert_eq("enum value", Color.Red, 0)
+assert_eq("enum names", Color.names(), ["Red", "Green", "Blue"])
+
+enum Status { OK = 200, NotFound = 404, Error = 500 }
+assert_eq("enum custom value", Status.NotFound, 404)
+
+-- ─────────────────────────────────────────────────────
+
+section("Error Handling")
+
+mut caught = null
+try {
+    throw "boom"
+} catch e {
+    caught = e
+}
+assert_eq("try/catch", caught, "boom")
+
+mut finally_ran = false
+try {
+    let x = 1
+} catch e {
+    -- nothing
+} finally {
+    finally_ran = true
+}
+assert_true("finally", finally_ran)
+
+-- ─────────────────────────────────────────────────────
+
+section("Null Safety")
+
+let maybe = null
+assert_eq("null coalescing", maybe ?? "default", "default")
+assert_eq("non-null coalescing", 42 ?? "default", 42)
+
+let obj = {profile: {name: "Alice"}}
+assert_eq("optional chain", obj?.profile?.name, "Alice")
+assert_eq("optional chain null", obj?.missing?.name, null)
+
+-- ─────────────────────────────────────────────────────
+
+section("Bitwise Operators")
+
+assert_eq("AND", 12 & 10, 8)
+assert_eq("OR", 12 | 10, 14)
+assert_eq("XOR", 12 ^ 10, 6)
+assert_eq("left shift", 1 << 4, 16)
+assert_eq("right shift", 16 >> 2, 4)
+
+-- ─────────────────────────────────────────────────────
+
+section("Type Conversions")
+
+assert_eq("int from string", int("42"), 42)
+assert_eq("float from string", float("3.14"), 3.14)
+assert_eq("str from int", str(42), "42")
+assert_eq("bool truthy", bool(1), true)
+assert_eq("bool falsy", bool(0), false)
+assert_eq("type of int", type(42), "int")
+assert_eq("type of string", type("hi"), "string")
+assert_eq("type of list", type([1, 2]), "list")
+assert_eq("type of map", type({a: 1}), "map")
+assert_eq("type of bool", type(true), "bool")
+assert_eq("type of null", type(null), "null")
+
+-- ─────────────────────────────────────────────────────
+
+section("Decorators")
+
+fn double_result(wrapped) {
+    return fn(...args) {
+        return wrapped(...args) * 2
+    }
+}
+
+@double_result
+fn compute(a, b) {
+    return a + b
+}
+assert_eq("decorator", compute(3, 4), 14)
+
+-- ─────────────────────────────────────────────────────
+
+section("Generators")
+
+fn fib_gen() {
+    mut a = 0
+    mut b = 1
+    for i in 0..8 {
+        yield a
+        a, b = b, a + b
+    }
+}
+assert_eq("generator", fib_gen(), [0, 1, 1, 2, 3, 5, 8, 13])
+
+-- ─────────────────────────────────────────────────────
+
+section("Interfaces")
+
+interface Shape {
+    fn area()
+}
+
+class Circle impl Shape {
+    fn init(r) { this.r = r }
+    fn area() { return 3.14 * this.r * this.r }
+}
+
+let c = Circle(10)
+assert_eq("interface impl", c.area(), 314.0)
+
+-- ─────────────────────────────────────────────────────
+
+section("Raw Strings")
+
+let raw = r"hello\nworld"
+assert_eq("raw string", raw, "hello\\nworld")
+
+-- ─────────────────────────────────────────────────────
+
+section("Async/Await")
+
+async fn async_value() {
+    return 42
+}
+let async_result = await async_value()
+assert_eq("async/await", async_result, 42)
+
+-- ═══════════════════════════════════════════════════════
+-- RESULTS
+-- ═══════════════════════════════════════════════════════
+
+show ""
+show "════════════════════════════════════════"
+if failed == 0 {
+    show "ALL {passed} TESTS PASSED ({total_sections} sections)"
+} else {
+    show "{passed} passed, {failed} failed ({total_sections} sections)"
+}
+show "════════════════════════════════════════"

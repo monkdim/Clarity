@@ -1,0 +1,51 @@
+-- Classes and Interfaces in Clarity
+
+interface Describable {
+    fn describe()
+}
+
+class Shape {
+    fn init(name) {
+        this.name = name
+    }
+    fn describe() {
+        show "{this.name}: area = {this.area()}"
+    }
+}
+
+class Circle < Shape impl Describable {
+    fn init(radius) {
+        this.name = "Circle"
+        this.radius = radius
+    }
+    fn area() {
+        return 3.14159 * this.radius * this.radius
+    }
+}
+
+class Rectangle < Shape impl Describable {
+    fn init(w, h) {
+        this.name = "Rectangle"
+        this.w = w
+        this.h = h
+    }
+    fn area() {
+        return this.w * this.h
+    }
+}
+
+-- Create shapes and describe them
+let shapes = [Circle(5), Rectangle(3, 4), Circle(10)]
+for shape in shapes {
+    shape.describe()
+}
+
+-- Enums
+enum Color {
+    Red = "#FF0000",
+    Green = "#00FF00",
+    Blue = "#0000FF"
+}
+
+show "Red is {Color.Red}"
+show "Colors: {Color.names()}"

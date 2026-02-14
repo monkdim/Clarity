@@ -1,0 +1,366 @@
+-- Clarity documentation generator — extract docs from source code.
+-- Self-hosted port of clarity/docgen.py, written in Clarity itself.
+--
+-- Extracts doc comments (-- or //) preceding fn/class/enum/interface/let
+-- declarations, builds structured entries, outputs as terminal, Markdown, or JSON.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "terminal.clarity" import bold, cyan, green, yellow, dim, red
+
+-- ── Doc comment extractor ─────────────────────────────────
+
+fn extract_doc_comment(source_lines, decl_line) {
+    -- Look backwards from decl_line (1-indexed) for contiguous -- or // lines
+    mut lines_list = []
+    mut idx = decl_line - 2
+    while idx >= 0 {
+        let line = source_lines[idx]
+        let trimmed = trim(line)
+        if starts(trimmed, "--") {
+            let text = trim(substring(trimmed, 2, len(trimmed)))
+            push(lines_list, text)
+            idx -= 1
+        } elif starts(trimmed, "//") {
+            let text = trim(substring(trimmed, 2, len(trimmed)))
+            push(lines_list, text)
+            idx -= 1
+        } else {
+            idx = -1
+        }
+    }
+    reverse(lines_list)
+    return join(lines_list, "\n")
+}
+
+-- ── AST walker ────────────────────────────────────────────
+
+fn extract_entries(source, tree, filename) {
+    let source_lines = split(source, "\n")
+    mut entries_list = []
+
+    for node in tree.body {
+        let nt = node.node_type
+
+        if nt == "FnStatement" {
+            let doc = extract_doc_comment(source_lines, node.line)
+            mut params = []
+            try { params = node.params } catch e {}
+            mut param_types = {}
+            try { param_types = node.param_types } catch e {}
+            mut return_type = null
+            try { return_type = node.return_type } catch e {}
+            mut is_async = false
+            try { is_async = node.is_async } catch e {}
+
+            -- Build signature
+            mut sig_parts = []
+            for p in params {
+                let pname = p
+                if type(p) == "list" { pname = p[0] }
+                if type(pname) == "string" and has(param_types, pname) {
+                    push(sig_parts, str(pname) + ": " + param_types[pname])
+                } else {
+                    push(sig_parts, str(pname))
+                }
+            }
+            mut prefix = "fn"
+            if is_async { prefix = "async fn" }
+            mut sig = prefix + " " + node.name + "(" + join(sig_parts, ", ") + ")"
+            if return_type != null { sig = sig + " -> " + return_type }
+
+            push(entries_list, {
+                "name": node.name,
+                "kind": "function",
+                "line": node.line,
+                "doc": doc,
+                "signature": sig,
+                "params": params,
+                "param_types": param_types,
+                "return_type": return_type,
+                "is_async": is_async
+            })
+        }
+
+        elif nt == "ClassStatement" {
+            let doc = extract_doc_comment(source_lines, node.line)
+            mut parent = null
+            try { parent = node.parent } catch e {}
+            mut sig = "class " + node.name
+            if parent != null { sig = sig + " extends " + parent }
+
+            -- Extract method docs
+            mut method_entries = []
+            for method in node.methods {
+                if method.node_type == "FnStatement" {
+                    let mdoc = extract_doc_comment(source_lines, method.line)
+                    mut mparams = []
+                    try { mparams = method.params } catch e {}
+                    mut mpt = {}
+                    try { mpt = method.param_types } catch e {}
+                    mut mrt = null
+                    try { mrt = method.return_type } catch e {}
+
+                    mut mp_parts = []
+                    for p in mparams {
+                        let pname = p
+                        if type(p) == "list" { pname = p[0] }
+                        if type(pname) == "string" and has(mpt, pname) {
+                            push(mp_parts, str(pname) + ": " + mpt[pname])
+                        } else {
+                            push(mp_parts, str(pname))
+                        }
+                    }
+                    mut msig = "fn " + method.name + "(" + join(mp_parts, ", ") + ")"
+                    if mrt != null { msig = msig + " -> " + mrt }
+
+                    push(method_entries, {
+                        "name": method.name,
+                        "signature": msig,
+                        "doc": mdoc,
+                        "params": mparams,
+                        "param_types": mpt,
+                        "return_type": mrt
+                    })
+                }
+            }
+
+            push(entries_list, {
+                "name": node.name,
+                "kind": "class",
+                "line": node.line,
+                "doc": doc,
+                "signature": sig,
+                "parent": parent,
+                "methods": method_entries
+            })
+        }
+
+        elif nt == "EnumStatement" {
+            let doc = extract_doc_comment(source_lines, node.line)
+            push(entries_list, {
+                "name": node.name,
+                "kind": "enum",
+                "line": node.line,
+                "doc": doc,
+                "signature": "enum " + node.name,
+                "members": node.members
+            })
+        }
+
+        elif nt == "InterfaceStatement" {
+            let doc = extract_doc_comment(source_lines, node.line)
+            push(entries_list, {
+                "name": node.name,
+                "kind": "interface",
+                "line": node.line,
+                "doc": doc,
+                "signature": "interface " + node.name,
+                "method_sigs": node.method_sigs
+            })
+        }
+
+        elif nt == "LetStatement" {
+            if not node.mutable {
+                let doc = extract_doc_comment(source_lines, node.line)
+                if len(doc) > 0 {
+                    mut ann = null
+                    try { ann = node.type_annotation } catch e {}
+                    mut sig = "let " + node.name
+                    if ann != null { sig = sig + ": " + ann }
+                    push(entries_list, {
+                        "name": node.name,
+                        "kind": "constant",
+                        "line": node.line,
+                        "doc": doc,
+                        "signature": sig,
+                        "type_annotation": ann
+                    })
+                }
+            }
+        }
+
+        elif nt == "DecoratedStatement" {
+            -- Visit the target (will be picked up on next iteration if top-level)
+        }
+    }
+
+    return entries_list
+}
+
+-- ── Terminal output ───────────────────────────────────────
+
+fn format_terminal(entries_list, filename) {
+    mut lines_list = []
+    push(lines_list, "")
+    push(lines_list, "  " + bold("Documentation"))
+    if len(filename) > 0 {
+        push(lines_list, "  " + dim(filename))
+    }
+    push(lines_list, "  " + dim(repeat("─", 56)))
+
+    for entry in entries_list {
+        mut kind_color = dim(entry["kind"])
+        if entry["kind"] == "function" { kind_color = cyan(entry["kind"]) }
+        elif entry["kind"] == "class" { kind_color = green(entry["kind"]) }
+        elif entry["kind"] == "enum" or entry["kind"] == "interface" { kind_color = yellow(entry["kind"]) }
+
+        push(lines_list, "")
+        push(lines_list, "  " + kind_color + "  " + bold(entry["signature"]))
+        if len(entry["doc"]) > 0 {
+            let doc_lines = split(entry["doc"], "\n")
+            for dl in doc_lines {
+                push(lines_list, "    " + dl)
+            }
+        }
+
+        if entry["kind"] == "class" and has(entry, "methods") {
+            for m in entry["methods"] {
+                push(lines_list, "    " + cyan(m["signature"]))
+                if len(m["doc"]) > 0 {
+                    let mdl = split(m["doc"], "\n")
+                    for dl in mdl {
+                        push(lines_list, "      " + dl)
+                    }
+                }
+            }
+        }
+
+        if entry["kind"] == "enum" and has(entry, "members") {
+            for member in entry["members"] {
+                let mname = member[0]
+                let mval = member[1]
+                if mval != null {
+                    push(lines_list, "    " + mname + " = " + str(mval))
+                } else {
+                    push(lines_list, "    " + mname)
+                }
+            }
+        }
+    }
+
+    push(lines_list, "")
+    return join(lines_list, "\n")
+}
+
+-- ── Markdown output ───────────────────────────────────────
+
+fn format_markdown(entries_list, title, filename) {
+    mut lines_list = ["# " + title, ""]
+    if len(filename) > 0 {
+        push(lines_list, "*Source: `" + filename + "`*")
+        push(lines_list, "")
+    }
+
+    -- Group by kind
+    let order = ["constant", "function", "class", "interface", "enum"]
+    let section_titles = {
+        "constant": "Constants",
+        "function": "Functions",
+        "class": "Classes",
+        "interface": "Interfaces",
+        "enum": "Enums"
+    }
+
+    for kind in order {
+        mut group = []
+        for entry in entries_list {
+            if entry["kind"] == kind { push(group, entry) }
+        }
+        if len(group) == 0 { continue }
+
+        push(lines_list, "## " + section_titles[kind])
+        push(lines_list, "")
+
+        for entry in group {
+            push(lines_list, "### `" + entry["signature"] + "`")
+            push(lines_list, "")
+            if len(entry["doc"]) > 0 {
+                push(lines_list, entry["doc"])
+                push(lines_list, "")
+            }
+
+            if kind == "function" {
+                if has(entry, "params") and len(entry["params"]) > 0 {
+                    push(lines_list, "**Parameters:**")
+                    for p in entry["params"] {
+                        let pname = p
+                        if type(p) == "list" { pname = p[0] }
+                        mut type_str = ""
+                        if has(entry, "param_types") and has(entry["param_types"], str(pname)) {
+                            type_str = " `" + entry["param_types"][str(pname)] + "`"
+                        }
+                        push(lines_list, "- `" + str(pname) + "`" + type_str)
+                    }
+                    push(lines_list, "")
+                }
+                if has(entry, "return_type") and entry["return_type"] != null {
+                    push(lines_list, "**Returns:** `" + entry["return_type"] + "`")
+                    push(lines_list, "")
+                }
+            }
+
+            if kind == "class" and has(entry, "methods") and len(entry["methods"]) > 0 {
+                push(lines_list, "**Methods:**")
+                push(lines_list, "")
+                for m in entry["methods"] {
+                    push(lines_list, "#### `" + m["signature"] + "`")
+                    push(lines_list, "")
+                    if len(m["doc"]) > 0 {
+                        push(lines_list, m["doc"])
+                        push(lines_list, "")
+                    }
+                }
+            }
+
+            if kind == "enum" and has(entry, "members") {
+                push(lines_list, "**Members:**")
+                for member in entry["members"] {
+                    let mname = member[0]
+                    let mval = member[1]
+                    if mval != null {
+                        push(lines_list, "- `" + mname + "` = `" + str(mval) + "`")
+                    } else {
+                        push(lines_list, "- `" + mname + "`")
+                    }
+                }
+                push(lines_list, "")
+            }
+
+            push(lines_list, "*Line " + str(entry["line"]) + "*")
+            push(lines_list, "")
+        }
+    }
+
+    return join(lines_list, "\n")
+}
+
+-- ── JSON output ───────────────────────────────────────────
+
+fn format_json(entries_list) {
+    return json_string(entries_list)
+}
+
+-- ── Public API ────────────────────────────────────────────
+
+fn generate_docs(source, filename, output_format) {
+    let tokens = tokenize(source, filename)
+    let tree = parse(tokens, source)
+    let entries_list = extract_entries(source, tree, filename)
+
+    if output_format == "markdown" {
+        let title = filename
+        if len(title) == 0 { title = "API Documentation" }
+        return format_markdown(entries_list, title, filename)
+    }
+    if output_format == "json" {
+        return format_json(entries_list)
+    }
+    return format_terminal(entries_list, filename)
+}
+
+fn generate_docs_entries(source, filename) {
+    let tokens = tokenize(source, filename)
+    let tree = parse(tokens, source)
+    return extract_entries(source, tree, filename)
+}

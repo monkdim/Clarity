@@ -1,0 +1,389 @@
+-- Clarity Shell — command parser and executor
+-- Parses shell command strings, handles pipes, redirections, and env vars.
+
+from "process.clarity" import run, run_output, which, _quote
+
+-- ── Token types for shell parsing ────────────────────────
+
+let SH_WORD     = "WORD"
+let SH_PIPE     = "PIPE"
+let SH_AND      = "AND"
+let SH_OR       = "OR"
+let SH_SEMI     = "SEMI"
+let SH_REDIR_OUT    = "REDIR_OUT"
+let SH_REDIR_APPEND = "REDIR_APPEND"
+let SH_REDIR_IN     = "REDIR_IN"
+let SH_REDIR_ERR    = "REDIR_ERR"
+let SH_NEWLINE  = "NEWLINE"
+let SH_EOF      = "EOF"
+
+-- ── Shell Tokenizer ──────────────────────────────────────
+
+fn tokenize_shell(input) {
+    -- Tokenize a shell command string into tokens.
+    let tokens = []
+    mut i = 0
+    let n = len(input)
+
+    while i < n {
+        let ch = input[i]
+
+        -- Skip whitespace
+        if ch == " " or ch == "\t" {
+            i += 1
+            continue
+        }
+
+        -- Newline
+        if ch == "\n" {
+            push(tokens, {"type": SH_NEWLINE, "value": "\n"})
+            i += 1
+            continue
+        }
+
+        -- Pipe or OR
+        if ch == "|" {
+            if i + 1 < n and input[i + 1] == "|" {
+                push(tokens, {"type": SH_OR, "value": "||"})
+                i += 2
+            } else {
+                push(tokens, {"type": SH_PIPE, "value": "|"})
+                i += 1
+            }
+            continue
+        }
+
+        -- AND
+        if ch == "&" and i + 1 < n and input[i + 1] == "&" {
+            push(tokens, {"type": SH_AND, "value": "&&"})
+            i += 2
+            continue
+        }
+
+        -- Semicolon
+        if ch == ";" {
+            push(tokens, {"type": SH_SEMI, "value": ";"})
+            i += 1
+            continue
+        }
+
+        -- Redirections
+        if ch == ">" {
+            if i + 1 < n and input[i + 1] == ">" {
+                push(tokens, {"type": SH_REDIR_APPEND, "value": ">>"})
+                i += 2
+            } else {
+                push(tokens, {"type": SH_REDIR_OUT, "value": ">"})
+                i += 1
+            }
+            continue
+        }
+        if ch == "<" {
+            push(tokens, {"type": SH_REDIR_IN, "value": "<"})
+            i += 1
+            continue
+        }
+        if ch == "2" and i + 1 < n and input[i + 1] == ">" {
+            push(tokens, {"type": SH_REDIR_ERR, "value": "2>"})
+            i += 2
+            continue
+        }
+
+        -- Double-quoted string
+        if ch == "\"" {
+            mut word = ""
+            i += 1
+            while i < n and input[i] != "\"" {
+                if input[i] == "\\" and i + 1 < n {
+                    i += 1
+                    word = word + input[i]
+                } else {
+                    word = word + input[i]
+                }
+                i += 1
+            }
+            if i < n { i += 1 }  -- skip closing quote
+            push(tokens, {"type": SH_WORD, "value": word})
+            continue
+        }
+
+        -- Single-quoted string (literal, no escaping)
+        if ch == "'" {
+            mut word = ""
+            i += 1
+            while i < n and input[i] != "'" {
+                word = word + input[i]
+                i += 1
+            }
+            if i < n { i += 1 }  -- skip closing quote
+            push(tokens, {"type": SH_WORD, "value": word})
+            continue
+        }
+
+        -- Comment
+        if ch == "#" {
+            while i < n and input[i] != "\n" {
+                i += 1
+            }
+            continue
+        }
+
+        -- Regular word (unquoted)
+        if ch != " " and ch != "\t" and ch != "\n" and ch != "|" and ch != "&" and ch != ";" and ch != ">" and ch != "<" and ch != "\"" and ch != "'" {
+            mut word = ""
+            while i < n {
+                let c = input[i]
+                if c == " " or c == "\t" or c == "\n" or c == "|" or c == "&" or c == ";" or c == ">" or c == "<" {
+                    break
+                }
+                if c == "\\" and i + 1 < n {
+                    i += 1
+                    word = word + input[i]
+                } else {
+                    word = word + c
+                }
+                i += 1
+            }
+            push(tokens, {"type": SH_WORD, "value": word})
+            continue
+        }
+
+        -- Fallback: skip unknown char
+        i += 1
+    }
+
+    push(tokens, {"type": SH_EOF, "value": ""})
+    return tokens
+}
+
+-- ── Environment variable expansion ───────────────────────
+
+fn expand_vars(word, env_vars) {
+    -- Expand $VAR and dollar references in a word.
+    mut result = ""
+    mut i = 0
+    let n = len(word)
+
+    while i < n {
+        if word[i] == "$" {
+            i += 1
+            if i < n and word[i] == "{" {
+                -- ${VAR} syntax
+                i += 1
+                mut var_name = ""
+                while i < n and word[i] != "}" {
+                    var_name = var_name + word[i]
+                    i += 1
+                }
+                if i < n { i += 1 }  -- skip }
+                let val = if has(env_vars, var_name) { env_vars[var_name] } else { env(var_name, "") }
+                result = result + str(val)
+            } elif i < n and (is_alpha(word[i]) or word[i] == "_") {
+                -- $VAR syntax
+                mut var_name = ""
+                while i < n and (is_alnum(word[i]) or word[i] == "_") {
+                    var_name = var_name + word[i]
+                    i += 1
+                }
+                let val = if has(env_vars, var_name) { env_vars[var_name] } else { env(var_name, "") }
+                result = result + str(val)
+            } else {
+                result = result + "$"
+            }
+        } else {
+            result = result + word[i]
+            i += 1
+        }
+    }
+    return result
+}
+
+-- ── Parse a single command with redirections ─────────────
+
+fn parse_simple_command(tokens, pos, env_vars) {
+    -- Parse tokens into a command: {args: [...], redirects: [...]}
+    mut args = []
+    mut redirects = []
+    mut i = pos
+
+    while i < len(tokens) {
+        let tok = tokens[i]
+        if tok.type == SH_PIPE or tok.type == SH_AND or tok.type == SH_OR or tok.type == SH_SEMI or tok.type == SH_NEWLINE or tok.type == SH_EOF {
+            break
+        }
+
+        if tok.type == SH_REDIR_OUT or tok.type == SH_REDIR_APPEND or tok.type == SH_REDIR_IN or tok.type == SH_REDIR_ERR {
+            i += 1
+            if i < len(tokens) and tokens[i].type == SH_WORD {
+                let target = expand_vars(tokens[i].value, env_vars)
+                push(redirects, {"type": tok.type, "target": target})
+                i += 1
+            }
+            continue
+        }
+
+        if tok.type == SH_WORD {
+            let expanded = expand_vars(tok.value, env_vars)
+            -- Handle glob expansion (basic * patterns)
+            if contains(expanded, "*") {
+                let glob_result = exec("ls -d " + expanded + " 2>/dev/null")
+                if len(trim(glob_result)) > 0 {
+                    let files = split(trim(glob_result), "\n")
+                    each(files, fn(f) { push(args, f) })
+                } else {
+                    push(args, expanded)
+                }
+            } else {
+                push(args, expanded)
+            }
+            i += 1
+            continue
+        }
+
+        i += 1
+    }
+
+    return {"args": args, "redirects": redirects, "next_pos": i}
+}
+
+-- ── Build shell command string from parsed args ──────────
+
+fn build_command_string(args, redirects) {
+    mut parts = []
+    each(args, fn(arg) {
+        if contains(arg, " ") or contains(arg, "'") or contains(arg, "\"") {
+            push(parts, _quote(arg))
+        } else {
+            push(parts, arg)
+        }
+    })
+    mut cmd = join(parts, " ")
+
+    -- Apply redirections
+    each(redirects, fn(r) {
+        if r.type == SH_REDIR_OUT {
+            cmd = cmd + " > " + _quote(r.target)
+        } elif r.type == SH_REDIR_APPEND {
+            cmd = cmd + " >> " + _quote(r.target)
+        } elif r.type == SH_REDIR_IN {
+            cmd = cmd + " < " + _quote(r.target)
+        } elif r.type == SH_REDIR_ERR {
+            cmd = cmd + " 2> " + _quote(r.target)
+        }
+    })
+    return cmd
+}
+
+-- ── Execute a parsed pipeline ────────────────────────────
+
+fn execute_pipeline(commands) {
+    -- commands: list of {args, redirects}
+    -- Chain them with pipes
+    if len(commands) == 0 {
+        return {"stdout": "", "stderr": "", "exit_code": 0, "success": true}
+    }
+
+    let cmd_strings = map(commands, fn(cmd) {
+        return build_command_string(cmd.args, cmd.redirects)
+    })
+    let pipeline = join(cmd_strings, " | ")
+    return run(pipeline)
+}
+
+-- ── Main execute function ────────────────────────────────
+
+fn execute(input, env_vars) {
+    -- Parse and execute a shell command string.
+    -- Handles pipes, &&, ||, ;, redirections, env var expansion.
+    let vars = env_vars ?? {}
+    let tokens = tokenize_shell(input)
+
+    -- Parse into command groups separated by &&, ||, ;
+    mut pos = 0
+    mut last_result = {"stdout": "", "stderr": "", "exit_code": 0, "success": true}
+    mut accumulated_stdout = ""
+    mut accumulated_stderr = ""
+
+    while pos < len(tokens) and tokens[pos].type != SH_EOF {
+        -- Skip newlines
+        if tokens[pos].type == SH_NEWLINE {
+            pos += 1
+            continue
+        }
+
+        -- Parse a pipeline (commands separated by |)
+        let pipeline = []
+        let cmd_result = parse_simple_command(tokens, pos, vars)
+        if len(cmd_result.args) > 0 {
+            push(pipeline, {"args": cmd_result.args, "redirects": cmd_result.redirects})
+        }
+        pos = cmd_result.next_pos
+
+        while pos < len(tokens) and tokens[pos].type == SH_PIPE {
+            pos += 1  -- skip |
+            let next_cmd = parse_simple_command(tokens, pos, vars)
+            if len(next_cmd.args) > 0 {
+                push(pipeline, {"args": next_cmd.args, "redirects": next_cmd.redirects})
+            }
+            pos = next_cmd.next_pos
+        }
+
+        -- Execute the pipeline
+        if len(pipeline) > 0 {
+            last_result = execute_pipeline(pipeline)
+            accumulated_stdout = accumulated_stdout + last_result.stdout
+            accumulated_stderr = accumulated_stderr + last_result.stderr
+        }
+
+        -- Handle connectors (&&, ||, ;)
+        if pos < len(tokens) {
+            let connector = tokens[pos]
+            if connector.type == SH_AND {
+                pos += 1
+                if not last_result.success {
+                    break
+                }
+            } elif connector.type == SH_OR {
+                pos += 1
+                if last_result.success {
+                    break
+                }
+            } elif connector.type == SH_SEMI {
+                pos += 1
+            } else {
+                break
+            }
+        }
+    }
+
+    -- Return combined output
+    last_result["stdout"] = accumulated_stdout
+    last_result["stderr"] = accumulated_stderr
+    return last_result
+}
+
+-- ── Interactive execution (prints output) ────────────────
+
+fn shell_exec(input, env_vars) {
+    -- Execute a shell command and print its output (for interactive use).
+    let result = execute(input, env_vars)
+    if len(trim(result.stdout)) > 0 {
+        show trim(result.stdout)
+    }
+    if len(trim(result.stderr)) > 0 {
+        show trim(result.stderr)
+    }
+    return result
+}
+
+-- ── Tilde expansion ──────────────────────────────────────
+
+fn expand_tilde(path) {
+    if starts(path, "~/") {
+        return env("HOME", "/root") + substring(path, 1)
+    }
+    if path == "~" {
+        return env("HOME", "/root")
+    }
+    return path
+}

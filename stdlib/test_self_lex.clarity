@@ -1,0 +1,32 @@
+-- Ultimate self-hosting test: Clarity lexer tokenizes its own source code
+
+from "tokens.clarity" import TokenType, Token
+from "lexer.clarity" import tokenize
+
+-- Read the lexer source
+let lexer_source = read("stdlib/lexer.clarity")
+
+show "Tokenizing lexer.clarity ({len(lexer_source)} chars)..."
+
+let tokens = tokenize(lexer_source, "lexer.clarity")
+
+show "Got {len(tokens)} tokens"
+
+-- Count by type
+mut types = {}
+for t in tokens {
+    if has(types, t.type) {
+        types[t.type] += 1
+    } else {
+        types[t.type] = 1
+    }
+}
+
+show ""
+show "Token breakdown:"
+for entry in entries(types) {
+    show "  {entry[0]}: {entry[1]}"
+}
+
+show ""
+show "Self-hosting lexer successfully tokenized its own source!"
