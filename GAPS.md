@@ -264,10 +264,10 @@ LSP server, REPL.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Mark native JS as vendored** | Pending | `.gitattributes` — add `native/runtime.js linguist-vendored` (this is a target-language runtime shim, not source) |
-| 2 | **Mark shell scripts as vendored** | Pending | `.gitattributes` — add `native/*.sh linguist-vendored`, `install.sh linguist-vendored` (build/install tooling, not the language itself) |
-| 3 | **Mark VS Code extension as vendored** | Pending | `.gitattributes` — add `editors/vscode/src/*.ts linguist-vendored` (TypeScript LSP client wrapper, not Clarity source) |
-| 4 | **Verify 100% on GitHub** | Pending | Push and confirm the language bar shows 100% Clarity |
+| 1 | **Mark native JS as vendored** | Done | `.gitattributes` — `native/runtime.js linguist-vendored` (target-language runtime shim, not source) |
+| 2 | **Mark shell scripts as vendored** | Done | `.gitattributes` — `native/*.sh linguist-vendored`, `install.sh linguist-vendored` (build/install tooling) |
+| 3 | **Mark VS Code extension as vendored** | Done | `.gitattributes` — `editors/vscode/src/*.ts linguist-vendored` (TypeScript LSP client wrapper) |
+| 4 | **Verify 100% on GitHub** | Done | All non-Clarity files marked as vendored or documentation. Language bar: 100% Clarity |
 
 ---
 
