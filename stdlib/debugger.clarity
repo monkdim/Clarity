@@ -1,0 +1,568 @@
+-- Clarity debugger — interactive step-through debugging.
+-- Self-hosted port of clarity/debugger.py, written in Clarity itself.
+--
+-- Hooks into the interpreter's execute() to pause at breakpoints,
+-- step through code, inspect variables, and evaluate expressions.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "terminal.clarity" import bold, cyan, green, yellow, red, dim
+
+-- ── Breakpoint ────────────────────────────────────────────
+
+mut _bp_next_id = 1
+
+class Breakpoint {
+    fn init(file, line) {
+        this.file = file
+        this.line = line
+        this.enabled = true
+        this.id = _bp_next_id
+        _bp_next_id += 1
+    }
+
+    fn to_string() {
+        let state = if this.enabled { "on" } else { "off" }
+        return "#" + str(this.id) + " " + this.file + ":" + str(this.line) + " (" + state + ")"
+    }
+}
+
+-- ── Debug frame ───────────────────────────────────────────
+
+class DebugFrame {
+    fn init(name, file, line) {
+        this.name = name
+        this.file = file
+        this.line = line
+    }
+
+    fn to_string() {
+        return this.name + " at " + this.file + ":" + str(this.line)
+    }
+}
+
+-- ── Debugger ──────────────────────────────────────────────
+
+class Debugger {
+    fn init(source_path) {
+        this.source_path = source_path
+        this.source = read(source_path)
+        this.source_lines = split(this.source, "\n")
+
+        -- Debug state
+        this.breakpoints = []
+        this.call_stack = [DebugFrame("<main>", source_path, 1)]
+        this.current_line = 0
+        this.current_file = source_path
+
+        -- Step mode: "continue", "step", "next", "finish"
+        this.mode = "step"
+        this.step_depth = 0
+        this.paused = false
+
+        -- Watch expressions
+        this.watches = []
+
+        -- Interpreter
+        let dir_result = exec_full("dirname " + this.quote(source_path))
+        let source_dir = trim(dir_result.stdout)
+        this.interp = Interpreter(null, source_dir)
+    }
+
+    fn quote(s) {
+        let escaped = replace(str(s), "'", "'\\''")
+        return "'" + escaped + "'"
+    }
+
+    fn run() {
+        show ""
+        show "  " + bold("Clarity Debugger")
+        show "  " + dim("File: " + this.source_path)
+        show "  " + dim("Type 'help' for commands.")
+        show ""
+
+        try {
+            let tokens = tokenize(this.source, this.source_path)
+            let tree = parse(tokens, this.source)
+
+            -- Run with step-through hooks
+            -- Since we can't monkey-patch in Clarity, we do manual step-through:
+            -- Execute each top-level statement, pausing as needed
+            this.execute_with_debug(tree.body)
+
+            show ""
+            show "  " + green("Program finished.")
+        } catch e {
+            show ""
+            show "  " + red("Error: " + str(e))
+            show "  " + dim("Dropped into debugger at error location.")
+            this.debug_prompt()
+        }
+    }
+
+    fn execute_with_debug(stmts) {
+        for stmt in stmts {
+            let line = stmt.line
+            if line != null {
+                this.current_line = line
+                if len(this.call_stack) > 0 {
+                    this.call_stack[len(this.call_stack) - 1].line = line
+                }
+
+                mut should_break = false
+
+                -- Check breakpoints
+                for bp in this.breakpoints {
+                    if bp.enabled and bp.line == line {
+                        should_break = true
+                        show ""
+                        show "  " + yellow("Breakpoint #" + str(bp.id)) + " at line " + str(line)
+                    }
+                }
+
+                -- Check step modes
+                if this.mode == "step" {
+                    should_break = true
+                } elif this.mode == "next" and len(this.call_stack) <= this.step_depth {
+                    should_break = true
+                } elif this.mode == "finish" and len(this.call_stack) < this.step_depth {
+                    should_break = true
+                }
+
+                if should_break {
+                    this.paused = true
+                    this.show_location(line)
+                    this.debug_prompt()
+                }
+            }
+
+            -- Execute the statement via interpreter
+            this.interp.execute_stmt(stmt, this.interp.global_env)
+        }
+    }
+
+    fn show_location(line) {
+        let start = max(0, line - 3)
+        let end_line = min(len(this.source_lines), line + 2)
+
+        show ""
+        mut i = start
+        while i < end_line {
+            let lineno = i + 1
+            let marker = if lineno == line { "  " + green(">") + " " } else { "    " }
+            let src = if i < len(this.source_lines) { this.source_lines[i] } else { "" }
+            if lineno == line {
+                show "  " + str(lineno) + marker + src
+            } else {
+                show "  " + dim(str(lineno)) + marker + dim(src)
+            }
+            i += 1
+        }
+
+        -- Show watches
+        if len(this.watches) > 0 {
+            show ""
+            show "  " + cyan("Watches:")
+            for expr in this.watches {
+                try {
+                    let wtokens = tokenize(expr, "<watch>")
+                    let wtree = parse(wtokens, expr)
+                    if len(wtree.body) > 0 {
+                        let last = wtree.body[len(wtree.body) - 1]
+                        mut val = null
+                        try {
+                            if last.node_type == "ExpressionStatement" {
+                                val = this.interp.evaluate(last.expression, this.interp.global_env)
+                            } else {
+                                val = this.interp.execute_stmt(last, this.interp.global_env)
+                            }
+                        } catch e {
+                            val = red("<error: " + str(e) + ">")
+                        }
+                        show "    " + expr + " = " + this.format_value(val)
+                    }
+                } catch e {
+                    show "    " + expr + " = " + red("<error: " + str(e) + ">")
+                }
+            }
+        }
+    }
+
+    fn debug_prompt() {
+        while true {
+            let cmd = ask("  " + cyan("debug> "))
+            if cmd == null { exit(0) }
+            let trimmed = trim(cmd)
+            if len(trimmed) == 0 { continue }
+
+            let parts = split(trimmed, " ")
+            let command = lower(parts[0])
+            mut arg = ""
+            if len(parts) > 1 {
+                -- Rejoin everything after the command
+                mut arg_parts = []
+                mut i = 1
+                while i < len(parts) {
+                    push(arg_parts, parts[i])
+                    i += 1
+                }
+                arg = join(arg_parts, " ")
+            }
+
+            if command == "s" or command == "step" {
+                this.mode = "step"
+                return null
+            }
+            if command == "n" or command == "next" {
+                this.mode = "next"
+                this.step_depth = len(this.call_stack)
+                return null
+            }
+            if command == "c" or command == "continue" or command == "cont" {
+                this.mode = "continue"
+                return null
+            }
+            if command == "f" or command == "finish" or command == "out" {
+                this.mode = "finish"
+                this.step_depth = len(this.call_stack)
+                return null
+            }
+            if command == "q" or command == "quit" or command == "exit" {
+                show "  " + dim("-- Quit --")
+                exit(0)
+            }
+            if command == "b" or command == "break" {
+                this.cmd_breakpoint(arg)
+            } elif command == "d" or command == "delete" {
+                this.cmd_delete_bp(arg)
+            } elif command == "bl" or command == "breakpoints" {
+                this.cmd_list_bp()
+            } elif command == "p" or command == "print" {
+                this.cmd_print(arg)
+            } elif command == "e" or command == "eval" {
+                this.cmd_eval(arg)
+            } elif command == "l" or command == "list" {
+                this.cmd_list_source(arg)
+            } elif command == "w" or command == "watch" {
+                this.cmd_watch(arg)
+            } elif command == "uw" or command == "unwatch" {
+                this.cmd_unwatch(arg)
+            } elif command == "v" or command == "vars" or command == "locals" {
+                this.cmd_vars()
+            } elif command == "bt" or command == "backtrace" or command == "stack" {
+                this.cmd_backtrace()
+            } elif command == "h" or command == "help" {
+                this.cmd_help()
+            } else {
+                -- Try to evaluate as expression
+                this.cmd_print(trimmed)
+            }
+        }
+    }
+
+    -- ── Commands ──────────────────────────────────────────
+
+    fn cmd_breakpoint(arg) {
+        if len(arg) == 0 {
+            show "  Usage: break <line> or break <file>:<line>"
+            return null
+        }
+        mut file = this.source_path
+        mut line_str = arg
+        if contains(arg, ":") {
+            let idx = index_of(arg, ":")
+            file = substring(arg, 0, idx)
+            line_str = substring(arg, idx + 1, len(arg))
+        }
+        let line = int(line_str)
+        let bp = Breakpoint(file, line)
+        push(this.breakpoints, bp)
+        show "  " + green("Breakpoint #" + str(bp.id)) + " set at " + file + ":" + str(line)
+    }
+
+    fn cmd_delete_bp(arg) {
+        if len(arg) == 0 {
+            show "  Usage: delete <breakpoint-id>"
+            return null
+        }
+        mut id_str = arg
+        if starts(id_str, "#") { id_str = substring(id_str, 1, len(id_str)) }
+        let bp_id = int(id_str)
+        mut i = 0
+        while i < len(this.breakpoints) {
+            if this.breakpoints[i].id == bp_id {
+                -- Remove by rebuilding list
+                mut new_bps = []
+                mut j = 0
+                while j < len(this.breakpoints) {
+                    if j != i { push(new_bps, this.breakpoints[j]) }
+                    j += 1
+                }
+                this.breakpoints = new_bps
+                show "  Deleted breakpoint #" + str(bp_id)
+                return null
+            }
+            i += 1
+        }
+        show "  " + red("No breakpoint #" + str(bp_id))
+    }
+
+    fn cmd_list_bp() {
+        if len(this.breakpoints) == 0 {
+            show "  " + dim("No breakpoints set.")
+            return null
+        }
+        for bp in this.breakpoints {
+            show "  " + bp.to_string()
+        }
+    }
+
+    fn cmd_print(expr) {
+        if len(expr) == 0 {
+            show "  Usage: print <expression>"
+            return null
+        }
+        try {
+            let ptokens = tokenize(expr, "<eval>")
+            let ptree = parse(ptokens, expr)
+            if len(ptree.body) > 0 {
+                let last = ptree.body[len(ptree.body) - 1]
+                mut val = null
+                if last.node_type == "ExpressionStatement" {
+                    val = this.interp.evaluate(last.expression, this.interp.global_env)
+                } else {
+                    val = this.interp.execute_stmt(last, this.interp.global_env)
+                }
+                show "  = " + this.format_value(val)
+            }
+        } catch e {
+            show "  " + red("Error: " + str(e))
+        }
+    }
+
+    fn cmd_eval(expr) {
+        if len(expr) == 0 {
+            show "  Usage: eval <code>"
+            return null
+        }
+        try {
+            let old_mode = this.mode
+            this.mode = "continue"
+            let etokens = tokenize(expr, "<eval>")
+            let etree = parse(etokens, expr)
+            mut result = null
+            for stmt in etree.body {
+                result = this.interp.execute_stmt(stmt, this.interp.global_env)
+            }
+            if result != null {
+                show "  = " + this.format_value(result)
+            }
+            this.mode = old_mode
+        } catch e {
+            show "  " + red("Error: " + str(e))
+        }
+    }
+
+    fn cmd_list_source(arg) {
+        mut center = this.current_line
+        if len(arg) > 0 {
+            try { center = int(arg) } catch e {}
+        }
+        let start = max(0, center - 6)
+        let end_line = min(len(this.source_lines), center + 5)
+        mut i = start
+        while i < end_line {
+            let lineno = i + 1
+            let marker = if lineno == this.current_line { "  " + green(">") + " " } else { "    " }
+            -- Check breakpoint markers
+            mut bp_mark = ""
+            for bp in this.breakpoints {
+                if bp.enabled and bp.line == lineno {
+                    bp_mark = " " + red("*")
+                }
+            }
+            let src = if i < len(this.source_lines) { this.source_lines[i] } else { "" }
+            if lineno == this.current_line {
+                show "  " + str(lineno) + marker + src + bp_mark
+            } else {
+                show "  " + dim(str(lineno)) + marker + dim(src) + bp_mark
+            }
+            i += 1
+        }
+    }
+
+    fn cmd_watch(expr) {
+        if len(expr) == 0 {
+            if len(this.watches) > 0 {
+                show "  " + cyan("Watches:")
+                mut i = 0
+                for w in this.watches {
+                    show "    " + str(i + 1) + ". " + w
+                    i += 1
+                }
+            } else {
+                show "  " + dim("No watches set.")
+            }
+            return null
+        }
+        push(this.watches, expr)
+        show "  " + green("Watch added:") + " " + expr
+    }
+
+    fn cmd_unwatch(arg) {
+        if len(arg) == 0 {
+            show "  Usage: unwatch <index>"
+            return null
+        }
+        try {
+            let idx = int(arg) - 1
+            if idx >= 0 and idx < len(this.watches) {
+                let removed = this.watches[idx]
+                mut new_watches = []
+                mut i = 0
+                while i < len(this.watches) {
+                    if i != idx { push(new_watches, this.watches[i]) }
+                    i += 1
+                }
+                this.watches = new_watches
+                show "  Removed watch: " + removed
+            } else {
+                show "  " + red("Invalid watch index")
+            }
+        } catch e {
+            -- Try removing by expression text
+            mut found = false
+            mut new_watches = []
+            for w in this.watches {
+                if w == arg and not found {
+                    found = true
+                    show "  Removed watch: " + arg
+                } else {
+                    push(new_watches, w)
+                }
+            }
+            if not found {
+                show "  " + red("Watch not found: " + arg)
+            } else {
+                this.watches = new_watches
+            }
+        }
+    }
+
+    fn cmd_vars() {
+        let env_vars = keys(this.interp.global_env.vars)
+        mut shown = 0
+        for name in env_vars {
+            -- Skip built-in functions (heuristic: skip if it's a function type)
+            let val = this.interp.global_env.vars[name]
+            if type(val) == "function" { continue }
+            mut mut_marker = ""
+            if has(this.interp.global_env.mutables, name) {
+                mut_marker = " (mut)"
+            }
+            show "  " + bold(name) + mut_marker + " = " + this.format_value(val)
+            shown += 1
+        }
+        if shown == 0 {
+            show "  " + dim("No user variables in scope.")
+        }
+    }
+
+    fn cmd_backtrace() {
+        if len(this.call_stack) == 0 {
+            show "  " + dim("Empty call stack.")
+            return null
+        }
+        mut i = len(this.call_stack) - 1
+        mut idx = 0
+        while i >= 0 {
+            let marker = if idx == 0 { green(">") + " " } else { "  " }
+            show "  " + marker + "#" + str(idx) + " " + this.call_stack[i].to_string()
+            i -= 1
+            idx += 1
+        }
+    }
+
+    fn cmd_help() {
+        show ""
+        show "  " + bold("Debugger Commands:")
+        show ""
+        show "  " + cyan("Execution:")
+        show "    s, step         Step into (execute one statement)"
+        show "    n, next         Step over (skip into function calls)"
+        show "    f, finish       Step out (run until current function returns)"
+        show "    c, continue     Continue until next breakpoint"
+        show "    q, quit         Exit debugger"
+        show ""
+        show "  " + cyan("Breakpoints:")
+        show "    b <line>        Set breakpoint at line"
+        show "    b <file>:<line> Set breakpoint at file:line"
+        show "    d <id>          Delete breakpoint"
+        show "    bl              List all breakpoints"
+        show ""
+        show "  " + cyan("Inspection:")
+        show "    p <expr>        Print expression value"
+        show "    e <code>        Evaluate Clarity code"
+        show "    v, vars         Show variables in current scope"
+        show "    bt, backtrace   Show call stack"
+        show "    l [line]        List source code"
+        show "    w <expr>        Add watch expression"
+        show "    uw <index>      Remove watch expression"
+        show ""
+    }
+
+    -- ── Helpers ───────────────────────────────────────────
+
+    fn format_value(val) {
+        if val == null { return dim("null") }
+        if type(val) == "string" { return green("\"" + val + "\"") }
+        if type(val) == "bool" { return cyan(str(val)) }
+        if type(val) == "number" or type(val) == "int" or type(val) == "float" { return yellow(str(val)) }
+        if type(val) == "list" {
+            if len(val) > 10 {
+                mut items = []
+                mut i = 0
+                while i < 10 {
+                    push(items, this.format_value(val[i]))
+                    i += 1
+                }
+                return "[" + join(items, ", ") + ", ... (" + str(len(val)) + " items)]"
+            }
+            mut items = []
+            for v in val {
+                push(items, this.format_value(v))
+            }
+            return "[" + join(items, ", ") + "]"
+        }
+        if type(val) == "map" {
+            let k = keys(val)
+            if len(k) > 5 {
+                mut items = []
+                mut i = 0
+                while i < 5 {
+                    push(items, str(k[i]) + ": " + this.format_value(val[k[i]]))
+                    i += 1
+                }
+                return "{" + join(items, ", ") + ", ... (" + str(len(k)) + " keys)}"
+            }
+            mut items = []
+            for key in k {
+                push(items, str(key) + ": " + this.format_value(val[key]))
+            }
+            return "{" + join(items, ", ") + "}"
+        }
+        return str(val)
+    }
+}
+
+-- ── Public API ────────────────────────────────────────────
+
+fn debug_file(path) {
+    if not exists(path) {
+        show "  " + red(">> File not found: " + path)
+        exit(1)
+    }
+    let dbg = Debugger(path)
+    dbg.run()
+}

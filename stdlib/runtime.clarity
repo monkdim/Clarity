@@ -1,0 +1,71 @@
+-- Clarity Runtime — self-hosting implementation
+-- Faithful port of clarity/runtime.py, written in Clarity itself.
+-- Provides built-in functions and modules for the self-hosted interpreter.
+--
+-- NOTE: In the self-hosted interpreter, builtins are registered directly
+-- in the Interpreter._setup_builtins() method. This module provides the
+-- module system (get_module) and any additional runtime helpers.
+
+-- ── Module system ────────────────────────────────────────
+
+fn get_module(name) {
+    if name == "math" {
+        return {
+            "pi": pi,
+            "e": e,
+            "sqrt": fn(n) { return sqrt(n) },
+            "pow": fn(a, b) { return pow(a, b) },
+            "abs": fn(n) { return abs(n) },
+            "floor": fn(n) { return floor(n) },
+            "ceil": fn(n) { return ceil(n) },
+            "round": fn(n) { return round(n) },
+            "sin": fn(n) { return sin(n) },
+            "cos": fn(n) { return cos(n) },
+            "tan": fn(n) { return tan(n) },
+            "log": fn(n) { return log(n) },
+            "min": fn(...a) { return min(...a) },
+            "max": fn(...a) { return max(...a) }
+        }
+    }
+
+    if name == "json" {
+        return {
+            "parse": fn(t) { return json_parse(t) },
+            "string": fn(v) { return json_string(v) }
+        }
+    }
+
+    if name == "os" {
+        return {
+            "env": fn(k, d) { return env(k, d) },
+            "cwd": fn() { return cwd() },
+            "args": fn() { return args() },
+            "exec": fn(cmd) { return exec(cmd) }
+        }
+    }
+
+    if name == "time" {
+        return {
+            "now": fn() { return time() },
+            "sleep": fn(s) { sleep(s) }
+        }
+    }
+
+    return null
+}
+
+-- ── Display helpers ──────────────────────────────────────
+
+fn display(value) {
+    if value == null { return "null" }
+    if value == true { return "true" }
+    if value == false { return "false" }
+    return str(value)
+}
+
+fn repr(value) {
+    if type(value) == "string" {
+        return "\"{value}\""
+    }
+    return display(value)
+}

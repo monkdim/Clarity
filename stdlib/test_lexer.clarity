@@ -1,0 +1,185 @@
+-- Test: Clarity lexer self-hosting
+-- Tokenize Clarity source code using the Clarity-written lexer
+
+from "tokens.clarity" import TokenType, Token
+from "lexer.clarity" import tokenize
+
+-- ── Test helper ─────────────────────────────────────────
+
+mut passed = 0
+mut failed = 0
+
+fn test(name, source, expected_types) {
+    let tokens = tokenize(source, "<test>")
+    -- Get types (excluding EOF)
+    let types = tokens
+        |> filter(t => t.type != TokenType.EOF)
+        |> filter(t => t.type != TokenType.NEWLINE)
+        |> map(t => t.type)
+
+    if len(types) != len(expected_types) {
+        show "  [FAIL] {name} — expected {len(expected_types)} tokens, got {len(types)}"
+        show "    expected: {expected_types}"
+        show "    got:      {types}"
+        failed += 1
+        return
+    }
+
+    mut ok = true
+    for i in 0..len(types) {
+        if types[i] != expected_types[i] {
+            show "  [FAIL] {name} — token {i}: expected {expected_types[i]}, got {types[i]}"
+            ok = false
+        }
+    }
+
+    if ok {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        failed += 1
+    }
+}
+
+fn test_value(name, source, index, expected_value) {
+    let tokens = tokenize(source, "<test>")
+    let non_special = tokens
+        |> filter(t => t.type != TokenType.EOF)
+        |> filter(t => t.type != TokenType.NEWLINE)
+
+    if index >= len(non_special) {
+        show "  [FAIL] {name} — not enough tokens"
+        failed += 1
+        return
+    }
+
+    if non_special[index].value == expected_value {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — expected {expected_value}, got {non_special[index].value}"
+        failed += 1
+    }
+}
+
+-- ── Tests ───────────────────────────────────────────────
+
+show "Self-hosting lexer tests:"
+
+-- Basic tokens
+test("let statement", "let x = 42", [
+    TokenType.LET, TokenType.IDENTIFIER, TokenType.ASSIGN, TokenType.NUMBER
+])
+
+-- Mutable
+test("mut statement", "mut count = 0", [
+    TokenType.MUT, TokenType.IDENTIFIER, TokenType.ASSIGN, TokenType.NUMBER
+])
+
+-- Function
+test("function", "fn add(a, b) {}", [
+    TokenType.FN, TokenType.IDENTIFIER, TokenType.LPAREN,
+    TokenType.IDENTIFIER, TokenType.COMMA, TokenType.IDENTIFIER,
+    TokenType.RPAREN, TokenType.LBRACE, TokenType.RBRACE
+])
+
+-- Operators
+test("operators", "a + b - c * d / e", [
+    TokenType.IDENTIFIER, TokenType.PLUS, TokenType.IDENTIFIER,
+    TokenType.MINUS, TokenType.IDENTIFIER, TokenType.STAR,
+    TokenType.IDENTIFIER, TokenType.SLASH, TokenType.IDENTIFIER
+])
+
+-- Comparison
+test("comparisons", "a == b != c < d > e <= f >= g", [
+    TokenType.IDENTIFIER, TokenType.EQ, TokenType.IDENTIFIER,
+    TokenType.NEQ, TokenType.IDENTIFIER, TokenType.LT,
+    TokenType.IDENTIFIER, TokenType.GT, TokenType.IDENTIFIER,
+    TokenType.LTE, TokenType.IDENTIFIER, TokenType.GTE,
+    TokenType.IDENTIFIER
+])
+
+-- Pipe
+test("pipe operator", "x |> foo()", [
+    TokenType.IDENTIFIER, TokenType.PIPE,
+    TokenType.IDENTIFIER, TokenType.LPAREN, TokenType.RPAREN
+])
+
+-- Fat arrow
+test("fat arrow", "x => x * 2", [
+    TokenType.IDENTIFIER, TokenType.FAT_ARROW,
+    TokenType.IDENTIFIER, TokenType.STAR, TokenType.NUMBER
+])
+
+-- Strings
+test("string", "\"hello world\"", [TokenType.STRING])
+test_value("string value", "\"hello\"", 0, "hello")
+
+-- Numbers
+test("integer", "42", [TokenType.NUMBER])
+test_value("integer value", "42", 0, 42)
+test("float", "3.14", [TokenType.NUMBER])
+test_value("float value", "3.14", 0, 3.14)
+
+-- Keywords
+test("if/else", "if true {} else {}", [
+    TokenType.IF, TokenType.TRUE, TokenType.LBRACE, TokenType.RBRACE,
+    TokenType.ELSE, TokenType.LBRACE, TokenType.RBRACE
+])
+
+-- Range and spread
+test("range operator", "1..10", [
+    TokenType.NUMBER, TokenType.DOTDOT, TokenType.NUMBER
+])
+
+test("spread operator", "...args", [
+    TokenType.SPREAD, TokenType.IDENTIFIER
+])
+
+-- Compound assignment
+test("compound assign", "x += 1", [
+    TokenType.IDENTIFIER, TokenType.PLUS_ASSIGN, TokenType.NUMBER
+])
+
+-- Bitwise
+test("bitwise", "a & b | c ^ d", [
+    TokenType.IDENTIFIER, TokenType.AMPERSAND, TokenType.IDENTIFIER,
+    TokenType.BIT_OR, TokenType.IDENTIFIER, TokenType.CARET,
+    TokenType.IDENTIFIER
+])
+
+-- Null coalescing and optional chaining
+test("null ops", "a ?? b?.c", [
+    TokenType.IDENTIFIER, TokenType.QUESTION_QUESTION,
+    TokenType.IDENTIFIER, TokenType.QUESTION_DOT, TokenType.IDENTIFIER
+])
+
+-- Class
+test("class", "class Dog < Animal {}", [
+    TokenType.CLASS, TokenType.IDENTIFIER, TokenType.LT,
+    TokenType.IDENTIFIER, TokenType.LBRACE, TokenType.RBRACE
+])
+
+-- Power
+test("power", "2 ** 10", [
+    TokenType.NUMBER, TokenType.POWER, TokenType.NUMBER
+])
+
+-- List literal
+test("list", "[1, 2, 3]", [
+    TokenType.LBRACKET, TokenType.NUMBER, TokenType.COMMA,
+    TokenType.NUMBER, TokenType.COMMA, TokenType.NUMBER,
+    TokenType.RBRACKET
+])
+
+-- Dash comment (should be ignored)
+test("dash comment", "x -- this is a comment", [TokenType.IDENTIFIER])
+
+-- ── Results ─────────────────────────────────────────────
+
+show ""
+if failed == 0 {
+    show "All {passed} self-hosting lexer tests passed!"
+} else {
+    show "{passed} passed, {failed} failed"
+}

@@ -1,0 +1,188 @@
+-- Clarity Process Module — structured process execution
+-- Wraps host exec/exec_full with richer options and PATH resolution.
+
+-- ── Run a command ────────────────────────────────────────
+
+fn run(cmd, ...rest) {
+    -- Run a shell command string.
+    -- rest[0] (optional map): { stdin, cwd, env_vars }
+    -- Returns: { stdout, stderr, exit_code, success }
+    let options = if len(rest) > 0 and rest[0] != null { rest[0] } else { {} }
+
+    -- Build the actual command
+    mut full_cmd = cmd
+
+    -- Prepend cd if cwd specified
+    if has(options, "cwd") and options.cwd != null {
+        full_cmd = "cd " + _quote(options.cwd) + " && " + full_cmd
+    }
+
+    -- Prepend env vars if specified
+    if has(options, "env_vars") and options.env_vars != null {
+        let env_pairs = entries(options.env_vars)
+        mut env_prefix = ""
+        each(env_pairs, fn(pair) {
+            env_prefix = env_prefix + pair[0] + "=" + _quote(str(pair[1])) + " "
+        })
+        full_cmd = env_prefix + full_cmd
+    }
+
+    -- Pipe stdin if specified
+    if has(options, "stdin") and options.stdin != null {
+        full_cmd = "echo " + _quote(options.stdin) + " | " + full_cmd
+    }
+
+    let result = exec_full(full_cmd)
+    result["success"] = result.exit_code == 0
+    return result
+}
+
+-- ── Run and get stdout only ──────────────────────────────
+
+fn run_output(cmd, ...rest) {
+    -- Run a command and return stdout trimmed. Throws on non-zero exit.
+    let opts = if len(rest) > 0 { rest[0] } else { null }
+    let result = run(cmd, opts)
+    if not result.success {
+        throw "Command failed (exit {result.exit_code}): {result.stderr}"
+    }
+    return trim(result.stdout)
+}
+
+-- ── Which — resolve executable from PATH ─────────────────
+
+fn which(name) {
+    -- Find the full path of an executable.
+    -- Returns the path string or null if not found.
+    try {
+        let result = exec_full("which " + _quote(name) + " 2>/dev/null")
+        if result.exit_code == 0 {
+            return trim(result.stdout)
+        }
+        return null
+    } catch e {
+        return null
+    }
+}
+
+-- ── Check if command exists ──────────────────────────────
+
+fn command_exists(name) {
+    return which(name) != null
+}
+
+-- ── Run with piped commands ──────────────────────────────
+
+fn pipe(commands) {
+    -- Run a list of commands connected by pipes.
+    -- commands: list of command strings
+    -- Returns: result of the final command in the pipeline
+    if len(commands) == 0 {
+        return {"stdout": "", "stderr": "", "exit_code": 0, "success": true}
+    }
+    let pipeline = join(commands, " | ")
+    return run(pipeline)
+}
+
+-- ── Run multiple commands in sequence ────────────────────
+
+fn sequence(commands) {
+    -- Run commands one after another. Stop on first failure.
+    -- Returns: result of the last command run
+    mut last_result = {"stdout": "", "stderr": "", "exit_code": 0, "success": true}
+    each(commands, fn(cmd) {
+        last_result = run(cmd)
+        if not last_result.success {
+            return last_result
+        }
+    })
+    return last_result
+}
+
+-- ── Environment helpers ──────────────────────────────────
+
+fn get_path() {
+    -- Get the PATH as a list of directories.
+    let path_str = env("PATH", "")
+    return split(path_str, ":")
+}
+
+fn get_env_map() {
+    -- Get all environment variables as a map.
+    -- Uses `env` command since we can't enumerate from Clarity directly.
+    let result = exec_full("env 2>/dev/null")
+    if result.exit_code != 0 {
+        return {}
+    }
+    let env_map = {}
+    let env_lines = split(result.stdout, "\n")
+    each(env_lines, fn(line) {
+        let eq_pos = index_of(line, "=")
+        if eq_pos > 0 {
+            let key = substring(line, 0, eq_pos)
+            let val = substring(line, eq_pos + 1)
+            env_map[key] = val
+        }
+    })
+    return env_map
+}
+
+fn home_dir() {
+    return env("HOME", "/root")
+}
+
+-- ── Shell quoting helper ─────────────────────────────────
+
+fn _quote(s) {
+    -- Single-quote a string for safe shell usage.
+    -- Escapes any internal single quotes.
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+-- ── List directory ───────────────────────────────────────
+
+fn ls(path) {
+    let dir = path ?? "."
+    let result = exec_full("ls -1 " + _quote(dir) + " 2>/dev/null")
+    if result.exit_code != 0 {
+        return []
+    }
+    let items = split(trim(result.stdout), "\n")
+    return filter(items, fn(s) { return len(s) > 0 })
+}
+
+fn ls_long(path) {
+    let dir = path ?? "."
+    let result = exec_full("ls -la " + _quote(dir) + " 2>/dev/null")
+    if result.exit_code != 0 {
+        return ""
+    }
+    return trim(result.stdout)
+}
+
+-- ── File helpers ─────────────────────────────────────────
+
+fn mkdir(path) {
+    return run("mkdir -p " + _quote(path))
+}
+
+fn rm(path) {
+    return run("rm -f " + _quote(path))
+}
+
+fn cp(src, dst) {
+    return run("cp -r " + _quote(src) + " " + _quote(dst))
+}
+
+fn mv(src, dst) {
+    return run("mv " + _quote(src) + " " + _quote(dst))
+}
+
+fn cat(path) {
+    return run_output("cat " + _quote(path))
+}
+
+fn pwd() {
+    return cwd()
+}

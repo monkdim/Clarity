@@ -1,0 +1,545 @@
+-- Clarity linter — static analysis for common code issues.
+-- Self-hosted port of clarity/linter.py, written in Clarity itself.
+--
+-- Rules:
+--   W001  Unused variable
+--   W002  Mutable variable never reassigned
+--   W003  Variable redeclared in same scope
+--   W004  Variable shadows outer variable
+--   W005  Constant condition (always true/false)
+--   W006  Null comparison (suggest ??)
+--   W007  Unreachable code after return/break/continue/throw
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+-- ── Built-in names (never warn as unused) ─────────────────
+
+let BUILTINS = [
+    "show", "ask", "len", "type", "str", "int", "float", "bool",
+    "abs", "round", "floor", "ceil", "min", "max", "sum", "sqrt",
+    "pow", "sin", "cos", "tan", "log", "pi", "e", "random",
+    "upper", "lower", "trim", "split", "join", "replace",
+    "contains", "starts", "ends", "chars", "repeat",
+    "keys", "values", "entries", "merge", "has",
+    "push", "pop", "sort", "reverse",
+    "map", "filter", "reduce", "find", "every", "some", "each",
+    "flat", "zip", "unique", "range",
+    "display", "repr", "json_parse", "json_string",
+    "read", "write", "append", "exists", "lines",
+    "encode64", "decode64", "hash",
+    "exec", "exec_full", "exit", "sleep", "time", "env", "args", "cwd",
+    "fetch", "serve", "compose", "tap", "set", "error",
+    "is_digit", "is_alpha", "is_alnum", "is_space",
+    "char_at", "char_code", "from_char_code", "index_of", "substring",
+    "pad_left", "pad_right"
+]
+
+fn is_builtin(name) {
+    for b in BUILTINS {
+        if b == name { return true }
+    }
+    return false
+}
+
+-- ── Lint scope ────────────────────────────────────────────
+
+class LintScope {
+    fn init(parent, scope_type) {
+        this.parent = parent
+        this.scope_type = scope_type
+        this.declared = {}
+        this.assigned = {}
+    }
+
+    fn declare(name, line, mutable) {
+        this.declared[name] = {"line": line, "mutable": mutable, "used": false}
+    }
+
+    fn mark_used(name) {
+        if has(this.declared, name) {
+            this.declared[name]["used"] = true
+            return true
+        }
+        if this.parent != null {
+            return this.parent.mark_used(name)
+        }
+        return false
+    }
+
+    fn mark_assigned(name) {
+        this.assigned[name] = true
+        if this.parent != null {
+            this.parent.mark_assigned(name)
+        }
+    }
+
+    fn is_declared(name) {
+        if has(this.declared, name) { return true }
+        if this.parent != null { return this.parent.is_declared(name) }
+        return false
+    }
+
+    fn is_declared_locally(name) {
+        return has(this.declared, name)
+    }
+}
+
+-- ── Linter ────────────────────────────────────────────────
+
+class Linter {
+    fn init() {
+        this.diagnostics = []
+        this.scope = LintScope(null, "module")
+        -- Pre-register builtins
+        for b in BUILTINS {
+            this.scope.declare(b, 0, false)
+            this.scope.mark_used(b)
+        }
+    }
+
+    fn lint(tree) {
+        this.diagnostics = []
+        for stmt in tree.body {
+            this.lint_stmt(stmt)
+        }
+        this.check_unused(this.scope, true)
+        return this.diagnostics
+    }
+
+    fn diag(msg, line, severity, code) {
+        push(this.diagnostics, {
+            "message": msg,
+            "line": line,
+            "severity": severity,
+            "code": code
+        })
+    }
+
+    fn push_scope(scope_type) {
+        this.scope = LintScope(this.scope, scope_type)
+    }
+
+    fn pop_scope(do_check) {
+        if do_check {
+            this.check_unused(this.scope, false)
+        }
+        this.scope = this.scope.parent
+    }
+
+    fn check_unused(scope, skip_builtins) {
+        let names = keys(scope.declared)
+        for name in names {
+            let info = scope.declared[name]
+            if skip_builtins and is_builtin(name) { continue }
+            if info["line"] == 0 { continue }
+            if not info["used"] and not starts(name, "_") {
+                this.diag(
+                    "Unused variable '" + name + "'",
+                    info["line"], "warning", "W001"
+                )
+            }
+            if info["mutable"] and not has(scope.assigned, name) and not starts(name, "_") {
+                if info["used"] {
+                    this.diag(
+                        "Variable '" + name + "' declared as mutable but never reassigned",
+                        info["line"], "warning", "W002"
+                    )
+                }
+            }
+        }
+    }
+
+    -- ── Statement dispatch ─────────────────────────────────
+
+    fn lint_stmt(node) {
+        let nt = node.node_type
+
+        if nt == "LetStatement" { this.lint_let(node) }
+        elif nt == "DestructureLetStatement" { this.lint_destructure_let(node) }
+        elif nt == "AssignStatement" { this.lint_assign(node) }
+        elif nt == "FnStatement" { this.lint_fn(node) }
+        elif nt == "ReturnStatement" { this.lint_return(node) }
+        elif nt == "IfStatement" { this.lint_if(node) }
+        elif nt == "ForStatement" { this.lint_for(node) }
+        elif nt == "WhileStatement" { this.lint_while(node) }
+        elif nt == "TryCatch" { this.lint_try(node) }
+        elif nt == "ClassStatement" { this.lint_class(node) }
+        elif nt == "InterfaceStatement" { this.lint_interface(node) }
+        elif nt == "EnumStatement" { this.lint_enum(node) }
+        elif nt == "MatchStatement" { this.lint_match(node) }
+        elif nt == "ShowStatement" { this.lint_show(node) }
+        elif nt == "ThrowStatement" { this.lint_throw(node) }
+        elif nt == "ImportStatement" { this.lint_import(node) }
+        elif nt == "ExpressionStatement" { this.lint_expr(node.expression) }
+        elif nt == "DecoratedStatement" { this.lint_decorated(node) }
+        elif nt == "MultiAssignStatement" { this.lint_multi_assign(node) }
+        elif nt == "Block" { this.lint_body(node.statements) }
+    }
+
+    fn lint_let(node) {
+        if this.scope.is_declared_locally(node.name) {
+            this.diag(
+                "Variable '" + node.name + "' is already declared in this scope",
+                node.line, "warning", "W003"
+            )
+        } elif this.scope.parent != null and this.scope.parent.is_declared(node.name) and not is_builtin(node.name) {
+            this.diag(
+                "Variable '" + node.name + "' shadows outer variable",
+                node.line, "info", "W004"
+            )
+        }
+        this.scope.declare(node.name, node.line, node.mutable)
+        this.lint_expr(node.value)
+    }
+
+    fn lint_destructure_let(node) {
+        for target in node.targets {
+            let name = target
+            if type(target) != "string" {
+                try { name = target.name } catch e { name = str(target) }
+            }
+            this.scope.declare(name, node.line, node.mutable)
+        }
+        this.lint_expr(node.value)
+    }
+
+    fn lint_assign(node) {
+        if node.target.node_type == "Identifier" {
+            this.scope.mark_assigned(node.target.name)
+        }
+        this.lint_expr(node.target)
+        this.lint_expr(node.value)
+    }
+
+    fn lint_fn(node) {
+        this.scope.declare(node.name, node.line, false)
+        this.push_scope("function")
+        for p in node.params {
+            let pname = p
+            if type(p) == "list" { pname = p[0] }
+            if type(pname) == "string" {
+                this.scope.declare(pname, node.line, false)
+            }
+        }
+        this.lint_body(node.body)
+        this.check_unreachable(node.body)
+        this.pop_scope(true)
+    }
+
+    fn lint_return(node) {
+        if node.value != null {
+            this.lint_expr(node.value)
+        }
+    }
+
+    fn lint_if(node) {
+        this.lint_expr(node.condition)
+        -- Check constant condition
+        if node.condition.node_type == "BoolLiteral" {
+            this.diag(
+                "Condition is always " + str(node.condition.value),
+                node.line, "warning", "W005"
+            )
+        }
+        this.push_scope("block")
+        this.lint_body(node.body)
+        this.pop_scope(true)
+
+        if node.elif_clauses != null {
+            for clause in node.elif_clauses {
+                this.lint_expr(clause[0])
+                this.push_scope("block")
+                this.lint_body(clause[1])
+                this.pop_scope(true)
+            }
+        }
+
+        if node.else_body != null {
+            this.push_scope("block")
+            this.lint_body(node.else_body)
+            this.pop_scope(true)
+        }
+    }
+
+    fn lint_for(node) {
+        this.lint_expr(node.iterable)
+        this.push_scope("block")
+        let name = node.variable
+        if type(name) != "string" {
+            try { name = node.variable.name } catch e { name = str(node.variable) }
+        }
+        this.scope.declare(name, node.line, false)
+        this.lint_body(node.body)
+        this.pop_scope(true)
+    }
+
+    fn lint_while(node) {
+        this.lint_expr(node.condition)
+        if node.condition.node_type == "BoolLiteral" and node.condition.value == true {
+            this.diag(
+                "Infinite loop: condition is always true",
+                node.line, "warning", "W005"
+            )
+        }
+        this.push_scope("block")
+        this.lint_body(node.body)
+        this.pop_scope(true)
+    }
+
+    fn lint_try(node) {
+        this.push_scope("block")
+        this.lint_body(node.try_body)
+        this.pop_scope(true)
+        if node.catch_body != null {
+            this.push_scope("block")
+            if node.catch_var != null {
+                this.scope.declare(node.catch_var, node.line, false)
+            }
+            this.lint_body(node.catch_body)
+            this.pop_scope(true)
+        }
+        if node.finally_body != null {
+            this.push_scope("block")
+            this.lint_body(node.finally_body)
+            this.pop_scope(true)
+        }
+    }
+
+    fn lint_class(node) {
+        this.scope.declare(node.name, node.line, false)
+        for method in node.methods {
+            if method.node_type == "FnStatement" {
+                this.push_scope("function")
+                this.scope.declare("this", 0, false)
+                this.scope.mark_used("this")
+                for p in method.params {
+                    let pname = p
+                    if type(p) == "list" { pname = p[0] }
+                    if type(pname) == "string" {
+                        this.scope.declare(pname, method.line, false)
+                    }
+                }
+                this.lint_body(method.body)
+                this.check_unreachable(method.body)
+                this.pop_scope(true)
+            }
+        }
+    }
+
+    fn lint_interface(node) {
+        this.scope.declare(node.name, node.line, false)
+    }
+
+    fn lint_enum(node) {
+        this.scope.declare(node.name, node.line, false)
+    }
+
+    fn lint_match(node) {
+        this.lint_expr(node.subject)
+        for arm in node.arms {
+            this.push_scope("block")
+            -- arm is [pattern, body] or [pattern, guard, body]
+            if len(arm) == 3 {
+                this.lint_body(arm[2])
+            } else {
+                this.lint_body(arm[1])
+            }
+            this.pop_scope(true)
+        }
+        if node.default != null {
+            this.push_scope("block")
+            this.lint_body(node.default)
+            this.pop_scope(true)
+        }
+    }
+
+    fn lint_show(node) {
+        for v in node.values {
+            this.lint_expr(v)
+        }
+    }
+
+    fn lint_throw(node) {
+        this.lint_expr(node.value)
+    }
+
+    fn lint_import(node) {
+        if node.names != null {
+            for name in node.names {
+                this.scope.declare(name, node.line, false)
+            }
+        } elif node.alias != null {
+            this.scope.declare(node.alias, node.line, false)
+        } elif node.module != null {
+            this.scope.declare(node.module, node.line, false)
+        }
+    }
+
+    fn lint_decorated(node) {
+        for dec in node.decorators {
+            this.lint_expr(dec)
+        }
+        this.lint_stmt(node.target)
+    }
+
+    fn lint_multi_assign(node) {
+        for v in node.values {
+            this.lint_expr(v)
+        }
+    }
+
+    fn lint_body(body) {
+        if body == null { return null }
+        if type(body) == "list" {
+            for stmt in body {
+                this.lint_stmt(stmt)
+            }
+        } else {
+            try {
+                if body.node_type == "Block" {
+                    for stmt in body.statements {
+                        this.lint_stmt(stmt)
+                    }
+                } else {
+                    this.lint_stmt(body)
+                }
+            } catch e {
+                -- Not a node, skip
+            }
+        }
+    }
+
+    -- ── Expression dispatch ────────────────────────────────
+
+    fn lint_expr(node) {
+        if node == null { return null }
+
+        let nt = null
+        try { nt = node.node_type } catch e { return null }
+        if nt == null { return null }
+
+        if nt == "Identifier" {
+            this.scope.mark_used(node.name)
+        } elif nt == "BinaryOp" {
+            this.lint_expr(node.left)
+            this.lint_expr(node.right)
+            -- Null comparison: suggest ??
+            if (node.operator == "==" or node.operator == "!=") {
+                let left_null = false
+                let right_null = false
+                try { left_null = node.left.node_type == "NullLiteral" } catch e {}
+                try { right_null = node.right.node_type == "NullLiteral" } catch e {}
+                if left_null or right_null {
+                    this.diag(
+                        "Consider using null coalescing (??) instead of comparing with null",
+                        node.line, "info", "W006"
+                    )
+                }
+            }
+        } elif nt == "UnaryOp" {
+            this.lint_expr(node.operand)
+        } elif nt == "CallExpression" {
+            this.lint_expr(node.callee)
+            for arg in node.arguments {
+                this.lint_expr(arg)
+            }
+        } elif nt == "MemberExpression" or nt == "OptionalMemberExpression" {
+            this.lint_expr(node.object)
+        } elif nt == "IndexExpression" {
+            this.lint_expr(node.object)
+            this.lint_expr(node.index)
+        } elif nt == "SliceExpression" {
+            this.lint_expr(node.object)
+            if node.start != null { this.lint_expr(node.start) }
+            if node.end != null { this.lint_expr(node.end) }
+        } elif nt == "ListLiteral" {
+            for el in node.elements {
+                this.lint_expr(el)
+            }
+        } elif nt == "MapLiteral" {
+            for pair in node.pairs {
+                this.lint_expr(pair[1])
+            }
+        } elif nt == "FnExpression" {
+            this.push_scope("function")
+            for p in node.params {
+                let pname = p
+                if type(p) == "list" { pname = p[0] }
+                if type(pname) == "string" {
+                    this.scope.declare(pname, node.line, false)
+                }
+            }
+            this.lint_body(node.body)
+            this.pop_scope(true)
+        } elif nt == "PipeExpression" {
+            this.lint_expr(node.value)
+            this.lint_expr(node.function)
+        } elif nt == "RangeExpression" {
+            this.lint_expr(node.start)
+            if node.end != null { this.lint_expr(node.end) }
+        } elif nt == "AskExpression" {
+            this.lint_expr(node.prompt)
+        } elif nt == "NullCoalesce" {
+            this.lint_expr(node.left)
+            this.lint_expr(node.right)
+        } elif nt == "SpreadExpression" {
+            this.lint_expr(node.value)
+        } elif nt == "IfExpression" {
+            this.lint_expr(node.condition)
+            this.lint_expr(node.true_expr)
+            this.lint_expr(node.false_expr)
+        } elif nt == "ComprehensionExpression" {
+            this.lint_expr(node.iterable)
+            this.lint_expr(node.expr)
+            if node.condition != null { this.lint_expr(node.condition) }
+        } elif nt == "MapComprehensionExpression" {
+            this.lint_expr(node.iterable)
+            this.lint_expr(node.key_expr)
+            this.lint_expr(node.value_expr)
+            if node.condition != null { this.lint_expr(node.condition) }
+        } elif nt == "AwaitExpression" {
+            this.lint_expr(node.value)
+        } elif nt == "YieldExpression" {
+            if node.value != null { this.lint_expr(node.value) }
+        }
+    }
+
+    -- ── Unreachable code detection ─────────────────────────
+
+    fn check_unreachable(body) {
+        mut stmts = []
+        if type(body) == "list" {
+            stmts = body
+        } else {
+            try { stmts = body.statements } catch e { return null }
+        }
+        if stmts == null { return null }
+
+        mut found_terminal = false
+        for stmt in stmts {
+            if found_terminal {
+                this.diag("Unreachable code", stmt.line, "warning", "W007")
+                return null
+            }
+            let nt = stmt.node_type
+            if nt == "ReturnStatement" or nt == "BreakStatement" or nt == "ContinueStatement" or nt == "ThrowStatement" {
+                found_terminal = true
+            }
+        }
+    }
+}
+
+-- ── Public API ────────────────────────────────────────────
+
+fn lint_source(source, filename) {
+    let tokens = tokenize(source, filename)
+    let tree = parse(tokens, source)
+    let linter = Linter()
+    return linter.lint(tree)
+}
+
+fn lint_tree(tree) {
+    let linter = Linter()
+    return linter.lint(tree)
+}

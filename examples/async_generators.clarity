@@ -1,0 +1,58 @@
+-- Async/Await and Generators in Clarity
+
+-- Generators with yield
+fn fibonacci() {
+    mut a = 0
+    mut b = 1
+    for i in 0..10 {
+        yield a
+        a, b = b, a + b
+    }
+}
+
+let fibs = fibonacci()
+show "Fibonacci:", fibs
+
+-- Generator for even numbers
+fn evens(limit) {
+    for i in 0..limit {
+        if i % 2 == 0 {
+            yield i
+        }
+    }
+}
+
+show "Evens:", evens(20)
+
+-- Async functions
+async fn compute(x) {
+    return x * x + 1
+}
+
+let result = await compute(5)
+show "Async result:", result
+
+-- Multiple async tasks
+async fn task_a() { return 10 }
+async fn task_b() { return 20 }
+async fn task_c() { return 30 }
+
+let a = await task_a()
+let b = await task_b()
+let c = await task_c()
+show "Tasks completed: {a} + {b} + {c} = {a + b + c}"
+
+-- Decorators
+fn twice(wrapped) {
+    return fn(...args) {
+        wrapped(...args)
+        wrapped(...args)
+    }
+}
+
+@twice
+fn say_hello() {
+    show "Hello!"
+}
+
+say_hello()  -- prints "Hello!" twice

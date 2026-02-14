@@ -1,0 +1,1269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clarity Playground</title>
+<style>
+:root {
+    --bg: #1e1e2e;
+    --surface: #181825;
+    --overlay: #313244;
+    --text: #cdd6f4;
+    --subtext: #a6adc8;
+    --blue: #89b4fa;
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --yellow: #f9e2af;
+    --mauve: #cba6f7;
+    --teal: #94e2d5;
+    --peach: #fab387;
+    --border: #45475a;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Header */
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+header h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--blue);
+}
+header h1 span { color: var(--subtext); font-weight: 400; }
+.toolbar { display: flex; gap: 0.5rem; align-items: center; }
+.btn {
+    padding: 0.35rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--overlay);
+    color: var(--text);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.btn:hover { background: var(--border); }
+.btn-run {
+    background: var(--green);
+    color: var(--bg);
+    border-color: var(--green);
+    font-weight: 600;
+}
+.btn-run:hover { opacity: 0.85; }
+select.example-select {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--overlay);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+
+/* Main layout */
+main {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+}
+.panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.panel-header {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--subtext);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+.divider {
+    width: 3px;
+    background: var(--border);
+    cursor: col-resize;
+}
+#editor-area {
+    flex: 1;
+    background: var(--bg);
+    padding: 0;
+    overflow: auto;
+}
+#editor {
+    width: 100%;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 0.75rem;
+    font-family: 'Fira Code', 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    tab-size: 4;
+}
+#output {
+    flex: 1;
+    background: var(--bg);
+    padding: 0.75rem;
+    overflow: auto;
+    font-family: 'Fira Code', 'SF Mono', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.output-line { margin-bottom: 2px; }
+.output-error { color: var(--red); }
+.output-info { color: var(--subtext); }
+.output-success { color: var(--green); }
+
+/* Footer */
+footer {
+    padding: 0.3rem 1rem;
+    font-size: 0.75rem;
+    color: var(--subtext);
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+}
+
+/* Responsive */
+@media (max-width: 700px) {
+    main { flex-direction: column; }
+    .divider { width: auto; height: 3px; cursor: row-resize; }
+}
+</style>
+</head>
+<body>
+
+<header>
+    <h1>Clarity <span>Playground</span></h1>
+    <div class="toolbar">
+        <select class="example-select" id="examples" onchange="loadExample()">
+            <option value="">— Examples —</option>
+            <option value="hello">Hello World</option>
+            <option value="fibonacci">Fibonacci</option>
+            <option value="classes">Classes</option>
+            <option value="functional">Functional</option>
+            <option value="match">Pattern Matching</option>
+            <option value="enum">Enums</option>
+        </select>
+        <button class="btn" onclick="shareCode()" title="Copy shareable link">Share</button>
+        <button class="btn btn-run" onclick="runCode()" title="Ctrl+Enter">&#9654; Run</button>
+    </div>
+</header>
+
+<main>
+    <div class="panel">
+        <div class="panel-header">Editor</div>
+        <div id="editor-area">
+            <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+        </div>
+    </div>
+    <div class="divider" id="divider"></div>
+    <div class="panel">
+        <div class="panel-header">Output</div>
+        <div id="output"><span class="output-info">Press Ctrl+Enter or click Run to execute.</span></div>
+    </div>
+</main>
+
+<footer>
+    <span>Clarity v0.5.0</span>
+    <span id="status">Ready</span>
+</footer>
+
+<script>
+// ── Examples ───────────────────────────────────────────
+const EXAMPLES = {
+    hello: `-- Hello World in Clarity
+show "Hello, World!"
+
+let name = "Clarity"
+show "Welcome to " + name + "!"
+`,
+    fibonacci: `-- Fibonacci sequence
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+for i in range(0, 15) {
+    show "fib(" + str(i) + ") = " + str(fib(i))
+}
+`,
+    classes: `-- Classes and inheritance
+class Animal {
+    fn init(name, sound) {
+        this.name = name
+        this.sound = sound
+    }
+
+    fn speak() {
+        return this.name + " says " + this.sound
+    }
+}
+
+class Dog < Animal {
+    fn init(name) {
+        this.name = name
+        this.sound = "Woof!"
+        this.tricks = []
+    }
+
+    fn learn(trick) {
+        push(this.tricks, trick)
+    }
+
+    fn show_tricks() {
+        show this.name + " knows:"
+        for trick in this.tricks {
+            show "  - " + trick
+        }
+    }
+}
+
+let dog = Dog("Rex")
+show dog.speak()
+dog.learn("sit")
+dog.learn("shake")
+dog.learn("roll over")
+dog.show_tricks()
+`,
+    functional: `-- Functional programming
+let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+let evens = filter(numbers, fn(n) { n % 2 == 0 })
+show "Evens: " + str(evens)
+
+let squared = map(numbers, fn(n) { n ** 2 })
+show "Squared: " + str(squared)
+
+let total = reduce(numbers, 0, fn(a, b) { a + b })
+show "Sum: " + str(total)
+
+-- List comprehension
+let pairs = [str(x) + "," + str(y) for x in range(1, 4) for y in range(1, 4)]
+show "Pairs: " + str(pairs)
+`,
+    match: `-- Pattern matching
+fn describe(value) {
+    match type(value) {
+        when "number" {
+            if value > 0 { return "positive number" }
+            elif value < 0 { return "negative number" }
+            else { return "zero" }
+        }
+        when "string" {
+            return "string of length " + str(len(value))
+        }
+        when "list" {
+            return "list with " + str(len(value)) + " items"
+        }
+        when "bool" {
+            return "boolean " + str(value)
+        }
+        else {
+            return "something else"
+        }
+    }
+}
+
+let values = [42, -7, 0, "hello", [1, 2, 3], true, null]
+for v in values {
+    show str(v) + " → " + describe(v)
+}
+`,
+    enum: `-- Enums and match
+enum Season {
+    Spring = "spring",
+    Summer = "summer",
+    Autumn = "autumn",
+    Winter = "winter"
+}
+
+fn temperature(season) {
+    match str(season) {
+        when "spring" { return "mild" }
+        when "summer" { return "hot" }
+        when "autumn" { return "cool" }
+        when "winter" { return "cold" }
+        else { return "unknown" }
+    }
+}
+
+let seasons = [Season.Spring, Season.Summer, Season.Autumn, Season.Winter]
+for s in seasons {
+    show str(s) + ": " + temperature(s)
+}
+`
+};
+
+// ── Interpreter ────────────────────────────────────────
+// Minimal Clarity interpreter in JS for the playground.
+// Supports a subset: variables, functions, classes, control flow, builtins.
+
+class ClarityError extends Error {
+    constructor(msg) { super(msg); this.name = 'ClarityError'; }
+}
+
+class ReturnSignal { constructor(v) { this.value = v; } }
+class BreakSignal {}
+class ContinueSignal {}
+
+class Environment {
+    constructor(parent) {
+        this.vars = new Map();
+        this.parent = parent || null;
+    }
+    get(name) {
+        if (this.vars.has(name)) return this.vars.get(name);
+        if (this.parent) return this.parent.get(name);
+        throw new ClarityError(`Undefined variable: ${name}`);
+    }
+    set(name, val) {
+        if (this.vars.has(name)) { this.vars.set(name, val); return; }
+        if (this.parent) { this.parent.set(name, val); return; }
+        throw new ClarityError(`Undefined variable: ${name}`);
+    }
+    define(name, val) { this.vars.set(name, val); }
+    has(name) {
+        if (this.vars.has(name)) return true;
+        return this.parent ? this.parent.has(name) : false;
+    }
+}
+
+// Tokenizer
+const TT = {
+    NUM: 'NUM', STR: 'STR', BOOL: 'BOOL', NULL: 'NULL', ID: 'ID',
+    LET: 'LET', MUT: 'MUT', FN: 'FN', IF: 'IF', ELSE: 'ELSE', ELIF: 'ELIF',
+    FOR: 'FOR', IN: 'IN', WHILE: 'WHILE', RETURN: 'RETURN',
+    TRUE: 'TRUE', FALSE: 'FALSE', CLASS: 'CLASS', THIS: 'THIS',
+    BREAK: 'BREAK', CONTINUE: 'CONTINUE', TRY: 'TRY', CATCH: 'CATCH',
+    THROW: 'THROW', MATCH: 'MATCH', WHEN: 'WHEN', ENUM: 'ENUM',
+    SHOW: 'SHOW', NOT: 'NOT', AND: 'AND', OR: 'OR', IMPORT: 'IMPORT',
+    FROM: 'FROM', AS: 'AS', ASYNC: 'ASYNC', AWAIT: 'AWAIT',
+    INTERFACE: 'INTERFACE', IMPL: 'IMPL',
+    PLUS: '+', MINUS: '-', STAR: '*', SLASH: '/', PERCENT: '%', POWER: '**',
+    EQ: '==', NEQ: '!=', LT: '<', GT: '>', LTE: '<=', GTE: '>=',
+    ASSIGN: '=', PLUS_EQ: '+=', MINUS_EQ: '-=', STAR_EQ: '*=', SLASH_EQ: '/=',
+    LPAREN: '(', RPAREN: ')', LBRACE: '{', RBRACE: '}',
+    LBRACK: '[', RBRACK: ']',
+    COMMA: ',', DOT: '.', COLON: ':', AT: '@',
+    PIPE: '|>', ARROW: '->', FAT_ARROW: '=>', SPREAD: '...',
+    DOTDOT: '..', QUESTION: '?',
+    NEWLINE: 'NL', EOF: 'EOF'
+};
+
+const KEYWORDS = {
+    'let':TT.LET,'mut':TT.MUT,'fn':TT.FN,'if':TT.IF,'else':TT.ELSE,'elif':TT.ELIF,
+    'for':TT.FOR,'in':TT.IN,'while':TT.WHILE,'return':TT.RETURN,
+    'true':TT.TRUE,'false':TT.FALSE,'null':TT.NULL,
+    'class':TT.CLASS,'this':TT.THIS,'break':TT.BREAK,'continue':TT.CONTINUE,
+    'try':TT.TRY,'catch':TT.CATCH,'throw':TT.THROW,
+    'match':TT.MATCH,'when':TT.WHEN,'enum':TT.ENUM,
+    'show':TT.SHOW,'not':TT.NOT,'and':TT.AND,'or':TT.OR,
+    'from':TT.FROM,'import':TT.IMPORT,'as':TT.AS,
+    'async':TT.ASYNC,'await':TT.AWAIT,
+    'interface':TT.INTERFACE,'impl':TT.IMPL
+};
+
+function tokenize(src) {
+    const tokens = [];
+    let i = 0, line = 1;
+    while (i < src.length) {
+        // Skip spaces/tabs
+        if (src[i] === ' ' || src[i] === '\t') { i++; continue; }
+        // Newline
+        if (src[i] === '\n') {
+            tokens.push({type: TT.NEWLINE, line});
+            line++; i++; continue;
+        }
+        if (src[i] === '\r') { i++; continue; }
+        // Comments
+        if (src[i] === '-' && src[i+1] === '-') {
+            while (i < src.length && src[i] !== '\n') i++;
+            continue;
+        }
+        if (src[i] === '/' && src[i+1] === '/') {
+            while (i < src.length && src[i] !== '\n') i++;
+            continue;
+        }
+        // Strings
+        if (src[i] === '"') {
+            let s = '', j = i + 1;
+            while (j < src.length && src[j] !== '"') {
+                if (src[j] === '\\') { j++; s += src[j] === 'n' ? '\n' : src[j] === 't' ? '\t' : src[j] === '\\' ? '\\' : src[j] === '"' ? '"' : src[j]; }
+                else s += src[j];
+                j++;
+            }
+            tokens.push({type: TT.STR, value: s, line}); i = j + 1; continue;
+        }
+        // Numbers
+        if (/[0-9]/.test(src[i]) || (src[i] === '.' && /[0-9]/.test(src[i+1]))) {
+            let n = '';
+            while (i < src.length && /[0-9.]/.test(src[i])) { n += src[i]; i++; }
+            tokens.push({type: TT.NUM, value: parseFloat(n), line}); continue;
+        }
+        // Identifiers/keywords
+        if (/[a-zA-Z_]/.test(src[i])) {
+            let id = '';
+            while (i < src.length && /[a-zA-Z0-9_]/.test(src[i])) { id += src[i]; i++; }
+            tokens.push({type: KEYWORDS[id] || TT.ID, value: id, line}); continue;
+        }
+        // Multi-char operators
+        if (src[i] === '|' && src[i+1] === '>') { tokens.push({type: TT.PIPE, line}); i+=2; continue; }
+        if (src[i] === '=' && src[i+1] === '>') { tokens.push({type: TT.FAT_ARROW, line}); i+=2; continue; }
+        if (src[i] === '=' && src[i+1] === '=') { tokens.push({type: TT.EQ, line}); i+=2; continue; }
+        if (src[i] === '!' && src[i+1] === '=') { tokens.push({type: TT.NEQ, line}); i+=2; continue; }
+        if (src[i] === '<' && src[i+1] === '=') { tokens.push({type: TT.LTE, line}); i+=2; continue; }
+        if (src[i] === '>' && src[i+1] === '=') { tokens.push({type: TT.GTE, line}); i+=2; continue; }
+        if (src[i] === '*' && src[i+1] === '*') { tokens.push({type: TT.POWER, line}); i+=2; continue; }
+        if (src[i] === '+' && src[i+1] === '=') { tokens.push({type: TT.PLUS_EQ, line}); i+=2; continue; }
+        if (src[i] === '-' && src[i+1] === '=') { tokens.push({type: TT.MINUS_EQ, line}); i+=2; continue; }
+        if (src[i] === '*' && src[i+1] === '=') { tokens.push({type: TT.STAR_EQ, line}); i+=2; continue; }
+        if (src[i] === '/' && src[i+1] === '=') { tokens.push({type: TT.SLASH_EQ, line}); i+=2; continue; }
+        if (src[i] === '-' && src[i+1] === '>') { tokens.push({type: TT.ARROW, line}); i+=2; continue; }
+        if (src[i] === '.' && src[i+1] === '.' && src[i+2] === '.') { tokens.push({type: TT.SPREAD, line}); i+=3; continue; }
+        if (src[i] === '.' && src[i+1] === '.') { tokens.push({type: TT.DOTDOT, line}); i+=2; continue; }
+        // Single-char
+        const singles = {'+':TT.PLUS,'-':TT.MINUS,'*':TT.STAR,'/':TT.SLASH,'%':TT.PERCENT,
+            '=':TT.ASSIGN,'<':TT.LT,'>':TT.GT,'(':TT.LPAREN,')':TT.RPAREN,
+            '{':TT.LBRACE,'}':TT.RBRACE,'[':TT.LBRACK,']':TT.RBRACK,
+            ',':TT.COMMA,'.':TT.DOT,':':TT.COLON,'@':TT.AT,'?':TT.QUESTION};
+        if (singles[src[i]]) { tokens.push({type: singles[src[i]], line}); i++; continue; }
+        i++; // skip unknown
+    }
+    tokens.push({type: TT.EOF, line});
+    return tokens;
+}
+
+// ── Parser ──────────────────────────────────────────────
+class Parser {
+    constructor(tokens) {
+        this.tokens = tokens.filter(t => t.type !== TT.NEWLINE);
+        this.pos = 0;
+    }
+    peek() { return this.tokens[this.pos] || {type: TT.EOF}; }
+    advance() { return this.tokens[this.pos++] || {type: TT.EOF}; }
+    expect(type) {
+        const t = this.advance();
+        if (t.type !== type) throw new ClarityError(`Expected ${type}, got ${t.type} at line ${t.line}`);
+        return t;
+    }
+    match(...types) {
+        if (types.includes(this.peek().type)) { return this.advance(); }
+        return null;
+    }
+    parse() {
+        const stmts = [];
+        while (this.peek().type !== TT.EOF) stmts.push(this.statement());
+        return {type: 'Program', body: stmts};
+    }
+    statement() {
+        const t = this.peek();
+        if (t.type === TT.LET || t.type === TT.MUT) return this.varDecl();
+        if (t.type === TT.FN) return this.fnDecl();
+        if (t.type === TT.CLASS) return this.classDecl();
+        if (t.type === TT.IF) return this.ifStmt();
+        if (t.type === TT.FOR) return this.forStmt();
+        if (t.type === TT.WHILE) return this.whileStmt();
+        if (t.type === TT.RETURN) { this.advance(); return {type: 'Return', value: this.peek().type === TT.RBRACE ? null : this.expression()}; }
+        if (t.type === TT.SHOW) { this.advance(); return {type: 'Show', value: this.expression()}; }
+        if (t.type === TT.BREAK) { this.advance(); return {type: 'Break'}; }
+        if (t.type === TT.CONTINUE) { this.advance(); return {type: 'Continue'}; }
+        if (t.type === TT.TRY) return this.tryStmt();
+        if (t.type === TT.THROW) { this.advance(); return {type: 'Throw', value: this.expression()}; }
+        if (t.type === TT.MATCH) return this.matchStmt();
+        if (t.type === TT.ENUM) return this.enumDecl();
+        if (t.type === TT.INTERFACE) return this.interfaceDecl();
+        if (t.type === TT.FROM || t.type === TT.IMPORT) return this.importStmt();
+        return this.exprStatement();
+    }
+    varDecl() {
+        const mutable = this.advance().type === TT.MUT;
+        const name = this.expect(TT.ID).value;
+        this.expect(TT.ASSIGN);
+        const init = this.expression();
+        return {type: 'VarDecl', name, init, mutable};
+    }
+    fnDecl() {
+        this.expect(TT.FN);
+        const name = this.expect(TT.ID).value;
+        const params = this.paramList();
+        const body = this.block();
+        return {type: 'FnDecl', name, params, body};
+    }
+    paramList() {
+        this.expect(TT.LPAREN);
+        const params = [];
+        let hasRest = false;
+        while (this.peek().type !== TT.RPAREN) {
+            if (this.match(TT.SPREAD)) {
+                hasRest = true;
+                params.push({name: this.expect(TT.ID).value, rest: true});
+            } else {
+                params.push({name: this.expect(TT.ID).value, rest: false});
+            }
+            if (!this.match(TT.COMMA)) break;
+        }
+        this.expect(TT.RPAREN);
+        return params;
+    }
+    block() {
+        this.expect(TT.LBRACE);
+        const stmts = [];
+        while (this.peek().type !== TT.RBRACE && this.peek().type !== TT.EOF)
+            stmts.push(this.statement());
+        this.expect(TT.RBRACE);
+        return stmts;
+    }
+    classDecl() {
+        this.expect(TT.CLASS);
+        const name = this.expect(TT.ID).value;
+        let parent = null;
+        if (this.match(TT.LT)) parent = this.expect(TT.ID).value;
+        this.expect(TT.LBRACE);
+        const methods = [];
+        while (this.peek().type !== TT.RBRACE && this.peek().type !== TT.EOF) {
+            this.expect(TT.FN);
+            const mname = this.expect(TT.ID).value;
+            const params = this.paramList();
+            const body = this.block();
+            methods.push({name: mname, params, body});
+        }
+        this.expect(TT.RBRACE);
+        return {type: 'ClassDecl', name, parent, methods};
+    }
+    ifStmt() {
+        this.expect(TT.IF);
+        const cond = this.expression();
+        const then = this.block();
+        let elifs = [], elseBody = null;
+        while (this.match(TT.ELIF)) {
+            const ec = this.expression();
+            const eb = this.block();
+            elifs.push({cond: ec, body: eb});
+        }
+        if (this.match(TT.ELSE)) elseBody = this.block();
+        return {type: 'If', cond, then, elifs, elseBody};
+    }
+    forStmt() {
+        this.expect(TT.FOR);
+        const name = this.expect(TT.ID).value;
+        this.expect(TT.IN);
+        const iter = this.expression();
+        const body = this.block();
+        return {type: 'For', name, iter, body};
+    }
+    whileStmt() {
+        this.expect(TT.WHILE);
+        const cond = this.expression();
+        const body = this.block();
+        return {type: 'While', cond, body};
+    }
+    tryStmt() {
+        this.expect(TT.TRY);
+        const body = this.block();
+        this.expect(TT.CATCH);
+        const errName = this.expect(TT.ID).value;
+        const catchBody = this.block();
+        return {type: 'Try', body, errName, catchBody};
+    }
+    matchStmt() {
+        this.expect(TT.MATCH);
+        const value = this.expression();
+        this.expect(TT.LBRACE);
+        const cases = [];
+        let elseCase = null;
+        while (this.peek().type !== TT.RBRACE && this.peek().type !== TT.EOF) {
+            if (this.match(TT.ELSE)) {
+                elseCase = this.block();
+            } else {
+                this.expect(TT.WHEN);
+                const pattern = this.expression();
+                const body = this.block();
+                cases.push({pattern, body});
+            }
+        }
+        this.expect(TT.RBRACE);
+        return {type: 'Match', value, cases, elseCase};
+    }
+    enumDecl() {
+        this.expect(TT.ENUM);
+        const name = this.expect(TT.ID).value;
+        this.expect(TT.LBRACE);
+        const members = [];
+        while (this.peek().type !== TT.RBRACE && this.peek().type !== TT.EOF) {
+            const mname = this.expect(TT.ID).value;
+            this.expect(TT.ASSIGN);
+            const val = this.expression();
+            members.push({name: mname, value: val});
+            this.match(TT.COMMA);
+        }
+        this.expect(TT.RBRACE);
+        return {type: 'EnumDecl', name, members};
+    }
+    interfaceDecl() {
+        this.expect(TT.INTERFACE);
+        const name = this.expect(TT.ID).value;
+        this.expect(TT.LBRACE);
+        while (this.peek().type !== TT.RBRACE) this.advance();
+        this.expect(TT.RBRACE);
+        return {type: 'InterfaceDecl', name};
+    }
+    importStmt() {
+        if (this.peek().type === TT.FROM) {
+            this.advance();
+            this.expect(TT.STR); // skip module
+            this.expect(TT.IMPORT);
+            while (this.peek().type === TT.ID) { this.advance(); this.match(TT.COMMA); }
+        } else {
+            this.advance();
+            while (this.peek().type === TT.ID || this.peek().type === TT.STR) { this.advance(); this.match(TT.COMMA); }
+        }
+        return {type: 'Import'};
+    }
+    exprStatement() {
+        const expr = this.expression();
+        // Check for assignment variants
+        if (expr.type === 'Ident' || expr.type === 'Member' || expr.type === 'Index') {
+            if (this.match(TT.ASSIGN)) return {type: 'Assign', target: expr, value: this.expression()};
+            if (this.match(TT.PLUS_EQ)) return {type: 'Assign', target: expr, value: {type:'BinOp',op:'+',left:expr,right:this.expression()}};
+            if (this.match(TT.MINUS_EQ)) return {type: 'Assign', target: expr, value: {type:'BinOp',op:'-',left:expr,right:this.expression()}};
+            if (this.match(TT.STAR_EQ)) return {type: 'Assign', target: expr, value: {type:'BinOp',op:'*',left:expr,right:this.expression()}};
+            if (this.match(TT.SLASH_EQ)) return {type: 'Assign', target: expr, value: {type:'BinOp',op:'/',left:expr,right:this.expression()}};
+        }
+        return {type: 'ExprStmt', expr};
+    }
+    expression() { return this.pipe(); }
+    pipe() {
+        let left = this.ternary();
+        while (this.match(TT.PIPE)) {
+            const fn = this.primary();
+            // pipe: val |> fn(args) → fn(val, args)
+            if (fn.type === 'Call') {
+                fn.args.unshift(left);
+                left = fn;
+            } else {
+                left = {type: 'Call', callee: fn, args: [left]};
+            }
+        }
+        return left;
+    }
+    ternary() {
+        let expr = this.or();
+        if (this.match(TT.QUESTION)) {
+            const then = this.expression();
+            this.expect(TT.COLON);
+            const else_ = this.expression();
+            return {type: 'Ternary', cond: expr, then, else_};
+        }
+        return expr;
+    }
+    or() { let l = this.and_(); while (this.match(TT.OR)) l = {type:'LogOp',op:'or',left:l,right:this.and_()}; return l; }
+    and_() { let l = this.not_(); while (this.match(TT.AND)) l = {type:'LogOp',op:'and',left:l,right:this.not_()}; return l; }
+    not_() { if (this.match(TT.NOT)) return {type:'UnaryOp',op:'not',expr:this.not_()}; return this.comparison(); }
+    comparison() {
+        let l = this.addition();
+        while (true) {
+            if (this.match(TT.EQ)) l = {type:'BinOp',op:'==',left:l,right:this.addition()};
+            else if (this.match(TT.NEQ)) l = {type:'BinOp',op:'!=',left:l,right:this.addition()};
+            else if (this.match(TT.LT)) l = {type:'BinOp',op:'<',left:l,right:this.addition()};
+            else if (this.match(TT.GT)) l = {type:'BinOp',op:'>',left:l,right:this.addition()};
+            else if (this.match(TT.LTE)) l = {type:'BinOp',op:'<=',left:l,right:this.addition()};
+            else if (this.match(TT.GTE)) l = {type:'BinOp',op:'>=',left:l,right:this.addition()};
+            else break;
+        }
+        return l;
+    }
+    addition() {
+        let l = this.multiplication();
+        while (true) {
+            if (this.match(TT.PLUS)) l = {type:'BinOp',op:'+',left:l,right:this.multiplication()};
+            else if (this.match(TT.MINUS)) l = {type:'BinOp',op:'-',left:l,right:this.multiplication()};
+            else break;
+        }
+        return l;
+    }
+    multiplication() {
+        let l = this.power();
+        while (true) {
+            if (this.match(TT.STAR)) l = {type:'BinOp',op:'*',left:l,right:this.power()};
+            else if (this.match(TT.SLASH)) l = {type:'BinOp',op:'/',left:l,right:this.power()};
+            else if (this.match(TT.PERCENT)) l = {type:'BinOp',op:'%',left:l,right:this.power()};
+            else break;
+        }
+        return l;
+    }
+    power() {
+        let l = this.unary();
+        if (this.match(TT.POWER)) l = {type:'BinOp',op:'**',left:l,right:this.power()};
+        return l;
+    }
+    unary() {
+        if (this.match(TT.MINUS)) return {type:'UnaryOp',op:'-',expr:this.unary()};
+        return this.postfix();
+    }
+    postfix() {
+        let expr = this.primary();
+        while (true) {
+            if (this.match(TT.DOT)) {
+                const prop = this.expect(TT.ID).value;
+                if (this.peek().type === TT.LPAREN) {
+                    const args = this.argList();
+                    expr = {type:'MethodCall',obj:expr,method:prop,args};
+                } else {
+                    expr = {type:'Member',obj:expr,prop};
+                }
+            } else if (this.match(TT.LBRACK)) {
+                const index = this.expression();
+                this.expect(TT.RBRACK);
+                expr = {type:'Index',obj:expr,index};
+            } else if (this.peek().type === TT.LPAREN && (expr.type === 'Ident' || expr.type === 'Member')) {
+                const args = this.argList();
+                expr = {type:'Call',callee:expr,args};
+            } else break;
+        }
+        return expr;
+    }
+    argList() {
+        this.expect(TT.LPAREN);
+        const args = [];
+        while (this.peek().type !== TT.RPAREN && this.peek().type !== TT.EOF) {
+            args.push(this.expression());
+            if (!this.match(TT.COMMA)) break;
+        }
+        this.expect(TT.RPAREN);
+        return args;
+    }
+    primary() {
+        const t = this.peek();
+        if (t.type === TT.NUM) { this.advance(); return {type:'Num',value:t.value}; }
+        if (t.type === TT.STR) { this.advance(); return {type:'Str',value:t.value}; }
+        if (t.type === TT.TRUE) { this.advance(); return {type:'Bool',value:true}; }
+        if (t.type === TT.FALSE) { this.advance(); return {type:'Bool',value:false}; }
+        if (t.type === TT.NULL) { this.advance(); return {type:'Null'}; }
+        if (t.type === TT.THIS) { this.advance(); return {type:'This'}; }
+        if (t.type === TT.ID) { this.advance(); return {type:'Ident',name:t.value}; }
+        if (t.type === TT.FN) { return this.lambdaExpr(); }
+        if (t.type === TT.LPAREN) { this.advance(); const e = this.expression(); this.expect(TT.RPAREN); return e; }
+        if (t.type === TT.LBRACK) { return this.listExpr(); }
+        if (t.type === TT.LBRACE) { return this.mapExpr(); }
+        if (t.type === TT.IF) { return this.ifExpr(); }
+        throw new ClarityError(`Unexpected token: ${t.type} (${t.value}) at line ${t.line}`);
+    }
+    lambdaExpr() {
+        this.expect(TT.FN);
+        const params = this.paramList();
+        const body = this.block();
+        return {type:'Lambda',params,body};
+    }
+    listExpr() {
+        this.expect(TT.LBRACK);
+        // Check for list comprehension: [expr for x in iter]
+        if (this.peek().type !== TT.RBRACK) {
+            const startPos = this.pos;
+            const first = this.expression();
+            if (this.peek().type === TT.FOR) {
+                // List comprehension
+                this.expect(TT.FOR);
+                const varName = this.expect(TT.ID).value;
+                this.expect(TT.IN);
+                const iter = this.expression();
+                // optional nested for
+                let innerFor = null;
+                if (this.peek().type === TT.FOR) {
+                    this.expect(TT.FOR);
+                    const v2 = this.expect(TT.ID).value;
+                    this.expect(TT.IN);
+                    const i2 = this.expression();
+                    innerFor = {var: v2, iter: i2};
+                }
+                this.expect(TT.RBRACK);
+                return {type:'ListComp',expr:first,varName,iter,innerFor};
+            }
+            // Regular list
+            const items = [first];
+            while (this.match(TT.COMMA)) {
+                if (this.peek().type === TT.RBRACK) break;
+                items.push(this.expression());
+            }
+            this.expect(TT.RBRACK);
+            return {type:'List',items};
+        }
+        this.expect(TT.RBRACK);
+        return {type:'List',items:[]};
+    }
+    mapExpr() {
+        this.expect(TT.LBRACE);
+        const entries = [];
+        while (this.peek().type !== TT.RBRACE && this.peek().type !== TT.EOF) {
+            let key;
+            if (this.peek().type === TT.ID) {
+                const id = this.advance();
+                if (this.peek().type === TT.COLON) { key = {type:'Str',value:id.value}; }
+                else { this.pos--; key = this.expression(); }
+            } else {
+                key = this.expression();
+            }
+            this.expect(TT.COLON);
+            const val = this.expression();
+            entries.push({key, val});
+            if (!this.match(TT.COMMA)) break;
+        }
+        this.expect(TT.RBRACE);
+        return {type:'Map',entries};
+    }
+    ifExpr() {
+        this.expect(TT.IF);
+        const cond = this.expression();
+        this.expect(TT.LBRACE);
+        const then = this.expression();
+        this.expect(TT.RBRACE);
+        this.expect(TT.ELSE);
+        this.expect(TT.LBRACE);
+        const else_ = this.expression();
+        this.expect(TT.RBRACE);
+        return {type:'IfExpr',cond,then,else_};
+    }
+}
+
+// ── Interpreter ─────────────────────────────────────────
+let outputLines = [];
+
+function clarityStr(v) {
+    if (v === null || v === undefined) return 'null';
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (Array.isArray(v)) return '[' + v.map(clarityStr).join(', ') + ']';
+    if (typeof v === 'object' && v._type === 'enum') return v.name + '.' + v.member;
+    if (typeof v === 'object' && v._type === 'instance') {
+        let props = Object.keys(v).filter(k => !k.startsWith('_')).map(k => k+': '+clarityStr(v[k])).join(', ');
+        return v._class + '(' + props + ')';
+    }
+    if (typeof v === 'object' && !Array.isArray(v)) {
+        let entries = Object.entries(v).map(([k,val]) => k+': '+clarityStr(val)).join(', ');
+        return '{' + entries + '}';
+    }
+    return String(v);
+}
+
+function createGlobalEnv() {
+    const env = new Environment();
+    // Builtins
+    env.define('str', (v) => clarityStr(v));
+    env.define('int', (v) => parseInt(v) || 0);
+    env.define('float', (v) => parseFloat(v) || 0);
+    env.define('bool', (v) => !!v);
+    env.define('type', (v) => { if (v===null||v===undefined) return 'null'; if (Array.isArray(v)) return 'list'; if (typeof v==='object'&&v._type==='enum') return 'enum'; if (typeof v==='object'&&v._type==='instance') return 'instance'; return typeof v; });
+    env.define('len', (v) => { if (typeof v==='string'||Array.isArray(v)) return v.length; if (typeof v==='object') return Object.keys(v).length; return 0; });
+    env.define('push', (a, v) => { a.push(v); return a; });
+    env.define('pop', (a) => a.pop());
+    env.define('sort', (a, fn) => { if (fn) return [...a].sort((x,y) => fn(x,y)); return [...a].sort(); });
+    env.define('reverse', (a) => [...a].reverse());
+    env.define('range', (...args) => { let s=0,e=0,step=1; if(args.length===1){e=args[0];}else if(args.length>=2){s=args[0];e=args[1];if(args.length===3)step=args[2];} let r=[]; if(step>0){for(let i=s;i<e;i+=step)r.push(i);}else{for(let i=s;i>e;i+=step)r.push(i);} return r; });
+    env.define('map', (a, fn) => a.map(fn));
+    env.define('filter', (a, fn) => a.filter(fn));
+    env.define('reduce', (a, init, fn) => a.reduce(fn, init));
+    env.define('each', (a, fn) => { a.forEach(fn); return null; });
+    env.define('find', (a, fn) => a.find(fn) ?? null);
+    env.define('every', (a, fn) => a.every(fn));
+    env.define('some', (a, fn) => a.some(fn));
+    env.define('flat', (a) => a.flat());
+    env.define('zip', (a, b) => a.map((v,i) => [v, b[i]]));
+    env.define('unique', (a) => [...new Set(a)]);
+    env.define('keys', (o) => Object.keys(o));
+    env.define('values', (o) => Object.values(o));
+    env.define('entries', (o) => Object.entries(o));
+    env.define('merge', (...maps) => Object.assign({}, ...maps));
+    env.define('has', (o, k) => Object.hasOwn(o, k));
+    env.define('split', (s, d) => s.split(d));
+    env.define('join', (a, d) => a.join(d ?? ''));
+    env.define('replace', (s, a, b) => s.split(a).join(b));
+    env.define('trim', (s) => s.trim());
+    env.define('upper', (s) => s.toUpperCase());
+    env.define('lower', (s) => s.toLowerCase());
+    env.define('contains', (s, sub) => { if(Array.isArray(s)) return s.includes(sub); return s.includes(sub); });
+    env.define('starts', (s, p) => s.startsWith(p));
+    env.define('ends', (s, p) => s.endsWith(p));
+    env.define('index_of', (s, sub) => s.indexOf(sub));
+    env.define('substring', (s, a, b) => s.substring(a, b));
+    env.define('chars', (s) => [...s]);
+    env.define('repeat', (s, n) => s.repeat(n));
+    env.define('pad_left', (s, n, c) => String(s).padStart(n, c || ' '));
+    env.define('pad_right', (s, n, c) => String(s).padEnd(n, c || ' '));
+    env.define('abs', Math.abs);
+    env.define('round', Math.round);
+    env.define('floor', Math.floor);
+    env.define('ceil', Math.ceil);
+    env.define('min', (...a) => Math.min(...a));
+    env.define('max', (...a) => Math.max(...a));
+    env.define('sum', (a) => a.reduce((s,v)=>s+v,0));
+    env.define('random', () => Math.random());
+    env.define('pow', Math.pow);
+    env.define('sqrt', Math.sqrt);
+    env.define('sin', Math.sin);
+    env.define('cos', Math.cos);
+    env.define('tan', Math.tan);
+    env.define('log', Math.log);
+    env.define('pi', Math.PI);
+    env.define('e', Math.E);
+    env.define('json_parse', JSON.parse);
+    env.define('json_string', (v) => JSON.stringify(v));
+    env.define('time', () => Date.now() / 1000);
+    return env;
+}
+
+function interpret(node, env) {
+    if (!node) return null;
+    switch (node.type) {
+        case 'Program':
+            let last = null;
+            for (const stmt of node.body) last = interpret(stmt, env);
+            return last;
+        case 'VarDecl':
+            env.define(node.name, interpret(node.init, env));
+            return null;
+        case 'FnDecl': {
+            const fn = function(...args) {
+                const local = new Environment(env);
+                node.params.forEach((p, i) => {
+                    if (p.rest) local.define(p.name, args.slice(i));
+                    else local.define(p.name, args[i] ?? null);
+                });
+                try { execBlock(node.body, local); } catch(e) { if (e instanceof ReturnSignal) return e.value; throw e; }
+                return null;
+            };
+            fn._name = node.name;
+            env.define(node.name, fn);
+            return null;
+        }
+        case 'ClassDecl': {
+            const classDef = {_type: 'class', name: node.name, parent: node.parent, methods: {}};
+            for (const m of node.methods) classDef.methods[m.name] = m;
+            const constructor = function(...args) {
+                const inst = {_type: 'instance', _class: node.name};
+                // Inherit parent methods if any
+                if (node.parent && env.has(node.parent)) {
+                    const parentClass = env.get(node.parent);
+                    if (parentClass && parentClass._methods) {
+                        for (const [k, v] of Object.entries(parentClass._methods)) inst['_m_' + k] = v;
+                    }
+                }
+                // Define methods
+                for (const m of node.methods) {
+                    inst['_m_' + m.name] = m;
+                }
+                // Call init
+                const initM = classDef.methods['init'];
+                if (initM) {
+                    const local = new Environment(env);
+                    local.define('this', inst);
+                    initM.params.forEach((p, i) => local.define(p.name, args[i] ?? null));
+                    try { execBlock(initM.body, local); } catch(e) { if (!(e instanceof ReturnSignal)) throw e; }
+                }
+                return inst;
+            };
+            constructor._methods = classDef.methods;
+            constructor._name = node.name;
+            env.define(node.name, constructor);
+            return null;
+        }
+        case 'EnumDecl': {
+            const enumObj = {_type: 'enum_def', name: node.name};
+            for (const m of node.members) {
+                enumObj[m.name] = {_type: 'enum', name: node.name, member: m.name, value: interpret(m.value, env)};
+            }
+            env.define(node.name, enumObj);
+            return null;
+        }
+        case 'InterfaceDecl': return null;
+        case 'Import': return null;
+        case 'If': {
+            if (truthy(interpret(node.cond, env))) return execBlock(node.then, new Environment(env));
+            for (const elif of node.elifs) {
+                if (truthy(interpret(elif.cond, env))) return execBlock(elif.body, new Environment(env));
+            }
+            if (node.elseBody) return execBlock(node.elseBody, new Environment(env));
+            return null;
+        }
+        case 'For': {
+            const iter = interpret(node.iter, env);
+            if (!Array.isArray(iter)) throw new ClarityError('For loop requires iterable');
+            for (const item of iter) {
+                const local = new Environment(env);
+                local.define(node.name, item);
+                try { execBlock(node.body, local); }
+                catch(e) { if (e instanceof BreakSignal) break; if (e instanceof ContinueSignal) continue; throw e; }
+            }
+            return null;
+        }
+        case 'While': {
+            while (truthy(interpret(node.cond, env))) {
+                try { execBlock(node.body, new Environment(env)); }
+                catch(e) { if (e instanceof BreakSignal) break; if (e instanceof ContinueSignal) continue; throw e; }
+            }
+            return null;
+        }
+        case 'Return': throw new ReturnSignal(node.value ? interpret(node.value, env) : null);
+        case 'Break': throw new BreakSignal();
+        case 'Continue': throw new ContinueSignal();
+        case 'Show': { const v = interpret(node.value, env); outputLines.push(clarityStr(v)); return null; }
+        case 'Throw': throw new ClarityError(clarityStr(interpret(node.value, env)));
+        case 'Try': {
+            try { return execBlock(node.body, new Environment(env)); }
+            catch(e) {
+                if (e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal) throw e;
+                const local = new Environment(env);
+                local.define(node.errName, e.message || String(e));
+                return execBlock(node.catchBody, local);
+            }
+        }
+        case 'Match': {
+            const val = interpret(node.value, env);
+            for (const c of node.cases) {
+                const pattern = interpret(c.pattern, env);
+                if (val === pattern || clarityStr(val) === clarityStr(pattern)) return execBlock(c.body, new Environment(env));
+            }
+            if (node.elseCase) return execBlock(node.elseCase, new Environment(env));
+            return null;
+        }
+        case 'Assign': {
+            const val = interpret(node.value, env);
+            if (node.target.type === 'Ident') env.set(node.target.name, val);
+            else if (node.target.type === 'Member') { const obj = interpret(node.target.obj, env); obj[node.target.prop] = val; }
+            else if (node.target.type === 'Index') { const obj = interpret(node.target.obj, env); const idx = interpret(node.target.index, env); obj[idx] = val; }
+            return null;
+        }
+        case 'ExprStmt': return interpret(node.expr, env);
+        case 'Num': return node.value;
+        case 'Str': return node.value;
+        case 'Bool': return node.value;
+        case 'Null': return null;
+        case 'This': return env.get('this');
+        case 'Ident': return env.get(node.name);
+        case 'BinOp': {
+            const l = interpret(node.left, env), r = interpret(node.right, env);
+            switch(node.op) {
+                case '+': return (typeof l==='string'||typeof r==='string') ? clarityStr(l)+clarityStr(r) : l+r;
+                case '-': return l-r; case '*': return l*r; case '/': return l/r;
+                case '%': return l%r; case '**': return l**r;
+                case '==': return l===r; case '!=': return l!==r;
+                case '<': return l<r; case '>': return l>r;
+                case '<=': return l<=r; case '>=': return l>=r;
+            }
+        }
+        case 'LogOp': {
+            if (node.op === 'and') return truthy(interpret(node.left, env)) ? interpret(node.right, env) : false;
+            if (node.op === 'or') { const l = interpret(node.left, env); return truthy(l) ? l : interpret(node.right, env); }
+        }
+        case 'UnaryOp': {
+            const v = interpret(node.expr, env);
+            if (node.op === '-') return -v;
+            if (node.op === 'not') return !truthy(v);
+        }
+        case 'Member': { const obj = interpret(node.obj, env); return obj[node.prop]; }
+        case 'Index': { const obj = interpret(node.obj, env); return obj[interpret(node.index, env)]; }
+        case 'Call': {
+            const callee = interpret(node.callee, env);
+            const args = node.args.map(a => interpret(a, env));
+            if (typeof callee !== 'function') throw new ClarityError(`${clarityStr(callee)} is not callable`);
+            return callee(...args);
+        }
+        case 'MethodCall': {
+            const obj = interpret(node.obj, env);
+            const args = node.args.map(a => interpret(a, env));
+            // Instance methods
+            if (obj && obj._type === 'instance' && obj['_m_' + node.method]) {
+                const m = obj['_m_' + node.method];
+                const local = new Environment(env);
+                local.define('this', obj);
+                m.params.forEach((p, i) => local.define(p.name, args[i] ?? null));
+                try { execBlock(m.body, local); } catch(e) { if (e instanceof ReturnSignal) return e.value; throw e; }
+                return null;
+            }
+            // Property function
+            if (obj && typeof obj[node.method] === 'function') return obj[node.method](...args);
+            // JS method fallback (for arrays, strings)
+            throw new ClarityError(`No method '${node.method}' on ${clarityStr(obj)}`);
+        }
+        case 'Lambda': {
+            return function(...args) {
+                const local = new Environment(env);
+                node.params.forEach((p, i) => {
+                    if (p.rest) local.define(p.name, args.slice(i));
+                    else local.define(p.name, args[i] ?? null);
+                });
+                try {
+                    let lastVal = null;
+                    for (const stmt of node.body) lastVal = interpret(stmt, local);
+                    return lastVal;
+                } catch(e) { if (e instanceof ReturnSignal) return e.value; throw e; }
+            };
+        }
+        case 'List': return node.items.map(i => interpret(i, env));
+        case 'ListComp': {
+            const iter = interpret(node.iter, env);
+            const result = [];
+            for (const item of iter) {
+                const local = new Environment(env);
+                local.define(node.varName, item);
+                if (node.innerFor) {
+                    const iter2 = interpret(node.innerFor.iter, local);
+                    for (const item2 of iter2) {
+                        local.define(node.innerFor.var, item2);
+                        result.push(interpret(node.expr, local));
+                    }
+                } else {
+                    result.push(interpret(node.expr, local));
+                }
+            }
+            return result;
+        }
+        case 'Map': {
+            const obj = {};
+            for (const e of node.entries) {
+                const key = interpret(e.key, env);
+                obj[clarityStr(key)] = interpret(e.val, env);
+            }
+            return obj;
+        }
+        case 'IfExpr': return truthy(interpret(node.cond, env)) ? interpret(node.then, env) : interpret(node.else_, env);
+        case 'Ternary': return truthy(interpret(node.cond, env)) ? interpret(node.then, env) : interpret(node.else_, env);
+        default: throw new ClarityError(`Unknown node type: ${node.type}`);
+    }
+}
+
+function execBlock(stmts, env) {
+    let last = null;
+    for (const stmt of stmts) last = interpret(stmt, env);
+    return last;
+}
+
+function truthy(v) {
+    if (v === null || v === undefined || v === false || v === 0 || v === '') return false;
+    return true;
+}
+
+// ── UI ──────────────────────────────────────────────────
+const editorEl = document.getElementById('editor');
+const outputEl = document.getElementById('output');
+const statusEl = document.getElementById('status');
+
+// Load default example
+editorEl.value = EXAMPLES.hello;
+
+function loadExample() {
+    const sel = document.getElementById('examples');
+    if (EXAMPLES[sel.value]) editorEl.value = EXAMPLES[sel.value];
+    sel.value = '';
+}
+
+function runCode() {
+    const src = editorEl.value;
+    outputEl.innerHTML = '';
+    outputLines = [];
+    statusEl.textContent = 'Running...';
+
+    try {
+        const t0 = performance.now();
+        const tokens = tokenize(src);
+        const parser = new Parser(tokens);
+        const ast = parser.parse();
+        const env = createGlobalEnv();
+        interpret(ast, env);
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(3);
+
+        for (const line of outputLines) {
+            const div = document.createElement('div');
+            div.className = 'output-line';
+            div.textContent = line;
+            outputEl.appendChild(div);
+        }
+
+        const info = document.createElement('div');
+        info.className = 'output-line output-info';
+        info.textContent = `\n— Finished in ${elapsed}s —`;
+        outputEl.appendChild(info);
+        statusEl.textContent = `Done (${elapsed}s)`;
+    } catch(e) {
+        const div = document.createElement('div');
+        div.className = 'output-line output-error';
+        div.textContent = 'Error: ' + e.message;
+        outputEl.appendChild(div);
+        statusEl.textContent = 'Error';
+    }
+}
+
+function shareCode() {
+    const src = editorEl.value;
+    const encoded = btoa(unescape(encodeURIComponent(src)));
+    const url = location.origin + location.pathname + '#code=' + encoded;
+    navigator.clipboard.writeText(url).then(() => {
+        statusEl.textContent = 'Link copied!';
+        setTimeout(() => statusEl.textContent = 'Ready', 2000);
+    });
+}
+
+// Load from URL hash
+window.addEventListener('load', () => {
+    const hash = location.hash;
+    if (hash.startsWith('#code=')) {
+        try {
+            editorEl.value = decodeURIComponent(escape(atob(hash.slice(6))));
+        } catch(e) {}
+    }
+});
+
+// Keyboard shortcuts
+editorEl.addEventListener('keydown', (e) => {
+    // Ctrl/Cmd+Enter to run
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        runCode();
+    }
+    // Tab inserts spaces
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = editorEl.selectionStart;
+        editorEl.value = editorEl.value.substring(0, start) + '    ' + editorEl.value.substring(editorEl.selectionEnd);
+        editorEl.selectionStart = editorEl.selectionEnd = start + 4;
+    }
+});
+
+// Resizable divider
+const divider = document.getElementById('divider');
+let isDragging = false;
+divider.addEventListener('mousedown', () => isDragging = true);
+document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const main = document.querySelector('main');
+    const rect = main.getBoundingClientRect();
+    const pct = ((e.clientX - rect.left) / rect.width) * 100;
+    const panels = main.querySelectorAll('.panel');
+    panels[0].style.flex = `0 0 ${pct}%`;
+    panels[1].style.flex = `0 0 ${100 - pct}%`;
+});
+document.addEventListener('mouseup', () => isDragging = false);
+</script>
+</body>
+</html>

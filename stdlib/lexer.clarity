@@ -1,0 +1,463 @@
+-- Clarity Lexer — self-hosting implementation
+-- Faithful port of clarity/lexer.py, written in Clarity itself.
+-- Clarity tokenizing its own source code.
+
+from "tokens.clarity" import TokenType, KEYWORDS, Token, keyword_or_ident
+
+-- ── Lexer class ─────────────────────────────────────────
+
+class Lexer {
+    fn init(source, filename) {
+        this.source = source
+        this.filename = filename ?? "<input>"
+        this.pos = 0
+        this.line = 1
+        this.column = 1
+        this.lines = split(source, "\n")
+        this.paren_depth = 0
+    }
+
+    fn error(message) {
+        let source_line = if this.line <= len(this.lines) {
+            this.lines[this.line - 1]
+        } else {
+            ""
+        }
+        throw "LexerError: {message} at line {this.line}, column {this.column}\n  {source_line}"
+    }
+
+    fn peek() {
+        if this.pos >= len(this.source) {
+            return "\0"
+        }
+        return char_at(this.source, this.pos)
+    }
+
+    fn peek_next() {
+        if this.pos + 1 >= len(this.source) {
+            return "\0"
+        }
+        return char_at(this.source, this.pos + 1)
+    }
+
+    fn peek_at(offset) {
+        let idx = this.pos + offset
+        if idx >= len(this.source) {
+            return "\0"
+        }
+        return char_at(this.source, idx)
+    }
+
+    fn advance() {
+        let ch = char_at(this.source, this.pos)
+        this.pos += 1
+        if ch == "\n" {
+            this.line += 1
+            this.column = 1
+        } else {
+            this.column += 1
+        }
+        return ch
+    }
+
+    fn match_char(expected) {
+        if this.pos >= len(this.source) or char_at(this.source, this.pos) != expected {
+            return false
+        }
+        this.advance()
+        return true
+    }
+
+    fn make_token(type, value, line, col) {
+        let l = line ?? this.line
+        let c = col ?? this.column
+        return Token(type, value, l, c)
+    }
+
+    fn skip_whitespace() {
+        while this.pos < len(this.source) and contains(" \t\r", this.peek()) {
+            this.advance()
+        }
+    }
+
+    fn skip_comment() {
+        -- // line comment
+        if this.peek() == "/" and this.peek_next() == "/" {
+            while this.pos < len(this.source) and this.peek() != "\n" {
+                this.advance()
+            }
+            return true
+        }
+
+        -- /* block comment */ (nested)
+        if this.peek() == "/" and this.peek_next() == "*" {
+            this.advance()
+            this.advance()
+            mut depth = 1
+            while this.pos < len(this.source) and depth > 0 {
+                if this.peek() == "/" and this.peek_next() == "*" {
+                    depth += 1
+                    this.advance()
+                } elif this.peek() == "*" and this.peek_next() == "/" {
+                    depth -= 1
+                    this.advance()
+                }
+                this.advance()
+            }
+            return true
+        }
+
+        -- -- line comment (dash style)
+        if this.peek() == "-" and this.peek_next() == "-" {
+            while this.pos < len(this.source) and this.peek() != "\n" {
+                this.advance()
+            }
+            return true
+        }
+
+        return false
+    }
+
+    fn read_string() {
+        let quote = this.advance()
+        let start_line = this.line
+        let start_col = this.column - 1
+        mut result = []
+
+        while this.pos < len(this.source) and this.peek() != quote {
+            let ch = this.peek()
+            if ch == "\\" {
+                this.advance()
+                let esc = this.advance()
+                let escape_map = {
+                    "n": "\n", "t": "\t", "r": "\r",
+                    "\\": "\\", "'": "'", "\"": "\"",
+                    "0": "\0", "\{": "\{", "\}": "\}"
+                }
+                if has(escape_map, esc) {
+                    push(result, escape_map[esc])
+                } else {
+                    push(result, "\\" + esc)
+                }
+            } elif ch == "\n" {
+                this.error("Unterminated string — use triple quotes for multi-line")
+            } else {
+                push(result, this.advance())
+            }
+        }
+
+        if this.pos >= len(this.source) {
+            this.error("Unterminated string")
+        }
+
+        this.advance()
+        return Token(TokenType.STRING, join(result, ""), start_line, start_col)
+    }
+
+    fn read_triple_string() {
+        let quote = char_at(this.source, this.pos)
+        let start_line = this.line
+        let start_col = this.column
+        this.advance()
+        this.advance()
+        this.advance()
+        mut result = []
+
+        while this.pos < len(this.source) {
+            if this.peek() == quote and this.pos + 2 < len(this.source) and char_at(this.source, this.pos + 1) == quote and char_at(this.source, this.pos + 2) == quote {
+                this.advance()
+                this.advance()
+                this.advance()
+                return Token(TokenType.STRING, join(result, ""), start_line, start_col)
+            }
+            push(result, this.advance())
+        }
+
+        this.error("Unterminated triple-quoted string")
+    }
+
+    fn read_number() {
+        let start_col = this.column
+        mut num = []
+        mut has_dot = false
+
+        -- Hex literal: 0x...
+        if this.peek() == "0" and contains("xX", this.peek_next()) {
+            push(num, this.advance())
+            push(num, this.advance())
+            while this.pos < len(this.source) and (is_alnum(this.peek()) or this.peek() == "_") {
+                if this.peek() != "_" {
+                    push(num, this.advance())
+                } else {
+                    this.advance()
+                }
+            }
+            return Token(TokenType.NUMBER, int(join(num, "")), this.line, start_col)
+        }
+
+        while this.pos < len(this.source) {
+            let ch = this.peek()
+            if is_digit(ch) {
+                push(num, this.advance())
+            } elif ch == "_" and len(num) > 0 {
+                this.advance()
+            } elif ch == "." and not has_dot and is_digit(this.peek_next()) {
+                has_dot = true
+                push(num, this.advance())
+            } else {
+                break
+            }
+        }
+
+        let raw = join(num, "")
+        let value = if has_dot { float(raw) } else { int(raw) }
+        return Token(TokenType.NUMBER, value, this.line, start_col)
+    }
+
+    fn read_identifier() {
+        let start_col = this.column
+        mut word_chars = []
+        while this.pos < len(this.source) and (is_alnum(this.peek()) or this.peek() == "_") {
+            push(word_chars, this.advance())
+        }
+        let word = join(word_chars, "")
+
+        -- Raw string: r"..." — no escape processing
+        if word == "r" and this.pos < len(this.source) and contains("\"'", this.peek()) {
+            return this.read_raw_string(start_col)
+        }
+
+        let token_type = keyword_or_ident(word)
+        return Token(token_type, word, this.line, start_col)
+    }
+
+    fn read_raw_string(start_col) {
+        let quote = this.advance()
+        mut result = []
+        while this.pos < len(this.source) and this.peek() != quote {
+            if this.peek() == "\n" {
+                this.error("Unterminated raw string")
+            }
+            push(result, this.advance())
+        }
+        if this.pos >= len(this.source) {
+            this.error("Unterminated raw string")
+        }
+        this.advance()
+        return Token(TokenType.RAW_STRING, join(result, ""), this.line, start_col)
+    }
+
+    fn tokenize() {
+        mut tokens = []
+        mut last_was_newline = true
+
+        while this.pos < len(this.source) {
+            this.skip_whitespace()
+
+            if this.pos >= len(this.source) {
+                break
+            }
+
+            if this.skip_comment() {
+                continue
+            }
+
+            let ch = this.peek()
+
+            -- Newline handling
+            if ch == "\n" {
+                this.advance()
+                if not last_was_newline and this.paren_depth == 0 {
+                    push(tokens, this.make_token(TokenType.NEWLINE, "\\n", null, null))
+                    last_was_newline = true
+                }
+                continue
+            }
+
+            last_was_newline = false
+
+            -- Strings
+            if ch == "\"" or ch == "'" {
+                if this.pos + 2 < len(this.source) and char_at(this.source, this.pos + 1) == ch and char_at(this.source, this.pos + 2) == ch {
+                    push(tokens, this.read_triple_string())
+                } else {
+                    push(tokens, this.read_string())
+                }
+                continue
+            }
+
+            -- Numbers
+            if is_digit(ch) {
+                push(tokens, this.read_number())
+                continue
+            }
+
+            -- Identifiers and keywords
+            if is_alpha(ch) or ch == "_" {
+                push(tokens, this.read_identifier())
+                continue
+            }
+
+            let col = this.column
+            let line = this.line
+
+            -- Operators and delimiters
+            if ch == "+" {
+                this.advance()
+                if this.match_char("=") {
+                    push(tokens, Token(TokenType.PLUS_ASSIGN, "+=", line, col))
+                } else {
+                    push(tokens, Token(TokenType.PLUS, "+", line, col))
+                }
+            } elif ch == "-" {
+                this.advance()
+                if this.match_char(">") {
+                    push(tokens, Token(TokenType.ARROW, "->", line, col))
+                } elif this.match_char("=") {
+                    push(tokens, Token(TokenType.MINUS_ASSIGN, "-=", line, col))
+                } elif this.match_char("-") {
+                    -- Dash comment: consume rest of line
+                    while this.pos < len(this.source) and this.peek() != "\n" {
+                        this.advance()
+                    }
+                } else {
+                    push(tokens, Token(TokenType.MINUS, "-", line, col))
+                }
+            } elif ch == "*" {
+                this.advance()
+                if this.match_char("*") {
+                    push(tokens, Token(TokenType.POWER, "**", line, col))
+                } elif this.match_char("=") {
+                    push(tokens, Token(TokenType.STAR_ASSIGN, "*=", line, col))
+                } else {
+                    push(tokens, Token(TokenType.STAR, "*", line, col))
+                }
+            } elif ch == "/" {
+                this.advance()
+                if this.match_char("=") {
+                    push(tokens, Token(TokenType.SLASH_ASSIGN, "/=", line, col))
+                } else {
+                    push(tokens, Token(TokenType.SLASH, "/", line, col))
+                }
+            } elif ch == "%" {
+                this.advance()
+                push(tokens, Token(TokenType.PERCENT, "%", line, col))
+            } elif ch == "=" {
+                this.advance()
+                if this.match_char("=") {
+                    push(tokens, Token(TokenType.EQ, "==", line, col))
+                } elif this.match_char(">") {
+                    push(tokens, Token(TokenType.FAT_ARROW, "=>", line, col))
+                } else {
+                    push(tokens, Token(TokenType.ASSIGN, "=", line, col))
+                }
+            } elif ch == "!" {
+                this.advance()
+                if this.match_char("=") {
+                    push(tokens, Token(TokenType.NEQ, "!=", line, col))
+                } else {
+                    push(tokens, Token(TokenType.NOT, "not", line, col))
+                }
+            } elif ch == "<" {
+                this.advance()
+                if this.match_char("=") {
+                    push(tokens, Token(TokenType.LTE, "<=", line, col))
+                } elif this.match_char("<") {
+                    push(tokens, Token(TokenType.LSHIFT, "<<", line, col))
+                } else {
+                    push(tokens, Token(TokenType.LT, "<", line, col))
+                }
+            } elif ch == ">" {
+                this.advance()
+                if this.match_char("=") {
+                    push(tokens, Token(TokenType.GTE, ">=", line, col))
+                } elif this.match_char(">") {
+                    push(tokens, Token(TokenType.RSHIFT, ">>", line, col))
+                } else {
+                    push(tokens, Token(TokenType.GT, ">", line, col))
+                }
+            } elif ch == "|" {
+                this.advance()
+                if this.match_char(">") {
+                    push(tokens, Token(TokenType.PIPE, "|>", line, col))
+                } else {
+                    push(tokens, Token(TokenType.BIT_OR, "|", line, col))
+                }
+            } elif ch == "&" {
+                this.advance()
+                push(tokens, Token(TokenType.AMPERSAND, "&", line, col))
+            } elif ch == "^" {
+                this.advance()
+                push(tokens, Token(TokenType.CARET, "^", line, col))
+            } elif ch == "~" {
+                this.advance()
+                push(tokens, Token(TokenType.TILDE, "~", line, col))
+            } elif ch == "?" {
+                this.advance()
+                if this.match_char(".") {
+                    push(tokens, Token(TokenType.QUESTION_DOT, "?.", line, col))
+                } elif this.match_char("?") {
+                    push(tokens, Token(TokenType.QUESTION_QUESTION, "??", line, col))
+                } else {
+                    push(tokens, Token(TokenType.QUESTION, "?", line, col))
+                }
+            } elif ch == "." {
+                this.advance()
+                if this.peek() == "." and this.peek_next() == "." {
+                    this.advance()
+                    this.advance()
+                    push(tokens, Token(TokenType.SPREAD, "...", line, col))
+                } elif this.match_char(".") {
+                    push(tokens, Token(TokenType.DOTDOT, "..", line, col))
+                } else {
+                    push(tokens, Token(TokenType.DOT, ".", line, col))
+                }
+            } elif ch == "(" {
+                this.advance()
+                this.paren_depth += 1
+                push(tokens, Token(TokenType.LPAREN, "(", line, col))
+            } elif ch == ")" {
+                this.advance()
+                this.paren_depth -= 1
+                push(tokens, Token(TokenType.RPAREN, ")", line, col))
+            } elif ch == "\{" {
+                this.advance()
+                this.paren_depth += 1
+                push(tokens, Token(TokenType.LBRACE, "\{", line, col))
+            } elif ch == "\}" {
+                this.advance()
+                this.paren_depth -= 1
+                push(tokens, Token(TokenType.RBRACE, "\}", line, col))
+            } elif ch == "[" {
+                this.advance()
+                this.paren_depth += 1
+                push(tokens, Token(TokenType.LBRACKET, "[", line, col))
+            } elif ch == "]" {
+                this.advance()
+                this.paren_depth -= 1
+                push(tokens, Token(TokenType.RBRACKET, "]", line, col))
+            } elif ch == "," {
+                this.advance()
+                push(tokens, Token(TokenType.COMMA, ",", line, col))
+            } elif ch == ":" {
+                this.advance()
+                push(tokens, Token(TokenType.COLON, ":", line, col))
+            } elif ch == "@" {
+                this.advance()
+                push(tokens, Token(TokenType.AT, "@", line, col))
+            } else {
+                this.error("Unexpected character: '{ch}'")
+            }
+        }
+
+        push(tokens, Token(TokenType.EOF, null, this.line, this.column))
+        return tokens
+    }
+}
+
+-- ── Convenience function ────────────────────────────────
+
+fn tokenize(source, filename) {
+    let lexer = Lexer(source, filename ?? "<input>")
+    return lexer.tokenize()
+}

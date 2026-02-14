@@ -1,0 +1,1264 @@
+-- Clarity Parser — self-hosting implementation
+-- Faithful port of clarity/parser.py, written in Clarity itself.
+-- Recursive descent parser: tokens -> AST
+
+from "tokens.clarity" import TokenType, KEYWORDS
+from "ast_nodes.clarity" import Program, LetStatement, DestructureLetStatement, AssignStatement, FnStatement, ReturnStatement, IfStatement, ForStatement, WhileStatement, TryCatch, BreakStatement, ContinueStatement, ThrowStatement, ShowStatement, ImportStatement, ClassStatement, InterfaceStatement, MatchStatement, MultiAssignStatement, EnumStatement, DecoratedStatement, ExpressionStatement, Block, NumberLiteral, StringLiteral, BoolLiteral, NullLiteral, Identifier, ThisExpression, ListLiteral, MapLiteral, BinaryOp, UnaryOp, CallExpression, MemberExpression, OptionalMemberExpression, IndexExpression, SliceExpression, FnExpression, PipeExpression, RangeExpression, AskExpression, NullCoalesce, SpreadExpression, IfExpression, ComprehensionExpression, MapComprehensionExpression, AwaitExpression, YieldExpression
+
+-- ── Parser class ────────────────────────────────────────
+
+class Parser {
+    fn init(tokens, source) {
+        this.tokens = tokens
+        this.pos = 0
+        this.source = source ?? ""
+        this.lines = if source != null { split(source, "\n") } else { [] }
+    }
+
+    fn error(message, token) {
+        let tok = token ?? this.current()
+        let source_line = if tok.line <= len(this.lines) { this.lines[tok.line - 1] } else { "" }
+        throw "ParseError: {message} at line {tok.line}, column {tok.column}\n  {source_line}"
+    }
+
+    fn current() {
+        if this.pos < len(this.tokens) {
+            return this.tokens[this.pos]
+        }
+        return this.tokens[len(this.tokens) - 1]
+    }
+
+    fn peek(offset) {
+        let idx = this.pos + (offset ?? 0)
+        if idx < len(this.tokens) {
+            return this.tokens[idx]
+        }
+        return this.tokens[len(this.tokens) - 1]
+    }
+
+    fn advance() {
+        let tok = this.current()
+        if tok.type != TokenType.EOF {
+            this.pos += 1
+        }
+        return tok
+    }
+
+    fn expect(tp, message) {
+        let tok = this.current()
+        if tok.type != tp {
+            let msg = message ?? "Expected {tp}, got {tok.type} ({tok.value})"
+            this.error(msg, null)
+        }
+        return this.advance()
+    }
+
+    fn match_type(tp) {
+        if this.current().type == tp {
+            return this.advance()
+        }
+        return null
+    }
+
+    fn expect_property_name() {
+        let tok = this.current()
+        if tok.type == TokenType.IDENTIFIER {
+            this.advance()
+            return tok.value
+        }
+        if has(KEYWORDS, tok.value) {
+            this.advance()
+            return tok.value
+        }
+        this.error("Expected property name after '.'", null)
+    }
+
+    fn skip_newlines() {
+        while this.current().type == TokenType.NEWLINE {
+            this.advance()
+        }
+    }
+
+    fn at_end() {
+        return this.current().type == TokenType.EOF
+    }
+
+    -- ── Entry Point ──────────────────────────────────────
+
+    fn parse() {
+        this.skip_newlines()
+        mut body = []
+        while not this.at_end() {
+            let stmt = this.parse_statement()
+            if stmt != null {
+                push(body, stmt)
+            }
+            this.skip_newlines()
+        }
+        return Program(body)
+    }
+
+    -- ── Statements ───────────────────────────────────────
+
+    fn parse_statement() {
+        let tok = this.current()
+
+        if tok.type == TokenType.LET or tok.type == TokenType.MUT {
+            return this.parse_let()
+        } elif tok.type == TokenType.FN {
+            if this.peek(1).type == TokenType.IDENTIFIER {
+                return this.parse_fn_declaration()
+            } else {
+                return this.parse_expression_statement()
+            }
+        } elif tok.type == TokenType.IF {
+            return this.parse_if()
+        } elif tok.type == TokenType.FOR {
+            return this.parse_for()
+        } elif tok.type == TokenType.WHILE {
+            return this.parse_while()
+        } elif tok.type == TokenType.RETURN {
+            return this.parse_return()
+        } elif tok.type == TokenType.BREAK {
+            this.advance()
+            this.match_type(TokenType.NEWLINE)
+            return BreakStatement(tok.line, tok.column)
+        } elif tok.type == TokenType.CONTINUE {
+            this.advance()
+            this.match_type(TokenType.NEWLINE)
+            return ContinueStatement(tok.line, tok.column)
+        } elif tok.type == TokenType.SHOW {
+            return this.parse_show()
+        } elif tok.type == TokenType.TRY {
+            return this.parse_try_catch()
+        } elif tok.type == TokenType.IMPORT {
+            return this.parse_import()
+        } elif tok.type == TokenType.FROM {
+            return this.parse_from_import()
+        } elif tok.type == TokenType.CLASS {
+            return this.parse_class()
+        } elif tok.type == TokenType.THROW {
+            return this.parse_throw()
+        } elif tok.type == TokenType.MATCH {
+            return this.parse_match()
+        } elif tok.type == TokenType.ENUM {
+            return this.parse_enum()
+        } elif tok.type == TokenType.ASYNC {
+            return this.parse_async_fn()
+        } elif tok.type == TokenType.AT {
+            return this.parse_decorated()
+        } elif tok.type == TokenType.INTERFACE {
+            return this.parse_interface()
+        } elif tok.type == TokenType.NEWLINE {
+            this.advance()
+            return null
+        } else {
+            return this.parse_expression_statement()
+        }
+    }
+
+    fn parse_let() {
+        let tok = this.advance()
+        let mutable = tok.type == TokenType.MUT
+
+        if this.current().type == TokenType.LBRACKET {
+            return this.parse_destructure_list(tok, mutable)
+        }
+        if this.current().type == TokenType.LBRACE {
+            return this.parse_destructure_map(tok, mutable)
+        }
+
+        let name_tok = this.expect(TokenType.IDENTIFIER, "Expected variable name after 'let'")
+        mut type_ann = null
+        if this.match_type(TokenType.COLON) != null {
+            type_ann = this.expect(TokenType.IDENTIFIER, "Expected type name").value
+        }
+        this.expect(TokenType.ASSIGN, "Expected '=' after variable name")
+        let value = this.parse_expression()
+        this.match_type(TokenType.NEWLINE)
+        return LetStatement(name_tok.value, value, mutable, type_ann, tok.line, tok.column)
+    }
+
+    fn parse_destructure_list(tok, mutable) {
+        this.advance()
+        mut targets = []
+        while this.current().type != TokenType.RBRACKET {
+            if len(targets) > 0 {
+                this.expect(TokenType.COMMA, null)
+            }
+            if this.current().type == TokenType.SPREAD {
+                this.advance()
+                let name = this.expect(TokenType.IDENTIFIER, null).value
+                push(targets, "..." + name)
+            } else {
+                push(targets, this.expect(TokenType.IDENTIFIER, null).value)
+            }
+        }
+        this.expect(TokenType.RBRACKET, null)
+        this.expect(TokenType.ASSIGN, "Expected '=' after destructure pattern")
+        let value = this.parse_expression()
+        this.match_type(TokenType.NEWLINE)
+        return DestructureLetStatement(targets, value, mutable, "list", tok.line, tok.column)
+    }
+
+    fn parse_destructure_map(tok, mutable) {
+        this.advance()
+        mut targets = []
+        while this.current().type != TokenType.RBRACE {
+            if len(targets) > 0 {
+                this.expect(TokenType.COMMA, null)
+            }
+            push(targets, this.expect(TokenType.IDENTIFIER, null).value)
+        }
+        this.expect(TokenType.RBRACE, null)
+        this.expect(TokenType.ASSIGN, "Expected '=' after destructure pattern")
+        let value = this.parse_expression()
+        this.match_type(TokenType.NEWLINE)
+        return DestructureLetStatement(targets, value, mutable, "map", tok.line, tok.column)
+    }
+
+    fn parse_fn_declaration() {
+        let tok = this.advance()
+        let name_tok = this.expect(TokenType.IDENTIFIER, "Expected function name")
+        let typed = this.parse_typed_params()
+        let params = typed[0]
+        let param_types = typed[1]
+        mut return_type = null
+        if this.match_type(TokenType.ARROW) != null {
+            return_type = this.expect(TokenType.IDENTIFIER, "Expected return type").value
+        }
+        let body = this.parse_block()
+        this.match_type(TokenType.NEWLINE)
+        return FnStatement(name_tok.value, params, body, false, param_types, return_type, tok.line, tok.column)
+    }
+
+    fn parse_typed_params() {
+        this.expect(TokenType.LPAREN, "Expected '(' after function name")
+        mut params = []
+        mut param_types = {}
+        while this.current().type != TokenType.RPAREN {
+            if len(params) > 0 {
+                this.expect(TokenType.COMMA, "Expected ',' between parameters")
+            }
+            if this.current().type == TokenType.SPREAD {
+                this.advance()
+                let param = this.expect(TokenType.IDENTIFIER, "Expected parameter name after '...'")
+                push(params, "..." + param.value)
+            } else {
+                let param = this.expect(TokenType.IDENTIFIER, "Expected parameter name")
+                push(params, param.value)
+                if this.match_type(TokenType.COLON) != null {
+                    let type_name = this.expect(TokenType.IDENTIFIER, "Expected type name").value
+                    param_types[param.value] = type_name
+                }
+            }
+        }
+        this.expect(TokenType.RPAREN, null)
+        return [params, param_types]
+    }
+
+    fn parse_params() {
+        let result = this.parse_typed_params()
+        return result[0]
+    }
+
+    fn parse_block() {
+        this.skip_newlines()
+        let tok = this.expect(TokenType.LBRACE, "Expected '\{'")
+        this.skip_newlines()
+        mut statements = []
+        while this.current().type != TokenType.RBRACE {
+            if this.at_end() {
+                this.error("Expected '\}' — unclosed block", tok)
+            }
+            let stmt = this.parse_statement()
+            if stmt != null {
+                push(statements, stmt)
+            }
+            this.skip_newlines()
+        }
+        this.expect(TokenType.RBRACE, null)
+        return Block(statements, tok.line, tok.column)
+    }
+
+    fn parse_if() {
+        let tok = this.advance()
+        let condition = this.parse_expression()
+        let body = this.parse_block()
+
+        mut elif_clauses = []
+        mut else_body = null
+
+        this.skip_newlines()
+        while this.match_type(TokenType.ELIF) != null {
+            let elif_cond = this.parse_expression()
+            let elif_body = this.parse_block()
+            push(elif_clauses, [elif_cond, elif_body])
+            this.skip_newlines()
+        }
+
+        if this.match_type(TokenType.ELSE) != null {
+            this.skip_newlines()
+            if this.current().type == TokenType.IF {
+                else_body = Block([this.parse_if()], this.current().line, null)
+            } else {
+                else_body = this.parse_block()
+            }
+        }
+
+        this.match_type(TokenType.NEWLINE)
+        return IfStatement(condition, body, elif_clauses, else_body, tok.line, tok.column)
+    }
+
+    fn parse_for() {
+        let tok = this.advance()
+        let var_tok = this.expect(TokenType.IDENTIFIER, "Expected variable name after 'for'")
+        this.expect(TokenType.IN, "Expected 'in' after variable name")
+        let iterable = this.parse_expression()
+        let body = this.parse_block()
+        this.match_type(TokenType.NEWLINE)
+        return ForStatement(var_tok.value, iterable, body, tok.line, tok.column)
+    }
+
+    fn parse_while() {
+        let tok = this.advance()
+        let condition = this.parse_expression()
+        let body = this.parse_block()
+        this.match_type(TokenType.NEWLINE)
+        return WhileStatement(condition, body, tok.line, tok.column)
+    }
+
+    fn parse_return() {
+        let tok = this.advance()
+        mut value = null
+        if this.current().type != TokenType.NEWLINE and this.current().type != TokenType.RBRACE and this.current().type != TokenType.EOF {
+            value = this.parse_expression()
+        }
+        this.match_type(TokenType.NEWLINE)
+        return ReturnStatement(value, tok.line, tok.column)
+    }
+
+    fn parse_show() {
+        let tok = this.advance()
+        mut values = [this.parse_expression()]
+        while this.match_type(TokenType.COMMA) != null {
+            push(values, this.parse_expression())
+        }
+        this.match_type(TokenType.NEWLINE)
+        return ShowStatement(values, tok.line, tok.column)
+    }
+
+    fn parse_try_catch() {
+        let tok = this.advance()
+        let try_body = this.parse_block()
+        this.skip_newlines()
+        this.expect(TokenType.CATCH, "Expected 'catch' after try block")
+        mut catch_var = null
+        if this.current().type == TokenType.IDENTIFIER {
+            catch_var = this.advance().value
+        }
+        let catch_body = this.parse_block()
+
+        mut finally_body = null
+        this.skip_newlines()
+        if this.match_type(TokenType.FINALLY) != null {
+            finally_body = this.parse_block()
+        }
+
+        this.match_type(TokenType.NEWLINE)
+        return TryCatch(try_body, catch_var, catch_body, finally_body, tok.line, tok.column)
+    }
+
+    fn parse_throw() {
+        let tok = this.advance()
+        let value = this.parse_expression()
+        this.match_type(TokenType.NEWLINE)
+        return ThrowStatement(value, tok.line, tok.column)
+    }
+
+    fn parse_class() {
+        let tok = this.advance()
+        let name = this.expect(TokenType.IDENTIFIER, "Expected class name").value
+
+        mut parent = null
+        if this.match_type(TokenType.LT) != null {
+            parent = this.expect(TokenType.IDENTIFIER, "Expected parent class name").value
+        }
+
+        mut interfaces = []
+        if this.match_type(TokenType.IMPL) != null {
+            push(interfaces, this.expect(TokenType.IDENTIFIER, "Expected interface name").value)
+            while this.match_type(TokenType.COMMA) != null {
+                push(interfaces, this.expect(TokenType.IDENTIFIER, null).value)
+            }
+        }
+
+        this.skip_newlines()
+        this.expect(TokenType.LBRACE, "Expected '\{' after class name")
+        this.skip_newlines()
+
+        mut methods = []
+        while this.current().type != TokenType.RBRACE {
+            if this.at_end() {
+                this.error("Expected '\}' — unclosed class", null)
+            }
+            if this.current().type == TokenType.FN {
+                let fn_tok = this.advance()
+                let fn_name = this.expect(TokenType.IDENTIFIER, null).value
+                let fn_params = this.parse_params()
+                let fn_body = this.parse_block()
+                push(methods, FnStatement(fn_name, fn_params, fn_body, false, {}, null, fn_tok.line, fn_tok.column))
+            } else {
+                this.error("Expected method declaration (fn) in class body", null)
+            }
+            this.skip_newlines()
+        }
+
+        this.expect(TokenType.RBRACE, null)
+        this.match_type(TokenType.NEWLINE)
+        return ClassStatement(name, methods, parent, interfaces, tok.line, tok.column)
+    }
+
+    fn parse_match() {
+        let tok = this.advance()
+        let subject = this.parse_expression()
+        this.skip_newlines()
+        this.expect(TokenType.LBRACE, "Expected '\{' after match expression")
+        this.skip_newlines()
+
+        mut arms = []
+        mut default_body = null
+
+        while this.current().type != TokenType.RBRACE {
+            if this.at_end() {
+                this.error("Expected '\}' — unclosed match", null)
+            }
+
+            if this.match_type(TokenType.ELSE) != null {
+                default_body = this.parse_block()
+                this.skip_newlines()
+                continue
+            }
+
+            this.expect(TokenType.WHEN, "Expected 'when' in match arm")
+            let pattern = this.parse_expression()
+            let arm_body = this.parse_block()
+            push(arms, [pattern, arm_body])
+            this.skip_newlines()
+        }
+
+        this.expect(TokenType.RBRACE, null)
+        this.match_type(TokenType.NEWLINE)
+        return MatchStatement(subject, arms, default_body, tok.line, tok.column)
+    }
+
+    fn parse_interface() {
+        let tok = this.advance()
+        let name = this.expect(TokenType.IDENTIFIER, "Expected interface name").value
+        this.skip_newlines()
+        this.expect(TokenType.LBRACE, "Expected '\{' after interface name")
+        this.skip_newlines()
+
+        mut method_sigs = []
+        while this.current().type != TokenType.RBRACE {
+            if this.at_end() {
+                this.error("Expected '\}' — unclosed interface", null)
+            }
+            this.expect(TokenType.FN, "Expected method signature (fn) in interface")
+            let method_name = this.expect(TokenType.IDENTIFIER, null).value
+            let typed = this.parse_typed_params()
+            mut return_type = null
+            if this.match_type(TokenType.ARROW) != null {
+                return_type = this.expect(TokenType.IDENTIFIER, "Expected return type").value
+            }
+            push(method_sigs, [method_name, typed[0], typed[1], return_type])
+            this.skip_newlines()
+        }
+
+        this.expect(TokenType.RBRACE, null)
+        this.match_type(TokenType.NEWLINE)
+        return InterfaceStatement(name, method_sigs, tok.line, tok.column)
+    }
+
+    fn parse_enum() {
+        let tok = this.advance()
+        let name = this.expect(TokenType.IDENTIFIER, "Expected enum name").value
+        this.skip_newlines()
+        this.expect(TokenType.LBRACE, "Expected '\{' after enum name")
+        this.skip_newlines()
+
+        mut members = []
+        while this.current().type != TokenType.RBRACE {
+            if len(members) > 0 {
+                this.expect(TokenType.COMMA, "Expected ',' between enum members")
+                this.skip_newlines()
+                if this.current().type == TokenType.RBRACE {
+                    break
+                }
+            }
+            let member_name = this.expect(TokenType.IDENTIFIER, "Expected enum member name").value
+            mut value = null
+            if this.match_type(TokenType.ASSIGN) != null {
+                value = this.parse_expression()
+            }
+            push(members, [member_name, value])
+            this.skip_newlines()
+        }
+
+        this.expect(TokenType.RBRACE, null)
+        this.match_type(TokenType.NEWLINE)
+        return EnumStatement(name, members, tok.line, tok.column)
+    }
+
+    fn parse_async_fn() {
+        let tok = this.advance()
+        this.expect(TokenType.FN, "Expected 'fn' after 'async'")
+        let name_tok = this.expect(TokenType.IDENTIFIER, "Expected function name")
+        let typed = this.parse_typed_params()
+        mut return_type = null
+        if this.match_type(TokenType.ARROW) != null {
+            return_type = this.expect(TokenType.IDENTIFIER, "Expected return type").value
+        }
+        let body = this.parse_block()
+        this.match_type(TokenType.NEWLINE)
+        return FnStatement(name_tok.value, typed[0], body, true, typed[1], return_type, tok.line, tok.column)
+    }
+
+    fn parse_decorated() {
+        mut decorators = []
+        while this.current().type == TokenType.AT {
+            this.advance()
+            let decorator_expr = this.parse_postfix()
+            push(decorators, decorator_expr)
+            this.skip_newlines()
+        }
+
+        mut node = null
+        if this.current().type == TokenType.FN {
+            node = this.parse_fn_declaration()
+        } elif this.current().type == TokenType.ASYNC {
+            node = this.parse_async_fn()
+        } elif this.current().type == TokenType.CLASS {
+            node = this.parse_class()
+        } else {
+            this.error("Expected 'fn', 'async', or 'class' after decorator", null)
+        }
+
+        return DecoratedStatement(node, decorators, node.line, node.column)
+    }
+
+    fn parse_import() {
+        let tok = this.advance()
+
+        if this.current().type == TokenType.STRING {
+            let path = this.advance().value
+            mut alias = null
+            if this.match_type(TokenType.AS) != null {
+                alias = this.expect(TokenType.IDENTIFIER, null).value
+            }
+            this.match_type(TokenType.NEWLINE)
+            return ImportStatement(null, alias, null, path, tok.line, tok.column)
+        }
+
+        let module = this.expect(TokenType.IDENTIFIER, "Expected module name").value
+        mut alias = null
+        mut names = null
+
+        if this.match_type(TokenType.AS) != null {
+            alias = this.expect(TokenType.IDENTIFIER, null).value
+        } elif this.match_type(TokenType.DOT) != null {
+            let name = this.expect(TokenType.IDENTIFIER, null).value
+            names = [name]
+        }
+
+        this.match_type(TokenType.NEWLINE)
+        return ImportStatement(module, alias, names, null, tok.line, tok.column)
+    }
+
+    fn parse_from_import() {
+        let tok = this.advance()
+
+        if this.current().type == TokenType.STRING {
+            let path = this.advance().value
+            this.expect(TokenType.IMPORT, "Expected 'import' after path")
+            mut names = [this.expect(TokenType.IDENTIFIER, null).value]
+            while this.match_type(TokenType.COMMA) != null {
+                push(names, this.expect(TokenType.IDENTIFIER, null).value)
+            }
+            this.match_type(TokenType.NEWLINE)
+            return ImportStatement(null, null, names, path, tok.line, tok.column)
+        }
+
+        let module = this.expect(TokenType.IDENTIFIER, null).value
+        this.expect(TokenType.IMPORT, "Expected 'import' after module name")
+        mut names = [this.expect(TokenType.IDENTIFIER, null).value]
+        while this.match_type(TokenType.COMMA) != null {
+            push(names, this.expect(TokenType.IDENTIFIER, null).value)
+        }
+        this.match_type(TokenType.NEWLINE)
+        return ImportStatement(module, null, names, null, tok.line, tok.column)
+    }
+
+    fn parse_expression_statement() {
+        let expr = this.parse_expression()
+
+        -- Multi-assignment: a, b = x, y
+        if this.current().type == TokenType.COMMA {
+            mut targets = [expr]
+            while this.match_type(TokenType.COMMA) != null {
+                push(targets, this.parse_expression())
+            }
+            if this.current().type == TokenType.ASSIGN {
+                this.advance()
+                mut values = [this.parse_expression()]
+                while this.match_type(TokenType.COMMA) != null {
+                    push(values, this.parse_expression())
+                }
+                this.match_type(TokenType.NEWLINE)
+                return MultiAssignStatement(targets, values, expr.line, expr.column)
+            } else {
+                this.match_type(TokenType.NEWLINE)
+                return ExpressionStatement(targets[len(targets) - 1], targets[len(targets) - 1].line, targets[len(targets) - 1].column)
+            }
+        }
+
+        if this.current().type == TokenType.ASSIGN {
+            this.advance()
+            let value = this.parse_expression()
+            this.match_type(TokenType.NEWLINE)
+            return AssignStatement(expr, "=", value, expr.line, expr.column)
+        } elif this.current().type == TokenType.PLUS_ASSIGN {
+            this.advance()
+            let value = this.parse_expression()
+            this.match_type(TokenType.NEWLINE)
+            return AssignStatement(expr, "+=", value, expr.line, expr.column)
+        } elif this.current().type == TokenType.MINUS_ASSIGN {
+            this.advance()
+            let value = this.parse_expression()
+            this.match_type(TokenType.NEWLINE)
+            return AssignStatement(expr, "-=", value, expr.line, expr.column)
+        } elif this.current().type == TokenType.STAR_ASSIGN {
+            this.advance()
+            let value = this.parse_expression()
+            this.match_type(TokenType.NEWLINE)
+            return AssignStatement(expr, "*=", value, expr.line, expr.column)
+        } elif this.current().type == TokenType.SLASH_ASSIGN {
+            this.advance()
+            let value = this.parse_expression()
+            this.match_type(TokenType.NEWLINE)
+            return AssignStatement(expr, "/=", value, expr.line, expr.column)
+        }
+
+        this.match_type(TokenType.NEWLINE)
+        return ExpressionStatement(expr, expr.line, expr.column)
+    }
+
+    -- ── Expressions (precedence climbing) ────────────────
+
+    fn parse_expression() {
+        return this.parse_pipe()
+    }
+
+    fn parse_pipe() {
+        mut expr = this.parse_null_coalesce()
+        while true {
+            let saved = this.pos
+            this.skip_newlines()
+            if this.match_type(TokenType.PIPE) != null {
+                let right = this.parse_null_coalesce()
+                expr = PipeExpression(expr, right, expr.line, expr.column)
+            } else {
+                this.pos = saved
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_null_coalesce() {
+        mut expr = this.parse_or()
+        while this.match_type(TokenType.QUESTION_QUESTION) != null {
+            let right = this.parse_or()
+            expr = NullCoalesce(expr, right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_or() {
+        mut expr = this.parse_and()
+        while this.match_type(TokenType.OR) != null {
+            let right = this.parse_and()
+            expr = BinaryOp(expr, "or", right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_and() {
+        mut expr = this.parse_bit_or()
+        while this.match_type(TokenType.AND) != null {
+            let right = this.parse_bit_or()
+            expr = BinaryOp(expr, "and", right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_bit_or() {
+        mut expr = this.parse_bit_xor()
+        while this.match_type(TokenType.BIT_OR) != null {
+            let right = this.parse_bit_xor()
+            expr = BinaryOp(expr, "|", right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_bit_xor() {
+        mut expr = this.parse_bit_and()
+        while this.match_type(TokenType.CARET) != null {
+            let right = this.parse_bit_and()
+            expr = BinaryOp(expr, "^", right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_bit_and() {
+        mut expr = this.parse_equality()
+        while this.match_type(TokenType.AMPERSAND) != null {
+            let right = this.parse_equality()
+            expr = BinaryOp(expr, "&", right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_equality() {
+        mut expr = this.parse_comparison()
+        while true {
+            if this.match_type(TokenType.EQ) != null {
+                let right = this.parse_comparison()
+                expr = BinaryOp(expr, "==", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.NEQ) != null {
+                let right = this.parse_comparison()
+                expr = BinaryOp(expr, "!=", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.IS) != null {
+                let right = this.parse_comparison()
+                expr = BinaryOp(expr, "is", right, expr.line, expr.column)
+            } else {
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_comparison() {
+        mut expr = this.parse_shift()
+        while true {
+            if this.match_type(TokenType.LT) != null {
+                let right = this.parse_shift()
+                expr = BinaryOp(expr, "<", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.GT) != null {
+                let right = this.parse_shift()
+                expr = BinaryOp(expr, ">", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.LTE) != null {
+                let right = this.parse_shift()
+                expr = BinaryOp(expr, "<=", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.GTE) != null {
+                let right = this.parse_shift()
+                expr = BinaryOp(expr, ">=", right, expr.line, expr.column)
+            } else {
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_shift() {
+        mut expr = this.parse_range()
+        while true {
+            if this.match_type(TokenType.LSHIFT) != null {
+                let right = this.parse_range()
+                expr = BinaryOp(expr, "<<", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.RSHIFT) != null {
+                let right = this.parse_range()
+                expr = BinaryOp(expr, ">>", right, expr.line, expr.column)
+            } else {
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_range() {
+        mut expr = this.parse_addition()
+        if this.match_type(TokenType.DOTDOT) != null {
+            let ct = this.current().type
+            if ct == TokenType.RBRACKET or ct == TokenType.EOF or ct == TokenType.NEWLINE or ct == TokenType.RPAREN {
+                expr = RangeExpression(expr, null, expr.line, expr.column)
+            } else {
+                let end = this.parse_addition()
+                expr = RangeExpression(expr, end, expr.line, expr.column)
+            }
+        }
+        return expr
+    }
+
+    fn parse_addition() {
+        mut expr = this.parse_multiplication()
+        while true {
+            if this.match_type(TokenType.PLUS) != null {
+                let right = this.parse_multiplication()
+                expr = BinaryOp(expr, "+", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.MINUS) != null {
+                let right = this.parse_multiplication()
+                expr = BinaryOp(expr, "-", right, expr.line, expr.column)
+            } else {
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_multiplication() {
+        mut expr = this.parse_power()
+        while true {
+            if this.match_type(TokenType.STAR) != null {
+                let right = this.parse_power()
+                expr = BinaryOp(expr, "*", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.SLASH) != null {
+                let right = this.parse_power()
+                expr = BinaryOp(expr, "/", right, expr.line, expr.column)
+            } elif this.match_type(TokenType.PERCENT) != null {
+                let right = this.parse_power()
+                expr = BinaryOp(expr, "%", right, expr.line, expr.column)
+            } else {
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_power() {
+        mut expr = this.parse_unary()
+        if this.match_type(TokenType.POWER) != null {
+            let right = this.parse_unary()
+            expr = BinaryOp(expr, "**", right, expr.line, expr.column)
+        }
+        return expr
+    }
+
+    fn parse_unary() {
+        if this.match_type(TokenType.MINUS) != null {
+            let operand = this.parse_unary()
+            return UnaryOp("-", operand, operand.line, operand.column)
+        }
+        if this.match_type(TokenType.NOT) != null {
+            let operand = this.parse_unary()
+            return UnaryOp("not", operand, operand.line, operand.column)
+        }
+        if this.match_type(TokenType.TILDE) != null {
+            let operand = this.parse_unary()
+            return UnaryOp("~", operand, operand.line, operand.column)
+        }
+        return this.parse_postfix()
+    }
+
+    fn parse_postfix() {
+        mut expr = this.parse_primary()
+        while true {
+            if this.current().type == TokenType.LPAREN {
+                expr = this.parse_call(expr)
+            } elif this.match_type(TokenType.DOT) != null {
+                let prop = this.expect_property_name()
+                expr = MemberExpression(expr, prop, expr.line, expr.column)
+            } elif this.match_type(TokenType.QUESTION_DOT) != null {
+                let prop = this.expect_property_name()
+                expr = OptionalMemberExpression(expr, prop, expr.line, expr.column)
+            } elif this.current().type == TokenType.LBRACKET {
+                this.advance()
+                if this.current().type == TokenType.DOTDOT {
+                    this.advance()
+                    let end = this.parse_expression()
+                    this.expect(TokenType.RBRACKET, "Expected ']'")
+                    expr = SliceExpression(expr, null, end, expr.line, expr.column)
+                } else {
+                    let index = this.parse_expression()
+                    if index.node_type == "RangeExpression" {
+                        this.expect(TokenType.RBRACKET, "Expected ']'")
+                        expr = SliceExpression(expr, index.start, index.end, expr.line, expr.column)
+                    } else {
+                        this.expect(TokenType.RBRACKET, "Expected ']'")
+                        expr = IndexExpression(expr, index, expr.line, expr.column)
+                    }
+                }
+            } else {
+                break
+            }
+        }
+        return expr
+    }
+
+    fn parse_call(callee) {
+        this.expect(TokenType.LPAREN, null)
+        mut args = []
+        while this.current().type != TokenType.RPAREN {
+            if len(args) > 0 {
+                this.expect(TokenType.COMMA, "Expected ',' between arguments")
+            }
+            this.skip_newlines()
+            if this.current().type == TokenType.SPREAD {
+                let spread_tok = this.advance()
+                let arg = this.parse_expression()
+                push(args, SpreadExpression(arg, spread_tok.line, spread_tok.column))
+            } else {
+                push(args, this.parse_expression())
+            }
+            this.skip_newlines()
+        }
+        this.expect(TokenType.RPAREN, null)
+        return CallExpression(callee, args, callee.line, callee.column)
+    }
+
+    fn parse_primary() {
+        let tok = this.current()
+
+        if tok.type == TokenType.NUMBER {
+            this.advance()
+            return NumberLiteral(tok.value, tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.STRING {
+            this.advance()
+            return StringLiteral(tok.value, tok.line, tok.column, false)
+        }
+
+        if tok.type == TokenType.RAW_STRING {
+            this.advance()
+            return StringLiteral(tok.value, tok.line, tok.column, true)
+        }
+
+        if tok.type == TokenType.TRUE {
+            this.advance()
+            return BoolLiteral(true, tok.line, tok.column)
+        }
+        if tok.type == TokenType.FALSE {
+            this.advance()
+            return BoolLiteral(false, tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.NULL {
+            this.advance()
+            return NullLiteral(tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.THIS {
+            this.advance()
+            return ThisExpression(tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.IDENTIFIER {
+            if this.peek(1).type == TokenType.FAT_ARROW {
+                this.advance()
+                this.advance()
+                let body_expr = this.parse_pipe()
+                let body = Block([
+                    ReturnStatement(body_expr, body_expr.line, body_expr.column)
+                ], tok.line, tok.column)
+                return FnExpression([tok.value], body, null, null, tok.line, tok.column)
+            }
+            this.advance()
+            return Identifier(tok.value, tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.ASK {
+            return this.parse_ask()
+        }
+
+        if tok.type == TokenType.FN {
+            return this.parse_fn_expression()
+        }
+
+        if tok.type == TokenType.IF {
+            return this.parse_if_expression()
+        }
+
+        if tok.type == TokenType.LPAREN {
+            if this.is_arrow_lambda() {
+                return this.parse_arrow_lambda()
+            }
+            this.advance()
+            let expr = this.parse_expression()
+            this.expect(TokenType.RPAREN, "Expected ')'")
+            return expr
+        }
+
+        if tok.type == TokenType.LBRACKET {
+            return this.parse_list()
+        }
+
+        if tok.type == TokenType.LBRACE {
+            return this.parse_map()
+        }
+
+        if tok.type == TokenType.AWAIT {
+            this.advance()
+            let value = this.parse_expression()
+            return AwaitExpression(value, tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.YIELD {
+            this.advance()
+            mut value = null
+            let ct = this.current().type
+            if ct != TokenType.NEWLINE and ct != TokenType.RBRACE and ct != TokenType.EOF and ct != TokenType.RPAREN and ct != TokenType.RBRACKET and ct != TokenType.COMMA {
+                value = this.parse_expression()
+            }
+            return YieldExpression(value, tok.line, tok.column)
+        }
+
+        if tok.type == TokenType.SPREAD {
+            this.advance()
+            let expr = this.parse_unary()
+            return SpreadExpression(expr, tok.line, tok.column)
+        }
+
+        this.error("Unexpected token: {tok.type} ({tok.value})", null)
+    }
+
+    fn parse_if_expression() {
+        let tok = this.advance()
+        let condition = this.parse_expression()
+        this.skip_newlines()
+        this.expect(TokenType.LBRACE, "Expected '\{'")
+        this.skip_newlines()
+        let true_expr = this.parse_expression()
+        this.skip_newlines()
+        this.expect(TokenType.RBRACE, "Expected '\}'")
+        this.skip_newlines()
+        this.expect(TokenType.ELSE, "Expected 'else' in if expression")
+        this.skip_newlines()
+        this.expect(TokenType.LBRACE, "Expected '\{'")
+        this.skip_newlines()
+        let false_expr = this.parse_expression()
+        this.skip_newlines()
+        this.expect(TokenType.RBRACE, "Expected '\}'")
+        return IfExpression(condition, true_expr, false_expr, tok.line, tok.column)
+    }
+
+    fn parse_fn_expression() {
+        let tok = this.advance()
+        let params = this.parse_params()
+        let body = this.parse_block()
+        return FnExpression(params, body, null, null, tok.line, tok.column)
+    }
+
+    fn parse_ask() {
+        let tok = this.advance()
+        this.expect(TokenType.LPAREN, null)
+        let prompt = this.parse_expression()
+        this.expect(TokenType.RPAREN, null)
+        return AskExpression(prompt, tok.line, tok.column)
+    }
+
+    fn parse_list() {
+        let tok = this.advance()
+        mut elements = []
+        this.skip_newlines()
+
+        if this.current().type == TokenType.RBRACKET {
+            this.expect(TokenType.RBRACKET, null)
+            return ListLiteral(elements, tok.line, tok.column)
+        }
+
+        mut first = null
+        if this.current().type == TokenType.SPREAD {
+            let spread_tok = this.advance()
+            first = SpreadExpression(this.parse_expression(), spread_tok.line, spread_tok.column)
+        } else {
+            first = this.parse_expression()
+        }
+
+        this.skip_newlines()
+        if this.current().type == TokenType.FOR and first.node_type != "SpreadExpression" {
+            this.advance()
+            let var_name = this.expect(TokenType.IDENTIFIER, null).value
+            this.expect(TokenType.IN, null)
+            let iterable = this.parse_expression()
+            mut condition = null
+            this.skip_newlines()
+            if this.current().type == TokenType.IF {
+                this.advance()
+                condition = this.parse_expression()
+            }
+            this.skip_newlines()
+            this.expect(TokenType.RBRACKET, null)
+            return ComprehensionExpression(first, var_name, iterable, condition, tok.line, tok.column)
+        }
+
+        push(elements, first)
+        this.skip_newlines()
+        while this.match_type(TokenType.COMMA) != null {
+            this.skip_newlines()
+            if this.current().type == TokenType.RBRACKET {
+                break
+            }
+            if this.current().type == TokenType.SPREAD {
+                let spread_tok = this.advance()
+                push(elements, SpreadExpression(this.parse_expression(), spread_tok.line, spread_tok.column))
+            } else {
+                push(elements, this.parse_expression())
+            }
+            this.skip_newlines()
+        }
+
+        this.expect(TokenType.RBRACKET, null)
+        return ListLiteral(elements, tok.line, tok.column)
+    }
+
+    fn parse_map() {
+        let tok = this.advance()
+        mut pairs = []
+        this.skip_newlines()
+        while this.current().type != TokenType.RBRACE {
+            if len(pairs) > 0 {
+                this.expect(TokenType.COMMA, "Expected ',' between map entries")
+            }
+            this.skip_newlines()
+
+            if this.current().type == TokenType.SPREAD {
+                let spread_tok = this.advance()
+                let spread_val = this.parse_expression()
+                push(pairs, [null, SpreadExpression(spread_val, spread_tok.line, spread_tok.column)])
+                this.skip_newlines()
+                continue
+            }
+
+            let is_first = len(pairs) == 0
+            mut key = this.parse_map_key(is_first)
+            this.expect(TokenType.COLON, "Expected ':' after map key")
+            let value = this.parse_expression()
+
+            this.skip_newlines()
+            if this.current().type == TokenType.FOR and is_first {
+                this.advance()
+                mut variables = [this.expect(TokenType.IDENTIFIER, null).value]
+                while this.match_type(TokenType.COMMA) != null {
+                    push(variables, this.expect(TokenType.IDENTIFIER, null).value)
+                }
+                this.expect(TokenType.IN, null)
+                let iterable = this.parse_expression()
+                mut condition = null
+                this.skip_newlines()
+                if this.current().type == TokenType.IF {
+                    this.advance()
+                    condition = this.parse_expression()
+                }
+                this.skip_newlines()
+                this.expect(TokenType.RBRACE, null)
+                return MapComprehensionExpression(key, value, variables, iterable, condition, tok.line, tok.column)
+            }
+
+            if is_first and key.node_type == "Identifier" {
+                key = StringLiteral(key.name, key.line, key.column, false)
+            }
+
+            push(pairs, [key, value])
+            this.skip_newlines()
+        }
+
+        this.expect(TokenType.RBRACE, null)
+        return MapLiteral(pairs, tok.line, tok.column)
+    }
+
+    fn parse_map_key(is_first) {
+        let key_tok = this.current()
+
+        if key_tok.type == TokenType.IDENTIFIER {
+            if this.peek(1).type == TokenType.COLON {
+                if is_first {
+                    this.advance()
+                    return Identifier(key_tok.value, key_tok.line, key_tok.column)
+                } else {
+                    this.advance()
+                    return StringLiteral(key_tok.value, key_tok.line, key_tok.column, false)
+                }
+            } else {
+                return this.parse_expression()
+            }
+        }
+
+        if key_tok.type == TokenType.STRING {
+            this.advance()
+            return StringLiteral(key_tok.value, key_tok.line, key_tok.column, false)
+        }
+
+        if key_tok.type == TokenType.NUMBER {
+            this.advance()
+            return NumberLiteral(key_tok.value, key_tok.line, key_tok.column)
+        }
+
+        return this.parse_expression()
+    }
+
+    fn is_arrow_lambda() {
+        let saved = this.pos
+        if this.current().type != TokenType.LPAREN {
+            return false
+        }
+        mut depth = 0
+        mut i = this.pos
+        while i < len(this.tokens) {
+            let t = this.tokens[i]
+            if t.type == TokenType.LPAREN {
+                depth += 1
+            } elif t.type == TokenType.RPAREN {
+                depth -= 1
+                if depth == 0 {
+                    if i + 1 < len(this.tokens) and this.tokens[i + 1].type == TokenType.FAT_ARROW {
+                        return true
+                    }
+                    return false
+                }
+            } elif t.type == TokenType.EOF {
+                return false
+            }
+            i += 1
+        }
+        return false
+    }
+
+    fn parse_arrow_lambda() {
+        let tok = this.current()
+        this.advance()
+        mut params = []
+        while this.current().type != TokenType.RPAREN {
+            if len(params) > 0 {
+                this.expect(TokenType.COMMA, null)
+            }
+            if this.current().type == TokenType.SPREAD {
+                this.advance()
+                let param = this.expect(TokenType.IDENTIFIER, null).value
+                push(params, "..." + param)
+            } else {
+                push(params, this.expect(TokenType.IDENTIFIER, null).value)
+            }
+        }
+        this.expect(TokenType.RPAREN, null)
+        this.expect(TokenType.FAT_ARROW, "Expected '=>' after parameters")
+
+        mut body = null
+        if this.current().type == TokenType.LBRACE {
+            body = this.parse_block()
+        } else {
+            let body_expr = this.parse_pipe()
+            body = Block([
+                ReturnStatement(body_expr, body_expr.line, body_expr.column)
+            ], tok.line, tok.column)
+        }
+        return FnExpression(params, body, null, null, tok.line, tok.column)
+    }
+}
+
+-- ── Convenience function ────────────────────────────────
+
+fn parse(tokens, source) {
+    let parser = Parser(tokens, source ?? "")
+    return parser.parse()
+}

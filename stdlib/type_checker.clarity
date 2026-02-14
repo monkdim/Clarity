@@ -1,0 +1,582 @@
+-- Clarity static type checker — compile-time type analysis.
+-- Self-hosted port of clarity/type_checker.py, written in Clarity itself.
+--
+-- Walks the AST, infers types from literals/expressions, validates
+-- type annotations on let/fn/class, checks return types.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+-- ── Built-in return types ─────────────────────────────────
+
+let BUILTIN_TYPES = {
+    "len": "int", "type": "string", "str": "string", "int": "int",
+    "float": "float", "bool": "bool", "abs": "number", "round": "int",
+    "floor": "int", "ceil": "int", "min": "any", "max": "any",
+    "sum": "number", "sqrt": "float", "pow": "number",
+    "sin": "float", "cos": "float", "tan": "float", "log": "float",
+    "upper": "string", "lower": "string", "trim": "string",
+    "split": "list", "join": "string", "replace": "string",
+    "contains": "bool", "starts": "bool", "ends": "bool",
+    "chars": "list", "repeat": "string",
+    "keys": "list", "values": "list", "entries": "list",
+    "merge": "map", "has": "bool",
+    "push": "null", "pop": "any", "sort": "list", "reverse": "list",
+    "map": "list", "filter": "list", "reduce": "any", "find": "any",
+    "every": "bool", "some": "bool", "each": "null",
+    "flat": "list", "zip": "list", "unique": "list",
+    "range": "list", "display": "string", "repr": "string",
+    "json_parse": "any", "json_string": "string",
+    "read": "string", "write": "null", "append": "null",
+    "exists": "bool", "lines": "list",
+    "encode64": "string", "decode64": "string",
+    "hash": "string", "random": "float",
+    "time": "float", "sleep": "null",
+    "is_digit": "bool", "is_alpha": "bool", "is_alnum": "bool", "is_space": "bool",
+    "char_at": "string", "char_code": "int", "from_char_code": "string",
+    "index_of": "int", "substring": "string",
+    "pad_left": "string", "pad_right": "string",
+    "pi": "float", "e": "float"
+}
+
+let BUILTIN_NAMES = [
+    "show", "ask", "exec", "exec_full", "exit", "env", "args", "cwd",
+    "fetch", "serve", "compose", "tap", "set", "error"
+]
+
+-- ── Type compatibility ────────────────────────────────────
+
+fn types_compatible(declared, inferred) {
+    if declared == null or inferred == null { return true }
+    if declared == "any" or inferred == "any" { return true }
+    if declared == inferred { return true }
+    if declared == "number" and (inferred == "int" or inferred == "float") { return true }
+    if declared == "float" and inferred == "int" { return true }
+    return false
+}
+
+-- ── Type scope ────────────────────────────────────────────
+
+class TypeScope {
+    fn init(parent) {
+        this.parent = parent
+        this.vars = {}
+        this.functions = {}
+        this.classes = {}
+        this.enums = {}
+        this.interfaces = {}
+    }
+
+    fn get_type(name) {
+        if has(this.vars, name) { return this.vars[name] }
+        if this.parent != null { return this.parent.get_type(name) }
+        return null
+    }
+
+    fn set_type(name, type_str) {
+        this.vars[name] = type_str
+    }
+
+    fn get_function(name) {
+        if has(this.functions, name) { return this.functions[name] }
+        if this.parent != null { return this.parent.get_function(name) }
+        return null
+    }
+
+    fn get_class(name) {
+        if has(this.classes, name) { return this.classes[name] }
+        if this.parent != null { return this.parent.get_class(name) }
+        return null
+    }
+}
+
+-- ── Type checker ──────────────────────────────────────────
+
+class TypeChecker {
+    fn init() {
+        this.diagnostics = []
+        this.scope = TypeScope(null)
+        -- Pre-populate builtins
+        let bt_names = keys(BUILTIN_TYPES)
+        for name in bt_names {
+            this.scope.set_type(name, "function")
+        }
+        for name in BUILTIN_NAMES {
+            this.scope.set_type(name, "function")
+        }
+    }
+
+    fn check(tree) {
+        this.diagnostics = []
+        for stmt in tree.body {
+            this.check_stmt(stmt)
+        }
+        return this.diagnostics
+    }
+
+    fn diag(msg, line, severity) {
+        push(this.diagnostics, {
+            "message": msg,
+            "line": line,
+            "severity": severity
+        })
+    }
+
+    fn push_scope() {
+        this.scope = TypeScope(this.scope)
+    }
+
+    fn pop_scope() {
+        this.scope = this.scope.parent
+    }
+
+    -- ── Statement dispatch ─────────────────────────────────
+
+    fn check_stmt(node) {
+        let nt = node.node_type
+
+        if nt == "LetStatement" { this.check_let(node) }
+        elif nt == "DestructureLetStatement" { this.check_destructure_let(node) }
+        elif nt == "AssignStatement" { this.check_assign(node) }
+        elif nt == "FnStatement" { this.check_fn(node) }
+        elif nt == "ReturnStatement" { this.check_return(node) }
+        elif nt == "IfStatement" { this.check_if(node) }
+        elif nt == "ForStatement" { this.check_for(node) }
+        elif nt == "WhileStatement" { this.check_while(node) }
+        elif nt == "TryCatch" { this.check_try(node) }
+        elif nt == "ClassStatement" { this.check_class(node) }
+        elif nt == "InterfaceStatement" { this.check_interface(node) }
+        elif nt == "EnumStatement" { this.check_enum(node) }
+        elif nt == "MatchStatement" { this.check_match(node) }
+        elif nt == "ShowStatement" {
+            for v in node.values { this.infer(v) }
+        }
+        elif nt == "ThrowStatement" { this.infer(node.value) }
+        elif nt == "ImportStatement" { this.check_import(node) }
+        elif nt == "ExpressionStatement" { this.infer(node.expression) }
+        elif nt == "DecoratedStatement" { this.check_stmt(node.target) }
+        elif nt == "MultiAssignStatement" {
+            for v in node.values { this.infer(v) }
+        }
+        elif nt == "Block" { this.check_body(node.statements) }
+    }
+
+    fn check_let(node) {
+        let inferred = this.infer(node.value)
+        mut ann = null
+        try { ann = node.type_annotation } catch e {}
+        if ann != null {
+            if not types_compatible(ann, inferred) {
+                this.diag(
+                    "Type mismatch: '" + node.name + "' declared as " + ann + ", but assigned " + str(inferred),
+                    node.line, "error"
+                )
+            }
+            this.scope.set_type(node.name, ann)
+        } else {
+            this.scope.set_type(node.name, inferred)
+        }
+    }
+
+    fn check_destructure_let(node) {
+        this.infer(node.value)
+        for target in node.targets {
+            let name = target
+            if type(target) != "string" {
+                try { name = target.name } catch e { name = str(target) }
+            }
+            this.scope.set_type(name, "any")
+        }
+    }
+
+    fn check_assign(node) {
+        let inferred = this.infer(node.value)
+        if node.target.node_type == "Identifier" {
+            let declared = this.scope.get_type(node.target.name)
+            if declared != null and declared != "any" and declared != "function" {
+                if not types_compatible(declared, inferred) {
+                    this.diag(
+                        "Type mismatch: '" + node.target.name + "' is " + declared + ", but reassigned to " + str(inferred),
+                        node.line, "error"
+                    )
+                }
+            }
+        }
+    }
+
+    fn check_fn(node) {
+        mut param_types = {}
+        mut return_type = null
+        try { param_types = node.param_types } catch e {}
+        try { return_type = node.return_type } catch e {}
+        this.scope.functions[node.name] = {"param_types": param_types, "return_type": return_type}
+        this.scope.set_type(node.name, "function")
+        this.push_scope()
+        for p in node.params {
+            let pname = p
+            if type(p) == "list" { pname = p[0] }
+            if type(pname) == "string" {
+                mut ptype = "any"
+                if has(param_types, pname) { ptype = param_types[pname] }
+                this.scope.set_type(pname, ptype)
+            }
+        }
+        this.check_body(node.body)
+        -- Check return type
+        if return_type != null {
+            let returns = this.collect_returns(node.body)
+            for ret in returns {
+                if not types_compatible(return_type, ret["type"]) {
+                    this.diag(
+                        "Function '" + node.name + "' should return " + return_type + ", but returns " + str(ret["type"]),
+                        ret["line"], "error"
+                    )
+                }
+            }
+        }
+        this.pop_scope()
+    }
+
+    fn check_return(node) {
+        if node.value != null { this.infer(node.value) }
+    }
+
+    fn check_if(node) {
+        this.infer(node.condition)
+        this.push_scope()
+        this.check_body(node.body)
+        this.pop_scope()
+        if node.elif_clauses != null {
+            for clause in node.elif_clauses {
+                this.infer(clause[0])
+                this.push_scope()
+                this.check_body(clause[1])
+                this.pop_scope()
+            }
+        }
+        if node.else_body != null {
+            this.push_scope()
+            this.check_body(node.else_body)
+            this.pop_scope()
+        }
+    }
+
+    fn check_for(node) {
+        this.infer(node.iterable)
+        this.push_scope()
+        let name = node.variable
+        if type(name) != "string" {
+            try { name = node.variable.name } catch e { name = str(node.variable) }
+        }
+        this.scope.set_type(name, "any")
+        this.check_body(node.body)
+        this.pop_scope()
+    }
+
+    fn check_while(node) {
+        this.infer(node.condition)
+        this.push_scope()
+        this.check_body(node.body)
+        this.pop_scope()
+    }
+
+    fn check_try(node) {
+        this.push_scope()
+        this.check_body(node.try_body)
+        this.pop_scope()
+        if node.catch_body != null {
+            this.push_scope()
+            if node.catch_var != null {
+                this.scope.set_type(node.catch_var, "any")
+            }
+            this.check_body(node.catch_body)
+            this.pop_scope()
+        }
+        if node.finally_body != null {
+            this.push_scope()
+            this.check_body(node.finally_body)
+            this.pop_scope()
+        }
+    }
+
+    fn check_class(node) {
+        mut methods = {}
+        for method in node.methods {
+            if method.node_type == "FnStatement" {
+                mut pt = {}
+                mut rt = null
+                try { pt = method.param_types } catch e {}
+                try { rt = method.return_type } catch e {}
+                methods[method.name] = {"param_types": pt, "return_type": rt}
+            }
+        }
+        this.scope.classes[node.name] = methods
+        this.scope.set_type(node.name, "class")
+        for method in node.methods {
+            if method.node_type == "FnStatement" {
+                this.push_scope()
+                this.scope.set_type("this", node.name)
+                for p in method.params {
+                    let pname = p
+                    if type(p) == "list" { pname = p[0] }
+                    if type(pname) == "string" {
+                        mut ptype = "any"
+                        try {
+                            if has(method.param_types, pname) { ptype = method.param_types[pname] }
+                        } catch e {}
+                        this.scope.set_type(pname, ptype)
+                    }
+                }
+                this.check_body(method.body)
+                -- Check method return type
+                mut rt = null
+                try { rt = method.return_type } catch e {}
+                if rt != null and method.name != "init" {
+                    let returns = this.collect_returns(method.body)
+                    for ret in returns {
+                        if not types_compatible(rt, ret["type"]) {
+                            this.diag(
+                                "Method '" + node.name + "." + method.name + "' should return " + rt + ", but returns " + str(ret["type"]),
+                                ret["line"], "error"
+                            )
+                        }
+                    }
+                }
+                this.pop_scope()
+            }
+        }
+    }
+
+    fn check_interface(node) {
+        this.scope.interfaces[node.name] = node.method_sigs
+        this.scope.set_type(node.name, "interface")
+    }
+
+    fn check_enum(node) {
+        this.scope.enums[node.name] = true
+        this.scope.set_type(node.name, "enum")
+    }
+
+    fn check_match(node) {
+        this.infer(node.subject)
+        for arm in node.arms {
+            this.push_scope()
+            if len(arm) == 3 {
+                this.check_body(arm[2])
+            } else {
+                this.check_body(arm[1])
+            }
+            this.pop_scope()
+        }
+        if node.default != null {
+            this.push_scope()
+            this.check_body(node.default)
+            this.pop_scope()
+        }
+    }
+
+    fn check_import(node) {
+        if node.names != null {
+            for name in node.names {
+                this.scope.set_type(name, "any")
+            }
+        } elif node.alias != null {
+            this.scope.set_type(node.alias, "any")
+        } elif node.module != null {
+            this.scope.set_type(node.module, "any")
+        }
+    }
+
+    fn check_body(body) {
+        if body == null { return null }
+        if type(body) == "list" {
+            for stmt in body { this.check_stmt(stmt) }
+        } else {
+            try {
+                if body.node_type == "Block" {
+                    for stmt in body.statements { this.check_stmt(stmt) }
+                } else {
+                    this.check_stmt(body)
+                }
+            } catch e {}
+        }
+    }
+
+    -- ── Return collection ──────────────────────────────────
+
+    fn collect_returns(body) {
+        mut results = []
+        mut stmts = []
+        if type(body) == "list" {
+            stmts = body
+        } else {
+            try { stmts = body.statements } catch e {
+                try { stmts = body.body } catch e2 { stmts = [body] }
+            }
+        }
+        if stmts == null { return results }
+
+        for stmt in stmts {
+            let nt = stmt.node_type
+            if nt == "ReturnStatement" {
+                mut ret_type = "null"
+                if stmt.value != null { ret_type = this.infer(stmt.value) }
+                push(results, {"line": stmt.line, "type": ret_type})
+            } elif nt == "IfStatement" {
+                let r1 = this.collect_returns(stmt.body)
+                for r in r1 { push(results, r) }
+                if stmt.elif_clauses != null {
+                    for clause in stmt.elif_clauses {
+                        let r2 = this.collect_returns(clause[1])
+                        for r in r2 { push(results, r) }
+                    }
+                }
+                if stmt.else_body != null {
+                    let r3 = this.collect_returns(stmt.else_body)
+                    for r in r3 { push(results, r) }
+                }
+            } elif nt == "TryCatch" {
+                let r1 = this.collect_returns(stmt.try_body)
+                for r in r1 { push(results, r) }
+                if stmt.catch_body != null {
+                    let r2 = this.collect_returns(stmt.catch_body)
+                    for r in r2 { push(results, r) }
+                }
+            } elif nt == "Block" {
+                let r1 = this.collect_returns(stmt.statements)
+                for r in r1 { push(results, r) }
+            }
+        }
+        return results
+    }
+
+    -- ── Type inference ─────────────────────────────────────
+
+    fn infer(node) {
+        if node == null { return "null" }
+        let nt = null
+        try { nt = node.node_type } catch e { return "any" }
+        if nt == null { return "any" }
+
+        if nt == "NumberLiteral" {
+            if type(node.value) == "float" { return "float" }
+            return "int"
+        }
+        if nt == "StringLiteral" { return "string" }
+        if nt == "BoolLiteral" { return "bool" }
+        if nt == "NullLiteral" { return "null" }
+        if nt == "ListLiteral" {
+            for el in node.elements { this.infer(el) }
+            return "list"
+        }
+        if nt == "MapLiteral" {
+            for pair in node.pairs { this.infer(pair[1]) }
+            return "map"
+        }
+        if nt == "Identifier" {
+            let t = this.scope.get_type(node.name)
+            if t != null { return t }
+            return "any"
+        }
+        if nt == "ThisExpression" {
+            let t = this.scope.get_type("this")
+            if t != null { return t }
+            return "any"
+        }
+        if nt == "BinaryOp" {
+            let left = this.infer(node.left)
+            let right = this.infer(node.right)
+            if node.operator == "+" or node.operator == "-" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "**" {
+                if left == "string" or right == "string" {
+                    if node.operator == "+" { return "string" }
+                }
+                if (left == "int" or left == "float" or left == "number") and (right == "int" or right == "float" or right == "number") {
+                    if node.operator == "/" or left == "float" or right == "float" { return "float" }
+                    return "int"
+                }
+                return "number"
+            }
+            if node.operator == "==" or node.operator == "!=" or node.operator == "<" or node.operator == ">" or node.operator == "<=" or node.operator == ">=" or node.operator == "and" or node.operator == "or" {
+                return "bool"
+            }
+            return "any"
+        }
+        if nt == "UnaryOp" {
+            let inner = this.infer(node.operand)
+            if node.operator == "not" { return "bool" }
+            if node.operator == "-" { return inner }
+            return "any"
+        }
+        if nt == "CallExpression" {
+            if node.callee.node_type == "Identifier" {
+                let name = node.callee.name
+                if has(BUILTIN_TYPES, name) { return BUILTIN_TYPES[name] }
+                let fn_sig = this.scope.get_function(name)
+                if fn_sig != null {
+                    let rt = fn_sig["return_type"]
+                    if rt != null { return rt }
+                    return "any"
+                }
+                let cls = this.scope.get_class(name)
+                if cls != null { return name }
+            }
+            for arg in node.arguments { this.infer(arg) }
+            return "any"
+        }
+        if nt == "MemberExpression" or nt == "OptionalMemberExpression" {
+            this.infer(node.object)
+            return "any"
+        }
+        if nt == "IndexExpression" {
+            this.infer(node.object)
+            this.infer(node.index)
+            return "any"
+        }
+        if nt == "SliceExpression" {
+            let obj_type = this.infer(node.object)
+            if obj_type == "string" { return "string" }
+            if obj_type == "list" { return "list" }
+            return "any"
+        }
+        if nt == "FnExpression" { return "function" }
+        if nt == "PipeExpression" {
+            this.infer(node.value)
+            return this.infer(node.function)
+        }
+        if nt == "RangeExpression" { return "list" }
+        if nt == "AskExpression" { return "string" }
+        if nt == "NullCoalesce" {
+            let left = this.infer(node.left)
+            let right = this.infer(node.right)
+            return if left == "null" { right } else { left }
+        }
+        if nt == "SpreadExpression" { return this.infer(node.value) }
+        if nt == "IfExpression" {
+            this.infer(node.condition)
+            let t = this.infer(node.true_expr)
+            let f = this.infer(node.false_expr)
+            if t == f { return t }
+            return "any"
+        }
+        if nt == "ComprehensionExpression" { return "list" }
+        if nt == "MapComprehensionExpression" { return "map" }
+        if nt == "AwaitExpression" { return "any" }
+        if nt == "YieldExpression" { return "any" }
+
+        return "any"
+    }
+}
+
+-- ── Public API ────────────────────────────────────────────
+
+fn check_types_source(source, filename) {
+    let tokens = tokenize(source, filename)
+    let tree = parse(tokens, source)
+    let checker = TypeChecker()
+    return checker.check(tree)
+}
+
+fn check_types_tree(tree) {
+    let checker = TypeChecker()
+    return checker.check(tree)
+}

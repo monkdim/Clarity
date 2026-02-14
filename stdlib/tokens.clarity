@@ -1,0 +1,171 @@
+-- Clarity Token Types — self-hosting implementation
+-- This is a faithful port of clarity/tokens.py written in Clarity itself.
+
+-- Token type constants (using a map as an enum-like registry)
+let TokenType = {
+    -- Literals
+    NUMBER: "NUMBER",
+    STRING: "STRING",
+    RAW_STRING: "RAW_STRING",
+    IDENTIFIER: "IDENTIFIER",
+
+    -- Keywords
+    LET: "LET",
+    MUT: "MUT",
+    FN: "FN",
+    IF: "IF",
+    ELSE: "ELSE",
+    ELIF: "ELIF",
+    FOR: "FOR",
+    IN: "IN",
+    WHILE: "WHILE",
+    RETURN: "RETURN",
+    TRUE: "TRUE",
+    FALSE: "FALSE",
+    NULL: "NULL",
+    TRY: "TRY",
+    CATCH: "CATCH",
+    FINALLY: "FINALLY",
+    BREAK: "BREAK",
+    CONTINUE: "CONTINUE",
+    IMPORT: "IMPORT",
+    FROM: "FROM",
+    AS: "AS",
+    AND: "AND",
+    OR: "OR",
+    NOT: "NOT",
+    IS: "IS",
+    SHOW: "SHOW",
+    ASK: "ASK",
+    CLASS: "CLASS",
+    THIS: "THIS",
+    THROW: "THROW",
+    MATCH: "MATCH",
+    WHEN: "WHEN",
+    ENUM: "ENUM",
+    ASYNC: "ASYNC",
+    AWAIT: "AWAIT",
+    YIELD: "YIELD",
+    INTERFACE: "INTERFACE",
+    IMPL: "IMPL",
+
+    -- Operators
+    PLUS: "PLUS",
+    MINUS: "MINUS",
+    STAR: "STAR",
+    SLASH: "SLASH",
+    PERCENT: "PERCENT",
+    POWER: "POWER",
+    EQ: "EQ",
+    NEQ: "NEQ",
+    LT: "LT",
+    GT: "GT",
+    LTE: "LTE",
+    GTE: "GTE",
+    ASSIGN: "ASSIGN",
+    PLUS_ASSIGN: "PLUS_ASSIGN",
+    MINUS_ASSIGN: "MINUS_ASSIGN",
+    STAR_ASSIGN: "STAR_ASSIGN",
+    SLASH_ASSIGN: "SLASH_ASSIGN",
+    PIPE: "PIPE",
+    FAT_ARROW: "FAT_ARROW",
+    ARROW: "ARROW",
+    DOTDOT: "DOTDOT",
+    SPREAD: "SPREAD",
+    QUESTION: "QUESTION",
+    QUESTION_DOT: "QUESTION_DOT",
+    QUESTION_QUESTION: "QUESTION_QUESTION",
+
+    -- Bitwise operators
+    AMPERSAND: "AMPERSAND",
+    BIT_OR: "BIT_OR",
+    CARET: "CARET",
+    TILDE: "TILDE",
+    LSHIFT: "LSHIFT",
+    RSHIFT: "RSHIFT",
+
+    -- Delimiters
+    LPAREN: "LPAREN",
+    RPAREN: "RPAREN",
+    LBRACE: "LBRACE",
+    RBRACE: "RBRACE",
+    LBRACKET: "LBRACKET",
+    RBRACKET: "RBRACKET",
+    COMMA: "COMMA",
+    COLON: "COLON",
+    DOT: "DOT",
+    AT: "AT",
+
+    -- Special
+    NEWLINE: "NEWLINE",
+    EOF: "EOF"
+}
+
+-- Keyword lookup map: string -> TokenType
+let KEYWORDS = {
+    "let": TokenType.LET,
+    "mut": TokenType.MUT,
+    "fn": TokenType.FN,
+    "if": TokenType.IF,
+    "else": TokenType.ELSE,
+    "elif": TokenType.ELIF,
+    "for": TokenType.FOR,
+    "in": TokenType.IN,
+    "while": TokenType.WHILE,
+    "return": TokenType.RETURN,
+    "true": TokenType.TRUE,
+    "false": TokenType.FALSE,
+    "null": TokenType.NULL,
+    "try": TokenType.TRY,
+    "catch": TokenType.CATCH,
+    "finally": TokenType.FINALLY,
+    "break": TokenType.BREAK,
+    "continue": TokenType.CONTINUE,
+    "import": TokenType.IMPORT,
+    "from": TokenType.FROM,
+    "as": TokenType.AS,
+    "and": TokenType.AND,
+    "or": TokenType.OR,
+    "not": TokenType.NOT,
+    "is": TokenType.IS,
+    "show": TokenType.SHOW,
+    "ask": TokenType.ASK,
+    "class": TokenType.CLASS,
+    "this": TokenType.THIS,
+    "throw": TokenType.THROW,
+    "match": TokenType.MATCH,
+    "when": TokenType.WHEN,
+    "enum": TokenType.ENUM,
+    "async": TokenType.ASYNC,
+    "await": TokenType.AWAIT,
+    "yield": TokenType.YIELD,
+    "interface": TokenType.INTERFACE,
+    "impl": TokenType.IMPL
+}
+
+-- Token class
+class Token {
+    fn init(type, value, line, column) {
+        this.type = type
+        this.value = value
+        this.line = line
+        this.column = column
+    }
+
+    fn to_string() {
+        return "Token({this.type}, {this.value}, L{this.line}:{this.column})"
+    }
+}
+
+-- Helper to check if a word is a keyword
+fn is_keyword(word) {
+    return has(KEYWORDS, word)
+}
+
+-- Helper to get keyword token type (or IDENTIFIER)
+fn keyword_or_ident(word) {
+    if has(KEYWORDS, word) {
+        return KEYWORDS[word]
+    }
+    return TokenType.IDENTIFIER
+}

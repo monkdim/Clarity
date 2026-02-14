@@ -1,0 +1,283 @@
+-- Clarity Networking — HTTP, TCP, and WebSocket utilities.
+-- Standard library module for network operations.
+-- Uses system tools (curl, nc, python) for platform-compatible behavior.
+
+-- ── HTTP Client ───────────────────────────────────────────
+
+class HttpResponse {
+    fn init(status, headers, body) {
+        this.status = status
+        this.headers = headers
+        this.body = body
+        this.ok = status >= 200 and status < 300
+    }
+
+    fn json() {
+        return json_parse(this.body)
+    }
+
+    fn text() {
+        return this.body
+    }
+
+    fn to_string() {
+        return "HttpResponse(status=" + str(this.status) + ", body=" + str(len(this.body)) + " bytes)"
+    }
+}
+
+fn http_get(url, headers) {
+    mut header_args = ""
+    if headers != null {
+        let ks = keys(headers)
+        for k in ks {
+            header_args = header_args + " -H " + _quote(k + ": " + headers[k])
+        }
+    }
+    let result = exec_full("curl -s -w '\\n%{http_code}' " + header_args + " " + _quote(url))
+    return _parse_curl_response(result.stdout)
+}
+
+fn http_post(url, body, headers) {
+    mut header_args = ""
+    if headers != null {
+        let ks = keys(headers)
+        for k in ks {
+            header_args = header_args + " -H " + _quote(k + ": " + headers[k])
+        }
+    }
+    mut body_arg = ""
+    if body != null {
+        if type(body) == "map" or type(body) == "list" {
+            body_arg = " -d " + _quote(json_string(body))
+            if not contains(header_args, "Content-Type") {
+                header_args = header_args + " -H 'Content-Type: application/json'"
+            }
+        } else {
+            body_arg = " -d " + _quote(str(body))
+        }
+    }
+    let result = exec_full("curl -s -X POST -w '\\n%{http_code}'" + header_args + body_arg + " " + _quote(url))
+    return _parse_curl_response(result.stdout)
+}
+
+fn http_put(url, body, headers) {
+    mut header_args = ""
+    if headers != null {
+        let ks = keys(headers)
+        for k in ks {
+            header_args = header_args + " -H " + _quote(k + ": " + headers[k])
+        }
+    }
+    mut body_arg = ""
+    if body != null {
+        if type(body) == "map" or type(body) == "list" {
+            body_arg = " -d " + _quote(json_string(body))
+            if not contains(header_args, "Content-Type") {
+                header_args = header_args + " -H 'Content-Type: application/json'"
+            }
+        } else {
+            body_arg = " -d " + _quote(str(body))
+        }
+    }
+    let result = exec_full("curl -s -X PUT -w '\\n%{http_code}'" + header_args + body_arg + " " + _quote(url))
+    return _parse_curl_response(result.stdout)
+}
+
+fn http_delete(url, headers) {
+    mut header_args = ""
+    if headers != null {
+        let ks = keys(headers)
+        for k in ks {
+            header_args = header_args + " -H " + _quote(k + ": " + headers[k])
+        }
+    }
+    let result = exec_full("curl -s -X DELETE -w '\\n%{http_code}'" + header_args + " " + _quote(url))
+    return _parse_curl_response(result.stdout)
+}
+
+fn download(url, output_path) {
+    let result = exec_full("curl -s -L -o " + _quote(output_path) + " -w '%{http_code}' " + _quote(url))
+    let status = int(trim(result.stdout))
+    return status >= 200 and status < 300
+}
+
+-- ── HTTP Server ───────────────────────────────────────────
+
+class HttpServer {
+    fn init(port) {
+        this.port = port
+        this.routes = {}
+        this._running = false
+    }
+
+    fn get(path, handler) {
+        this.routes["GET " + path] = handler
+        return this
+    }
+
+    fn post(path, handler) {
+        this.routes["POST " + path] = handler
+        return this
+    }
+
+    fn put(path, handler) {
+        this.routes["PUT " + path] = handler
+        return this
+    }
+
+    fn delete(path, handler) {
+        this.routes["DELETE " + path] = handler
+        return this
+    }
+
+    fn listen() {
+        this._running = true
+        show "  Server listening on port " + str(this.port) + "..."
+        -- Delegate to Clarity's built-in serve()
+        serve(this.port, fn(req) {
+            let route_key = req.method + " " + req.path
+            if has(this.routes, route_key) {
+                return this.routes[route_key](req)
+            }
+            return {"status": 404, "body": "Not Found"}
+        })
+    }
+
+    fn to_string() {
+        return "HttpServer(port=" + str(this.port) + ", routes=" + str(len(keys(this.routes))) + ")"
+    }
+}
+
+-- ── TCP client ────────────────────────────────────────────
+
+fn tcp_connect(host, port, message) {
+    let result = exec_full("echo " + _quote(message) + " | nc -w 5 " + _quote(host) + " " + str(port) + " 2>/dev/null")
+    return {
+        "response": trim(result.stdout),
+        "success": result.exit_code == 0
+    }
+}
+
+fn tcp_check(host, port) {
+    let result = exec_full("nc -z -w 3 " + _quote(host) + " " + str(port) + " 2>/dev/null && echo open || echo closed")
+    return trim(result.stdout) == "open"
+}
+
+-- ── URL utilities ─────────────────────────────────────────
+
+class URL {
+    fn init(url_string) {
+        this.raw = url_string
+        this._parse()
+    }
+
+    fn _parse() {
+        mut s = this.raw
+        -- Protocol
+        this.protocol = ""
+        let proto_idx = index_of(s, "://")
+        if proto_idx >= 0 {
+            this.protocol = substring(s, 0, proto_idx)
+            s = substring(s, proto_idx + 3, len(s))
+        }
+
+        -- Path + Query
+        this.path = "/"
+        this.query = ""
+        this.fragment = ""
+        let hash_idx = index_of(s, "#")
+        if hash_idx >= 0 {
+            this.fragment = substring(s, hash_idx + 1, len(s))
+            s = substring(s, 0, hash_idx)
+        }
+        let q_idx = index_of(s, "?")
+        if q_idx >= 0 {
+            this.query = substring(s, q_idx + 1, len(s))
+            s = substring(s, 0, q_idx)
+        }
+        let path_idx = index_of(s, "/")
+        if path_idx >= 0 {
+            this.path = substring(s, path_idx, len(s))
+            s = substring(s, 0, path_idx)
+        }
+
+        -- Host + Port
+        this.host = s
+        this.port = null
+        let colon_idx = index_of(s, ":")
+        if colon_idx >= 0 {
+            this.host = substring(s, 0, colon_idx)
+            this.port = int(substring(s, colon_idx + 1, len(s)))
+        }
+    }
+
+    fn query_params() {
+        if len(this.query) == 0 { return {} }
+        let pairs = split(this.query, "&")
+        mut params = {}
+        for pair in pairs {
+            let eq_idx = index_of(pair, "=")
+            if eq_idx >= 0 {
+                let k = substring(pair, 0, eq_idx)
+                let v = substring(pair, eq_idx + 1, len(pair))
+                params[k] = v
+            } else {
+                params[pair] = ""
+            }
+        }
+        return params
+    }
+
+    fn to_string() {
+        mut result = ""
+        if len(this.protocol) > 0 { result = this.protocol + "://" }
+        result = result + this.host
+        if this.port != null { result = result + ":" + str(this.port) }
+        result = result + this.path
+        if len(this.query) > 0 { result = result + "?" + this.query }
+        if len(this.fragment) > 0 { result = result + "#" + this.fragment }
+        return result
+    }
+}
+
+fn parse_url(url_string) {
+    return URL(url_string)
+}
+
+fn encode_uri(s) {
+    let result = exec_full("python3 -c \"import urllib.parse; print(urllib.parse.quote(" + _quote(s) + "))\" 2>/dev/null")
+    return trim(result.stdout)
+}
+
+fn decode_uri(s) {
+    let result = exec_full("python3 -c \"import urllib.parse; print(urllib.parse.unquote(" + _quote(s) + "))\" 2>/dev/null")
+    return trim(result.stdout)
+}
+
+-- ── Helpers ───────────────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _parse_curl_response(output) {
+    let lines_list = split(output, "\n")
+    if len(lines_list) < 1 { return HttpResponse(0, {}, "") }
+
+    -- Last line is status code
+    let status_str = trim(lines_list[len(lines_list) - 1])
+    mut status = 0
+    try { status = int(status_str) } catch e {}
+
+    -- Everything else is body
+    mut body_lines = []
+    mut i = 0
+    while i < len(lines_list) - 1 {
+        push(body_lines, lines_list[i])
+        i += 1
+    }
+    let body = join(body_lines, "\n")
+
+    return HttpResponse(status, {}, body)
+}

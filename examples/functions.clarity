@@ -1,0 +1,69 @@
+-- Functions in Clarity
+-- Clean, simple, powerful
+
+-- Basic function
+fn add(a, b) {
+    return a + b
+}
+
+show "2 + 3 =", add(2, 3)
+
+-- Functions as values
+let double = fn(x) { return x * 2 }
+let square = fn(x) { return x * x }
+
+show "Double 5:", double(5)
+show "Square 5:", square(5)
+
+-- Higher-order functions
+fn apply(value, operation) {
+    return operation(value)
+}
+
+show "Apply double to 10:", apply(10, double)
+show "Apply square to 10:", apply(10, square)
+
+-- Recursion
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+show "5! =", factorial(5)
+show "10! =", factorial(10)
+
+-- Fibonacci
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+show "First 10 fibonacci numbers:"
+for i in range(10) {
+    show "  fib({i}) = {fib(i)}"
+}
+
+-- Closures
+fn counter(start) {
+    mut count = start
+    return {
+        next: fn() {
+            count += 1
+            return count
+        },
+        value: fn() { return count },
+        reset: fn() { count = start }
+    }
+}
+
+let c = counter(0)
+show "Count:", c.next()
+show "Count:", c.next()
+show "Count:", c.next()
+
+-- Pipe operator
+let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let result = nums |> filter(fn(x) { return x % 2 == 0 }) |> map(fn(x) { return x * x })
+show "Even squares:", result
