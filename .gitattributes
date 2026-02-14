@@ -1,6 +1,21 @@
+# Clarity source — the language itself
 *.clarity linguist-language=Clarity
 *.clarity linguist-detectable=true
+
+# Python bootstrap — vendored (self-hosted equivalents exist in stdlib/)
 *.py linguist-vendored
+
+# JavaScript runtime shim — vendored (target-language output, not source)
+native/runtime.js linguist-vendored
+
+# Shell scripts — vendored (build/install tooling)
+native/*.sh linguist-vendored
+install.sh linguist-vendored
+
+# TypeScript — vendored (VS Code extension wrapper)
+editors/vscode/src/*.ts linguist-vendored
+
+# Documentation & community assets
 editors/linguist/* linguist-documentation
 docs/* linguist-documentation
 playground/* linguist-documentation
