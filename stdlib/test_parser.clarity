@@ -1,0 +1,233 @@
+-- Test: Clarity parser self-hosting
+-- Parse Clarity source code using the Clarity-written parser
+
+from "tokens.clarity" import TokenType
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+mut passed = 0
+mut failed = 0
+
+fn assert_type(name, source, expected_type) {
+    try {
+        let tokens = tokenize(source, "<test>")
+        let ast = parse(tokens, source)
+        if len(ast.body) == 0 {
+            show "  [FAIL] {name} — empty body"
+            failed += 1
+            return
+        }
+        let node = ast.body[0]
+        if node.node_type == expected_type {
+            show "  [pass] {name}"
+            passed += 1
+        } else {
+            show "  [FAIL] {name} — expected {expected_type}, got {node.node_type}"
+            failed += 1
+        }
+    } catch e {
+        show "  [FAIL] {name} — {e}"
+        failed += 1
+    }
+}
+
+fn assert_parses(name, source) {
+    try {
+        let tokens = tokenize(source, "<test>")
+        let ast = parse(tokens, source)
+        show "  [pass] {name} ({len(ast.body)} stmts)"
+        passed += 1
+    } catch e {
+        show "  [FAIL] {name} — {e}"
+        failed += 1
+    }
+}
+
+fn assert_expr_type(name, source, expected_type) {
+    try {
+        let tokens = tokenize(source, "<test>")
+        let ast = parse(tokens, source)
+        let node = ast.body[0]
+        let expr = if node.node_type == "ExpressionStatement" { node.expression } else { node }
+        if expr.node_type == expected_type {
+            show "  [pass] {name}"
+            passed += 1
+        } else {
+            show "  [FAIL] {name} — expected {expected_type}, got {expr.node_type}"
+            failed += 1
+        }
+    } catch e {
+        show "  [FAIL] {name} — {e}"
+        failed += 1
+    }
+}
+
+-- ── Statement tests ─────────────────────────────────────
+
+show "Self-hosting parser tests:"
+show ""
+show "Statements:"
+
+assert_type("let statement", "let x = 42", "LetStatement")
+assert_type("mut statement", "mut x = 0", "LetStatement")
+assert_type("fn declaration", "fn add(a, b) { return a + b }", "FnStatement")
+assert_type("if statement", "if true { show 1 }", "IfStatement")
+assert_type("for loop", "for i in 0..10 { show i }", "ForStatement")
+assert_type("while loop", "while true { break }", "WhileStatement")
+assert_type("return statement", "return 42", "ReturnStatement")
+assert_type("break", "break", "BreakStatement")
+assert_type("continue", "continue", "ContinueStatement")
+assert_type("show", "show 42", "ShowStatement")
+assert_type("throw", "throw \"error\"", "ThrowStatement")
+assert_type("try/catch", r"try { 1 } catch e { 2 }", "TryCatch")
+assert_type("import module", "import math", "ImportStatement")
+assert_type("import file", """import "foo.clarity" """, "ImportStatement")
+assert_type("from import", "from math import sqrt", "ImportStatement")
+assert_type("class", r"class Foo { fn init() { } }", "ClassStatement")
+assert_type("match", r"match x { when 1 { } else { } }", "MatchStatement")
+assert_type("enum", r"enum Color { Red, Green, Blue }", "EnumStatement")
+assert_type("interface", r"interface Shape { fn area() }", "InterfaceStatement")
+assert_type("list destructure", "let [a, b] = [1, 2]", "DestructureLetStatement")
+assert_type("map destructure", r"let {x, y} = {x: 1, y: 2}", "DestructureLetStatement")
+assert_type("assignment", "x = 42", "AssignStatement")
+assert_type("plus assign", "x += 1", "AssignStatement")
+
+-- ── Expression tests ────────────────────────────────────
+
+show ""
+show "Expressions:"
+
+assert_expr_type("number", "42", "NumberLiteral")
+assert_expr_type("string", "\"hello\"", "StringLiteral")
+assert_expr_type("bool true", "true", "BoolLiteral")
+assert_expr_type("bool false", "false", "BoolLiteral")
+assert_expr_type("null", "null", "NullLiteral")
+assert_expr_type("identifier", "foo", "Identifier")
+assert_expr_type("binary op", "1 + 2", "BinaryOp")
+assert_expr_type("unary minus", "-5", "UnaryOp")
+assert_expr_type("call", "foo(1, 2)", "CallExpression")
+assert_expr_type("member access", "obj.prop", "MemberExpression")
+assert_expr_type("optional chain", "obj?.prop", "OptionalMemberExpression")
+assert_expr_type("index", "arr[0]", "IndexExpression")
+assert_expr_type("list literal", "[1, 2, 3]", "ListLiteral")
+assert_expr_type("map literal", r"{a: 1}", "MapLiteral")
+assert_expr_type("pipe", "x |> foo()", "PipeExpression")
+assert_expr_type("range", "1..10", "RangeExpression")
+assert_expr_type("null coalesce", "a ?? b", "NullCoalesce")
+assert_expr_type("lambda single", "x => x * 2", "FnExpression")
+assert_expr_type("fn expression", r"fn(a, b) { return a + b }", "FnExpression")
+assert_expr_type("if expression", r"let x = if true { 1 } else { 2 }", "LetStatement")
+assert_expr_type("comprehension", "[x * x for x in 0..10]", "ComprehensionExpression")
+assert_expr_type("spread", "...args", "SpreadExpression")
+
+-- ── Complex programs ────────────────────────────────────
+
+show ""
+show "Complex programs:"
+
+assert_parses("fibonacci", """fn fibonacci() {
+    mut a = 0
+    mut b = 1
+    for i in 0..10 {
+        yield a
+        a, b = b, a + b
+    }
+}""")
+
+assert_parses("class with inheritance", """class Dog < Animal {
+    fn init(name) {
+        this.name = name
+        this.sound = "woof"
+    }
+    fn speak() {
+        return this.name + " says " + this.sound
+    }
+}""")
+
+assert_parses("pipe chain", """let result = [1, 2, 3, 4, 5]
+    |> filter(x => x % 2 == 0)
+    |> map(x => x * x)
+    |> reduce((a, b) => a + b, 0)""")
+
+assert_parses("decorated async", """@log
+async fn fetch_data() {
+    return await get("/api/data")
+}""")
+
+assert_parses("pattern matching", """match status {
+    when 200 { show "ok" }
+    when 404 { show "not found" }
+    when 500 { show "error" }
+    else { show "unknown" }
+}""")
+
+assert_parses("interface impl", """interface Drawable {
+    fn draw()
+    fn area() -> float
+}
+class Circle impl Drawable {
+    fn init(r) { this.r = r }
+    fn draw() { show "circle" }
+    fn area() { return 3.14 * this.r * this.r }
+}""")
+
+assert_parses("try/catch/finally", """try {
+    let data = fetch("http://example.com")
+    show data
+} catch e {
+    show "Error: " + e
+} finally {
+    show "done"
+}""")
+
+assert_parses("destructuring + spread", """let [head, ...rest] = [1, 2, 3, 4, 5]
+let merged = [...list1, ...list2]""")
+
+-- ── Self-parse test ─────────────────────────────────────
+
+show ""
+show "Self-parsing:"
+
+try {
+    let source = read("stdlib/tokens.clarity")
+    let tokens = tokenize(source, "tokens.clarity")
+    let ast = parse(tokens, source)
+    show "  [pass] parsed tokens.clarity ({len(ast.body)} top-level statements)"
+    passed += 1
+} catch e {
+    show "  [FAIL] tokens.clarity — {e}"
+    failed += 1
+}
+
+try {
+    let source = read("stdlib/ast_nodes.clarity")
+    let tokens = tokenize(source, "ast_nodes.clarity")
+    let ast = parse(tokens, source)
+    show "  [pass] parsed ast_nodes.clarity ({len(ast.body)} top-level statements)"
+    passed += 1
+} catch e {
+    show "  [FAIL] ast_nodes.clarity — {e}"
+    failed += 1
+}
+
+try {
+    let source = read("stdlib/lexer.clarity")
+    let tokens = tokenize(source, "lexer.clarity")
+    let ast = parse(tokens, source)
+    show "  [pass] parsed lexer.clarity ({len(ast.body)} top-level statements)"
+    passed += 1
+} catch e {
+    show "  [FAIL] lexer.clarity — {e}"
+    failed += 1
+}
+
+-- ── Results ─────────────────────────────────────────────
+
+show ""
+show "════════════════════════════════════════"
+if failed == 0 {
+    show "ALL {passed} PARSER TESTS PASSED"
+} else {
+    show "{passed} passed, {failed} failed"
+}
+show "════════════════════════════════════════"

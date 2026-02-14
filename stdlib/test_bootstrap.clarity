@@ -1,0 +1,341 @@
+-- Test: Phase 28 Bootstrap — verify Clarity-on-Clarity matches Python-Clarity
+-- Runs programs through the self-hosted interpreter and checks output.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "terminal.clarity" import red, green, yellow, bold, dim
+
+mut passed = 0
+mut failed = 0
+mut total = 0
+
+fn run_clarity(source) {
+    -- Run source through the self-hosted Clarity interpreter.
+    -- Returns list of output lines.
+    let tokens = tokenize(source, "<test>")
+    let tree = parse(tokens, source)
+    let interp = Interpreter(null, null)
+    interp.run(tree)
+    return interp.output
+}
+
+fn assert_output(name, source, expected) {
+    total += 1
+    try {
+        let output = run_clarity(source)
+        if output == expected {
+            show "  [pass] {name}"
+            passed += 1
+        } else {
+            show "  [FAIL] {name}"
+            show "    expected: {expected}"
+            show "    got:      {output}"
+            failed += 1
+        }
+    } catch e {
+        show "  [FAIL] {name} — {e}"
+        failed += 1
+    }
+}
+
+fn assert_error(name, source) {
+    total += 1
+    try {
+        run_clarity(source)
+        show "  [FAIL] {name} — expected error"
+        failed += 1
+    } catch e {
+        show "  [pass] {name}"
+        passed += 1
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════
+show bold("=== Phase 28: Bootstrap Verification Tests ===")
+show ""
+
+-- ── Basic Output ───────────────────────────────────────
+show "── Basic Output ──"
+
+assert_output("hello world",
+    "show \"hello world\"",
+    ["hello world"])
+
+assert_output("multiple show",
+    "show \"a\"\nshow \"b\"\nshow \"c\"",
+    ["a", "b", "c"])
+
+-- ── Variables ──────────────────────────────────────────
+show ""
+show "── Variables ──"
+
+assert_output("let binding",
+    "let x = 42\nshow x",
+    ["42"])
+
+assert_output("mut and reassign",
+    "mut x = 1\nx = 2\nshow x",
+    ["2"])
+
+assert_output("let with expression",
+    "let x = 3 + 4 * 2\nshow x",
+    ["11"])
+
+-- ── Arithmetic ─────────────────────────────────────────
+show ""
+show "── Arithmetic ──"
+
+assert_output("addition",
+    "show 2 + 3",
+    ["5"])
+
+assert_output("subtraction",
+    "show 10 - 4",
+    ["6"])
+
+assert_output("multiplication",
+    "show 6 * 7",
+    ["42"])
+
+assert_output("division",
+    "show 10 / 2",
+    ["5"])
+
+assert_output("modulo",
+    "show 10 % 3",
+    ["1"])
+
+assert_output("string concat",
+    "show \"hello\" + \" \" + \"world\"",
+    ["hello world"])
+
+-- ── Functions ──────────────────────────────────────────
+show ""
+show "── Functions ──"
+
+assert_output("basic function",
+    "fn greet(name) { return \"hi \" + name }\nshow greet(\"world\")",
+    ["hi world"])
+
+assert_output("function with math",
+    "fn double(x) { return x * 2 }\nshow double(21)",
+    ["42"])
+
+assert_output("recursive factorial",
+    "fn fact(n) { if n <= 1 { return 1 }\nreturn n * fact(n - 1) }\nshow fact(6)",
+    ["720"])
+
+assert_output("closure",
+    "fn make_adder(x) { return fn(y) { return x + y } }\nlet add5 = make_adder(5)\nshow add5(3)",
+    ["8"])
+
+-- ── Control Flow ───────────────────────────────────────
+show ""
+show "── Control Flow ──"
+
+assert_output("if true",
+    "if true { show \"yes\" }",
+    ["yes"])
+
+assert_output("if false else",
+    "if false { show \"no\" } else { show \"yes\" }",
+    ["yes"])
+
+assert_output("while loop",
+    "mut i = 0\nmut s = 0\nwhile i < 5 { s = s + i\ni = i + 1 }\nshow s",
+    ["10"])
+
+assert_output("for loop",
+    "mut s = 0\nfor x in [1, 2, 3, 4, 5] { s = s + x }\nshow s",
+    ["15"])
+
+assert_output("break",
+    "mut i = 0\nwhile true { if i == 3 { break }\ni = i + 1 }\nshow i",
+    ["3"])
+
+assert_output("continue",
+    "mut s = 0\nfor i in [1, 2, 3, 4, 5] { if i == 3 { continue }\ns = s + i }\nshow s",
+    ["12"])
+
+-- ── Lists ──────────────────────────────────────────────
+show ""
+show "── Lists ──"
+
+assert_output("list literal",
+    "show [1, 2, 3]",
+    ["[1, 2, 3]"])
+
+assert_output("list index",
+    "let lst = [10, 20, 30]\nshow lst[1]",
+    ["20"])
+
+assert_output("list length",
+    "show len([1, 2, 3])",
+    ["3"])
+
+assert_output("list push",
+    "let lst = [1, 2]\npush(lst, 3)\nshow lst",
+    ["[1, 2, 3]"])
+
+-- ── Maps ───────────────────────────────────────────────
+show ""
+show "── Maps ──"
+
+assert_output("map literal",
+    "let m = {\"a\": 1, \"b\": 2}\nshow m[\"a\"]",
+    ["1"])
+
+assert_output("map property access",
+    "let m = {\"name\": \"clarity\"}\nshow m.name",
+    ["clarity"])
+
+assert_output("map keys",
+    "let m = {\"x\": 1, \"y\": 2}\nshow len(keys(m))",
+    ["2"])
+
+-- ── Strings ────────────────────────────────────────────
+show ""
+show "── Strings ──"
+
+assert_output("string length",
+    "show len(\"hello\")",
+    ["5"])
+
+assert_output("string upper",
+    "show upper(\"hello\")",
+    ["HELLO"])
+
+assert_output("string contains",
+    "show contains(\"hello world\", \"world\")",
+    ["true"])
+
+-- ── Classes ────────────────────────────────────────────
+show ""
+show "── Classes ──"
+
+assert_output("basic class",
+    "class Dog { fn init(name) { this.name = name } fn speak() { return this.name + \" says woof\" } }\nlet d = Dog(\"Rex\")\nshow d.speak()",
+    ["Rex says woof"])
+
+assert_output("class inheritance",
+    "class Animal { fn init(name) { this.name = name } fn speak() { return this.name } }\nclass Cat < Animal { fn speak() { return this.name + \" meows\" } }\nlet c = Cat(\"Whiskers\")\nshow c.speak()",
+    ["Whiskers meows"])
+
+-- ── Try/Catch ──────────────────────────────────────────
+show ""
+show "── Try/Catch ──"
+
+assert_output("catch error",
+    "try { throw \"oops\" } catch e { show e }",
+    ["oops"])
+
+assert_output("nested try/catch",
+    "try { try { throw \"inner\" } catch e { throw \"outer: \" + e } } catch e { show e }",
+    ["outer: inner"])
+
+-- ── Match ──────────────────────────────────────────────
+show ""
+show "── Match ──"
+
+assert_output("match basic",
+    "let x = 2\nmatch x { when 1 { show \"one\" } when 2 { show \"two\" } else { show \"other\" } }",
+    ["two"])
+
+-- ── Enums ──────────────────────────────────────────────
+show ""
+show "── Enums ──"
+
+assert_output("basic enum",
+    "enum Color { Red, Green, Blue }\nshow Color.Red",
+    ["0"])
+
+-- ── Pipe Operator ──────────────────────────────────────
+show ""
+show "── Pipes ──"
+
+assert_output("pipe to function",
+    "fn double(x) { return x * 2 }\nshow 5 |> double",
+    ["10"])
+
+assert_output("pipe chain",
+    "fn add1(x) { return x + 1 }\nfn double(x) { return x * 2 }\nshow 3 |> add1 |> double",
+    ["8"])
+
+-- ── Higher-Order Functions ─────────────────────────────
+show ""
+show "── Higher-Order ──"
+
+assert_output("map function",
+    "show map([1, 2, 3], fn(x) { return x * 2 })",
+    ["[2, 4, 6]"])
+
+assert_output("filter function",
+    "show filter([1, 2, 3, 4, 5], fn(x) { return x > 3 })",
+    ["[4, 5]"])
+
+assert_output("reduce function",
+    "show reduce([1, 2, 3, 4], fn(acc, x) { return acc + x }, 0)",
+    ["10"])
+
+-- ── Destructuring ──────────────────────────────────────
+show ""
+show "── Destructuring ──"
+
+assert_output("list destructure",
+    "let [a, b, c] = [1, 2, 3]\nshow a + b + c",
+    ["6"])
+
+-- ── Spread ─────────────────────────────────────────────
+show ""
+show "── Spread ──"
+
+assert_output("list spread",
+    "let a = [1, 2]\nlet b = [...a, 3, 4]\nshow b",
+    ["[1, 2, 3, 4]"])
+
+assert_output("map spread",
+    "let base = {\"a\": 1}\nlet ext = {...base, \"b\": 2}\nshow ext.a\nshow ext.b",
+    ["1", "2"])
+
+-- ── Range ──────────────────────────────────────────────
+show ""
+show "── Range ──"
+
+assert_output("range expression",
+    "let r = 0..5\nshow r",
+    ["[0, 1, 2, 3, 4]"])
+
+-- ── Null Coalescing ────────────────────────────────────
+show ""
+show "── Null Coalescing ──"
+
+assert_output("null coalesce with null",
+    "let x = null\nshow x ?? \"default\"",
+    ["default"])
+
+assert_output("null coalesce with value",
+    "let x = 42\nshow x ?? \"default\"",
+    ["42"])
+
+-- ── Fibonacci (integration test) ──────────────────────
+show ""
+show "── Integration ──"
+
+assert_output("fibonacci",
+    "fn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }\nshow fib(10)",
+    ["55"])
+
+assert_output("counter class",
+    "class Counter { fn init() { this.count = 0 } fn inc() { this.count = this.count + 1 } fn value() { return this.count } }\nlet c = Counter()\nc.inc()\nc.inc()\nc.inc()\nshow c.value()",
+    ["3"])
+
+-- ═══════════════════════════════════════════════════════════
+show ""
+show "═══════════════════════════════════════"
+show "Results: {passed}/{total} passed, {failed} failed"
+if failed == 0 {
+    show bold(green("All bootstrap tests passed!"))
+} else {
+    show bold(red("{failed} test(s) FAILED"))
+}

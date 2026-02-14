@@ -1,0 +1,331 @@
+-- Clarity Tab Completer — context-aware completions for the REPL.
+-- Completes keywords, builtins, variable names, module members, and file paths.
+
+from "process.clarity" import _quote
+
+-- ── Keywords ────────────────────────────────────────────
+
+let KEYWORDS = [
+    "let", "mut", "fn", "if", "else", "elif", "for", "in", "while",
+    "return", "true", "false", "null", "try", "catch", "finally",
+    "break", "continue", "import", "from", "as", "and", "or", "not",
+    "is", "show", "ask", "class", "this", "throw", "match", "when",
+    "enum", "async", "await", "yield", "interface", "impl"
+]
+
+-- ── Builtins ────────────────────────────────────────────
+
+let BUILTINS = [
+    "show", "ask", "read", "write", "append", "exists", "lines",
+    "int", "float", "str", "bool", "type", "len",
+    "push", "pop", "sort", "reverse", "range",
+    "map", "filter", "reduce", "each", "find", "every", "some", "flat", "zip", "unique",
+    "keys", "values", "entries", "merge", "has",
+    "split", "join", "replace", "trim", "upper", "lower",
+    "contains", "starts", "ends", "chars", "repeat",
+    "pad_left", "pad_right", "char_at", "char_code", "from_char_code",
+    "index_of", "substring", "is_digit", "is_alpha", "is_alnum", "is_space",
+    "abs", "round", "floor", "ceil", "min", "max", "sum", "random", "pow",
+    "pi", "e", "sqrt", "sin", "cos", "tan", "log",
+    "exec", "exec_full", "exit", "sleep", "time", "env", "args", "cwd",
+    "json_parse", "json_string", "hash", "encode64", "decode64",
+    "fetch", "serve", "compose", "tap", "set", "error",
+    "display", "repr", "truthy"
+]
+
+-- ── Completer class ─────────────────────────────────────
+
+class Completer {
+    fn init() {
+        this.user_vars = []
+        this.user_fns = []
+        this.user_classes = []
+        this.modules = []
+    }
+
+    fn add_var(name) {
+        if not contains(this.user_vars, name) {
+            push(this.user_vars, name)
+        }
+    }
+
+    fn add_fn(name) {
+        if not contains(this.user_fns, name) {
+            push(this.user_fns, name)
+        }
+    }
+
+    fn add_class(name) {
+        if not contains(this.user_classes, name) {
+            push(this.user_classes, name)
+        }
+    }
+
+    fn add_module(name) {
+        if not contains(this.modules, name) {
+            push(this.modules, name)
+        }
+    }
+
+    fn complete(input) {
+        -- Return list of possible completions for the given input.
+        let trimmed = trim(input)
+        if len(trimmed) == 0 { return [] }
+
+        -- Get the word being completed (last word in input)
+        let word = _get_last_word(trimmed)
+        if len(word) == 0 { return [] }
+
+        -- Check if completing after a dot (member access)
+        if contains(word, ".") {
+            return this._complete_member(word)
+        }
+
+        -- Check if completing a file path (after import/from)
+        if _is_import_context(trimmed) {
+            return _complete_file_path(word)
+        }
+
+        -- General completion: keywords + builtins + user symbols
+        return this._complete_identifier(word)
+    }
+
+    fn _complete_identifier(prefix) {
+        mut results = []
+        let p = lower(prefix)
+
+        -- Keywords
+        for kw in KEYWORDS {
+            if starts(kw, p) {
+                push(results, {"text": kw, "kind": "keyword"})
+            }
+        }
+
+        -- Builtins
+        for bi in BUILTINS {
+            if starts(bi, p) {
+                push(results, {"text": bi, "kind": "builtin"})
+            }
+        }
+
+        -- User variables
+        for v in this.user_vars {
+            if starts(lower(v), p) {
+                push(results, {"text": v, "kind": "variable"})
+            }
+        }
+
+        -- User functions
+        for f in this.user_fns {
+            if starts(lower(f), p) {
+                push(results, {"text": f, "kind": "function"})
+            }
+        }
+
+        -- User classes
+        for c in this.user_classes {
+            if starts(lower(c), p) {
+                push(results, {"text": c, "kind": "class"})
+            }
+        }
+
+        return results
+    }
+
+    fn _complete_member(word) {
+        -- Complete after dot: obj.meth
+        let dot_idx = _last_index_of(word, ".")
+        if dot_idx < 0 { return [] }
+
+        let obj_name = substring(word, 0, dot_idx)
+        let member_prefix = substring(word, dot_idx + 1, len(word))
+
+        -- Common methods for known types
+        mut methods = []
+
+        -- String methods
+        let string_methods = ["len", "split", "trim", "upper", "lower", "replace",
+                             "contains", "starts", "ends", "index_of", "substring",
+                             "chars", "pad_left", "pad_right"]
+        -- List methods
+        let list_methods = ["len", "push", "pop", "sort", "reverse", "map",
+                           "filter", "reduce", "each", "find", "every", "some",
+                           "flat", "zip", "unique", "join"]
+        -- Map methods
+        let map_methods = ["keys", "values", "entries", "has", "merge"]
+
+        -- Add all known methods (we can't determine the type at completion time)
+        for m in string_methods { push(methods, m) }
+        for m in list_methods { push(methods, m) }
+        for m in map_methods { push(methods, m) }
+
+        -- Deduplicate
+        mut seen = {}
+        mut unique_methods = []
+        for m in methods {
+            if not has(seen, m) {
+                seen[m] = true
+                push(unique_methods, m)
+            }
+        }
+
+        -- Filter by prefix
+        mut results = []
+        let p = lower(member_prefix)
+        for m in unique_methods {
+            if len(p) == 0 or starts(m, p) {
+                push(results, {"text": obj_name + "." + m, "kind": "method"})
+            }
+        }
+
+        return results
+    }
+
+    fn learn_from_source(source) {
+        -- Extract variable and function names from source for completion.
+        let lines_list = split(source, "\n")
+        for line in lines_list {
+            let l = trim(line)
+            -- let/mut declarations
+            if starts(l, "let ") or starts(l, "mut ") {
+                let rest = trim(substring(l, 4, len(l)))
+                let name = _extract_identifier(rest)
+                if len(name) > 0 { this.add_var(name) }
+            }
+            -- fn declarations
+            if starts(l, "fn ") {
+                let rest = trim(substring(l, 3, len(l)))
+                let name = _extract_identifier(rest)
+                if len(name) > 0 { this.add_fn(name) }
+            }
+            -- class declarations
+            if starts(l, "class ") {
+                let rest = trim(substring(l, 6, len(l)))
+                let name = _extract_identifier(rest)
+                if len(name) > 0 { this.add_class(name) }
+            }
+        }
+    }
+}
+
+-- ── Helper functions ────────────────────────────────────
+
+fn _get_last_word(input) {
+    -- Get the last word (identifier-like) from input
+    mut i = len(input) - 1
+    while i >= 0 {
+        let ch = input[i]
+        if not (is_alnum(ch) or ch == "_" or ch == ".") {
+            break
+        }
+        i -= 1
+    }
+    return substring(input, i + 1, len(input))
+}
+
+fn _extract_identifier(text) {
+    -- Extract an identifier from the start of text
+    mut i = 0
+    while i < len(text) {
+        let ch = text[i]
+        if not (is_alnum(ch) or ch == "_") { break }
+        i += 1
+    }
+    return substring(text, 0, i)
+}
+
+fn _last_index_of(s, ch) {
+    mut i = len(s) - 1
+    while i >= 0 {
+        if s[i] == ch { return i }
+        i -= 1
+    }
+    return -1
+}
+
+fn _is_import_context(input) {
+    -- Check if we're in an import statement
+    return starts(trim(input), "from ") or starts(trim(input), "import ")
+}
+
+fn _complete_file_path(prefix) {
+    -- Complete file paths for import statements
+    -- Strip quotes if present
+    mut p = prefix
+    if starts(p, "\"") { p = substring(p, 1, len(p)) }
+
+    -- Get directory and partial filename
+    mut dir = "."
+    mut partial = p
+    let slash_idx = _last_index_of(p, "/")
+    if slash_idx >= 0 {
+        dir = substring(p, 0, slash_idx)
+        if len(dir) == 0 { dir = "/" }
+        partial = substring(p, slash_idx + 1, len(p))
+    }
+
+    -- List .clarity files in directory
+    let result = exec_full("ls -1 " + _quote(dir) + " 2>/dev/null")
+    if result.exit_code != 0 { return [] }
+
+    let files = split(trim(result.stdout), "\n")
+    mut results = []
+    for f in files {
+        let fname = trim(f)
+        if len(fname) == 0 { continue }
+        if ends(fname, ".clarity") and starts(fname, partial) {
+            let full_path = if slash_idx >= 0 { substring(p, 0, slash_idx + 1) + fname } else { fname }
+            push(results, {"text": full_path, "kind": "file"})
+        }
+    }
+    return results
+}
+
+-- ── Display completions ─────────────────────────────────
+
+fn format_completions(completions, max_show) {
+    -- Format completion results for display
+    let limit = if max_show != null { max_show } else { 20 }
+    mut lines = []
+    mut count = 0
+
+    for comp in completions {
+        if count >= limit {
+            let remaining = len(completions) - count
+            push(lines, "  ... and " + str(remaining) + " more")
+            break
+        }
+        mut kind_label = ""
+        if comp["kind"] == "keyword" { kind_label = " [kw]" }
+        elif comp["kind"] == "builtin" { kind_label = " [fn]" }
+        elif comp["kind"] == "variable" { kind_label = " [var]" }
+        elif comp["kind"] == "function" { kind_label = " [fn]" }
+        elif comp["kind"] == "class" { kind_label = " [cls]" }
+        elif comp["kind"] == "method" { kind_label = " [.m]" }
+        elif comp["kind"] == "file" { kind_label = " [file]" }
+        push(lines, "  " + comp["text"] + kind_label)
+        count += 1
+    }
+    return join(lines, "\n")
+}
+
+fn common_prefix(completions) {
+    -- Find the longest common prefix among all completion texts.
+    if len(completions) == 0 { return "" }
+    if len(completions) == 1 { return completions[0]["text"] }
+
+    let first = completions[0]["text"]
+    mut prefix_len = len(first)
+
+    for comp in completions {
+        let text = comp["text"]
+        mut i = 0
+        while i < prefix_len and i < len(text) {
+            if first[i] != text[i] { break }
+            i += 1
+        }
+        prefix_len = i
+    }
+
+    return substring(first, 0, prefix_len)
+}

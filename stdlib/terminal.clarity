@@ -1,0 +1,183 @@
+-- Clarity Terminal UI — ANSI colors, cursor control, terminal info
+-- Provides building blocks for rich terminal applications.
+
+-- ── ANSI escape code ─────────────────────────────────────
+
+let ESC = from_char_code(27)
+let CSI = ESC + "["
+
+-- ── Colors ───────────────────────────────────────────────
+
+fn red(s)     { return CSI + "31m" + str(s) + CSI + "0m" }
+fn green(s)   { return CSI + "32m" + str(s) + CSI + "0m" }
+fn yellow(s)  { return CSI + "33m" + str(s) + CSI + "0m" }
+fn blue(s)    { return CSI + "34m" + str(s) + CSI + "0m" }
+fn magenta(s) { return CSI + "35m" + str(s) + CSI + "0m" }
+fn cyan(s)    { return CSI + "36m" + str(s) + CSI + "0m" }
+fn white(s)   { return CSI + "37m" + str(s) + CSI + "0m" }
+fn gray(s)    { return CSI + "90m" + str(s) + CSI + "0m" }
+
+-- ── Bright colors ────────────────────────────────────────
+
+fn bright_red(s)     { return CSI + "91m" + str(s) + CSI + "0m" }
+fn bright_green(s)   { return CSI + "92m" + str(s) + CSI + "0m" }
+fn bright_yellow(s)  { return CSI + "93m" + str(s) + CSI + "0m" }
+fn bright_blue(s)    { return CSI + "94m" + str(s) + CSI + "0m" }
+fn bright_magenta(s) { return CSI + "95m" + str(s) + CSI + "0m" }
+fn bright_cyan(s)    { return CSI + "96m" + str(s) + CSI + "0m" }
+
+-- ── Background colors ────────────────────────────────────
+
+fn bg_red(s)     { return CSI + "41m" + str(s) + CSI + "0m" }
+fn bg_green(s)   { return CSI + "42m" + str(s) + CSI + "0m" }
+fn bg_yellow(s)  { return CSI + "43m" + str(s) + CSI + "0m" }
+fn bg_blue(s)    { return CSI + "44m" + str(s) + CSI + "0m" }
+fn bg_magenta(s) { return CSI + "45m" + str(s) + CSI + "0m" }
+fn bg_cyan(s)    { return CSI + "46m" + str(s) + CSI + "0m" }
+
+-- ── Styles ───────────────────────────────────────────────
+
+fn bold(s)      { return CSI + "1m" + str(s) + CSI + "0m" }
+fn dim(s)       { return CSI + "2m" + str(s) + CSI + "0m" }
+fn italic(s)    { return CSI + "3m" + str(s) + CSI + "0m" }
+fn underline(s) { return CSI + "4m" + str(s) + CSI + "0m" }
+fn inverse(s)   { return CSI + "7m" + str(s) + CSI + "0m" }
+fn strike(s)    { return CSI + "9m" + str(s) + CSI + "0m" }
+
+fn reset_code() { return CSI + "0m" }
+
+-- ── Compound styles ──────────────────────────────────────
+
+fn style(s, ...styles) {
+    -- Apply multiple styles: style("text", "bold", "red")
+    mut result = str(s)
+    each(styles, fn(st) {
+        if st == "bold" { result = bold(result) }
+        elif st == "dim" { result = dim(result) }
+        elif st == "italic" { result = italic(result) }
+        elif st == "underline" { result = underline(result) }
+        elif st == "inverse" { result = inverse(result) }
+        elif st == "red" { result = red(result) }
+        elif st == "green" { result = green(result) }
+        elif st == "yellow" { result = yellow(result) }
+        elif st == "blue" { result = blue(result) }
+        elif st == "magenta" { result = magenta(result) }
+        elif st == "cyan" { result = cyan(result) }
+        elif st == "gray" { result = gray(result) }
+        elif st == "white" { result = white(result) }
+    })
+    return result
+}
+
+-- ── Cursor control ───────────────────────────────────────
+
+fn move_to(row, col)  { return CSI + str(row) + ";" + str(col) + "H" }
+fn move_up(n)         { return CSI + str(n ?? 1) + "A" }
+fn move_down(n)       { return CSI + str(n ?? 1) + "B" }
+fn move_right(n)      { return CSI + str(n ?? 1) + "C" }
+fn move_left(n)       { return CSI + str(n ?? 1) + "D" }
+fn save_cursor()      { return CSI + "s" }
+fn restore_cursor()   { return CSI + "u" }
+fn hide_cursor()      { return CSI + "?25l" }
+fn show_cursor()      { return CSI + "?25h" }
+
+-- ── Screen control ───────────────────────────────────────
+
+fn clear_screen()      { return CSI + "2J" + CSI + "H" }
+fn clear_line()        { return CSI + "2K" }
+fn clear_to_end()      { return CSI + "K" }
+fn clear_to_start()    { return CSI + "1K" }
+fn clear_below()       { return CSI + "J" }
+fn scroll_up(n)        { return CSI + str(n ?? 1) + "S" }
+fn scroll_down(n)      { return CSI + str(n ?? 1) + "T" }
+
+-- ── Terminal dimensions ──────────────────────────────────
+
+fn columns() {
+    try {
+        return int(trim(exec("tput cols 2>/dev/null")))
+    } catch e {
+        return 80
+    }
+}
+
+fn rows() {
+    try {
+        return int(trim(exec("tput lines 2>/dev/null")))
+    } catch e {
+        return 24
+    }
+}
+
+fn size() {
+    return {"columns": columns(), "rows": rows()}
+}
+
+-- ── Convenience output ───────────────────────────────────
+
+fn print_colored(text, color) {
+    -- Print text in a named color.
+    if color == "red" { show red(text) }
+    elif color == "green" { show green(text) }
+    elif color == "yellow" { show yellow(text) }
+    elif color == "blue" { show blue(text) }
+    elif color == "magenta" { show magenta(text) }
+    elif color == "cyan" { show cyan(text) }
+    elif color == "gray" { show gray(text) }
+    else { show text }
+}
+
+fn hr(ch, width) {
+    -- Print a horizontal rule.
+    let c = ch ?? "-"
+    let w = width ?? columns()
+    show repeat(c, w)
+}
+
+fn banner(text) {
+    -- Print a centered banner.
+    let w = columns()
+    let pad = (w - len(text) - 4) / 2
+    if pad < 0 { pad = 0 }
+    let line = repeat("=", pad) + "  " + text + "  " + repeat("=", pad)
+    show bold(line)
+}
+
+-- ── Progress indicator ───────────────────────────────────
+
+fn spinner_frames() {
+    return ["|", "/", "-", "\\"]
+}
+
+fn progress_bar(current, total, width) {
+    let w = width ?? 30
+    let pct = if total > 0 { current / total } else { 0 }
+    let filled = int(pct * w)
+    let empty = w - filled
+    let bar = "[" + repeat("#", filled) + repeat("-", empty) + "]"
+    let label = " " + str(int(pct * 100)) + "%"
+    return bar + label
+}
+
+-- ── Box drawing ──────────────────────────────────────────
+
+fn box_top(width) {
+    return "+" + repeat("-", width - 2) + "+"
+}
+
+fn box_mid(text, width) {
+    let pad = width - len(text) - 4
+    if pad < 0 { pad = 0 }
+    return "| " + text + repeat(" ", pad) + " |"
+}
+
+fn box_bottom(width) {
+    return "+" + repeat("-", width - 2) + "+"
+}
+
+fn box(text, width) {
+    let w = width ?? (len(text) + 4)
+    show box_top(w)
+    show box_mid(text, w)
+    show box_bottom(w)
+}

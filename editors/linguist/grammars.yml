@@ -1,0 +1,8 @@
+# Grammar entry for github-linguist/linguist grammars.yml
+# Points to the TextMate grammar in this repository.
+
+# Add this to vendor/grammars/ or reference via submodule:
+# - clarity-lang/Clarity:
+#     - source.clarity
+
+# The grammar file is at: editors/clarity.tmLanguage.json

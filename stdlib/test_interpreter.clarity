@@ -1,0 +1,384 @@
+-- Test: Clarity interpreter self-hosting
+-- The self-hosted interpreter (written in Clarity) executes Clarity programs.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter, Environment, cl_type_name
+
+mut passed = 0
+mut failed = 0
+mut total = 0
+
+fn run_code(source) {
+    let tokens = tokenize(source, "<test>")
+    let tree = parse(tokens, source)
+    let interp = Interpreter(null, null)
+    interp.run(tree)
+    return interp
+}
+
+fn assert_output(name, source, expected) {
+    total += 1
+    try {
+        let interp = run_code(source)
+        if interp.output == expected {
+            show "  [pass] {name}"
+            passed += 1
+        } else {
+            show "  [FAIL] {name} — expected {expected}, got {interp.output}"
+            failed += 1
+        }
+    } catch err {
+        show "  [FAIL] {name} — {err}"
+        failed += 1
+    }
+}
+
+fn assert_no_error(name, source) {
+    total += 1
+    try {
+        run_code(source)
+        show "  [pass] {name}"
+        passed += 1
+    } catch err {
+        show "  [FAIL] {name} — {err}"
+        failed += 1
+    }
+}
+
+fn assert_error(name, source) {
+    total += 1
+    try {
+        run_code(source)
+        show "  [FAIL] {name} — expected error but succeeded"
+        failed += 1
+    } catch err {
+        show "  [pass] {name} (error: {err})"
+        passed += 1
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════
+show "═══ Phase 26: Self-Hosting Interpreter Tests ═══"
+show ""
+
+-- ── Variables ────────────────────────────────────────────
+show "── Variables ──"
+
+assert_output("let binding",
+    "let x = 42\nshow x",
+    ["42"])
+
+assert_output("mut binding and reassign",
+    "mut x = 1\nx = 2\nshow x",
+    ["2"])
+
+assert_output("let with expression",
+    "let x = 3 + 4\nshow x",
+    ["7"])
+
+assert_error("immutable reassign",
+    "let x = 1\nx = 2")
+
+-- ── Arithmetic ───────────────────────────────────────────
+show ""
+show "── Arithmetic ──"
+
+assert_output("addition",
+    "show 2 + 3",
+    ["5"])
+
+assert_output("subtraction",
+    "show 10 - 4",
+    ["6"])
+
+assert_output("multiplication",
+    "show 6 * 7",
+    ["42"])
+
+assert_output("division",
+    "show 10 / 2",
+    ["5"])
+
+assert_output("modulo",
+    "show 10 % 3",
+    ["1"])
+
+assert_output("string concat",
+    "show \"hello\" + \" \" + \"world\"",
+    ["hello world"])
+
+-- ── Functions ────────────────────────────────────────────
+show ""
+show "── Functions ──"
+
+assert_output("basic function",
+    "fn add(a, b) { return a + b }\nshow add(2, 3)",
+    ["5"])
+
+assert_output("function with no return",
+    "fn greet(name) { show \"hi \" + name }\ngreet(\"world\")",
+    ["hi world"])
+
+assert_output("closure",
+    "fn make_adder(n) { return fn(x) { return n + x } }\nlet add5 = make_adder(5)\nshow add5(3)",
+    ["8"])
+
+assert_output("recursion",
+    "fn fib(n) { if n <= 1 { return n } return fib(n - 1) + fib(n - 2) }\nshow fib(10)",
+    ["55"])
+
+assert_output("rest params",
+    "fn sum_all(...nums) { return reduce(nums, fn(a, b) { return a + b }, 0) }\nshow sum_all(1, 2, 3, 4)",
+    ["10"])
+
+-- ── Control Flow ─────────────────────────────────────────
+show ""
+show "── Control Flow ──"
+
+assert_output("if true",
+    "if true { show \"yes\" }",
+    ["yes"])
+
+assert_output("if false with else",
+    "if false { show \"yes\" } else { show \"no\" }",
+    ["no"])
+
+assert_output("if elif else",
+    "let x = 2\nif x == 1 { show \"one\" } elif x == 2 { show \"two\" } else { show \"other\" }",
+    ["two"])
+
+assert_output("while loop",
+    "mut i = 0\nmut s = 0\nwhile i < 5 { s += i\ni += 1 }\nshow s",
+    ["10"])
+
+assert_output("for loop",
+    "mut s = \"\"\nfor x in [1, 2, 3] { s = s + str(x) }\nshow s",
+    ["123"])
+
+assert_output("break in loop",
+    "mut i = 0\nwhile true { if i == 3 { break }\ni += 1 }\nshow i",
+    ["3"])
+
+assert_output("continue in loop",
+    "mut s = 0\nfor x in [1, 2, 3, 4, 5] { if x % 2 == 0 { continue }\ns += x }\nshow s",
+    ["9"])
+
+-- ── Lists ────────────────────────────────────────────────
+show ""
+show "── Lists ──"
+
+assert_output("list literal",
+    "show [1, 2, 3]",
+    ["[1, 2, 3]"])
+
+assert_output("list index",
+    "let lst = [10, 20, 30]\nshow lst[1]",
+    ["20"])
+
+assert_output("list length",
+    "show len([1, 2, 3])",
+    ["3"])
+
+assert_output("list push",
+    "let lst = [1, 2]\npush(lst, 3)\nshow lst",
+    ["[1, 2, 3]"])
+
+assert_output("list slice",
+    "let lst = [1, 2, 3, 4, 5]\nlet s = lst[1..3]\nshow s",
+    ["[2, 3]"])
+
+-- ── Maps ─────────────────────────────────────────────────
+show ""
+show "── Maps ──"
+
+assert_output("map literal",
+    "let m = {\"a\": 1, \"b\": 2}\nshow m[\"a\"]",
+    ["1"])
+
+assert_output("map property access",
+    "let m = {\"name\": \"clarity\"}\nshow m.name",
+    ["clarity"])
+
+assert_output("map keys",
+    "let m = {\"x\": 1, \"y\": 2}\nshow len(keys(m))",
+    ["2"])
+
+-- ── Strings ──────────────────────────────────────────────
+show ""
+show "── Strings ──"
+
+assert_output("string length",
+    "show len(\"hello\")",
+    ["5"])
+
+assert_output("string upper",
+    "show upper(\"hello\")",
+    ["HELLO"])
+
+assert_output("string split join",
+    "show join(split(\"a-b-c\", \"-\"), \", \")",
+    ["a, b, c"])
+
+assert_output("string contains",
+    "show contains(\"hello world\", \"world\")",
+    ["true"])
+
+-- ── Classes ──────────────────────────────────────────────
+show ""
+show "── Classes ──"
+
+assert_output("basic class",
+    "class Dog { fn init(name) { this.name = name } fn speak() { return this.name + \" says woof\" } }\nlet d = Dog(\"Rex\")\nshow d.speak()",
+    ["Rex says woof"])
+
+assert_output("class inheritance",
+    "class Animal { fn init(name) { this.name = name } fn speak() { return this.name } }\nclass Cat < Animal { fn speak() { return this.name + \" meows\" } }\nlet c = Cat(\"Whiskers\")\nshow c.speak()",
+    ["Whiskers meows"])
+
+assert_output("class property access",
+    "class Point { fn init(x, y) { this.x = x\nthis.y = y } }\nlet p = Point(3, 4)\nshow p.x + p.y",
+    ["7"])
+
+-- ── Try/Catch ────────────────────────────────────────────
+show ""
+show "── Try/Catch ──"
+
+assert_output("try catch",
+    "try { throw \"oops\" } catch e { show \"caught: \" + e }",
+    ["caught: oops"])
+
+assert_output("try catch no error",
+    "try { show \"ok\" } catch e { show \"error\" }",
+    ["ok"])
+
+assert_output("nested try catch",
+    "try { try { throw \"inner\" } catch e { throw \"outer: \" + e } } catch e { show e }",
+    ["outer: inner"])
+
+-- ── Match ────────────────────────────────────────────────
+show ""
+show "── Match ──"
+
+assert_output("match basic",
+    "let x = 2\nmatch x { when 1 { show \"one\" } when 2 { show \"two\" } else { show \"other\" } }",
+    ["two"])
+
+assert_output("match default",
+    "let x = 99\nmatch x { when 1 { show \"one\" } else { show \"default\" } }",
+    ["default"])
+
+-- ── Enums ────────────────────────────────────────────────
+show ""
+show "── Enums ──"
+
+assert_output("basic enum",
+    "enum Color { Red, Green, Blue }\nshow Color.Red",
+    ["0"])
+
+assert_output("enum with values",
+    "enum Status { OK = 200, NotFound = 404 }\nshow Status.NotFound",
+    ["404"])
+
+-- ── Pipes ────────────────────────────────────────────────
+show ""
+show "── Pipes ──"
+
+assert_output("pipe operator",
+    "fn double(x) { return x * 2 }\nfn inc(x) { return x + 1 }\nshow 5 |> double |> inc",
+    ["11"])
+
+-- ── Comprehensions ───────────────────────────────────────
+show ""
+show "── Comprehensions ──"
+
+assert_output("list comprehension",
+    "let squares = [x * x for x in range(5)]\nshow squares",
+    ["[0, 1, 4, 9, 16]"])
+
+assert_output("filtered comprehension",
+    "let evens = [x for x in range(10) if x % 2 == 0]\nshow evens",
+    ["[0, 2, 4, 6, 8]"])
+
+-- ── Higher-order functions ───────────────────────────────
+show ""
+show "── Higher-order Functions ──"
+
+assert_output("map function",
+    "show map([1, 2, 3], fn(x) { return x * 2 })",
+    ["[2, 4, 6]"])
+
+assert_output("filter function",
+    "show filter([1, 2, 3, 4, 5], fn(x) { return x > 3 })",
+    ["[4, 5]"])
+
+assert_output("reduce function",
+    "show reduce([1, 2, 3, 4], fn(a, b) { return a + b }, 0)",
+    ["10"])
+
+-- ── Null coalesce ────────────────────────────────────────
+show ""
+show "── Null Coalesce ──"
+
+assert_output("null coalesce with null",
+    "let x = null\nshow x ?? \"default\"",
+    ["default"])
+
+assert_output("null coalesce with value",
+    "let x = 42\nshow x ?? \"default\"",
+    ["42"])
+
+-- ── If expressions ───────────────────────────────────────
+show ""
+show "── If Expressions ──"
+
+-- Build if-expression source with braces that won't be interpolated
+let LB = from_char_code(123)
+let RB = from_char_code(125)
+let if_true_src = "let a = true\nlet x = if a " + LB + " 42 " + RB + " else " + LB + " 0 " + RB + "\nshow x"
+let if_false_src = "let a = false\nlet x = if a " + LB + " 42 " + RB + " else " + LB + " 0 " + RB + "\nshow x"
+
+assert_output("if expression true", if_true_src, ["42"])
+assert_output("if expression false", if_false_src, ["0"])
+
+-- ── Destructuring ────────────────────────────────────────
+show ""
+show "── Destructuring ──"
+
+assert_output("list destructure",
+    "let [a, b, c] = [1, 2, 3]\nshow a + b + c",
+    ["6"])
+
+assert_output("rest destructure",
+    "let [first, ...rest] = [1, 2, 3, 4]\nshow first\nshow rest",
+    ["1", "[2, 3, 4]"])
+
+-- ── Spread ───────────────────────────────────────────────
+show ""
+show "── Spread ──"
+
+assert_output("list spread",
+    "let a = [1, 2]\nlet b = [0, ...a, 3]\nshow b",
+    ["[0, 1, 2, 3]"])
+
+assert_output("map spread",
+    "let base = {\"a\": 1}\nlet ext = {...base, \"b\": 2}\nshow ext.a\nshow ext.b",
+    ["1", "2"])
+
+-- ── Range ────────────────────────────────────────────────
+show ""
+show "── Range ──"
+
+assert_output("range expression",
+    "let r = 0..5\nshow r",
+    ["[0, 1, 2, 3, 4]"])
+
+-- ═══════════════════════════════════════════════════════════
+show ""
+show "═══════════════════════════════════════"
+show "Results: {passed}/{total} passed, {failed} failed"
+if failed == 0 {
+    show "All tests passed!"
+} else {
+    show "{failed} test(s) FAILED"
+}

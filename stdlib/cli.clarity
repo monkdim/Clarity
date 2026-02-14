@@ -1,0 +1,859 @@
+-- Clarity CLI — fully self-hosted command-line interface.
+-- All commands implemented in Clarity. No Python dependency.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter, interpret
+from "terminal.clarity" import bold, green, cyan, red, yellow, dim
+from "linter.clarity" import Linter, lint_source
+from "formatter.clarity" import Formatter, format_source
+from "type_checker.clarity" import TypeChecker, check_types_source
+from "docgen.clarity" import generate_docs
+from "debugger.clarity" import debug_file
+from "profiler.clarity" import profile_file
+
+-- ── Version ─────────────────────────────────────────────
+
+let VERSION = "0.5.0"
+
+-- ── Banner ──────────────────────────────────────────────
+
+fn _banner() {
+    show ""
+    show "   +===================================+"
+    show "   |         C L A R I T Y             |"
+    show "   |      v{VERSION}..........................  |"
+    show "   |   Simple code. Real power.        |"
+    show "   +===================================+"
+}
+
+-- ── Help text ───────────────────────────────────────────
+
+fn _help() {
+    show ""
+    show "Usage: clarity <command> [args]"
+    show ""
+    show "Commands:"
+    show "  run <file.clarity>    Run a Clarity program"
+    show "  shell                 Start Clarity Shell (interactive terminal)"
+    show "  repl                  Start interactive REPL (basic)"
+    show "  check <file.clarity>  Check syntax (--types for type checking)"
+    show "  lint <file|dir>       Lint code for common issues"
+    show "  debug <file.clarity>  Interactive step-through debugger"
+    show "  profile <file>        Profile execution (time, calls, hotspots)"
+    show "  doc <file|dir>        Generate documentation (--md, --json, -o)"
+    show "  fmt <file|dir>        Format Clarity code (--check, --write)"
+    show "  test [dir]            Run test files (test_*.clarity)"
+    show "  tokens <file>         Show lexer output (debug)"
+    show "  ast <file>            Show parser output (debug)"
+    show "  init                  Create a new clarity.toml"
+    show "  install               Install dependencies from clarity.toml"
+    show "  install <pkg>         Add and install a package"
+    show "  publish               Pack and publish to registry"
+    show "  search <query>        Search the package registry"
+    show "  info <pkg>            Show package info from registry"
+    show "  lsp                   Start language server (for editors)"
+    show "  help                  Show this help message"
+    show "  version               Show version"
+    show ""
+    show "Examples:"
+    show "  clarity shell"
+    show "  clarity run hello.clarity"
+    show "  clarity check file.clarity --types"
+    show "  clarity lint stdlib/"
+    show "  clarity debug app.clarity"
+    show "  clarity profile app.clarity"
+    show "  clarity doc stdlib/ --md -o docs.md"
+    show "  clarity fmt stdlib/ --write"
+    show "  clarity test"
+    show "  clarity publish"
+    show "  clarity search http"
+    show "  clarity info some-package"
+}
+
+-- ── Path helpers ───────────────────────────────────────
+
+fn _dirname(path) {
+    let result = exec_full("dirname " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn _abspath(path) {
+    let result = exec_full("realpath " + _quote(path) + " 2>/dev/null || readlink -f " + _quote(path) + " 2>/dev/null || echo " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _is_dir(path) {
+    let result = exec_full("test -d " + _quote(path) + " && echo dir || echo file")
+    return trim(result.stdout) == "dir"
+}
+
+fn _collect_clarity_files(paths) {
+    mut files = []
+    for p in paths {
+        if exists(p) {
+            if _is_dir(p) {
+                let find_result = exec_full("find " + _quote(p) + " -name '*.clarity' -type f | sort")
+                let found = split(trim(find_result.stdout), "\n")
+                for f in found {
+                    if len(trim(f)) > 0 {
+                        push(files, trim(f))
+                    }
+                }
+            } else {
+                push(files, p)
+            }
+        } else {
+            show red("  >> Not found: {p}")
+            exit(1)
+        }
+    }
+    return files
+}
+
+-- ── File runner ─────────────────────────────────────────
+
+fn run_file(path) {
+    if not exists(path) {
+        show red("  >> File not found: {path}")
+        exit(1)
+    }
+
+    let source = read(path)
+
+    try {
+        let tokens = tokenize(source, path)
+        let tree = parse(tokens, source)
+        let source_dir = _dirname(_abspath(path))
+        let interp = Interpreter(null, source_dir)
+        interp.run(tree)
+    } catch e {
+        show red("\nClarity Error in {path}: {e}")
+        exit(1)
+    }
+}
+
+-- ── Syntax checker ──────────────────────────────────────
+
+fn check_file(path, type_check) {
+    if not exists(path) {
+        show red("  >> File not found: {path}")
+        exit(1)
+    }
+
+    let source = read(path)
+
+    try {
+        let tokens = tokenize(source, path)
+        let tree = parse(tokens, source)
+        let stmt_count = len(tree.body)
+        show green("  OK") + " — {path} ({stmt_count} statements)"
+
+        if type_check {
+            let checker = TypeChecker()
+            let diagnostics = checker.check(tree)
+            if len(diagnostics) > 0 {
+                mut errors = 0
+                mut warnings = 0
+                for d in diagnostics {
+                    let color = if d["severity"] == "error" { red(upper(d["severity"])) } else { yellow(upper(d["severity"])) }
+                    mut loc = ""
+                    if d["line"] != null { loc = ":" + str(d["line"]) }
+                    show "  " + color + " " + path + loc + ": " + d["message"]
+                    if d["severity"] == "error" { errors += 1 } else { warnings += 1 }
+                }
+                show ""
+                show "  " + str(errors) + " error(s), " + str(warnings) + " warning(s)"
+                if errors > 0 { exit(1) }
+            } else {
+                show green("  OK") + " — No type errors"
+            }
+        }
+    } catch e {
+        show red("  ERROR") + " — {path}: {e}"
+        exit(1)
+    }
+}
+
+-- ── Token display ───────────────────────────────────────
+
+fn show_tokens(path) {
+    if not exists(path) {
+        show red("  >> File not found: {path}")
+        exit(1)
+    }
+
+    let source = read(path)
+
+    try {
+        let tokens = tokenize(source, path)
+        show bold(cyan("  Tokens for {path}:"))
+        show ""
+        mut i = 0
+        while i < len(tokens) {
+            let tok = tokens[i]
+            show "  " + dim(str(i)) + "  " + cyan(tok.type) + "  " + str(tok.value) + "  " + dim("L{tok.line}:{tok.column}")
+            i += 1
+        }
+        show ""
+        show dim("  {len(tokens)} tokens total")
+    } catch e {
+        show red("  Lexer error: {e}")
+        exit(1)
+    }
+}
+
+-- ── AST display ─────────────────────────────────────────
+
+fn show_ast(path) {
+    if not exists(path) {
+        show red("  >> File not found: {path}")
+        exit(1)
+    }
+
+    let source = read(path)
+
+    try {
+        let tokens = tokenize(source, path)
+        let tree = parse(tokens, source)
+        show bold(cyan("  AST for {path}:"))
+        show ""
+        print_node(tree, 0)
+        show ""
+        show dim("  {len(tree.body)} top-level statement(s)")
+    } catch e {
+        show red("  Parse error: {e}")
+        exit(1)
+    }
+}
+
+fn print_node(node, indent) {
+    let prefix = repeat("  ", indent + 1)
+
+    if type(node) == "list" {
+        mut i = 0
+        while i < len(node) {
+            print_node(node[i], indent)
+            i += 1
+        }
+        return null
+    }
+
+    if node == null { return null }
+    if type(node) != "map" and type(node) != "ClarityInstance" { return null }
+
+    mut nt = null
+    try { nt = node.node_type } catch e { return null }
+    if nt == null { return null }
+
+    mut fields_str = ""
+    if nt == "Identifier" {
+        try { fields_str = "name=" + repr_val(node.name) } catch e {}
+    } elif nt == "NumberLiteral" {
+        try { fields_str = "value=" + str(node.value) } catch e {}
+    } elif nt == "StringLiteral" {
+        try { fields_str = "value=" + repr_val(node.value) } catch e {}
+    } elif nt == "BoolLiteral" {
+        try { fields_str = "value=" + str(node.value) } catch e {}
+    } elif nt == "NullLiteral" {
+        fields_str = ""
+    } elif nt == "LetStatement" {
+        try { fields_str = "name=" + repr_val(node.name) + ", mutable=" + str(node.mutable) } catch e {}
+    } elif nt == "FnStatement" {
+        try { fields_str = "name=" + repr_val(node.name) } catch e {}
+    } elif nt == "AssignStatement" {
+        try { fields_str = "operator=" + repr_val(node.operator) } catch e {}
+    } elif nt == "BinaryOp" {
+        try { fields_str = "operator=" + repr_val(node.operator) } catch e {}
+    } elif nt == "UnaryOp" {
+        try { fields_str = "operator=" + repr_val(node.operator) } catch e {}
+    } elif nt == "ImportStatement" {
+        try { fields_str = "path=" + repr_val(node.path) } catch e {}
+    } elif nt == "ClassStatement" {
+        try { fields_str = "name=" + repr_val(node.name) } catch e {}
+    } elif nt == "ForStatement" {
+        try { fields_str = "variable=" + repr_val(node.variable) } catch e {}
+    }
+
+    show prefix + cyan(nt) + "(" + fields_str + ")"
+
+    try { if node.body != null { print_node(node.body, indent + 1) } } catch e {}
+    try { if node.value != null and type(node.value) != "string" and type(node.value) != "number" and type(node.value) != "bool" { print_node(node.value, indent + 1) } } catch e {}
+    try { if node.expression != null { print_node(node.expression, indent + 1) } } catch e {}
+    try { if node.condition != null { print_node(node.condition, indent + 1) } } catch e {}
+    try { if node.left != null { print_node(node.left, indent + 1) } } catch e {}
+    try { if node.right != null { print_node(node.right, indent + 1) } } catch e {}
+    try { if node.target != null { print_node(node.target, indent + 1) } } catch e {}
+    try { if node.callee != null { print_node(node.callee, indent + 1) } } catch e {}
+    try { if node.arguments != null { print_node(node.arguments, indent + 1) } } catch e {}
+    try { if node.object != null { print_node(node.object, indent + 1) } } catch e {}
+    try { if node.elements != null { print_node(node.elements, indent + 1) } } catch e {}
+    try { if node.iterable != null { print_node(node.iterable, indent + 1) } } catch e {}
+    try { if node.operand != null { print_node(node.operand, indent + 1) } } catch e {}
+    try { if node.values != null and type(node.values) == "list" { print_node(node.values, indent + 1) } } catch e {}
+    try { if node.statements != null { print_node(node.statements, indent + 1) } } catch e {}
+    try { if node.try_body != null { print_node(node.try_body, indent + 1) } } catch e {}
+    try { if node.catch_body != null { print_node(node.catch_body, indent + 1) } } catch e {}
+    try { if node.else_body != null { print_node(node.else_body, indent + 1) } } catch e {}
+    try { if node.methods != null { print_node(node.methods, indent + 1) } } catch e {}
+}
+
+fn repr_val(v) {
+    if v == null { return "null" }
+    if type(v) == "string" { return "\"" + v + "\"" }
+    return str(v)
+}
+
+-- ── Shell / REPL delegation ─────────────────────────────
+
+fn start_shell() {
+    let stdlib_dir = _dirname(_abspath("lexer.clarity"))
+    let repl_path = stdlib_dir + "/repl.clarity"
+    if exists(repl_path) {
+        run_file(repl_path)
+    } else {
+        show red("  >> Clarity Shell not found at: {repl_path}")
+        exit(1)
+    }
+}
+
+fn start_repl() {
+    start_shell()
+}
+
+-- ── Package management ──────────────────────────────────
+
+fn do_init_package() {
+    if exists("clarity.toml") {
+        show "  clarity.toml already exists"
+        return null
+    }
+    let toml = "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\n\n[dependencies]\n"
+    write("clarity.toml", toml)
+    show "  Created clarity.toml"
+}
+
+fn do_install_packages(cli_args) {
+    if not exists("clarity.toml") {
+        show "  No clarity.toml found. Run 'clarity init' first."
+        return null
+    }
+
+    from "package.clarity" import install_packages, add_package
+
+    -- Check if a specific package was named: clarity install <pkg> [version]
+    if len(cli_args) >= 2 and not starts(cli_args[1], "--") {
+        let pkg_name = cli_args[1]
+        mut spec = "*"
+        if len(cli_args) >= 3 and not starts(cli_args[2], "--") {
+            spec = cli_args[2]
+        }
+        add_package(pkg_name, spec)
+        return null
+    }
+
+    install_packages()
+}
+
+fn do_publish() {
+    if not exists("clarity.toml") {
+        show "  No clarity.toml found. Run 'clarity init' first."
+        return null
+    }
+    from "package.clarity" import publish_package
+    publish_package()
+}
+
+fn do_search(cli_args) {
+    if len(cli_args) < 2 {
+        show red("Usage: clarity search <query>")
+        exit(1)
+    }
+    let query = cli_args[1]
+    from "package.clarity" import search_packages
+    let results = search_packages(query)
+    if len(results) == 0 {
+        show "  No packages found for '{query}'"
+        return null
+    }
+    show ""
+    show "  Search results for '{query}':"
+    show ""
+    for pkg in results {
+        let name = if has(pkg, "name") { pkg["name"] } else { "?" }
+        let desc = if has(pkg, "description") { pkg["description"] } else { "" }
+        let latest = if has(pkg, "latest") { pkg["latest"] } else { "" }
+        show "  " + bold(green(name)) + " " + dim("v" + latest)
+        if len(desc) > 0 {
+            show "    " + desc
+        }
+    }
+    show ""
+    show "  " + str(len(results)) + " package(s) found"
+}
+
+fn do_info(cli_args) {
+    if len(cli_args) < 2 {
+        show red("Usage: clarity info <package-name>")
+        exit(1)
+    }
+    let name = cli_args[1]
+    from "package.clarity" import show_package_info
+    let info = show_package_info(name)
+    if info == null {
+        return null
+    }
+    show ""
+    show "  " + bold(green(name))
+    if has(info, "description") and len(info["description"]) > 0 {
+        show "  " + info["description"]
+    }
+    if has(info, "latest") {
+        show "  Latest: " + info["latest"]
+    }
+    if has(info, "versions") {
+        let vers = keys(info["versions"])
+        show "  Versions: " + join(vers, ", ")
+    }
+    show ""
+}
+
+-- ── LSP delegation ──────────────────────────────────────
+
+fn start_lsp() {
+    let stdlib_dir = _dirname(_abspath("lexer.clarity"))
+    let lsp_path = stdlib_dir + "/lsp.clarity"
+    if exists(lsp_path) {
+        from "lsp.clarity" import start_server
+        start_server()
+    } else {
+        show yellow("  >> lsp.clarity not found")
+    }
+}
+
+-- ── Main entry point ────────────────────────────────────
+
+fn main() {
+    let cli_args = args()
+
+    if len(cli_args) == 0 {
+        start_shell()
+        return null
+    }
+
+    let command = cli_args[0]
+
+    -- Help
+    if command == "help" or command == "--help" or command == "-h" {
+        _banner()
+        _help()
+        return null
+    }
+
+    -- Version
+    if command == "version" or command == "--version" or command == "-v" {
+        show "Clarity v{VERSION}"
+        return null
+    }
+
+    -- Run
+    if command == "run" {
+        if len(cli_args) < 2 {
+            show red("Usage: clarity run <file.clarity>")
+            exit(1)
+        }
+        run_file(cli_args[1])
+        return null
+    }
+
+    -- Shell
+    if command == "shell" {
+        start_shell()
+        return null
+    }
+
+    -- REPL
+    if command == "repl" {
+        start_repl()
+        return null
+    }
+
+    -- Check
+    if command == "check" {
+        if len(cli_args) < 2 {
+            show red("Usage: clarity check <file.clarity> [--types]")
+            exit(1)
+        }
+        let type_check = contains(cli_args, "--types")
+        check_file(cli_args[1], type_check)
+        return null
+    }
+
+    -- Tokens
+    if command == "tokens" {
+        if len(cli_args) < 2 {
+            show red("Usage: clarity tokens <file.clarity>")
+            exit(1)
+        }
+        show_tokens(cli_args[1])
+        return null
+    }
+
+    -- AST
+    if command == "ast" {
+        if len(cli_args) < 2 {
+            show red("Usage: clarity ast <file.clarity>")
+            exit(1)
+        }
+        show_ast(cli_args[1])
+        return null
+    }
+
+    -- Init
+    if command == "init" {
+        do_init_package()
+        return null
+    }
+
+    -- Install
+    if command == "install" {
+        do_install_packages(cli_args)
+        return null
+    }
+
+    -- Publish
+    if command == "publish" {
+        do_publish()
+        return null
+    }
+
+    -- Search
+    if command == "search" {
+        do_search(cli_args)
+        return null
+    }
+
+    -- Info
+    if command == "info" {
+        do_info(cli_args)
+        return null
+    }
+
+    -- LSP
+    if command == "lsp" {
+        start_lsp()
+        return null
+    }
+
+    -- Lint (full 7-rule linter)
+    if command == "lint" {
+        do_lint(cli_args)
+        return null
+    }
+
+    -- Debug (self-hosted)
+    if command == "debug" {
+        if len(cli_args) < 2 {
+            show red("Usage: clarity debug <file.clarity>")
+            exit(1)
+        }
+        debug_file(cli_args[1])
+        return null
+    }
+
+    -- Profile (self-hosted)
+    if command == "profile" {
+        if len(cli_args) < 2 {
+            show red("Usage: clarity profile <file.clarity>")
+            exit(1)
+        }
+        profile_file(cli_args[1])
+        return null
+    }
+
+    -- Doc (self-hosted)
+    if command == "doc" {
+        do_doc(cli_args)
+        return null
+    }
+
+    -- Format (self-hosted)
+    if command == "fmt" {
+        do_fmt(cli_args)
+        return null
+    }
+
+    -- Test
+    if command == "test" {
+        do_test(cli_args)
+        return null
+    }
+
+    -- If the argument looks like a .clarity file, run it directly
+    if exists(command) and ends(command, ".clarity") {
+        run_file(command)
+        return null
+    }
+
+    -- Unknown command
+    show red("Unknown command: {command}")
+    show dim("Run 'clarity help' for usage.")
+    exit(1)
+}
+
+-- ── Lint command (full 7-rule linter) ──────────────────
+
+fn do_lint(cli_args) {
+    mut paths = []
+    mut i = 1
+    while i < len(cli_args) {
+        let arg = cli_args[i]
+        if not starts(arg, "--") { push(paths, arg) }
+        i += 1
+    }
+
+    if len(paths) == 0 {
+        show "Usage: clarity lint <file|dir>"
+        exit(1)
+    }
+
+    let files = _collect_clarity_files(paths)
+    mut total_issues = 0
+
+    for filepath in files {
+        try {
+            let source = read(filepath)
+            let diagnostics = lint_source(source, filepath)
+
+            if len(diagnostics) > 0 {
+                for d in diagnostics {
+                    mut color = yellow(upper(d["severity"]))
+                    if d["severity"] == "info" { color = cyan(upper(d["severity"])) }
+                    elif d["severity"] == "error" { color = red(upper(d["severity"])) }
+                    mut code_str = ""
+                    if d["code"] != null { code_str = " [" + d["code"] + "]" }
+                    mut loc = ""
+                    if d["line"] != null { loc = ":" + str(d["line"]) }
+                    show "  " + color + code_str + " " + filepath + loc + ": " + d["message"]
+                }
+                total_issues += len(diagnostics)
+            } else {
+                show green("  OK") + "  " + filepath
+            }
+        } catch e {
+            show red("  ERROR") + " " + filepath + ": " + str(e)
+            total_issues += 1
+        }
+    }
+
+    show ""
+    show "  " + str(len(files)) + " file(s) checked, " + str(total_issues) + " issue(s) found"
+
+    if total_issues > 0 { exit(1) }
+}
+
+-- ── Format command (full AST formatter) ─────────────────
+
+fn do_fmt(cli_args) {
+    let check_only = contains(cli_args, "--check")
+    let write_mode = contains(cli_args, "--write")
+
+    mut paths = []
+    mut i = 1
+    while i < len(cli_args) {
+        let arg = cli_args[i]
+        if not starts(arg, "--") { push(paths, arg) }
+        i += 1
+    }
+
+    if len(paths) == 0 {
+        show "Usage: clarity fmt <file|dir> [--check] [--write]"
+        exit(1)
+    }
+
+    let files = _collect_clarity_files(paths)
+    mut changed_count = 0
+
+    for filepath in files {
+        try {
+            let original = read(filepath)
+            let formatted = format_source(original, filepath)
+            let changed = formatted != original
+
+            if changed {
+                changed_count += 1
+                if check_only {
+                    show "  UNFORMATTED  " + filepath
+                } elif write_mode {
+                    write(filepath, formatted)
+                    show "  FORMATTED    " + filepath
+                } else {
+                    show formatted
+                }
+            } else {
+                if check_only or write_mode {
+                    show green("  OK") + "           " + filepath
+                }
+            }
+        } catch e {
+            show red("  ERROR") + "        " + filepath + ": " + str(e)
+        }
+    }
+
+    if check_only {
+        if changed_count > 0 {
+            show ""
+            show "  " + str(changed_count) + " file(s) need formatting"
+            exit(1)
+        } else {
+            show ""
+            show "  All " + str(len(files)) + " file(s) formatted correctly"
+        }
+    } elif write_mode {
+        show ""
+        show green("  " + str(len(files)) + " file(s) processed")
+    }
+}
+
+-- ── Doc command (self-hosted docgen) ────────────────────
+
+fn do_doc(cli_args) {
+    if len(cli_args) < 2 {
+        show red("Usage: clarity doc <file|dir> [--md|--json] [-o output]")
+        exit(1)
+    }
+
+    let target = cli_args[1]
+
+    -- Determine format
+    mut fmt = "terminal"
+    if contains(cli_args, "--md") { fmt = "markdown" }
+    elif contains(cli_args, "--json") { fmt = "json" }
+
+    -- Output path
+    mut output_path = null
+    mut i = 0
+    while i < len(cli_args) {
+        if cli_args[i] == "-o" and i + 1 < len(cli_args) {
+            output_path = cli_args[i + 1]
+        }
+        i += 1
+    }
+
+    if _is_dir(target) {
+        -- Generate docs for all .clarity files in directory
+        let files = _collect_clarity_files([target])
+        mut all_output = []
+        for filepath in files {
+            try {
+                let source = read(filepath)
+                let result = generate_docs(source, filepath, fmt)
+                push(all_output, result)
+            } catch e {
+                show red("  ERROR") + " " + filepath + ": " + str(e)
+            }
+        }
+        let combined = join(all_output, "\n")
+        if output_path != null {
+            write(output_path, combined)
+            show green("  Documentation written to " + output_path)
+        } else {
+            show combined
+        }
+    } else {
+        if not exists(target) {
+            show red("  >> File not found: " + target)
+            exit(1)
+        }
+        let source = read(target)
+        let result = generate_docs(source, target, fmt)
+        if output_path != null {
+            write(output_path, result)
+            show green("  Documentation written to " + output_path)
+        } else {
+            show result
+        }
+    }
+}
+
+-- ── Test command ────────────────────────────────────────
+
+fn do_test(cli_args) {
+    let verbose = contains(cli_args, "--verbose") or contains(cli_args, "-v")
+
+    mut paths = []
+    mut i = 1
+    while i < len(cli_args) {
+        let arg = cli_args[i]
+        if not starts(arg, "--") and not starts(arg, "-v") {
+            push(paths, arg)
+        }
+        i += 1
+    }
+
+    if len(paths) == 0 {
+        paths = ["stdlib"]
+    }
+
+    -- Collect test files
+    mut test_files = []
+    for p in paths {
+        if exists(p) and ends(p, ".clarity") {
+            push(test_files, p)
+        } else {
+            let find_result = exec_full("find " + _quote(p) + " -name 'test_*.clarity' -type f 2>/dev/null | sort")
+            let found = split(trim(find_result.stdout), "\n")
+            for f in found {
+                if len(trim(f)) > 0 {
+                    push(test_files, trim(f))
+                }
+            }
+        }
+    }
+
+    if len(test_files) == 0 {
+        show "  No test files found (looking for test_*.clarity)"
+        exit(1)
+    }
+
+    show ""
+    show "  Running " + str(len(test_files)) + " test file(s)..."
+    show ""
+
+    mut passed = 0
+    mut failed = 0
+
+    for filepath in test_files {
+        try {
+            let source = read(filepath)
+            let tokens = tokenize(source, filepath)
+            let tree = parse(tokens, source)
+            let interp = Interpreter(null, _dirname(_abspath(filepath)))
+            interp.run(tree)
+            passed += 1
+            show green("  PASS") + "  " + filepath
+        } catch e {
+            failed += 1
+            show red("  FAIL") + "  " + filepath
+            if verbose {
+                show "        " + str(e)
+            }
+        }
+    }
+
+    let total = passed + failed
+    show ""
+    show "  " + str(passed) + " passed, " + str(failed) + " failed / " + str(total) + " total"
+    show ""
+
+    if failed > 0 { exit(1) }
+}
+
+-- ── Run ─────────────────────────────────────────────────
+
+main()

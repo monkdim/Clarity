@@ -1,0 +1,194 @@
+-- Clarity Date/Time — date, time, and duration handling.
+-- Standard library module for temporal operations.
+-- Uses system `date` command for platform-compatible behavior.
+
+-- ── Duration ──────────────────────────────────────────────
+-- Represents a time interval in seconds.
+
+class Duration {
+    fn init(seconds) {
+        this.total_seconds = seconds
+    }
+
+    fn days() { return floor(this.total_seconds / 86400) }
+    fn hours() { return floor((this.total_seconds % 86400) / 3600) }
+    fn minutes() { return floor((this.total_seconds % 3600) / 60) }
+    fn seconds() { return this.total_seconds % 60 }
+
+    fn in_days() { return this.total_seconds / 86400 }
+    fn in_hours() { return this.total_seconds / 3600 }
+    fn in_minutes() { return this.total_seconds / 60 }
+    fn in_seconds() { return this.total_seconds }
+    fn in_millis() { return this.total_seconds * 1000 }
+
+    fn add(other) { return Duration(this.total_seconds + other.total_seconds) }
+    fn subtract(other) { return Duration(this.total_seconds - other.total_seconds) }
+    fn multiply(n) { return Duration(this.total_seconds * n) }
+
+    fn to_string() {
+        let d = this.days()
+        let h = this.hours()
+        let m = this.minutes()
+        let s = round(this.seconds())
+        mut parts = []
+        if d > 0 { push(parts, str(d) + "d") }
+        if h > 0 { push(parts, str(h) + "h") }
+        if m > 0 { push(parts, str(m) + "m") }
+        if s > 0 or len(parts) == 0 { push(parts, str(s) + "s") }
+        return join(parts, " ")
+    }
+}
+
+-- Duration constructors
+fn from_seconds(n) { return Duration(n) }
+fn from_minutes(n) { return Duration(n * 60) }
+fn from_hours(n) { return Duration(n * 3600) }
+fn from_days(n) { return Duration(n * 86400) }
+fn from_millis(n) { return Duration(n / 1000) }
+
+-- ── DateTime ──────────────────────────────────────────────
+-- Represents a specific point in time.
+
+class DateTime {
+    fn init(year, month, day, hour, minute, second) {
+        this.year = year
+        this.month = month
+        this.day = day
+        this.hour = if hour == null { 0 } else { hour }
+        this.minute = if minute == null { 0 } else { minute }
+        this.second = if second == null { 0 } else { second }
+        this._timestamp = null
+    }
+
+    fn timestamp() {
+        if this._timestamp != null { return this._timestamp }
+        let date_str = this.format("YYYY-MM-DD HH:mm:ss")
+        let result = exec_full("date -d '" + date_str + "' +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' '" + date_str + "' +%s 2>/dev/null")
+        this._timestamp = int(trim(result.stdout))
+        return this._timestamp
+    }
+
+    fn format(pattern) {
+        mut result = pattern
+        result = replace(result, "YYYY", pad_left(str(this.year), 4, "0"))
+        result = replace(result, "MM", pad_left(str(this.month), 2, "0"))
+        result = replace(result, "DD", pad_left(str(this.day), 2, "0"))
+        result = replace(result, "HH", pad_left(str(this.hour), 2, "0"))
+        result = replace(result, "mm", pad_left(str(this.minute), 2, "0"))
+        result = replace(result, "ss", pad_left(str(this.second), 2, "0"))
+        return result
+    }
+
+    fn iso() {
+        return this.format("YYYY-MM-DD") + "T" + this.format("HH:mm:ss") + "Z"
+    }
+
+    fn date_string() {
+        return this.format("YYYY-MM-DD")
+    }
+
+    fn time_string() {
+        return this.format("HH:mm:ss")
+    }
+
+    fn add_duration(duration) {
+        let ts = this.timestamp() + duration.total_seconds
+        return from_timestamp(ts)
+    }
+
+    fn subtract_duration(duration) {
+        let ts = this.timestamp() - duration.total_seconds
+        return from_timestamp(ts)
+    }
+
+    fn diff(other) {
+        let d = abs(this.timestamp() - other.timestamp())
+        return Duration(d)
+    }
+
+    fn is_before(other) { return this.timestamp() < other.timestamp() }
+    fn is_after(other) { return this.timestamp() > other.timestamp() }
+    fn is_equal(other) { return this.timestamp() == other.timestamp() }
+
+    fn day_of_week() {
+        let date_str = this.format("YYYY-MM-DD")
+        let result = exec_full("date -d '" + date_str + "' +%u 2>/dev/null || date -j -f '%Y-%m-%d' '" + date_str + "' +%u 2>/dev/null")
+        return int(trim(result.stdout))
+    }
+
+    fn day_name() {
+        let names = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        let dow = this.day_of_week()
+        if dow >= 1 and dow <= 7 { return names[dow] }
+        return "Unknown"
+    }
+
+    fn is_weekend() {
+        let dow = this.day_of_week()
+        return dow == 6 or dow == 7
+    }
+
+    fn is_leap_year() {
+        return (this.year % 4 == 0 and this.year % 100 != 0) or (this.year % 400 == 0)
+    }
+
+    fn days_in_month() {
+        let days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        if this.month == 2 and this.is_leap_year() { return 29 }
+        return days[this.month]
+    }
+
+    fn to_string() {
+        return this.format("YYYY-MM-DD HH:mm:ss")
+    }
+}
+
+-- ── Constructors ──────────────────────────────────────────
+
+fn now() {
+    let result = exec_full("date '+%Y %m %d %H %M %S'")
+    let parts = split(trim(result.stdout), " ")
+    return DateTime(
+        int(parts[0]), int(parts[1]), int(parts[2]),
+        int(parts[3]), int(parts[4]), int(parts[5])
+    )
+}
+
+fn today() {
+    let n = now()
+    return DateTime(n.year, n.month, n.day, 0, 0, 0)
+}
+
+fn from_timestamp(ts) {
+    let result = exec_full("date -d @" + str(ts) + " '+%Y %m %d %H %M %S' 2>/dev/null || date -r " + str(ts) + " '+%Y %m %d %H %M %S' 2>/dev/null")
+    let parts = split(trim(result.stdout), " ")
+    return DateTime(
+        int(parts[0]), int(parts[1]), int(parts[2]),
+        int(parts[3]), int(parts[4]), int(parts[5])
+    )
+}
+
+fn from_iso(iso_string) {
+    -- Parse "YYYY-MM-DDTHH:mm:ssZ" or "YYYY-MM-DD"
+    mut s = replace(iso_string, "T", " ")
+    s = replace(s, "Z", "")
+    let date_part = split(s, " ")[0]
+    let dp = split(date_part, "-")
+    mut hp = [0, 0, 0]
+    if contains(s, " ") {
+        let time_part = split(s, " ")[1]
+        hp = split(time_part, ":")
+    }
+    return DateTime(
+        int(dp[0]), int(dp[1]), int(dp[2]),
+        int(hp[0]), int(hp[1]), int(hp[2])
+    )
+}
+
+fn date(year, month, day) {
+    return DateTime(year, month, day, 0, 0, 0)
+}
+
+fn datetime(year, month, day, hour, minute, second) {
+    return DateTime(year, month, day, hour, minute, second)
+}

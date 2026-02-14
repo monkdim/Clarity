@@ -1,0 +1,96 @@
+{
+  "name": "clarity-lang",
+  "displayName": "Clarity Language",
+  "description": "Syntax highlighting, LSP integration, and snippets for the Clarity programming language",
+  "version": "0.5.0",
+  "publisher": "clarity-lang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages", "Snippets", "Linters"],
+  "activationEvents": [
+    "onLanguage:clarity"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "clarity",
+        "aliases": ["Clarity", "clarity"],
+        "extensions": [".clarity"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/clarity-light.png",
+          "dark": "./icons/clarity-dark.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "clarity",
+        "scopeName": "source.clarity",
+        "path": "./syntaxes/clarity.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "clarity",
+        "path": "./snippets/clarity.json"
+      }
+    ],
+    "configuration": {
+      "title": "Clarity",
+      "properties": {
+        "clarity.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable the Clarity Language Server"
+        },
+        "clarity.lsp.path": {
+          "type": "string",
+          "default": "clarity",
+          "description": "Path to the Clarity binary for LSP"
+        },
+        "clarity.format.onSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Format files on save using clarity fmt"
+        },
+        "clarity.lint.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable linting via clarity lint"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "clarity.run",
+        "title": "Clarity: Run Current File"
+      },
+      {
+        "command": "clarity.check",
+        "title": "Clarity: Check Syntax"
+      },
+      {
+        "command": "clarity.format",
+        "title": "Clarity: Format File"
+      },
+      {
+        "command": "clarity.lint",
+        "title": "Clarity: Lint File"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0",
+    "vscode-languageclient": "^9.0.0"
+  }
+}

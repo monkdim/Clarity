@@ -1,0 +1,43 @@
+-- File I/O in Clarity
+-- Read, write, and process files
+
+-- Write a file
+write("example_output.txt", "Hello from Clarity!\nLine 2\nLine 3\n")
+show "File written."
+
+-- Read it back
+let content = read("example_output.txt")
+show "File contents:"
+show content
+
+-- Read as lines
+let file_lines = lines("example_output.txt")
+show "Number of lines:", len(file_lines)
+for line in file_lines {
+    show "  | {line}"
+}
+
+-- Append to file
+append("example_output.txt", "Line 4 — appended!\n")
+show "After append:", read("example_output.txt")
+
+-- Check if file exists
+show "File exists:", exists("example_output.txt")
+show "Missing file:", exists("nope.txt")
+
+-- Process a CSV-like format
+let csv = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago"
+write("people.csv", csv)
+
+let rows = lines("people.csv")
+let header = rows[0].split(",")
+show "Columns:", header
+
+for i in 1..len(rows) {
+    let fields = rows[i].split(",")
+    show "  {fields[0]} is {fields[1]} from {fields[2]}"
+}
+
+-- Clean up
+exec("rm -f example_output.txt people.csv")
+show "Cleaned up temp files."

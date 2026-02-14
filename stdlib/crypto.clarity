@@ -1,0 +1,171 @@
+-- Clarity Crypto — hashing, HMAC, random bytes, and UUID generation.
+-- Standard library module for cryptographic operations.
+-- Delegates to system tools (openssl, /dev/urandom) for real crypto.
+
+-- ── Hashing ───────────────────────────────────────────────
+
+fn sha256(input) {
+    let result = exec_full("echo -n " + _quote(input) + " | sha256sum 2>/dev/null || echo -n " + _quote(input) + " | shasum -a 256 2>/dev/null")
+    let output = trim(result.stdout)
+    -- sha256sum outputs: "hash  -" or "hash  filename"
+    let parts = split(output, " ")
+    return parts[0]
+}
+
+fn sha512(input) {
+    let result = exec_full("echo -n " + _quote(input) + " | sha512sum 2>/dev/null || echo -n " + _quote(input) + " | shasum -a 512 2>/dev/null")
+    let output = trim(result.stdout)
+    let parts = split(output, " ")
+    return parts[0]
+}
+
+fn sha1(input) {
+    let result = exec_full("echo -n " + _quote(input) + " | sha1sum 2>/dev/null || echo -n " + _quote(input) + " | shasum 2>/dev/null")
+    let output = trim(result.stdout)
+    let parts = split(output, " ")
+    return parts[0]
+}
+
+fn md5(input) {
+    let result = exec_full("echo -n " + _quote(input) + " | md5sum 2>/dev/null || md5 -q -s " + _quote(input) + " 2>/dev/null")
+    let output = trim(result.stdout)
+    let parts = split(output, " ")
+    return parts[0]
+}
+
+fn hash_file(path, algorithm) {
+    mut cmd = "sha256sum"
+    if algorithm == "sha512" { cmd = "sha512sum" }
+    elif algorithm == "sha1" { cmd = "sha1sum" }
+    elif algorithm == "md5" { cmd = "md5sum" }
+
+    let result = exec_full(cmd + " " + _quote(path) + " 2>/dev/null")
+    let output = trim(result.stdout)
+    let parts = split(output, " ")
+    return parts[0]
+}
+
+-- ── HMAC ──────────────────────────────────────────────────
+
+fn hmac_sha256(key, message) {
+    let result = exec_full("echo -n " + _quote(message) + " | openssl dgst -sha256 -hmac " + _quote(key) + " 2>/dev/null")
+    let output = trim(result.stdout)
+    -- openssl outputs: "(stdin)= hash" or just "hash"
+    if contains(output, "= ") {
+        let idx = index_of(output, "= ")
+        return substring(output, idx + 2, len(output))
+    }
+    return output
+}
+
+fn hmac_sha512(key, message) {
+    let result = exec_full("echo -n " + _quote(message) + " | openssl dgst -sha512 -hmac " + _quote(key) + " 2>/dev/null")
+    let output = trim(result.stdout)
+    if contains(output, "= ") {
+        let idx = index_of(output, "= ")
+        return substring(output, idx + 2, len(output))
+    }
+    return output
+}
+
+-- ── Random bytes ──────────────────────────────────────────
+
+fn random_bytes(n) {
+    let result = exec_full("head -c " + str(n) + " /dev/urandom | xxd -p | tr -d '\\n' 2>/dev/null")
+    return trim(result.stdout)
+}
+
+fn random_hex(n) {
+    return random_bytes(n)
+}
+
+fn random_int(min_val, max_val) {
+    let range = max_val - min_val + 1
+    let result = exec_full("awk 'BEGIN{srand(); print int(rand()*" + str(range) + ")+" + str(min_val) + "}' 2>/dev/null")
+    return int(trim(result.stdout))
+}
+
+fn random_string(length, charset) {
+    mut chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    if charset != null { chars = charset }
+    let result = exec_full("head -c 256 /dev/urandom | tr -dc " + _quote(chars) + " | head -c " + str(length) + " 2>/dev/null")
+    return trim(result.stdout)
+}
+
+-- ── UUID ──────────────────────────────────────────────────
+
+fn uuid4() {
+    -- Try system UUID generator first
+    let result = exec_full("cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null")
+    let output = trim(result.stdout)
+    if len(output) >= 36 { return lower(output) }
+    -- Fallback: generate from random bytes
+    let hex = random_bytes(16)
+    if len(hex) >= 32 {
+        return substring(hex, 0, 8) + "-" + substring(hex, 8, 12) + "-4" + substring(hex, 13, 16) + "-" + substring(hex, 16, 20) + "-" + substring(hex, 20, 32)
+    }
+    return hex
+}
+
+fn uuid_timestamp() {
+    -- v1-like: time-based, less random
+    let ts = str(round(time() * 1000000))
+    let rand = random_bytes(6)
+    let h = sha256(ts + rand)
+    return substring(h, 0, 8) + "-" + substring(h, 8, 12) + "-1" + substring(h, 13, 16) + "-" + substring(h, 16, 20) + "-" + substring(h, 20, 32)
+}
+
+-- ── Base64 ────────────────────────────────────────────────
+-- (encode64/decode64 already in builtins, but adding file variants)
+
+fn base64_encode_file(path) {
+    let result = exec_full("base64 " + _quote(path) + " 2>/dev/null || openssl base64 -in " + _quote(path) + " 2>/dev/null")
+    return replace(trim(result.stdout), "\n", "")
+}
+
+fn base64_decode_to_file(b64_string, output_path) {
+    let result = exec_full("echo " + _quote(b64_string) + " | base64 -d > " + _quote(output_path) + " 2>/dev/null || echo " + _quote(b64_string) + " | openssl base64 -d > " + _quote(output_path) + " 2>/dev/null")
+    return result.exit_code == 0
+}
+
+-- ── Constant-time comparison ──────────────────────────────
+
+fn secure_compare(a, b) {
+    if len(a) != len(b) { return false }
+    mut result = 0
+    mut i = 0
+    while i < len(a) {
+        if char_at(a, i) != char_at(b, i) {
+            result = result + 1
+        }
+        i += 1
+    }
+    return result == 0
+}
+
+-- ── Password hashing (basic) ──────────────────────────────
+
+fn hash_password(password, salt) {
+    mut s = salt
+    if s == null {
+        s = random_hex(16)
+    }
+    let hashed = sha256(s + ":" + password)
+    return s + ":" + hashed
+}
+
+fn verify_password(password, stored) {
+    let parts = split(stored, ":")
+    if len(parts) != 2 { return false }
+    let s = parts[0]
+    let expected = parts[1]
+    let actual = sha256(s + ":" + password)
+    return secure_compare(actual, expected)
+}
+
+-- ── Helpers ───────────────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}

@@ -1,0 +1,67 @@
+-- Pattern Matching and Destructuring in Clarity
+
+-- Destructuring
+let [first, second, ...rest] = [10, 20, 30, 40, 50]
+show "First: {first}, Second: {second}, Rest: {rest}"
+
+let {name, age} = {name: "Alice", age: 30, city: "NYC"}
+show "{name} is {age} years old"
+
+-- Multi-assignment (swap)
+mut a = 1
+mut b = 2
+show "Before swap: a={a}, b={b}"
+a, b = b, a
+show "After swap: a={a}, b={b}"
+
+-- Pattern matching
+fn classify(value) {
+    match value {
+        when 0 { return "zero" }
+        when 1 { return "one" }
+        when 2 { return "two" }
+        else { return "many ({value})" }
+    }
+}
+
+for n in 0..5 {
+    show "{n} -> {classify(n)}"
+}
+
+-- Match with types
+fn describe(x) {
+    match type(x) {
+        when "int" { show "{x} is an integer" }
+        when "string" { show '"{x}" is a string' }
+        when "list" { show "{x} is a list with {len(x)} items" }
+        else { show "{x} is a {type(x)}" }
+    }
+}
+
+describe(42)
+describe("hello")
+describe([1, 2, 3])
+describe(true)
+
+-- Null safety
+let config = {theme: "dark", font_size: 14}
+let theme = config?.theme ?? "light"
+let lang = config?.language ?? "en"
+show "Theme: {theme}, Language: {lang}"
+
+-- Error handling
+fn safe_divide(a, b) {
+    if b == 0 {
+        throw "Division by zero"
+    }
+    return a / b
+}
+
+try {
+    show safe_divide(10, 3)
+    show safe_divide(10, 0)
+} catch e {
+    show "Caught: {e}"
+} finally {
+    show "Done with math"
+}

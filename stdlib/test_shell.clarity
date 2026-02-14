@@ -1,0 +1,254 @@
+-- Test: Clarity Shell — Phase 27
+-- Tests process execution, shell parsing, pipes, redirections, terminal UI.
+
+from "process.clarity" import run, run_output, which, command_exists, pipe, get_path, get_env_map, ls, home_dir, _quote, pwd
+from "shell.clarity" import tokenize_shell, expand_vars, execute, parse_simple_command, expand_tilde, SH_WORD, SH_PIPE, SH_AND, SH_OR, SH_SEMI, SH_REDIR_OUT, SH_REDIR_APPEND, SH_REDIR_IN, SH_EOF
+from "terminal.clarity" import red, green, yellow, blue, cyan, bold, dim, underline, italic, columns, rows, progress_bar, box, hr, ESC
+
+mut passed = 0
+mut failed = 0
+mut total = 0
+
+fn assert_eq(name, actual, expected) {
+    total += 1
+    if actual == expected {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — expected {expected}, got {actual}"
+        failed += 1
+    }
+}
+
+fn assert_true(name, value) {
+    total += 1
+    if value {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — expected true"
+        failed += 1
+    }
+}
+
+fn assert_false(name, value) {
+    total += 1
+    if not value {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — expected false"
+        failed += 1
+    }
+}
+
+fn assert_contains(name, text, needle) {
+    total += 1
+    if contains(str(text), needle) {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — '{needle}' not found in '{text}'"
+        failed += 1
+    }
+}
+
+fn assert_no_error(name, f) {
+    total += 1
+    try {
+        f()
+        show "  [pass] {name}"
+        passed += 1
+    } catch e {
+        show "  [FAIL] {name} — {e}"
+        failed += 1
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════
+show "=== Phase 27: Clarity Terminal (Shell) Tests ==="
+show ""
+
+-- ── Process Execution ────────────────────────────────────
+show "-- Process Execution --"
+
+let echo_result = run("echo hello")
+assert_eq("run echo", trim(echo_result.stdout), "hello")
+assert_eq("run exit code", echo_result.exit_code, 0)
+assert_true("run success", echo_result.success)
+
+let fail_result = run("false")
+assert_false("run failure", fail_result.success)
+assert_eq("run failure exit code", fail_result.exit_code, 1)
+
+let output = run_output("echo world")
+assert_eq("run_output echo", output, "world")
+
+let multi_result = run("echo line1 && echo line2")
+assert_contains("run multi command", multi_result.stdout, "line1")
+assert_contains("run multi command line2", multi_result.stdout, "line2")
+
+-- ── Which / command_exists ───────────────────────────────
+show ""
+show "-- Which / Command Exists --"
+
+let bash_path = which("bash")
+assert_true("which bash", bash_path != null)
+assert_contains("which bash path", bash_path, "bash")
+
+assert_true("command_exists echo", command_exists("echo"))
+assert_false("command_exists nonexistent", command_exists("this_command_surely_does_not_exist_xyz"))
+
+-- ── Pipe execution ───────────────────────────────────────
+show ""
+show "-- Pipe Execution --"
+
+let pipe_result = pipe(["echo hello world", "wc -w"])
+assert_eq("pipe echo | wc -w", trim(pipe_result.stdout), "2")
+assert_true("pipe success", pipe_result.success)
+
+let pipe_result2 = pipe(["echo -e 'a\nb\nc'", "sort -r", "head -1"])
+assert_contains("pipe sort reverse", pipe_result2.stdout, "c")
+
+-- ── Environment helpers ──────────────────────────────────
+show ""
+show "-- Environment --"
+
+let path_dirs = get_path()
+assert_true("get_path non-empty", len(path_dirs) > 0)
+assert_true("get_path has /usr", some(path_dirs, fn(d) { return contains(d, "usr") }))
+
+let env_map = get_env_map()
+assert_true("get_env_map has PATH", has(env_map, "PATH"))
+assert_true("get_env_map has HOME", has(env_map, "HOME"))
+
+let home = home_dir()
+assert_true("home_dir non-empty", len(home) > 0)
+
+-- ── Shell Quoting ────────────────────────────────────────
+show ""
+show "-- Shell Quoting --"
+
+assert_eq("quote simple", _quote("hello"), "'hello'")
+assert_eq("quote with space", _quote("hello world"), "'hello world'")
+
+-- ── Directory listing ────────────────────────────────────
+show ""
+show "-- Directory Listing --"
+
+let files = ls(".")
+assert_true("ls non-empty", len(files) > 0)
+
+assert_eq("pwd returns string", type(pwd()), "string")
+assert_true("pwd non-empty", len(pwd()) > 0)
+
+-- ── Shell Tokenizer ─────────────────────────────────────
+show ""
+show "-- Shell Tokenizer --"
+
+let tokens1 = tokenize_shell("echo hello world")
+assert_eq("tokenize simple word count", len(tokens1), 4)  -- 3 words + EOF
+assert_eq("tokenize word 1", tokens1[0].value, "echo")
+assert_eq("tokenize word 2", tokens1[1].value, "hello")
+assert_eq("tokenize word 3", tokens1[2].value, "world")
+assert_eq("tokenize EOF", tokens1[3].type, SH_EOF)
+
+let tokens2 = tokenize_shell("ls | grep foo")
+assert_eq("tokenize pipe", tokens2[1].type, SH_PIPE)
+
+let tokens3 = tokenize_shell("echo ok && echo done")
+assert_eq("tokenize AND", tokens3[2].type, SH_AND)
+
+let tokens4 = tokenize_shell("echo fail || echo fallback")
+assert_eq("tokenize OR", tokens4[2].type, SH_OR)
+
+let tokens5 = tokenize_shell("echo hello > out.txt")
+assert_eq("tokenize redir out", tokens5[2].type, SH_REDIR_OUT)
+assert_eq("tokenize redir target", tokens5[3].value, "out.txt")
+
+let tokens6 = tokenize_shell("echo data >> log.txt")
+assert_eq("tokenize redir append", tokens6[2].type, SH_REDIR_APPEND)
+
+let tokens7 = tokenize_shell("cat < input.txt")
+assert_eq("tokenize redir in", tokens7[1].type, SH_REDIR_IN)
+
+-- Quoted strings
+let tokens8 = tokenize_shell("echo \"hello world\"")
+assert_eq("tokenize double quote", tokens8[1].value, "hello world")
+
+let tokens9 = tokenize_shell("echo 'no $expansion'")
+assert_eq("tokenize single quote", tokens9[1].value, "no $expansion")
+
+-- ── Environment Variable Expansion ───────────────────────
+show ""
+show "-- Env Var Expansion --"
+
+let vars = {"NAME": "clarity", "VERSION": "1.0"}
+assert_eq("expand $VAR", expand_vars("$NAME", vars), "clarity")
+assert_eq("expand ${VAR}", expand_vars("hello $\{NAME\}", vars), "hello clarity")
+assert_eq("expand multiple", expand_vars("$NAME v$VERSION", vars), "clarity v1.0")
+assert_eq("expand missing", expand_vars("$NOTSET", {}), "")
+
+-- Expand from actual environment
+let home_expanded = expand_vars("$HOME", {})
+assert_true("expand $HOME", len(home_expanded) > 0)
+
+-- ── Tilde Expansion ──────────────────────────────────────
+show ""
+show "-- Tilde Expansion --"
+
+let tilde_home = expand_tilde("~")
+assert_eq("tilde ~ expands", tilde_home, home_dir())
+
+let tilde_path = expand_tilde("~/projects")
+assert_true("tilde ~/path", ends(tilde_path, "/projects"))
+
+assert_eq("tilde no expand", expand_tilde("/usr/bin"), "/usr/bin")
+
+-- ── Shell Execute ────────────────────────────────────────
+show ""
+show "-- Shell Execute --"
+
+let exec1 = execute("echo hello", {})
+assert_eq("execute echo", trim(exec1.stdout), "hello")
+assert_true("execute success", exec1.success)
+
+let exec2 = execute("echo hello | tr 'h' 'H'", {})
+assert_eq("execute pipe", trim(exec2.stdout), "Hello")
+
+let exec3 = execute("echo ok && echo done", {})
+assert_contains("execute &&", exec3.stdout, "ok")
+assert_contains("execute && part2", exec3.stdout, "done")
+
+let exec4 = execute("false || echo fallback", {})
+assert_eq("execute ||", trim(exec4.stdout), "fallback")
+
+-- ── Terminal Colors ──────────────────────────────────────
+show ""
+show "-- Terminal UI --"
+
+assert_contains("red has escape", red("test"), ESC)
+assert_contains("green has escape", green("test"), ESC)
+assert_contains("bold has escape", bold("test"), ESC)
+assert_contains("dim has escape", dim("test"), ESC)
+
+-- Columns/rows return reasonable values
+let cols = columns()
+assert_true("columns > 0", cols > 0)
+let rws = rows()
+assert_true("rows > 0", rws > 0)
+
+-- Progress bar
+let pbar = progress_bar(50, 100, 20)
+assert_contains("progress bar has #", pbar, "#")
+assert_contains("progress bar has %", pbar, "50%")
+
+-- ═══════════════════════════════════════════════════════════
+show ""
+show "======================================="
+show "Results: {passed}/{total} passed, {failed} failed"
+if failed == 0 {
+    show "All tests passed!"
+} else {
+    show "{failed} test(s) FAILED"
+}

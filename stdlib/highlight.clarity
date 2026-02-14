@@ -1,0 +1,233 @@
+-- Clarity Syntax Highlighter — colorize source code using lexer tokens.
+-- Transforms raw Clarity source into ANSI-colored output for terminal display.
+
+from "lexer.clarity" import tokenize
+from "terminal.clarity" import bold, dim, red, green, yellow, blue, magenta, cyan, gray
+
+-- ── Token color mapping ─────────────────────────────────
+
+fn _token_color(token_type) {
+    -- Keywords (control flow)
+    if token_type == "IF" or token_type == "ELSE" or token_type == "ELIF" or
+       token_type == "FOR" or token_type == "WHILE" or token_type == "RETURN" or
+       token_type == "BREAK" or token_type == "CONTINUE" or
+       token_type == "TRY" or token_type == "CATCH" or token_type == "FINALLY" or
+       token_type == "MATCH" or token_type == "WHEN" or
+       token_type == "THROW" or token_type == "YIELD" or token_type == "AWAIT" {
+        return "keyword"
+    }
+    -- Declaration keywords
+    if token_type == "LET" or token_type == "MUT" or token_type == "FN" or
+       token_type == "CLASS" or token_type == "ENUM" or token_type == "INTERFACE" or
+       token_type == "IMPL" or token_type == "ASYNC" {
+        return "declaration"
+    }
+    -- Import keywords
+    if token_type == "IMPORT" or token_type == "FROM" or token_type == "AS" {
+        return "import"
+    }
+    -- Logical operators
+    if token_type == "AND" or token_type == "OR" or token_type == "NOT" or token_type == "IN" or token_type == "IS" {
+        return "operator"
+    }
+    -- Builtins
+    if token_type == "SHOW" or token_type == "ASK" {
+        return "builtin"
+    }
+    -- Literals
+    if token_type == "NUMBER" { return "number" }
+    if token_type == "STRING" or token_type == "RAW_STRING" { return "string" }
+    if token_type == "TRUE" or token_type == "FALSE" { return "boolean" }
+    if token_type == "NULL" { return "null" }
+    if token_type == "THIS" { return "this" }
+    -- Operators
+    if token_type == "PLUS" or token_type == "MINUS" or token_type == "STAR" or
+       token_type == "SLASH" or token_type == "PERCENT" or token_type == "POWER" or
+       token_type == "EQ" or token_type == "NEQ" or token_type == "LT" or
+       token_type == "GT" or token_type == "LTE" or token_type == "GTE" or
+       token_type == "PIPE" or token_type == "FAT_ARROW" or token_type == "ARROW" or
+       token_type == "DOTDOT" or token_type == "SPREAD" or
+       token_type == "QUESTION" or token_type == "QUESTION_DOT" or token_type == "QUESTION_QUESTION" {
+        return "operator"
+    }
+    -- Assignment
+    if token_type == "ASSIGN" or token_type == "PLUS_ASSIGN" or
+       token_type == "MINUS_ASSIGN" or token_type == "STAR_ASSIGN" or
+       token_type == "SLASH_ASSIGN" {
+        return "operator"
+    }
+    -- Identifier
+    if token_type == "IDENTIFIER" { return "identifier" }
+    -- Delimiters
+    if token_type == "LPAREN" or token_type == "RPAREN" or
+       token_type == "LBRACE" or token_type == "RBRACE" or
+       token_type == "LBRACKET" or token_type == "RBRACKET" or
+       token_type == "COMMA" or token_type == "COLON" or
+       token_type == "DOT" or token_type == "AT" {
+        return "punctuation"
+    }
+    return "default"
+}
+
+fn _apply_color(text, color_name) {
+    if color_name == "keyword" { return bold(magenta(text)) }
+    if color_name == "declaration" { return bold(blue(text)) }
+    if color_name == "import" { return cyan(text) }
+    if color_name == "operator" { return yellow(text) }
+    if color_name == "builtin" { return bold(cyan(text)) }
+    if color_name == "number" { return green(text) }
+    if color_name == "string" { return green(text) }
+    if color_name == "boolean" { return bold(yellow(text)) }
+    if color_name == "null" { return bold(red(text)) }
+    if color_name == "this" { return bold(magenta(text)) }
+    if color_name == "identifier" { return text }
+    if color_name == "punctuation" { return dim(text) }
+    if color_name == "comment" { return gray(text) }
+    return text
+}
+
+-- ── Public API ──────────────────────────────────────────
+
+fn highlight(source, ...rest) {
+    -- Highlight Clarity source code with ANSI colors.
+    -- Returns the colorized string.
+    let filename = if len(rest) > 0 { rest[0] } else { "<input>" }
+
+    try {
+        let tokens = tokenize(source, filename)
+        return _highlight_from_tokens(source, tokens)
+    } catch e {
+        -- If lexing fails, return source with comment coloring only
+        return _highlight_comments_only(source)
+    }
+}
+
+fn highlight_line(line) {
+    -- Highlight a single line of Clarity code.
+    return highlight(line, "<repl>")
+}
+
+fn _highlight_from_tokens(source, tokens) {
+    -- Reconstruct the source with ANSI colors inserted at token boundaries
+    let lines = split(source, "\n")
+    mut result_lines = []
+
+    for line_text in lines {
+        push(result_lines, "")
+    }
+
+    -- Track which characters are colored
+    mut colored = []
+    for line_text in lines {
+        mut line_colors = []
+        mut ci = 0
+        while ci < len(line_text) {
+            push(line_colors, null)
+            ci += 1
+        }
+        push(colored, line_colors)
+    }
+
+    -- Assign colors from tokens
+    for tok in tokens {
+        if tok.type == "NEWLINE" or tok.type == "EOF" { continue }
+        let line_idx = tok.line - 1
+        let col_idx = tok.column - 1
+        if line_idx < 0 or line_idx >= len(lines) { continue }
+
+        let color = _token_color(tok.type)
+        let tok_text = str(tok.value)
+        mut tok_len = len(tok_text)
+
+        -- Strings include quotes in source but not in token value
+        if tok.type == "STRING" or tok.type == "RAW_STRING" {
+            tok_len = tok_len + 2
+        }
+
+        -- Mark character range
+        mut ci = col_idx
+        while ci < col_idx + tok_len and ci < len(colored[line_idx]) {
+            colored[line_idx][ci] = color
+            ci += 1
+        }
+    }
+
+    -- Build output with colors
+    mut output_lines = []
+    mut li = 0
+    while li < len(lines) {
+        let line_text = lines[li]
+        let line_colors = colored[li]
+        mut output = ""
+        mut ci = 0
+
+        -- Check if line has a comment
+        mut comment_start = -1
+        mut in_str = false
+        mut si = 0
+        while si < len(line_text) {
+            if line_text[si] == "\"" and not in_str {
+                in_str = true
+            } elif line_text[si] == "\"" and in_str {
+                in_str = false
+            } elif not in_str and si + 1 < len(line_text) and line_text[si] == "-" and line_text[si + 1] == "-" {
+                comment_start = si
+                break
+            } elif not in_str and si + 1 < len(line_text) and line_text[si] == "/" and line_text[si + 1] == "/" {
+                comment_start = si
+                break
+            }
+            si += 1
+        }
+
+        while ci < len(line_text) {
+            if comment_start >= 0 and ci >= comment_start {
+                -- Rest of line is comment
+                output = output + _apply_color(substring(line_text, ci, len(line_text)), "comment")
+                break
+            }
+
+            let color = if ci < len(line_colors) and line_colors[ci] != null { line_colors[ci] } else { "default" }
+
+            -- Group consecutive chars of same color
+            mut end = ci + 1
+            while end < len(line_text) and (comment_start < 0 or end < comment_start) {
+                let next_color = if end < len(line_colors) and line_colors[end] != null { line_colors[end] } else { "default" }
+                if next_color != color { break }
+                end += 1
+            }
+
+            let chunk = substring(line_text, ci, end)
+            output = output + _apply_color(chunk, color)
+            ci = end
+        }
+
+        push(output_lines, output)
+        li += 1
+    }
+
+    return join(output_lines, "\n")
+}
+
+fn _highlight_comments_only(source) {
+    -- Fallback: only highlight comments
+    let lines = split(source, "\n")
+    mut result = []
+    for line_text in lines {
+        let trimmed = trim(line_text)
+        if starts(trimmed, "--") or starts(trimmed, "//") {
+            push(result, gray(line_text))
+        } else {
+            push(result, line_text)
+        }
+    }
+    return join(result, "\n")
+}
+
+-- ── Themed highlight (alternative color schemes) ────────
+
+fn highlight_themed(source, theme) {
+    -- Currently just uses default theme
+    -- Future: support "dark", "light", "monokai", etc.
+    return highlight(source)
+}

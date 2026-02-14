@@ -1,0 +1,585 @@
+-- Clarity Language Server Protocol (LSP) implementation
+-- Self-hosted port of clarity/lsp.py, written in Clarity itself.
+--
+-- Provides real-time diagnostics (syntax errors) for editors like VS Code.
+-- Communicates over stdin/stdout using JSON-RPC 2.0.
+--
+-- Usage:
+--   clarity stdlib/lsp.clarity     Start the language server
+--
+-- The transport layer reads JSON-RPC messages from stdin and writes to stdout.
+-- Since Clarity does not provide raw binary stdin/stdout, we use exec_full
+-- for reading content-length-delimited input and print for output.
+-- For a production deployment, a thin Python wrapper can bridge the transport.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "tokens.clarity" import KEYWORDS
+
+-- ── Constants ────────────────────────────────────────────
+
+let LSP_VERSION = "0.1.0"
+let LSP_NAME = "clarity-lsp"
+
+-- Diagnostic severity constants (LSP spec)
+let SEVERITY_ERROR   = 1
+let SEVERITY_WARNING = 2
+let SEVERITY_INFO    = 3
+let SEVERITY_HINT    = 4
+
+-- Completion item kind constants (LSP spec)
+let COMPLETION_FUNCTION = 3
+let COMPLETION_KEYWORD  = 14
+
+-- ── Builtin documentation ────────────────────────────────
+
+let BUILTINS_INFO = {
+    show: "**show** -- Print values to output\n```\nshow value1, value2\n```",
+    ask: "**ask(prompt)** -- Read input from the user\n```\nlet name = ask(\"Name: \")\n```",
+    let: "**let** -- Declare an immutable variable\n```\nlet name = value\n```",
+    mut: "**mut** -- Declare a mutable variable\n```\nmut counter = 0\n```",
+    fn: "**fn** -- Declare a function\n```\nfn name(params) \u007b body \u007d\n```",
+    class: "**class** -- Declare a class\n```\nclass Name \u007b fn init() \u007b ... \u007d \u007d\n```",
+    map: "**map(list, fn)** -- Transform each element\n```\nmap([1,2,3], x => x * 2)\n```",
+    filter: "**filter(list, fn)** -- Keep matching elements\n```\nfilter([1,2,3,4], x => x > 2)\n```",
+    reduce: "**reduce(list, fn, initial)** -- Fold list to single value",
+    each: "**each(list, fn)** -- Iterate over elements for side effects",
+    find: "**find(list, fn)** -- Find first matching element",
+    every: "**every(list, fn)** -- Check if all elements match",
+    some: "**some(list, fn)** -- Check if any element matches",
+    len: "**len(value)** -- Get length of string, list, or map",
+    type: "**type(value)** -- Get type name as string",
+    range: "**range(n)** or **range(start, end)** -- Create a list of numbers",
+    push: "**push(list, item)** -- Add item to end of list",
+    pop: "**pop(list)** -- Remove and return last item from list",
+    sort: "**sort(list)** -- Return sorted copy of list",
+    reverse: "**reverse(list)** -- Return reversed copy of list",
+    keys: "**keys(map)** -- Get list of map keys",
+    values: "**values(map)** -- Get list of map values",
+    entries: "**entries(map)** -- Get list of [key, value] pairs",
+    merge: "**merge(map1, map2)** -- Merge two maps",
+    has: "**has(map, key)** -- Check if map contains a key",
+    str: "**str(value)** -- Convert to string",
+    int: "**int(value)** -- Convert to integer",
+    float: "**float(value)** -- Convert to float",
+    bool: "**bool(value)** -- Convert to boolean",
+    split: "**split(str, sep)** -- Split string into list",
+    join: "**join(list, sep)** -- Join list into string",
+    replace: "**replace(str, old, new)** -- Replace occurrences in string",
+    trim: "**trim(str)** -- Remove leading/trailing whitespace",
+    upper: "**upper(str)** -- Convert to uppercase",
+    lower: "**lower(str)** -- Convert to lowercase",
+    contains: "**contains(str, sub)** -- Check if string contains substring",
+    starts: "**starts(str, prefix)** -- Check if string starts with prefix",
+    ends: "**ends(str, suffix)** -- Check if string ends with suffix",
+    abs: "**abs(n)** -- Absolute value",
+    round: "**round(n)** -- Round to nearest integer",
+    floor: "**floor(n)** -- Round down",
+    ceil: "**ceil(n)** -- Round up",
+    min: "**min(a, b)** -- Minimum of two values",
+    max: "**max(a, b)** -- Maximum of two values",
+    sum: "**sum(list)** -- Sum all elements in a list",
+    sqrt: "**sqrt(n)** -- Square root",
+    json_parse: "**json_parse(str)** -- Parse JSON string into a value",
+    json_string: "**json_string(value)** -- Convert value to JSON string",
+    read: "**read(path)** -- Read entire file contents as string",
+    write: "**write(path, content)** -- Write content to file",
+    fetch: "**fetch(url)** -- HTTP GET request, returns response map",
+    serve: "**serve(port, handler)** -- Start HTTP server on port",
+    exec: "**exec(cmd)** -- Run shell command, return stdout",
+    exec_full: "**exec_full(cmd)** -- Run shell command, return \u007bstdout, stderr, exit_code\u007d",
+    sleep: "**sleep(seconds)** -- Pause execution",
+    time: "**time()** -- Current Unix timestamp",
+    env: "**env(name, default)** -- Get environment variable",
+    exit: "**exit(code)** -- Exit the process"
+}
+
+-- Complete list of builtin function names for completions
+let BUILTIN_NAMES = [
+    "show", "ask", "len", "type", "str", "int", "float", "bool",
+    "map", "filter", "reduce", "each", "find", "every", "some",
+    "sort", "reverse", "push", "pop", "keys", "values", "entries",
+    "range", "join", "split", "replace", "trim", "upper", "lower",
+    "contains", "starts", "ends", "chars", "repeat", "pad_left", "pad_right",
+    "char_at", "char_code", "from_char_code", "index_of", "substring",
+    "is_digit", "is_alpha", "is_alnum", "is_space",
+    "abs", "round", "floor", "ceil", "min", "max", "sum", "sqrt",
+    "random", "sin", "cos", "tan", "log", "pow",
+    "read", "write", "append", "exists", "lines",
+    "exec", "exec_full", "exit", "sleep", "time", "env", "cwd", "args",
+    "fetch", "serve",
+    "json_parse", "json_string",
+    "hash", "encode64", "decode64",
+    "merge", "has", "flat", "zip", "unique", "set",
+    "compose", "tap", "error"
+]
+
+-- ── JSON-RPC Message Construction ────────────────────────
+
+fn make_response(id, result) {
+    -- Build a JSON-RPC 2.0 response message.
+    return {
+        jsonrpc: "2.0",
+        id: id,
+        result: result
+    }
+}
+
+fn make_error_response(id, code, message) {
+    -- Build a JSON-RPC 2.0 error response message.
+    return {
+        jsonrpc: "2.0",
+        id: id,
+        error: {
+            code: code,
+            message: message
+        }
+    }
+}
+
+fn make_notification(method, params) {
+    -- Build a JSON-RPC 2.0 notification (no id).
+    return {
+        jsonrpc: "2.0",
+        method: method,
+        params: params
+    }
+}
+
+-- ── JSON-RPC Transport ──────────────────────────────────
+
+fn send_message(msg) {
+    -- Serialize a JSON-RPC message and write it to stdout.
+    -- LSP uses Content-Length headers followed by the JSON body.
+    let body = json_string(msg)
+    let content_length = len(body)
+    -- Write the header and body as raw stdout.
+    -- We use print which writes to stdout with a newline, so we build
+    -- the full LSP frame. For true LSP compliance the output must be
+    -- exactly: "Content-Length: N\r\n\r\n<body>" with no trailing newline.
+    -- We use exec to write raw bytes without trailing newline.
+    let frame = "Content-Length: {content_length}\r\n\r\n{body}"
+    -- Write raw frame to stdout via a shell printf (avoids trailing newline)
+    let escaped = replace(replace(frame, "\\", "\\\\"), "'", "'\\''")
+    exec("printf '%s' '{escaped}'")
+}
+
+fn read_message() {
+    -- Read a JSON-RPC message from stdin.
+    -- Reads Content-Length header, then reads that many bytes of body.
+    -- Returns the parsed message map, or null on EOF/error.
+    --
+    -- We use a Python one-liner via exec_full to perform the binary
+    -- stdin read that Clarity's native I/O cannot do directly.
+    let read_script = "import sys, json; "
+        + "headers = {}; "
+        + "line = sys.stdin.buffer.readline(); "
+        + "[sys.exit(1) if not line else None]; "
+        + "exec('\\n'.join(["
+        + "'while line.strip():',"
+        + "'    if b\":\" in line:',"
+        + "'        k,_,v = line.decode().partition(\":\")',"
+        + "'        headers[k.strip()] = v.strip()',"
+        + "'    line = sys.stdin.buffer.readline()',"
+        + "])); "
+        + "cl = int(headers.get('Content-Length', 0)); "
+        + "body = sys.stdin.buffer.read(cl).decode() if cl > 0 else ''; "
+        + "print(body) if body else sys.exit(1)"
+
+    let result = exec_full("python3 -c \"{read_script}\"")
+    if result.exit_code != 0 {
+        return null
+    }
+    try {
+        return json_parse(trim(result.stdout))
+    } catch e {
+        return null
+    }
+}
+
+-- ── Diagnostics ─────────────────────────────────────────
+
+fn check_source(source, uri) {
+    -- Check source code for lexer/parser errors.
+    -- Returns a list of LSP diagnostic objects.
+    mut diagnostics = []
+
+    try {
+        let tokens = tokenize(source, uri)
+        parse(tokens, source)
+    } catch e {
+        -- Parse the error message to extract line and column info.
+        -- Clarity errors are strings like:
+        --   "LexerError: msg at line N, column M\n  source_line"
+        --   "ParseError: msg at line N, column M\n  source_line"
+        let err_str = str(e)
+
+        mut err_line = 0
+        mut err_col = 0
+        mut err_msg = err_str
+
+        -- Try to extract "at line N, column M" from the error
+        let line_idx = index_of(err_str, "at line ")
+        if line_idx >= 0 {
+            -- Extract the message before location info
+            let prefix_end = index_of(err_str, ": ")
+            if prefix_end >= 0 {
+                let after_prefix = substring(err_str, prefix_end + 2)
+                let at_idx = index_of(after_prefix, " at line ")
+                if at_idx >= 0 {
+                    err_msg = substring(after_prefix, 0, at_idx)
+                }
+            }
+
+            -- Extract line number
+            let after_line = substring(err_str, line_idx + 8)
+            let comma_idx = index_of(after_line, ",")
+            if comma_idx >= 0 {
+                let line_str = substring(after_line, 0, comma_idx)
+                try {
+                    err_line = int(trim(line_str)) - 1
+                } catch parse_err {
+                    err_line = 0
+                }
+            }
+
+            -- Extract column number
+            let col_marker = index_of(after_line, "column ")
+            if col_marker >= 0 {
+                let after_col = substring(after_line, col_marker + 7)
+                -- Find end of number (newline or end of string)
+                mut col_end = 0
+                while col_end < len(after_col) and is_digit(char_at(after_col, col_end)) {
+                    col_end += 1
+                }
+                if col_end > 0 {
+                    let col_str = substring(after_col, 0, col_end)
+                    try {
+                        err_col = int(col_str) - 1
+                    } catch parse_err {
+                        err_col = 0
+                    }
+                }
+            }
+        }
+
+        -- Ensure non-negative values
+        if err_line < 0 { err_line = 0 }
+        if err_col < 0 { err_col = 0 }
+
+        push(diagnostics, {
+            range: {
+                start: { line: err_line, character: err_col },
+                end: { line: err_line, character: err_col + 1 }
+            },
+            severity: SEVERITY_ERROR,
+            source: "clarity",
+            message: err_msg
+        })
+    }
+
+    return diagnostics
+}
+
+-- ── Hover Info ──────────────────────────────────────────
+
+fn extract_word(source, line, character) {
+    -- Extract the word at the given (line, character) position.
+    -- Returns the word string, or "" if none found.
+    let source_lines = split(source, "\n")
+    if line >= len(source_lines) {
+        return ""
+    }
+    let src_line = source_lines[line]
+    if character >= len(src_line) {
+        return ""
+    }
+
+    -- Scan backward to find start of word
+    mut start = character
+    while start > 0 {
+        let ch = char_at(src_line, start - 1)
+        if is_alnum(ch) or ch == "_" {
+            start -= 1
+        } else {
+            break
+        }
+    }
+
+    -- Scan forward to find end of word
+    mut end = character
+    while end < len(src_line) {
+        let ch = char_at(src_line, end)
+        if is_alnum(ch) or ch == "_" {
+            end += 1
+        } else {
+            break
+        }
+    }
+
+    if start == end {
+        return ""
+    }
+
+    return substring(src_line, start, end)
+}
+
+fn get_hover_info(source, line, character) {
+    -- Get hover information for the word at a given position.
+    -- Returns a markdown string with documentation, or null if no info.
+    let word = extract_word(source, line, character)
+
+    if len(word) == 0 {
+        return null
+    }
+
+    -- Check if it is a keyword
+    if has(KEYWORDS, word) {
+        return "**{word}** -- Clarity keyword"
+    }
+
+    -- Check if it is a documented builtin
+    if has(BUILTINS_INFO, word) {
+        return BUILTINS_INFO[word]
+    }
+
+    return null
+}
+
+-- ── Completions ─────────────────────────────────────────
+
+fn get_completions(source, line, character) {
+    -- Get completion items for a given position.
+    -- Returns a list of LSP CompletionItem objects.
+    mut items = []
+
+    -- Add all keywords
+    let keyword_names = keys(KEYWORDS)
+    for kw in keyword_names {
+        push(items, {
+            label: kw,
+            kind: COMPLETION_KEYWORD,
+            detail: "keyword"
+        })
+    }
+
+    -- Add all builtin functions
+    for name in BUILTIN_NAMES {
+        push(items, {
+            label: name,
+            kind: COMPLETION_FUNCTION,
+            detail: "builtin"
+        })
+    }
+
+    return items
+}
+
+-- ── Language Server ─────────────────────────────────────
+
+class LanguageServer {
+    fn init() {
+        this.documents = {}
+        this.running = true
+    }
+
+    fn run() {
+        -- Main server loop. Read messages from stdin and dispatch.
+        while this.running {
+            try {
+                let msg = read_message()
+                if msg == null {
+                    break
+                }
+                this.handle(msg)
+            } catch e {
+                -- Log errors to stderr so they do not corrupt the LSP stream.
+                -- Use exec to write to stderr without disrupting stdout.
+                let err_msg = replace(str(e), "'", "'\\''")
+                exec("echo 'clarity-lsp error: {err_msg}' >&2")
+            }
+        }
+    }
+
+    fn handle(msg) {
+        -- Dispatch a JSON-RPC message to the appropriate handler.
+        let method = if has(msg, "method") { msg.method } else { "" }
+        let id = if has(msg, "id") { msg.id } else { null }
+        let params = if has(msg, "params") { msg.params } else { {} }
+
+        if method == "initialize" {
+            this.on_initialize(id, params)
+        } elif method == "initialized" {
+            -- Client is ready; no response needed.
+        } elif method == "shutdown" {
+            this.on_shutdown(id)
+        } elif method == "exit" {
+            this.on_exit()
+        } elif method == "textDocument/didOpen" {
+            this.on_did_open(params)
+        } elif method == "textDocument/didChange" {
+            this.on_did_change(params)
+        } elif method == "textDocument/didSave" {
+            this.on_did_save(params)
+        } elif method == "textDocument/didClose" {
+            this.on_did_close(params)
+        } elif method == "textDocument/hover" {
+            this.on_hover(id, params)
+        } elif method == "textDocument/completion" {
+            this.on_completion(id, params)
+        } else {
+            -- Unknown request: respond with null result if it has an id
+            if id != null {
+                send_message(make_response(id, null))
+            }
+        }
+    }
+
+    -- ── Request handlers ─────────────────────────────────
+
+    fn on_initialize(id, params) {
+        -- Respond with server capabilities.
+        let capabilities = {
+            textDocumentSync: 1,
+            hoverProvider: true,
+            completionProvider: {
+                triggerCharacters: [".", "|"],
+                resolveProvider: false
+            }
+        }
+
+        let result = {
+            capabilities: capabilities,
+            serverInfo: {
+                name: LSP_NAME,
+                version: LSP_VERSION
+            }
+        }
+
+        send_message(make_response(id, result))
+    }
+
+    fn on_shutdown(id) {
+        -- Shutdown request: respond and stop running.
+        send_message(make_response(id, null))
+        this.running = false
+    }
+
+    fn on_exit() {
+        -- Exit notification: stop the server loop.
+        this.running = false
+    }
+
+    -- ── Document synchronization ─────────────────────────
+
+    fn on_did_open(params) {
+        -- A document was opened. Store its text and publish diagnostics.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+        let text = if has(doc, "text") { doc.text } else { "" }
+
+        this.documents[uri] = text
+        this.publish_diagnostics(uri, text)
+    }
+
+    fn on_did_change(params) {
+        -- A document was changed. Update stored text and publish diagnostics.
+        -- With textDocumentSync = 1 (Full), contentChanges contains the full text.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+        let changes = if has(params, "contentChanges") { params.contentChanges } else { [] }
+
+        if len(changes) > 0 {
+            -- Take the last change (full document text)
+            let last_change = changes[len(changes) - 1]
+            let text = if has(last_change, "text") { last_change.text } else { "" }
+            this.documents[uri] = text
+            this.publish_diagnostics(uri, text)
+        }
+    }
+
+    fn on_did_save(params) {
+        -- A document was saved. Re-publish diagnostics.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+        let text = if has(this.documents, uri) { this.documents[uri] } else { "" }
+        this.publish_diagnostics(uri, text)
+    }
+
+    fn on_did_close(params) {
+        -- A document was closed. Remove it and clear diagnostics.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+
+        -- Remove from document store
+        if has(this.documents, uri) {
+            -- Clear diagnostics by publishing an empty list
+            send_message(make_notification("textDocument/publishDiagnostics", {
+                uri: uri,
+                diagnostics: []
+            }))
+        }
+    }
+
+    -- ── Feature handlers ─────────────────────────────────
+
+    fn on_hover(id, params) {
+        -- Handle textDocument/hover: return documentation for the word at position.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+        let pos = if has(params, "position") { params.position } else { {} }
+        let line = if has(pos, "line") { pos.line } else { 0 }
+        let character = if has(pos, "character") { pos.character } else { 0 }
+
+        let text = if has(this.documents, uri) { this.documents[uri] } else { "" }
+        let info = get_hover_info(text, line, character)
+
+        if info != null {
+            send_message(make_response(id, {
+                contents: {
+                    kind: "markdown",
+                    value: info
+                }
+            }))
+        } else {
+            send_message(make_response(id, null))
+        }
+    }
+
+    fn on_completion(id, params) {
+        -- Handle textDocument/completion: return keyword and builtin completions.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+        let pos = if has(params, "position") { params.position } else { {} }
+        let line = if has(pos, "line") { pos.line } else { 0 }
+        let character = if has(pos, "character") { pos.character } else { 0 }
+
+        let text = if has(this.documents, uri) { this.documents[uri] } else { "" }
+        let items = get_completions(text, line, character)
+
+        send_message(make_response(id, items))
+    }
+
+    -- ── Diagnostics publishing ───────────────────────────
+
+    fn publish_diagnostics(uri, text) {
+        -- Run the lexer and parser on the source text, then publish
+        -- any errors as LSP diagnostics.
+        let diagnostics = check_source(text, uri)
+        send_message(make_notification("textDocument/publishDiagnostics", {
+            uri: uri,
+            diagnostics: diagnostics
+        }))
+    }
+}
+
+-- ── Entry Point ─────────────────────────────────────────
+
+fn start_server() {
+    -- Create and run the language server.
+    let server = LanguageServer()
+    server.run()
+}
+
+-- Run the server when this module is executed directly
+start_server()
