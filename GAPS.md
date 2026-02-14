@@ -239,8 +239,6 @@ LSP server, REPL.
 
 ---
 
-## Upcoming Phases (Roadmap)
-
 ## Phase 42 — Linguist Registration & Community
 
 > Get Clarity officially recognized and build community infrastructure.
@@ -255,6 +253,106 @@ LSP server, REPL.
 
 ---
 
-## Upcoming Phases (Roadmap)
+## Road to 100% — Remaining Phases
 
-> Everything below is planned but not yet started. Pick up from Phase 43.
+> Clarity is 94.9% self-hosted. These phases eliminate every non-Clarity dependency
+> and make the language fully self-sufficient. Pick up from Phase 43.
+
+## Phase 43 — Gitattributes & Repo Hygiene (Quick Win)
+
+> Fix the GitHub language bar: mark remaining JS/Shell files so Linguist counts only Clarity.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Mark native JS as vendored** | Pending | `.gitattributes` — add `native/runtime.js linguist-vendored` (this is a target-language runtime shim, not source) |
+| 2 | **Mark shell scripts as vendored** | Pending | `.gitattributes` — add `native/*.sh linguist-vendored`, `install.sh linguist-vendored` (build/install tooling, not the language itself) |
+| 3 | **Mark VS Code extension as vendored** | Pending | `.gitattributes` — add `editors/vscode/src/*.ts linguist-vendored` (TypeScript LSP client wrapper, not Clarity source) |
+| 4 | **Verify 100% on GitHub** | Pending | Push and confirm the language bar shows 100% Clarity |
+
+---
+
+## Phase 44 — Self-Hosted Transpiler
+
+> The last critical Python component. Port `native/transpile.py` (679 lines) to Clarity so Clarity can compile itself to JavaScript without Python.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Transpiler core in Clarity** | Pending | `stdlib/transpile.clarity` — port all 22 stmt + 25 expr type handlers from Python to Clarity. AST walker that emits JavaScript strings |
+| 2 | **Import resolution** | Pending | Resolve `from "file" import` to bundled JS modules, hoist imports to top level (matching current Python transpiler behavior) |
+| 3 | **`--bundle` mode** | Pending | Concatenate all 20+ stdlib files into a single JS output, same as `transpile.py --bundle` |
+| 4 | **`clarity transpile` command** | Pending | New CLI command: `clarity transpile <file> [--bundle] [-o output.js]` — runs entirely in Clarity |
+| 5 | **Parity tests** | Pending | Verify transpiled output from Clarity transpiler matches Python transpiler output for all 76 native test cases |
+
+---
+
+## Phase 45 — Self-Hosted Build Pipeline
+
+> Replace `native/build.sh` and `build_standalone.py` with Clarity scripts. The entire build process runs through Clarity.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Build script in Clarity** | Pending | `stdlib/build.clarity` — transpile all stdlib → JS, invoke Bun compile via `exec()`, handle `--all` and `--target` flags for cross-platform builds |
+| 2 | **`clarity build` command** | Pending | New CLI command: `clarity build [--target <platform>] [--all]` — produces native binary from Clarity source |
+| 3 | **Smoke test in Clarity** | Pending | `stdlib/test_smoke.clarity` — port `native/smoke_test.sh` (25 checks) to Clarity using `exec()` and pattern matching |
+| 4 | **Install script in Clarity** | Pending | `install.clarity` — port `install.sh` logic: detect platform, download binary from releases, add to PATH |
+| 5 | **Remove shell scripts** | Pending | Delete `native/build.sh`, `native/smoke_test.sh`, `install.sh` — Clarity handles everything |
+
+---
+
+## Phase 46 — Test Suite Migration
+
+> Move all Python tests to Clarity. The `pytest` dependency disappears entirely.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Port interpreter tests** | Pending | Migrate `tests/test_interpreter.py` (298 lines) → `stdlib/test_interpreter_full.clarity` — cover all edge cases not yet in self-hosted tests |
+| 2 | **Port parser tests** | Pending | Migrate `tests/test_parser.py` (192 lines) → `stdlib/test_parser_full.clarity` — AST structure verification |
+| 3 | **Port feature tests** | Pending | Migrate `tests/test_v2_features.py` (611 lines), `test_v3_features.py` (367 lines), `test_v4_features.py` (503 lines) → `stdlib/test_features.clarity` |
+| 4 | **Port tool tests** | Pending | Migrate `tests/test_type_checker.py`, `test_linter.py`, `test_debugger.py`, `test_profiler.py`, `test_docgen.py` → Clarity equivalents |
+| 5 | **Port native tests** | Pending | Migrate `tests/test_native.py` (821 lines) → `stdlib/test_native.clarity` — transpile-and-verify tests running in Clarity |
+| 6 | **Port lexer tests** | Pending | Migrate `tests/test_lexer.py` (128 lines) → `stdlib/test_lexer_full.clarity` |
+| 7 | **`clarity test` enhanced** | Pending | Support test assertions, expected failures, test fixtures, and summary reporting (X passed, Y failed, Z skipped) |
+
+---
+
+## Phase 47 — Kill the Python Bootstrap (For Real)
+
+> Remove the entire `clarity/` Python package. The native binary is the only entry point. Python is gone.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Audit Python-only codepaths** | Pending | Identify any functionality in `clarity/*.py` that has no Clarity equivalent yet — fill the gaps |
+| 2 | **Self-compile chain** | Pending | Verify: `clarity transpile stdlib/ --bundle` → JS → `bun build --compile` → binary that can itself run `clarity transpile`. Full bootstrap circle |
+| 3 | **Remove `clarity/` directory** | Pending | Delete all 15 Python source files (8,600 lines). Update `pyproject.toml` to point entry_point at native binary or remove entirely |
+| 4 | **Remove `tests/` directory** | Pending | Delete all 12 Python test files (3,400 lines). All tests now live in `stdlib/test_*.clarity` |
+| 5 | **Remove Python build files** | Pending | Delete `build_standalone.py`, `setup.py`, `pyproject.toml`, `native/transpile.py`. Clarity builds Clarity |
+| 6 | **Update README** | Pending | Install instructions: download binary or `clarity build` from source. No `pip install`. No Python mentioned as a dependency |
+| 7 | **Version 1.0.0** | Pending | Bump to v1.0.0 — Clarity is 100% self-hosted, zero external dependencies |
+
+---
+
+## Phase 48 — Runtime.js Generation
+
+> The last non-Clarity file. Generate `native/runtime.js` from Clarity source instead of maintaining it by hand.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Runtime spec in Clarity** | Pending | `stdlib/runtime_spec.clarity` — define all JS shim functions (I/O, types, collections, crypto, HTTP) as a structured spec |
+| 2 | **JS codegen from spec** | Pending | Transpiler emits runtime.js from the spec — builtins, type helpers, control flow signals, all generated |
+| 3 | **Remove hand-written runtime.js** | Pending | Delete `native/runtime.js` (394 lines). The transpiler produces it from Clarity definitions |
+| 4 | **Verify native binary** | Pending | All 76 native tests + 25 smoke tests pass with generated runtime |
+
+---
+
+## The Finish Line
+
+After Phase 48, the repo contains:
+- `stdlib/` — the entire language, toolchain, and standard library (100% Clarity)
+- `editors/` — grammar files and editor extensions
+- `docs/` / `playground/` — documentation (HTML, marked as docs)
+- `examples/` — example programs
+- `README.md`, `GAPS.md`, `LICENSE`
+
+**Zero Python. Zero JavaScript. Zero Shell. 100% Clarity.**
+
+The bootstrap problem is solved: a pre-built native binary compiles the next version of itself. New contributors download the binary and build from source — in Clarity.
