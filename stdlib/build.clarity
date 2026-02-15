@@ -1,0 +1,156 @@
+-- Clarity Build Script — self-hosted implementation
+-- Port of native/build.sh, written entirely in Clarity.
+-- Transpiles stdlib to JS, compiles to native binary via Bun.
+
+from "transpile.clarity" import transpile_bundle
+
+-- ── ANSI colors ─────────────────────────────────────────
+
+fn _bold(s) { return "\x1b[1m" + s + "\x1b[0m" }
+fn _green(s) { return "\x1b[32m" + s + "\x1b[0m" }
+fn _cyan(s) { return "\x1b[36m" + s + "\x1b[0m" }
+fn _red(s) { return "\x1b[31m" + s + "\x1b[0m" }
+fn _dim(s) { return "\x1b[2m" + s + "\x1b[0m" }
+
+-- ── Path helpers ────────────────────────────────────────
+
+fn _dirname(path) {
+    let result = exec_full("dirname " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn _abspath(path) {
+    let result = exec_full("realpath " + _quote(path) + " 2>/dev/null || readlink -f " + _quote(path) + " 2>/dev/null || echo " + _quote(path))
+    return trim(result.stdout)
+}
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+-- ── Build a single target ───────────────────────────────
+
+fn build_target(dist_dir, bun_target, out_name, label) {
+    show ""
+    show "  " + _cyan("Building:") + " " + label + "..."
+
+    mut cmd = "cd " + _quote(dist_dir) + " && bun build --compile"
+    if bun_target != null {
+        cmd = cmd + " --target=bun-" + bun_target
+    }
+    cmd = cmd + " clarity-entry.js --outfile " + _quote(out_name) + " 2>&1"
+
+    let result = exec_full(cmd)
+    if result.code != 0 {
+        show "  " + _red("ERROR:") + " Build failed for " + label
+        show "  " + result.stdout
+        return false
+    }
+
+    -- Check file exists and report size
+    let size_result = exec_full("du -h " + _quote(dist_dir + "/" + out_name) + " 2>/dev/null | cut -f1")
+    let size = trim(size_result.stdout)
+    show "  " + _green("Done:") + " " + _bold(dist_dir + "/" + out_name) + " (" + size + ")"
+    return true
+}
+
+-- ── Main build function ─────────────────────────────────
+
+fn build(cli_args) {
+    let build_all = contains(cli_args, "--all")
+    let do_install = contains(cli_args, "--install")
+
+    -- Parse --target flag
+    mut target = null
+    mut i = 0
+    while i < len(cli_args) {
+        if cli_args[i] == "--target" and i + 1 < len(cli_args) {
+            target = cli_args[i + 1]
+        }
+        i += 1
+    }
+
+    show ""
+    show _bold("   Building native Clarity binary")
+    show _dim("   No Python needed at runtime.")
+    show ""
+
+    -- Check for bun
+    let bun_check = exec_full("command -v bun 2>/dev/null")
+    if len(trim(bun_check.stdout)) == 0 {
+        show "  " + _dim("Bun not found. Installing...")
+        exec("curl -fsSL https://bun.sh/install | bash")
+    }
+
+    -- Step 1: Transpile
+    show "  " + _cyan("Step 1:") + " Transpiling Clarity -> JavaScript..."
+
+    -- Find stdlib and dist dirs
+    let stdlib_dir = _dirname(_abspath("lexer.clarity"))
+    let project_root = _dirname(stdlib_dir)
+    let native_dir = project_root + "/native"
+    let dist_dir = native_dir + "/dist"
+
+    transpile_bundle(stdlib_dir, dist_dir)
+
+    -- Step 2: Compile
+    if build_all {
+        show ""
+        show "  " + _cyan("Step 2:") + " Compiling for all platforms..."
+
+        build_target(dist_dir, "darwin-arm64", "clarity-macos-arm64", "macOS (Apple Silicon)")
+        build_target(dist_dir, "darwin-x64", "clarity-macos-x64", "macOS (Intel)")
+        build_target(dist_dir, "linux-x64", "clarity-linux-x64", "Linux (x64)")
+        build_target(dist_dir, "linux-arm64", "clarity-linux-arm64", "Linux (ARM64)")
+        build_target(dist_dir, "windows-x64", "clarity-windows.exe", "Windows (x64)")
+
+        show ""
+        show "  " + _green(_bold("All platforms built!"))
+        show ""
+        show "  Binaries in: " + dist_dir + "/"
+
+    } elif target != null {
+        show ""
+        show "  " + _cyan("Step 2:") + " Compiling for " + target + "..."
+
+        if target == "macos" or target == "darwin" {
+            build_target(dist_dir, "darwin-arm64", "clarity-macos-arm64", "macOS (Apple Silicon)")
+            build_target(dist_dir, "darwin-x64", "clarity-macos-x64", "macOS (Intel)")
+        } elif target == "linux" {
+            build_target(dist_dir, "linux-x64", "clarity-linux-x64", "Linux (x64)")
+            build_target(dist_dir, "linux-arm64", "clarity-linux-arm64", "Linux (ARM64)")
+        } elif target == "windows" or target == "win" {
+            build_target(dist_dir, "windows-x64", "clarity-windows.exe", "Windows (x64)")
+        } else {
+            show "  " + _red("Unknown platform: " + target)
+            show "  Supported: macos, linux, windows"
+            exit(1)
+        }
+
+    } else {
+        -- Default: build for current platform
+        show ""
+        show "  " + _cyan("Step 2:") + " Compiling JavaScript -> native binary..."
+        build_target(dist_dir, null, "clarity", "current platform")
+
+        show ""
+        show "  " + _green(_bold("Build complete!"))
+
+        if do_install {
+            show ""
+            show "  " + _cyan("Installing to /usr/local/bin/clarity...")
+            exec("sudo cp " + _quote(dist_dir + "/clarity") + " /usr/local/bin/clarity")
+            show "  " + _green("Done!") + " Type " + _bold("clarity") + " anywhere."
+        } else {
+            show ""
+            show "  To install:"
+            show "    sudo cp " + dist_dir + "/clarity /usr/local/bin/clarity"
+            show ""
+            show "  Or run directly:"
+            show "    " + dist_dir + "/clarity shell"
+        }
+    }
+
+    show ""
+}

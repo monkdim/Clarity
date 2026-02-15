@@ -610,6 +610,7 @@ def bundle(compile_native=False):
         'highlight.clarity', 'completer.clarity', 'pretty.clarity',
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
         'transpile.clarity',
+        'build.clarity', 'test_smoke.clarity',
         'cli.clarity',
     ]
 
