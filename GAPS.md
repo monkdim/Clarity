@@ -291,9 +291,9 @@ LSP server, REPL.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Build script in Clarity** | Pending | `stdlib/build.clarity` — transpile all stdlib → JS, invoke Bun compile via `exec()`, handle `--all` and `--target` flags for cross-platform builds |
-| 2 | **`clarity build` command** | Pending | New CLI command: `clarity build [--target <platform>] [--all]` — produces native binary from Clarity source |
-| 3 | **Smoke test in Clarity** | Pending | `stdlib/test_smoke.clarity` — port `native/smoke_test.sh` (25 checks) to Clarity using `exec()` and pattern matching |
+| 1 | **Build script in Clarity** | Done | `stdlib/build.clarity` — `build()` function: transpile stdlib → JS via `transpile_bundle()`, invoke Bun compile via `exec()`, `--all` (5 platforms), `--target` (macos/linux/windows), `--install` flags |
+| 2 | **`clarity build` command** | Done | New CLI command in `stdlib/cli.clarity`: `clarity build [--target <platform>] [--all] [--install]` — full build pipeline in Clarity |
+| 3 | **Smoke test in Clarity** | Done | `stdlib/test_smoke.clarity` — 25 smoke tests ported: run (5), functions (2), control flow (2), classes (1), help/version (2), check (2), tokens (1), ast (1), lint (1), fmt (1), doc (2), test (1), init (1). New `clarity smoke` command |
 | 4 | **Install script in Clarity** | Pending | `install.clarity` — port `install.sh` logic: detect platform, download binary from releases, add to PATH |
 | 5 | **Remove shell scripts** | Pending | Delete `native/build.sh`, `native/smoke_test.sh`, `install.sh` — Clarity handles everything |
 

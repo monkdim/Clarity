@@ -12,6 +12,7 @@ from "docgen.clarity" import generate_docs
 from "debugger.clarity" import debug_file
 from "profiler.clarity" import profile_file
 from "transpile.clarity" import transpile_with_runtime, transpile_bundle, STDLIB_FILES
+from "build.clarity" import build
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -54,6 +55,8 @@ fn _help() {
     show "  search <query>        Search the package registry"
     show "  info <pkg>            Show package info from registry"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
+    show "  build                 Build native binary (--all, --target, --install)"
+    show "  smoke                 Run smoke tests on the binary"
     show "  lsp                   Start language server (for editors)"
     show "  help                  Show this help message"
     show "  version               Show version"
@@ -549,6 +552,19 @@ fn main() {
     -- Transpile
     if command == "transpile" {
         do_transpile(cli_args)
+        return null
+    }
+
+    -- Build
+    if command == "build" {
+        build(cli_args)
+        return null
+    }
+
+    -- Smoke test
+    if command == "smoke" {
+        from "test_smoke.clarity" import run_smoke_tests
+        run_smoke_tests()
         return null
     }
 
