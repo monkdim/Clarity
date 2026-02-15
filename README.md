@@ -38,18 +38,26 @@ show result  -- [4, 16]
 
 ## Install
 
-### From source (recommended)
+### Pre-built binary (recommended)
+
+Download the latest release for your platform from [Releases](https://github.com/monkdim/Clarity/releases), or build from source:
 
 ```bash
 git clone https://github.com/monkdim/Clarity.git
 cd Clarity
-pip install -e .
+clarity build --install
 ```
 
-### Requirements
+### Build from source
 
-- Python 3.10+ (bootstrap runtime)
-- [Bun](https://bun.sh) (optional, only for building native binaries)
+Requires [Bun](https://bun.sh):
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+cd Clarity/native
+python3 transpile.py --bundle --compile
+# Binary is in native/dist/clarity
+```
 
 After install, the `clarity` command is available globally.
 
@@ -521,12 +529,7 @@ Clarity is fully self-hosted. The entire toolchain has been rewritten in Clarity
 | Terminal UI | `stdlib/terminal.clarity` | Colors, cursor control, box drawing |
 | Process | `stdlib/process.clarity` | Process execution, PATH, environment |
 
-Run the self-hosted CLI:
-
-```bash
-clarity --self-hosted run hello.clarity
-clarity --self-hosted shell
-```
+The native binary runs the self-hosted toolchain directly — no Python dependency required.
 
 ---
 
@@ -584,8 +587,7 @@ bash build.sh --target windows-x64     # Windows x64
 ### Verify the binary
 
 ```bash
-cd native
-bash smoke_test.sh
+clarity smoke
 ```
 
 ---
@@ -594,51 +596,40 @@ bash smoke_test.sh
 
 ```
 Clarity/
-  clarity/                  # Python bootstrap (entry point)
-    cli.py                  # CLI dispatcher (18 commands)
-    lexer.py                # Tokenizer
-    parser.py               # Recursive descent parser
-    ast_nodes.py            # AST node definitions
-    interpreter.py          # Tree-walking interpreter
-    runtime.py              # 60+ built-in functions, 8 modules
-    bytecode.py             # Bytecode compiler + stack VM
-    type_checker.py         # Static type checker
-    linter.py               # 7-rule linter
-    formatter.py            # AST pretty-printer
-    debugger.py             # Interactive step-through debugger
-    profiler.py             # Execution profiler
-    docgen.py               # Documentation generator
-    package.py              # Package manager
-    lsp.py                  # Language server protocol
-    errors.py               # Error types
-
-  stdlib/                   # Self-hosted toolchain (21 Clarity files)
-    lexer.clarity           # Self-hosted lexer
-    parser.clarity          # Self-hosted parser (1200 lines)
-    interpreter.clarity     # Self-hosted interpreter
-    bytecode.clarity        # Self-hosted bytecode compiler + VM (1400 lines)
-    cli.clarity             # Self-hosted CLI
-    lsp.clarity             # Self-hosted language server
-    shell.clarity           # Pipe/redirect parser
-    repl.clarity            # Interactive shell
-    terminal.clarity        # Terminal UI (colors, cursor, box drawing)
-    process.clarity         # Process execution
-    package.clarity         # Package manager
-    runtime.clarity         # Module system
+  stdlib/                   # The language — 100% Clarity
+    lexer.clarity           # Tokenizer
+    parser.clarity          # Recursive descent parser (1200 lines)
     ast_nodes.clarity       # 49 AST node types
     tokens.clarity          # Token type definitions
-    test_*.clarity          # Self-hosted test suites (430+ tests)
+    interpreter.clarity     # Tree-walking interpreter
+    runtime.clarity         # Module system (math, json, os, time)
+    bytecode.clarity        # Bytecode compiler + stack VM (1400 lines)
+    cli.clarity             # CLI dispatcher (18 commands)
+    formatter.clarity       # AST pretty-printer
+    linter.clarity          # 7-rule linter
+    type_checker.clarity    # Static type checker
+    debugger.clarity        # Interactive step-through debugger
+    profiler.clarity        # Execution profiler
+    docgen.clarity          # Documentation generator
+    package.clarity         # Package manager + TOML parser
+    lsp.clarity             # Language server (JSON-RPC 2.0)
+    shell.clarity           # Pipe/redirect tokenizer and parser
+    repl.clarity            # Interactive shell with auto-detect
+    terminal.clarity        # Terminal UI (colors, cursor, box drawing)
+    process.clarity         # Process execution, PATH, environment
+    transpile.clarity       # Self-hosted Clarity-to-JS transpiler
+    build.clarity           # Self-hosted build pipeline
+    test_*.clarity          # Test suites (430+ tests)
 
-  native/                   # Native binary compilation
-    transpile.py            # Clarity-to-JavaScript transpiler (650 lines)
-    runtime.js              # JavaScript runtime shim (290 lines)
+  native/                   # Build tooling (vendored)
+    transpile.py            # Clarity-to-JavaScript transpiler
+    runtime.js              # JavaScript runtime shim
     build.sh                # Build script (uses Bun)
     smoke_test.sh           # Binary verification
 
-  tests/                    # Python test suite (287 tests)
-  examples/                 # 11 example programs
+  examples/                 # Example programs
   website/                  # Clarity-powered website
-  GAPS.md                   # Development roadmap (Phases 24-42)
+  GAPS.md                   # Development roadmap
 ```
 
 ---
@@ -646,34 +637,30 @@ Clarity/
 ## Running Tests
 
 ```bash
-# Run all Python tests
-python -m pytest tests/ -v
+# Run all tests
+clarity test stdlib/
 
 # Run specific test suites
-python -m pytest tests/test_interpreter.py -v
-python -m pytest tests/test_type_checker.py -v
-python -m pytest tests/test_debugger.py -v
-python -m pytest tests/test_profiler.py -v
-python -m pytest tests/test_docgen.py -v
+clarity run stdlib/test_features.clarity
+clarity run stdlib/test_type_checker_full.clarity
+clarity run stdlib/test_linter_full.clarity
+clarity run stdlib/test_debugger_full.clarity
+clarity run stdlib/test_profiler_full.clarity
+clarity run stdlib/test_docgen_full.clarity
 
-# Run self-hosted Clarity tests
-clarity test stdlib/
+# Smoke tests (verify the binary)
+clarity smoke
 ```
 
-**287 Python tests** across 12 test files, plus **430+ self-hosted Clarity tests** in the stdlib.
+**430+ self-hosted tests** across 14 test files, all written in Clarity.
 
 ---
 
 ## Roadmap
 
-See [GAPS.md](GAPS.md) for the full development history (Phases 24-36, all complete) and upcoming plans:
+See [GAPS.md](GAPS.md) for the full development history (Phases 24-48).
 
-- **Phase 37** — Kill the Python bootstrap (native-only entry point)
-- **Phase 38** — Standard library expansion (collections, datetime, networking, database)
-- **Phase 39** — Package registry (publish, install, dependency resolution)
-- **Phase 40** — REPL enhancements (syntax highlighting, tab completion, history)
-- **Phase 41** — Concurrency & channels (structured concurrency, message passing)
-- **Phase 42** — Linguist registration & community (VS Code extension, playground, docs site)
+Clarity reached **v1.0.0** — 100% self-hosted, zero Python dependency. The entire language, toolchain, and test suite are written in Clarity itself.
 
 ---
 
