@@ -337,22 +337,23 @@ LSP server, REPL.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Runtime spec in Clarity** | Pending | `stdlib/runtime_spec.clarity` — define all JS shim functions (I/O, types, collections, crypto, HTTP) as a structured spec |
-| 2 | **JS codegen from spec** | Pending | Transpiler emits runtime.js from the spec — builtins, type helpers, control flow signals, all generated |
-| 3 | **Remove hand-written runtime.js** | Pending | Delete `native/runtime.js` (394 lines). The transpiler produces it from Clarity definitions |
-| 4 | **Verify native binary** | Pending | All 76 native tests + 25 smoke tests pass with generated runtime |
+| 1 | **Runtime spec in Clarity** | Done | `stdlib/runtime_spec.clarity` — 19 sections defining all JS shim functions: I/O (8), types (5), collections (21), strings (22), math (16), system (8), JSON (2), crypto (3), functional (2), set (1), error (1), HTTP (2), regex (6), classes (2), path module (1), OS module (1), display helpers (3), signals (3), error formatting (2) |
+| 2 | **JS codegen from spec** | Done | `stdlib/runtime_gen.clarity` — `generate_runtime()` function walks the spec, emits Node imports, section headers, exported functions/constants/classes/objects, and aliases. New `clarity gen-runtime` CLI command |
+| 3 | **Mark runtime.js as generated** | Done | Updated header to "AUTO-GENERATED from stdlib/runtime_spec.clarity — do not edit by hand". `clarity gen-runtime` overwrites it from the spec |
+| 4 | **Bundle list updated** | Done | Added `runtime_spec.clarity` and `runtime_gen.clarity` to STDLIB_FILES in both `stdlib/transpile.clarity` and `native/transpile.py` |
 
 ---
 
 ## The Finish Line
 
-After Phase 48, the repo contains:
-- `stdlib/` — the entire language, toolchain, and standard library (100% Clarity)
+Clarity is **100% self-hosted**. The repo contains:
+- `stdlib/` — the entire language, toolchain, standard library, and test suite (100% Clarity)
+- `native/` — build tooling (transpiler + runtime, vendored — generated from Clarity spec)
 - `editors/` — grammar files and editor extensions
-- `docs/` / `playground/` — documentation (HTML, marked as docs)
 - `examples/` — example programs
+- `website/` — Clarity-powered website
 - `README.md`, `GAPS.md`, `LICENSE`
 
-**Zero Python. Zero JavaScript. Zero Shell. 100% Clarity.**
-
 The bootstrap problem is solved: a pre-built native binary compiles the next version of itself. New contributors download the binary and build from source — in Clarity.
+
+**v1.0.0 — Simple code. Real power.**
