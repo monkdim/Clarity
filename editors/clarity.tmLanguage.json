@@ -7,13 +7,18 @@
     {"include": "#comments"},
     {"include": "#strings"},
     {"include": "#numbers"},
+    {"include": "#decorators"},
+    {"include": "#function-definition"},
+    {"include": "#class-definition"},
+    {"include": "#enum-definition"},
+    {"include": "#interface-definition"},
+    {"include": "#impl-definition"},
     {"include": "#keywords"},
     {"include": "#declarations"},
     {"include": "#imports"},
     {"include": "#builtins"},
     {"include": "#constants"},
     {"include": "#operators"},
-    {"include": "#decorators"},
     {"include": "#function-call"},
     {"include": "#identifiers"},
     {"include": "#punctuation"}
@@ -40,7 +45,15 @@
           "patterns": [
             {
               "name": "constant.character.escape.clarity",
-              "match": "\\\\."
+              "match": "\\\\[\\\\\"nrtbf0/{}]"
+            },
+            {
+              "name": "constant.character.escape.hex.clarity",
+              "match": "\\\\x[0-9a-fA-F]{2}"
+            },
+            {
+              "name": "constant.character.escape.unicode.clarity",
+              "match": "\\\\u[0-9a-fA-F]{4}"
             },
             {
               "name": "meta.interpolation.clarity",
@@ -61,7 +74,7 @@
           "patterns": [
             {
               "name": "constant.character.escape.clarity",
-              "match": "\\\\."
+              "match": "\\\\[\\\\\'nrtbf0]"
             }
           ]
         }
@@ -70,12 +83,126 @@
     "numbers": {
       "patterns": [
         {
+          "name": "constant.numeric.hex.clarity",
+          "match": "\\b0x[0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.clarity",
+          "match": "\\b0o[0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.clarity",
+          "match": "\\b0b[01_]+\\b"
+        },
+        {
           "name": "constant.numeric.float.clarity",
-          "match": "\\b\\d+\\.\\d+\\b"
+          "match": "\\b\\d[\\d_]*\\.\\d[\\d_]*([eE][+-]?\\d+)?\\b"
         },
         {
           "name": "constant.numeric.integer.clarity",
-          "match": "\\b\\d+\\b"
+          "match": "\\b\\d[\\d_]*\\b"
+        }
+      ]
+    },
+    "decorators": {
+      "patterns": [
+        {
+          "name": "meta.decorator.clarity",
+          "begin": "(@)(\\w+)(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": {"name": "punctuation.decorator.clarity"},
+            "2": {"name": "entity.name.function.decorator.clarity"},
+            "3": {"name": "punctuation.bracket.round.clarity"}
+          },
+          "endCaptures": {
+            "0": {"name": "punctuation.bracket.round.clarity"}
+          },
+          "patterns": [
+            {"include": "$self"}
+          ]
+        },
+        {
+          "name": "meta.decorator.clarity",
+          "match": "(@)(\\w+)",
+          "captures": {
+            "1": {"name": "punctuation.decorator.clarity"},
+            "2": {"name": "entity.name.function.decorator.clarity"}
+          }
+        }
+      ]
+    },
+    "function-definition": {
+      "patterns": [
+        {
+          "match": "\\b(async)\\s+(fn)\\s+([a-zA-Z_]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "keyword.declaration.clarity"},
+            "3": {"name": "entity.name.function.definition.clarity"}
+          }
+        },
+        {
+          "match": "\\b(fn)\\s+([a-zA-Z_]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "entity.name.function.definition.clarity"}
+          }
+        }
+      ]
+    },
+    "class-definition": {
+      "patterns": [
+        {
+          "match": "\\b(class)\\s+([A-Z]\\w*)\\s*(<)\\s*([A-Z]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "entity.name.type.class.clarity"},
+            "3": {"name": "keyword.operator.inheritance.clarity"},
+            "4": {"name": "entity.other.inherited-class.clarity"}
+          }
+        },
+        {
+          "match": "\\b(class)\\s+([A-Z]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "entity.name.type.class.clarity"}
+          }
+        }
+      ]
+    },
+    "enum-definition": {
+      "patterns": [
+        {
+          "match": "\\b(enum)\\s+([A-Z]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "entity.name.type.enum.clarity"}
+          }
+        }
+      ]
+    },
+    "interface-definition": {
+      "patterns": [
+        {
+          "match": "\\b(interface)\\s+([A-Z]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "entity.name.type.interface.clarity"}
+          }
+        }
+      ]
+    },
+    "impl-definition": {
+      "patterns": [
+        {
+          "match": "\\b(impl)\\s+([A-Z]\\w*)\\s+(for)\\s+([A-Z]\\w*)",
+          "captures": {
+            "1": {"name": "keyword.declaration.clarity"},
+            "2": {"name": "entity.name.type.interface.clarity"},
+            "3": {"name": "keyword.control.clarity"},
+            "4": {"name": "entity.name.type.class.clarity"}
+          }
         }
       ]
     },
@@ -104,6 +231,10 @@
         {
           "name": "variable.language.this.clarity",
           "match": "\\bthis\\b"
+        },
+        {
+          "name": "variable.language.super.clarity",
+          "match": "\\bsuper\\b"
         }
       ]
     },
@@ -123,7 +254,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.clarity",
-          "match": "\\b(show|ask|read|write|append|exists|lines|int|float|str|bool|type|len|push|pop|sort|reverse|range|map|filter|reduce|each|find|every|some|flat|zip|unique|keys|values|entries|merge|has|split|join|replace|trim|upper|lower|contains|starts|ends|chars|repeat|pad_left|pad_right|char_at|char_code|from_char_code|index_of|substring|is_digit|is_alpha|is_alnum|is_space|abs|round|floor|ceil|min|max|sum|random|pow|sqrt|sin|cos|tan|log|exec|exec_full|exit|sleep|time|env|args|cwd|json_parse|json_string|hash|encode64|decode64|fetch|serve|display|repr)\\b"
+          "match": "\\b(show|ask|read|write|append|exists|lines|int|float|str|bool|type|len|push|pop|sort|reverse|range|map|filter|reduce|each|find|every|some|flat|zip|unique|keys|values|entries|merge|has|split|join|replace|trim|upper|lower|contains|starts|ends|chars|repeat|pad_left|pad_right|char_at|char_code|from_char_code|index_of|substring|is_digit|is_alpha|is_alnum|is_space|abs|round|floor|ceil|min|max|sum|random|pow|sqrt|sin|cos|tan|log|exec|exec_full|exit|sleep|time|env|args|cwd|json_parse|json_string|hash|encode64|decode64|fetch|serve|compose|tap|set|error|display|repr)\\b"
         }
       ]
     },
@@ -151,7 +282,7 @@
         },
         {
           "name": "keyword.operator.arrow.clarity",
-          "match": "=>|->'"
+          "match": "=>|->"
         },
         {
           "name": "keyword.operator.spread.clarity",
@@ -175,22 +306,11 @@
         },
         {
           "name": "keyword.operator.assignment.clarity",
-          "match": "\\+=|-=|\\*=|/=|="
+          "match": "\\+=|-=|\\*=|/=|%=|="
         },
         {
           "name": "keyword.operator.arithmetic.clarity",
           "match": "\\*\\*|[+\\-*/%]"
-        }
-      ]
-    },
-    "decorators": {
-      "patterns": [
-        {
-          "name": "meta.decorator.clarity",
-          "match": "@(\\w+)",
-          "captures": {
-            "1": {"name": "entity.name.function.decorator.clarity"}
-          }
         }
       ]
     },
