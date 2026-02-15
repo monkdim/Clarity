@@ -364,16 +364,16 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 
 ---
 
-## Phase 50 — VS Code Extension
+## Phase 50 — VS Code Extension ✅
 
 > First-class editor experience. Syntax highlighting, LSP integration, snippets.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **TextMate grammar polish** | Pending | Update `editors/vscode/syntaxes/clarity.tmLanguage.json` — full keyword coverage, string interpolation scopes, regex for decorators/enums/interfaces |
-| 2 | **LSP client integration** | Pending | Wire the TypeScript extension client to `clarity lsp` — diagnostics, hover, completion |
-| 3 | **Snippets** | Pending | Common patterns: `fn`, `class`, `match`, `for`, `try`, `enum`, `interface`, `test` |
-| 4 | **Publish to Marketplace** | Pending | Package and publish `clarity-lang` extension to VS Code Marketplace |
+| 1 | **TextMate grammar polish** | Done | Full rewrite — `fn`/`class`/`enum`/`interface`/`impl` names get semantic scopes, decorator-with-arguments support, hex/octal/binary number literals, `\x`/`\u` escape sequences, `super` keyword, `compose`/`tap`/`set`/`error` builtins, `%=` operator, inheritance (`<`) highlighting |
+| 2 | **LSP client integration** | Done | Diagnostics collection for lint-on-save fallback, document formatting provider via `clarity fmt --stdout`, `clarity.test` command, LSP init options pass lint/format config to server |
+| 3 | **Snippets** | Done | 31 snippets: added `impl`, `test`, `testa` (with assert), `gen` (generator), `pipec` (pipe chain), `aw` (async await), `main` (entry point), `method` |
+| 4 | **Publish to Marketplace** | Done | Bumped to v1.0.0, added `repository`/`keywords`, `@vscode/vsce` devDep, `package`/`publish` scripts, `.vscodeignore` for clean VSIX builds. Ready: `cd editors/vscode && npm run package` |
 
 ---
 

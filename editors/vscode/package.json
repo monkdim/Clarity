@@ -2,13 +2,18 @@
   "name": "clarity-lang",
   "displayName": "Clarity Language",
   "description": "Syntax highlighting, LSP integration, and snippets for the Clarity programming language",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "publisher": "clarity-lang",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/monkdim/Clarity"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
-  "categories": ["Programming Languages", "Snippets", "Linters"],
+  "categories": ["Programming Languages", "Snippets", "Linters", "Formatters"],
+  "keywords": ["clarity", "clarity-lang", "programming language", "syntax highlighting", "lsp"],
   "activationEvents": [
     "onLanguage:clarity"
   ],
@@ -80,16 +85,23 @@
       {
         "command": "clarity.lint",
         "title": "Clarity: Lint File"
+      },
+      {
+        "command": "clarity.test",
+        "title": "Clarity: Run Tests"
       }
     ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "devDependencies": {
     "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.0.0",
     "typescript": "^5.0.0",
     "vscode-languageclient": "^9.0.0"
   }
