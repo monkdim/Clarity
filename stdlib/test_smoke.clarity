@@ -1,0 +1,185 @@
+-- Clarity Smoke Test — self-hosted implementation
+-- Port of native/smoke_test.sh, written entirely in Clarity.
+-- Verifies ALL CLI commands work end-to-end.
+
+-- ── ANSI colors ─────────────────────────────────────────
+
+fn _bold(s) { return "\x1b[1m" + s + "\x1b[0m" }
+fn _green(s) { return "\x1b[32m" + s + "\x1b[0m" }
+fn _red(s) { return "\x1b[31m" + s + "\x1b[0m" }
+fn _dim(s) { return "\x1b[2m" + s + "\x1b[0m" }
+
+-- ── Test state ──────────────────────────────────────────
+
+mut PASSED = 0
+mut FAILED = 0
+
+-- ── Helpers ─────────────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _get_clarity_cmd() {
+    -- Determine how to invoke clarity
+    let cli_args = args()
+    if len(cli_args) > 0 {
+        return cli_args[0]
+    }
+    -- Default: try clarity binary, fall back to bun dist
+    let which_result = exec_full("command -v clarity 2>/dev/null")
+    if len(trim(which_result.stdout)) > 0 {
+        return "clarity"
+    }
+    return "bun native/dist/clarity-entry.js"
+}
+
+fn check(name, clarity_code, expected) {
+    -- Write code to temp file, run, compare output
+    let tmp = "/tmp/smoke_" + str(time()) + ".clarity"
+    write(tmp, clarity_code)
+    let clarity_cmd = _get_clarity_cmd()
+    let result = exec_full(clarity_cmd + " run " + _quote(tmp) + " 2>&1")
+    exec("rm -f " + _quote(tmp))
+
+    let actual = trim(result.stdout)
+    if actual == expected {
+        PASSED += 1
+        show "  " + _green("PASS") + "  " + name
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  " + name
+        show "    " + _dim("Expected: " + expected)
+        show "    " + _dim("Got:      " + actual)
+    }
+}
+
+fn check_cmd(name, cmd, expect_pattern) {
+    let result = exec_full(cmd + " 2>&1")
+    if contains(result.stdout, expect_pattern) {
+        PASSED += 1
+        show "  " + _green("PASS") + "  " + name
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  " + name
+        show "    " + _dim("Expected to contain: " + expect_pattern)
+        show "    " + _dim("Got: " + substring(result.stdout, 0, min([200, len(result.stdout)])))
+    }
+}
+
+fn check_exit(name, cmd, expected_code) {
+    let result = exec_full(cmd + " >/dev/null 2>&1")
+    if result.code == expected_code {
+        PASSED += 1
+        show "  " + _green("PASS") + "  " + name
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  " + name
+        show "    " + _dim("Expected exit code: " + str(expected_code) + ", got: " + str(result.code))
+    }
+}
+
+-- ── Run smoke tests ─────────────────────────────────────
+
+fn run_smoke_tests() {
+    let clarity = _get_clarity_cmd()
+    show ""
+    show _bold("  Smoke testing: " + clarity)
+    show ""
+
+    -- ── Core: run ───────────────────────────────────────
+    show "  " + _bold("-- run --")
+    check("hello world", "show \"hello world\"", "hello world")
+    check("arithmetic", "show 2 + 3 * 4", "14")
+    check("variables", "let x = 42\nshow x", "42")
+    check("string ops", "show upper(\"hello\")", "HELLO")
+    check("list ops", "show len([1, 2, 3])", "3")
+
+    -- ── Functions ───────────────────────────────────────
+    show "  " + _bold("-- functions --")
+    check("function call", "fn add(a, b) { return a + b }\nshow add(3, 4)", "7")
+    check("recursion", "fn fib(n) {\n    if n <= 1 { return n }\n    return fib(n - 1) + fib(n - 2)\n}\nshow fib(10)", "55")
+
+    -- ── Control flow ────────────────────────────────────
+    show "  " + _bold("-- control flow --")
+    check("if/else", "if 5 > 3 { show \"yes\" } else { show \"no\" }", "yes")
+    check("for loop", "mut s = 0\nfor i in [1, 2, 3] { s += i }\nshow s", "6")
+
+    -- ── Classes ─────────────────────────────────────────
+    show "  " + _bold("-- classes --")
+    check("class", "class Dog {\n    fn init(name) { this.name = name }\n    fn bark() { return this.name + \" says woof\" }\n}\nlet d = Dog(\"Rex\")\nshow d.bark()", "Rex says woof")
+
+    -- ── CLI commands ────────────────────────────────────
+    show ""
+    show "  " + _bold("-- help --")
+    check_cmd("help output", clarity + " help", "Usage: clarity")
+    check_cmd("version", clarity + " version", "Clarity v")
+
+    show "  " + _bold("-- check --")
+    let tmp_check = "/tmp/smoke_check_" + str(time()) + ".clarity"
+    write(tmp_check, "let x = 42")
+    check_cmd("check syntax", clarity + " check " + tmp_check, "OK")
+    check_cmd("check with types", clarity + " check " + tmp_check + " --types", "OK")
+    exec("rm -f " + _quote(tmp_check))
+
+    show "  " + _bold("-- tokens --")
+    let tmp_tok = "/tmp/smoke_tok_" + str(time()) + ".clarity"
+    write(tmp_tok, "let x = 42")
+    check_cmd("tokens output", clarity + " tokens " + tmp_tok, "tokens total")
+    exec("rm -f " + _quote(tmp_tok))
+
+    show "  " + _bold("-- ast --")
+    let tmp_ast = "/tmp/smoke_ast_" + str(time()) + ".clarity"
+    write(tmp_ast, "let x = 42")
+    check_cmd("ast output", clarity + " ast " + tmp_ast, "LetStatement")
+    exec("rm -f " + _quote(tmp_ast))
+
+    show "  " + _bold("-- lint --")
+    let tmp_lint = "/tmp/smoke_lint_" + str(time()) + ".clarity"
+    write(tmp_lint, "fn main() {\n    let x = 42\n    show \"hello\"\n}\nmain()")
+    check_cmd("lint output", clarity + " lint " + tmp_lint, "file(s) checked")
+    exec("rm -f " + _quote(tmp_lint))
+
+    show "  " + _bold("-- fmt --")
+    let tmp_fmt = "/tmp/smoke_fmt_" + str(time()) + ".clarity"
+    write(tmp_fmt, "let x = 42\nshow x")
+    check_cmd("fmt check", clarity + " fmt " + tmp_fmt + " --check", "file(s)")
+    exec("rm -f " + _quote(tmp_fmt))
+
+    show "  " + _bold("-- doc --")
+    let tmp_doc = "/tmp/smoke_doc_" + str(time()) + ".clarity"
+    write(tmp_doc, "-- Adds two numbers together\nfn add(a, b) {\n    return a + b\n}")
+    check_cmd("doc terminal", clarity + " doc " + tmp_doc, "Documentation")
+    check_cmd("doc markdown", clarity + " doc " + tmp_doc + " --md", "# ")
+    exec("rm -f " + _quote(tmp_doc))
+
+    show "  " + _bold("-- test --")
+    let tmp_test_dir = "/tmp/smoke_test_" + str(time())
+    exec("mkdir -p " + _quote(tmp_test_dir))
+    write(tmp_test_dir + "/test_basic.clarity", "fn assert(val, msg) {\n    if not val { throw \"FAIL: \" + msg }\n}\nassert(1 + 1 == 2, \"addition\")\nassert(len([1, 2, 3]) == 3, \"list length\")")
+    check_cmd("test runner", clarity + " test " + tmp_test_dir, "passed")
+    exec("rm -rf " + _quote(tmp_test_dir))
+
+    show "  " + _bold("-- init --")
+    let tmp_init_dir = "/tmp/smoke_init_" + str(time())
+    exec("mkdir -p " + _quote(tmp_init_dir))
+    check_cmd("init package", "cd " + _quote(tmp_init_dir) + " && " + clarity + " init", "Created clarity.toml")
+    exec("rm -rf " + _quote(tmp_init_dir))
+
+    -- ── Summary ─────────────────────────────────────────
+    let total = PASSED + FAILED
+    show ""
+    if FAILED == 0 {
+        show "  " + _green(_bold("All " + str(PASSED) + " smoke tests passed!"))
+    } else {
+        show "  " + str(PASSED) + " passed, " + _red(str(FAILED) + " failed") + " / " + str(total) + " total"
+    }
+    show ""
+
+    if FAILED > 0 { exit(1) }
+}
+
+-- ── Run ─────────────────────────────────────────────────
+
+run_smoke_tests()
