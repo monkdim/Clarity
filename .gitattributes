@@ -1,6 +1,17 @@
+# Clarity source — the language itself
 *.clarity linguist-language=Clarity
 *.clarity linguist-detectable=true
+
+# Everything else is vendored (bootstrap, build tooling, editor wrappers)
 *.py linguist-vendored
-editors/linguist/* linguist-documentation
-docs/* linguist-documentation
-playground/* linguist-documentation
+*.js linguist-vendored
+*.sh linguist-vendored
+*.ts linguist-vendored
+*.json linguist-vendored
+*.yml linguist-vendored
+*.yaml linguist-vendored
+*.toml linguist-vendored
+
+# Documentation & community assets
+*.html linguist-documentation
+*.md linguist-documentation
