@@ -1,0 +1,280 @@
+-- Feature Tests — ported from tests/test_v2_features.py, test_v3_features.py, test_v4_features.py
+-- Covers: classes, enums, pattern matching, destructuring, lambdas, decorators,
+-- comprehensions, spread, null safety, bitwise ops, interfaces, raw strings.
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg
+    }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg + " (expected " + str(expected) + ", got " + str(actual) + ")"
+    }
+}
+
+-- ── v2: Classes & Inheritance ───────────────────────────
+
+show "-- Features: Classes --"
+
+class Animal {
+    fn init(name, sound) {
+        this.name = name
+        this.sound = sound
+    }
+    fn speak() { return this.name + " says " + this.sound }
+}
+
+class Dog < Animal {
+    fn init(name) {
+        this.name = name
+        this.sound = "woof"
+    }
+    fn fetch(item) { return this.name + " fetches " + item }
+}
+
+let dog = Dog("Rex")
+assert_eq(dog.speak(), "Rex says woof", "inheritance speak")
+assert_eq(dog.fetch("ball"), "Rex fetches ball", "subclass method")
+
+-- ── v2: Error Handling ──────────────────────────────────
+
+show "-- Features: Error Handling --"
+
+mut caught = false
+try {
+    throw "test error"
+} catch e {
+    caught = true
+    assert(contains(str(e), "test error"), "catch gets error message")
+}
+assert(caught, "try/catch works")
+
+mut finally_ran = false
+try {
+    let x = 1
+} catch e {
+    -- skip
+} finally {
+    finally_ran = true
+}
+assert(finally_ran, "finally block runs")
+
+-- ── v2: Pattern Matching ────────────────────────────────
+
+show "-- Features: Pattern Matching --"
+
+fn describe(val) {
+    mut result = ""
+    match val {
+        when 0 { result = "zero" }
+        when 1 { result = "one" }
+        when "hello" { result = "greeting" }
+        else { result = "other" }
+    }
+    return result
+}
+
+assert_eq(describe(0), "zero", "match zero")
+assert_eq(describe(1), "one", "match one")
+assert_eq(describe("hello"), "greeting", "match string")
+assert_eq(describe(99), "other", "match default")
+
+-- ── v2: Destructuring ───────────────────────────────────
+
+show "-- Features: Destructuring --"
+
+let [a, b, ...rest] = [1, 2, 3, 4, 5]
+assert_eq(a, 1, "list destructure first")
+assert_eq(b, 2, "list destructure second")
+assert_eq(rest, [3, 4, 5], "list destructure rest")
+
+let {name, age} = {name: "Alice", age: 30}
+assert_eq(name, "Alice", "map destructure name")
+assert_eq(age, 30, "map destructure age")
+
+-- ── v2: Null Safety ─────────────────────────────────────
+
+show "-- Features: Null Safety --"
+
+let val = null ?? "default"
+assert_eq(val, "default", "null coalescing")
+
+let present = 42 ?? "default"
+assert_eq(present, 42, "non-null coalescing")
+
+-- ── v2: Spread Operator ─────────────────────────────────
+
+show "-- Features: Spread --"
+
+let list1 = [1, 2]
+let list2 = [3, 4]
+let merged = [...list1, ...list2]
+assert_eq(merged, [1, 2, 3, 4], "list spread")
+
+let map1 = {a: 1}
+let map2 = {b: 2}
+let merged_map = {...map1, ...map2}
+assert(has(merged_map, "a"), "map spread key a")
+assert(has(merged_map, "b"), "map spread key b")
+
+-- ── v2: Comprehensions ──────────────────────────────────
+
+show "-- Features: Comprehensions --"
+
+let squares = [x * x for x in [1, 2, 3, 4, 5]]
+assert_eq(squares, [1, 4, 9, 16, 25], "list comprehension")
+
+let evens = [x for x in [1, 2, 3, 4, 5, 6] if x % 2 == 0]
+assert_eq(evens, [2, 4, 6], "filtered comprehension")
+
+-- ── v2: Slicing ─────────────────────────────────────────
+
+show "-- Features: Slicing --"
+
+let lst = [10, 20, 30, 40, 50]
+assert_eq(lst[1..3], [20, 30], "list slice")
+assert_eq(lst[-1], 50, "negative index")
+
+-- ── v2: Bitwise Operations ──────────────────────────────
+
+show "-- Features: Bitwise --"
+
+assert_eq(5 & 3, 1, "bitwise AND")
+assert_eq(5 | 3, 7, "bitwise OR")
+assert_eq(5 ^ 3, 6, "bitwise XOR")
+assert_eq(1 << 3, 8, "left shift")
+assert_eq(8 >> 2, 2, "right shift")
+
+-- ── v2: If Expression ───────────────────────────────────
+
+show "-- Features: If Expression --"
+
+let label = if 5 > 3 { "big" } else { "small" }
+assert_eq(label, "big", "if expression true")
+
+let label2 = if 1 > 3 { "big" } else { "small" }
+assert_eq(label2, "small", "if expression false")
+
+-- ── v3: Lambda Expressions ──────────────────────────────
+
+show "-- Features: Lambdas --"
+
+let double = x => x * 2
+assert_eq(double(5), 10, "lambda single param")
+
+let multiply = (a, b) => a * b
+assert_eq(multiply(3, 4), 12, "lambda multi param")
+
+-- ── v3: Pipes with Lambdas ──────────────────────────────
+
+show "-- Features: Pipes --"
+
+let result = [1, 2, 3, 4, 5]
+    |> filter(x => x % 2 == 0)
+    |> map(x => x * x)
+assert_eq(result, [4, 16], "pipe with lambdas")
+
+-- ── v3: Multi-Assignment ────────────────────────────────
+
+show "-- Features: Multi-Assignment --"
+
+mut x = 1
+mut y = 2
+x, y = y, x
+assert_eq(x, 2, "swap x")
+assert_eq(y, 1, "swap y")
+
+-- ── v3: Enums ───────────────────────────────────────────
+
+show "-- Features: Enums --"
+
+enum Color { Red, Green, Blue }
+assert_eq(Color.Red, 0, "enum value")
+assert_eq(Color.Green, 1, "enum value green")
+assert_eq(Color.names(), ["Red", "Green", "Blue"], "enum names")
+
+enum Status { OK = 200, NotFound = 404, Error = 500 }
+assert_eq(Status.OK, 200, "enum custom value")
+assert_eq(Status.NotFound, 404, "enum custom value 2")
+
+-- ── v3: Decorators ──────────────────────────────────────
+
+show "-- Features: Decorators --"
+
+fn log_decorator(wrapped) {
+    return fn(...args) {
+        return wrapped(...args)
+    }
+}
+
+@log_decorator
+fn greet(name) {
+    return "Hello " + name
+}
+assert_eq(greet("World"), "Hello World", "decorated function")
+
+-- ── v3: Map Comprehension ───────────────────────────────
+
+show "-- Features: Map Comprehensions --"
+
+let lengths = {name: len(name) for name in ["hi", "hello", "hey"]}
+assert_eq(lengths["hi"], 2, "map comprehension")
+assert_eq(lengths["hello"], 5, "map comprehension 2")
+
+-- ── v4: Interfaces ──────────────────────────────────────
+
+show "-- Features: Interfaces --"
+
+interface Drawable {
+    fn draw()
+    fn area()
+}
+
+class Circle impl Drawable {
+    fn init(r) { this.r = r }
+    fn draw() { return "Drawing circle r=" + str(this.r) }
+    fn area() { return 3.14159 * this.r * this.r }
+}
+
+let c = Circle(5)
+assert_eq(c.draw(), "Drawing circle r=5", "interface impl draw")
+assert(c.area() > 78 and c.area() < 79, "interface impl area")
+
+-- ── v4: Raw Strings ─────────────────────────────────────
+
+show "-- Features: Raw Strings --"
+
+let raw = r"hello\nworld"
+assert(contains(raw, "\\n"), "raw string no escape")
+assert(not contains(raw, "\n"), "raw string literal backslash")
+
+-- ── v4: Rest Parameters ─────────────────────────────────
+
+show "-- Features: Rest Params --"
+
+fn first(head, ...tail) {
+    return head
+}
+assert_eq(first(1, 2, 3), 1, "rest params head")
+
+fn sum_all(...nums) {
+    return sum(nums)
+}
+assert_eq(sum_all(1, 2, 3, 4), 10, "rest params sum")
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Features: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " feature test(s) failed" }

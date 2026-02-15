@@ -1,7 +1,7 @@
 """Clarity lexer — turns source code into tokens."""
 
-from .tokens import Token, TokenType, KEYWORDS
-from .errors import LexerError
+from tokens import Token, TokenType, KEYWORDS
+from errors import LexerError
 
 
 class Lexer:

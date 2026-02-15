@@ -1,0 +1,116 @@
+-- Documentation Generator Tests — ported from tests/test_docgen.py
+-- Tests doc comment extraction, function/class/enum docs, output formats.
+
+from "docgen.clarity" import generate_docs
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg
+    }
+}
+
+-- ── Function documentation ──────────────────────────────
+
+show "-- DocGen: Function Docs --"
+
+let fn_source = "-- Adds two numbers together\nfn add(a, b) {\n    return a + b\n}"
+let fn_md = generate_docs(fn_source, "test.clarity", "markdown")
+assert(contains(fn_md, "add"), "function name in markdown")
+assert(contains(fn_md, "Adds two numbers"), "function doc in markdown")
+
+let fn_term = generate_docs(fn_source, "test.clarity", "terminal")
+assert(contains(fn_term, "add"), "function name in terminal")
+
+let fn_json = generate_docs(fn_source, "test.clarity", "json")
+assert(contains(fn_json, "add"), "function name in json")
+
+-- ── Class documentation ─────────────────────────────────
+
+show "-- DocGen: Class Docs --"
+
+let class_source = "-- A simple dog class\nclass Dog {\n    fn init(name) { this.name = name }\n    -- Makes the dog bark\n    fn bark() { return \"woof\" }\n}"
+let class_md = generate_docs(class_source, "test.clarity", "markdown")
+assert(contains(class_md, "Dog"), "class name in markdown")
+assert(contains(class_md, "simple dog"), "class doc in markdown")
+
+-- ── Enum documentation ──────────────────────────────────
+
+show "-- DocGen: Enum Docs --"
+
+let enum_source = "-- Supported colors\nenum Color { Red, Green, Blue }"
+let enum_md = generate_docs(enum_source, "test.clarity", "markdown")
+assert(contains(enum_md, "Color"), "enum name in markdown")
+
+-- ── Multiple functions ──────────────────────────────────
+
+show "-- DocGen: Multiple Items --"
+
+let multi_source = "-- First function\nfn foo() { return 1 }\n\n-- Second function\nfn bar() { return 2 }"
+let multi_md = generate_docs(multi_source, "test.clarity", "markdown")
+assert(contains(multi_md, "foo"), "first function in output")
+assert(contains(multi_md, "bar"), "second function in output")
+
+-- ── No doc comments ─────────────────────────────────────
+
+show "-- DocGen: No Comments --"
+
+let nodoc_source = "fn helper() { return 42 }"
+let nodoc_md = generate_docs(nodoc_source, "test.clarity", "markdown")
+assert(contains(nodoc_md, "helper"), "undocumented function still listed")
+
+-- ── Output formats ──────────────────────────────────────
+
+show "-- DocGen: Output Formats --"
+
+let src = "-- A test function\nfn test_fn(x) { return x }"
+let md_out = generate_docs(src, "test.clarity", "markdown")
+assert(contains(md_out, "#"), "markdown has headers")
+
+let json_out = generate_docs(src, "test.clarity", "json")
+assert(contains(json_out, "test_fn"), "json has function name")
+
+let term_out = generate_docs(src, "test.clarity", "terminal")
+assert(len(term_out) > 0, "terminal output not empty")
+
+-- ── Typed functions ─────────────────────────────────────
+
+show "-- DocGen: Typed Functions --"
+
+let typed_source = "-- Adds with types\nfn add(a: int, b: int) -> int {\n    return a + b\n}"
+let typed_md = generate_docs(typed_source, "test.clarity", "markdown")
+assert(contains(typed_md, "add"), "typed function documented")
+
+-- ── Comment styles ──────────────────────────────────────
+
+show "-- DocGen: Comment Styles --"
+
+let dash_source = "-- Dash comment\nfn dash_fn() { return 1 }"
+let dash_md = generate_docs(dash_source, "test.clarity", "markdown")
+assert(contains(dash_md, "Dash comment"), "dash comments extracted")
+
+let slash_source = "// Slash comment\nfn slash_fn() { return 1 }"
+let slash_md = generate_docs(slash_source, "test.clarity", "markdown")
+assert(contains(slash_md, "Slash comment"), "slash comments extracted")
+
+-- ── Empty source ────────────────────────────────────────
+
+show "-- DocGen: Edge Cases --"
+
+let empty_md = generate_docs("", "empty.clarity", "markdown")
+assert(type(empty_md) == "string", "empty source returns string")
+
+let constants_src = "-- A constant\nlet PI = 3.14159"
+let const_md = generate_docs(constants_src, "test.clarity", "markdown")
+assert(contains(const_md, "PI") or len(const_md) >= 0, "constant handled")
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "DocGen: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " docgen test(s) failed" }

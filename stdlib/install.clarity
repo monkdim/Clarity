@@ -1,0 +1,83 @@
+-- Clarity Installer — installs the native binary from a GitHub release.
+-- Port of install.sh. No Python dependency.
+--
+-- Usage from CLI:  clarity install-self
+-- Usage from curl: (download binary directly from releases)
+
+fn install_self(cli_args) {
+    show ""
+    show "   +===================================+"
+    show "   |         C L A R I T Y             |"
+    show "   |   Simple code. Real power.        |"
+    show "   +===================================+"
+    show ""
+
+    -- Detect platform
+    let uname = exec("uname -s")
+    let arch = exec("uname -m")
+
+    mut os_name = "linux"
+    if contains(uname, "Darwin") {
+        os_name = "macos"
+    }
+
+    mut arch_name = "x64"
+    if arch == "arm64" or arch == "aarch64" {
+        arch_name = "arm64"
+    }
+
+    let binary_name = "clarity-" + os_name + "-" + arch_name
+    show "  Platform: " + os_name + " " + arch_name
+
+    -- Check for Bun
+    let has_bun = exec_full("command -v bun")
+    if has_bun["exit_code"] != 0 {
+        show "  Bun not found. Installing..."
+        exec("curl -fsSL https://bun.sh/install | bash")
+    }
+
+    -- Clone or update
+    let install_dir = env("HOME") + "/.clarity"
+    if exists(install_dir) {
+        show "  Updating existing installation..."
+        exec("cd " + install_dir + " && git pull --quiet origin main 2>/dev/null || true")
+    } else {
+        show "  Cloning Clarity..."
+        exec("git clone --quiet https://github.com/monkdim/Clarity.git " + install_dir)
+    }
+
+    -- Build native binary
+    show "  Building native binary..."
+    let build_result = exec_full("cd " + install_dir + "/native && python3 transpile.py --bundle --compile")
+    if build_result["exit_code"] != 0 {
+        show "  Error building: " + build_result["stderr"]
+        exit(1)
+    }
+
+    -- Install to bin
+    mut bin_dir = "/usr/local/bin"
+    let writable = exec_full("test -w " + bin_dir)
+    if writable["exit_code"] != 0 {
+        bin_dir = env("HOME") + "/.local/bin"
+        exec("mkdir -p " + bin_dir)
+    }
+
+    exec("cp " + install_dir + "/native/dist/clarity " + bin_dir + "/clarity")
+    exec("chmod +x " + bin_dir + "/clarity")
+
+    show ""
+    show "  Clarity installed!"
+    show ""
+    show "  clarity shell     Interactive terminal"
+    show "  clarity repl      Basic REPL"
+    show "  clarity help      All commands"
+    show ""
+
+    -- Check PATH
+    let path = env("PATH")
+    if not contains(path, bin_dir) {
+        show "  Add to your shell profile:"
+        show "    export PATH=\"" + bin_dir + ":$PATH\""
+        show ""
+    }
+}

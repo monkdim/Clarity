@@ -14,12 +14,12 @@ import os
 import sys
 import textwrap
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add native/ to path so local modules are found
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from clarity.lexer import tokenize
-from clarity.parser import parse
-from clarity import ast_nodes as ast
+from lexer import tokenize
+from parser import parse
+import ast_nodes as ast
 
 
 class JSEmitter:
@@ -609,6 +609,10 @@ def bundle(compile_native=False):
         'semver.clarity', 'registry.clarity',
         'highlight.clarity', 'completer.clarity', 'pretty.clarity',
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
+        'transpile.clarity',
+        'build.clarity', 'test_smoke.clarity',
+        'runtime_spec.clarity', 'runtime_gen.clarity',
+        'install.clarity',
         'cli.clarity',
     ]
 

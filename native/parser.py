@@ -1,8 +1,8 @@
 """Clarity parser — turns tokens into an AST."""
 
-from .tokens import Token, TokenType
-from .errors import ParseError
-from . import ast_nodes as ast
+from tokens import Token, TokenType
+from errors import ParseError
+import ast_nodes as ast
 
 
 class Parser:
