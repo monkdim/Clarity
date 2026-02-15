@@ -612,6 +612,7 @@ def bundle(compile_native=False):
         'transpile.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
+        'install.clarity',
         'cli.clarity',
     ]
 

@@ -619,13 +619,14 @@ Clarity/
     process.clarity         # Process execution, PATH, environment
     transpile.clarity       # Self-hosted Clarity-to-JS transpiler
     build.clarity           # Self-hosted build pipeline
+    install.clarity         # Self-hosted installer
+    runtime_spec.clarity    # Runtime.js spec (single source of truth)
+    runtime_gen.clarity     # JS codegen from runtime spec
     test_*.clarity          # Test suites (430+ tests)
 
   native/                   # Build tooling (vendored)
     transpile.py            # Clarity-to-JavaScript transpiler
-    runtime.js              # JavaScript runtime shim
-    build.sh                # Build script (uses Bun)
-    smoke_test.sh           # Binary verification
+    runtime.js              # Auto-generated JS runtime shim
 
   examples/                 # Example programs
   website/                  # Clarity-powered website
