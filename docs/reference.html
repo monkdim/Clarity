@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clarity Language Reference</title>
+<style>
+:root {
+    --bg: #fafafa; --surface: #ffffff; --text: #1a1a2e; --subtext: #666;
+    --accent: #4A90D9; --accent2: #2d6cb4; --code-bg: #f0f0f0; --border: #e0e0e0;
+    --sidebar-w: 260px;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #1e1e2e; --surface: #181825; --text: #cdd6f4; --subtext: #a6adc8;
+        --accent: #89b4fa; --accent2: #b4d0fb; --code-bg: #313244; --border: #45475a;
+    }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+.wrapper { display: flex; min-height: 100vh; }
+nav { width: var(--sidebar-w); background: var(--surface); border-right: 1px solid var(--border); padding: 1.5rem 0; position: fixed; top: 0; left: 0; bottom: 0; overflow-y: auto; }
+nav .logo { font-size: 1.3rem; font-weight: 700; color: var(--accent); padding: 0 1.25rem 1rem; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+nav .logo span { color: var(--subtext); font-weight: 400; font-size: 0.85rem; }
+nav ul { list-style: none; } nav li { margin: 0; }
+nav li a { display: block; padding: 0.35rem 1.25rem; color: var(--subtext); font-size: 0.9rem; transition: all 0.15s; }
+nav li a:hover, nav li a.active { color: var(--accent); background: var(--code-bg); text-decoration: none; }
+nav .section-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--subtext); padding: 0.75rem 1.25rem 0.25rem; }
+main { margin-left: var(--sidebar-w); flex: 1; max-width: 800px; padding: 2rem 3rem; }
+h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+h2 { font-size: 1.5rem; margin: 2rem 0 0.75rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+h3 { font-size: 1.15rem; margin: 1.5rem 0 0.5rem; }
+p { margin-bottom: 1rem; }
+code { font-family: 'Fira Code', 'SF Mono', monospace; font-size: 0.9em; background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+pre { background: var(--code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto; margin-bottom: 1rem; font-size: 0.9rem; line-height: 1.5; }
+pre code { background: none; padding: 0; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+th, td { padding: 0.5rem 0.75rem; border: 1px solid var(--border); text-align: left; }
+th { background: var(--code-bg); font-weight: 600; }
+@media (max-width: 800px) { nav { display: none; } main { margin-left: 0; padding: 1rem; } }
+</style>
+</head>
+<body>
+<div class="wrapper">
+<nav>
+    <div class="logo">Clarity <span>Reference</span></div>
+    <div class="section-title">Syntax</div>
+    <ul>
+        <li><a href="#comments">Comments</a></li>
+        <li><a href="#literals">Literals</a></li>
+        <li><a href="#variables">Variables</a></li>
+        <li><a href="#operators">Operators</a></li>
+    </ul>
+    <div class="section-title">Expressions</div>
+    <ul>
+        <li><a href="#functions">Functions</a></li>
+        <li><a href="#control-flow">Control Flow</a></li>
+        <li><a href="#match">Match</a></li>
+        <li><a href="#pipes">Pipes</a></li>
+        <li><a href="#comprehensions">Comprehensions</a></li>
+    </ul>
+    <div class="section-title">Types</div>
+    <ul>
+        <li><a href="#classes">Classes</a></li>
+        <li><a href="#enums">Enums</a></li>
+        <li><a href="#interfaces">Interfaces</a></li>
+    </ul>
+    <div class="section-title">Advanced</div>
+    <ul>
+        <li><a href="#modules">Modules</a></li>
+        <li><a href="#errors">Error Handling</a></li>
+        <li><a href="#async">Async / Await</a></li>
+        <li><a href="#generators">Generators</a></li>
+        <li><a href="#decorators">Decorators</a></li>
+        <li><a href="#null-safety">Null Safety</a></li>
+    </ul>
+    <div class="section-title">Navigation</div>
+    <ul>
+        <li><a href="index.html">Documentation</a></li>
+        <li><a href="tutorial.html">Tutorial</a></li>
+    </ul>
+</nav>
+
+<main>
+<h1 id="top">Language Reference</h1>
+<p>Complete specification of the Clarity programming language v1.0.0.</p>
+
+<h2 id="comments">Comments</h2>
+<pre><code>-- Line comment (preferred)
+// Also supported
+</code></pre>
+
+<h2 id="literals">Literals</h2>
+<table>
+<tr><th>Type</th><th>Syntax</th><th>Examples</th></tr>
+<tr><td>Integer</td><td>Decimal, hex, octal, binary</td><td><code>42</code>, <code>0xFF</code>, <code>0o77</code>, <code>0b1010</code></td></tr>
+<tr><td>Float</td><td>Decimal point, exponent</td><td><code>3.14</code>, <code>1.5e10</code>, <code>2.0E-3</code></td></tr>
+<tr><td>String</td><td>Double or single quotes</td><td><code>"hello"</code>, <code>'world'</code></td></tr>
+<tr><td>Interpolation</td><td><code>{expr}</code> inside double quotes</td><td><code>"Hello {name}!"</code></td></tr>
+<tr><td>Boolean</td><td>Lowercase keywords</td><td><code>true</code>, <code>false</code></td></tr>
+<tr><td>Null</td><td>Keyword</td><td><code>null</code></td></tr>
+<tr><td>List</td><td>Square brackets</td><td><code>[1, 2, 3]</code></td></tr>
+<tr><td>Map</td><td>Curly braces</td><td><code>{a: 1, "b": 2}</code></td></tr>
+</table>
+<p>Escape sequences: <code>\n</code> <code>\t</code> <code>\r</code> <code>\\</code> <code>\"</code> <code>\{</code> <code>\}</code> <code>\x41</code> <code>\u0041</code></p>
+
+<h2 id="variables">Variables</h2>
+<pre><code>let x = 42           -- immutable binding (default)
+mut counter = 0      -- mutable binding
+counter += 1         -- OK: counter is mutable
+-- x = 10            -- Error: x is immutable
+</code></pre>
+<p><code>let</code> creates an immutable binding. <code>mut</code> creates a mutable one. Prefer <code>let</code> unless mutation is needed.</p>
+
+<h2 id="operators">Operators</h2>
+<table>
+<tr><th>Category</th><th>Operators</th></tr>
+<tr><td>Arithmetic</td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> <code>%</code> <code>**</code> (power)</td></tr>
+<tr><td>Comparison</td><td><code>==</code> <code>!=</code> <code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code></td></tr>
+<tr><td>Logical</td><td><code>and</code> <code>or</code> <code>not</code> <code>is</code></td></tr>
+<tr><td>Assignment</td><td><code>=</code> <code>+=</code> <code>-=</code> <code>*=</code> <code>/=</code> <code>%=</code></td></tr>
+<tr><td>Pipe</td><td><code>|&gt;</code> — pass left side as first argument to right side</td></tr>
+<tr><td>Null coalesce</td><td><code>??</code> — returns right side if left is null</td></tr>
+<tr><td>Optional chain</td><td><code>?.</code> — safe property access (returns null if left is null)</td></tr>
+<tr><td>Spread</td><td><code>...</code> — expand list/map or collect rest parameters</td></tr>
+<tr><td>Range</td><td><code>..</code> — numeric range (exclusive end)</td></tr>
+</table>
+
+<h2 id="functions">Functions</h2>
+<pre><code>-- Named function
+fn greet(name) {
+    return "Hello, " + name
+}
+
+-- Default parameter
+fn connect(host, port, timeout) {
+    timeout = timeout ?? 30
+}
+
+-- Rest parameters
+fn log(msg, ...args) {
+    show msg
+    each(args, fn(a) { show "  " + str(a) })
+}
+
+-- Lambda / anonymous function
+let double = fn(x) { x * 2 }
+
+-- Arrow syntax
+let triple = x => x * 3
+let add = (a, b) => a + b
+
+-- Implicit return (last expression)
+fn square(n) { n * n }
+</code></pre>
+
+<h2 id="control-flow">Control Flow</h2>
+<pre><code>-- If / elif / else
+if x > 0 {
+    show "positive"
+} elif x < 0 {
+    show "negative"
+} else {
+    show "zero"
+}
+
+-- If expression (returns a value)
+let sign = if x > 0 { "+" } else { "-" }
+
+-- For loop
+for item in [1, 2, 3] {
+    show item
+}
+
+-- For with range
+for i in 0..10 {
+    show i
+}
+
+-- While loop
+mut i = 0
+while i < 10 {
+    i += 1
+}
+
+-- Break and continue
+for n in range(100) {
+    if n % 2 == 0 { continue }
+    if n > 50 { break }
+    show n
+}
+</code></pre>
+
+<h2 id="match">Match Expressions</h2>
+<pre><code>match value {
+    when 0 { "zero" }
+    when 1 { "one" }
+    when 2 { "two" }
+    else { "other: " + str(value) }
+}
+
+-- Match on type
+match data {
+    when "string" { show "it's a string" }
+    when 42 { show "the answer" }
+    else { show "something else" }
+}
+</code></pre>
+
+<h2 id="pipes">Pipe Operator</h2>
+<pre><code>-- Without pipes
+let result = sum(map(filter(data, is_active), get_score))
+
+-- With pipes — same thing, left to right
+let result = data
+    |> filter(is_active)
+    |> map(get_score)
+    |> sum()
+</code></pre>
+<p>The pipe operator <code>|&gt;</code> passes the left-hand value as the first argument to the right-hand function.</p>
+
+<h2 id="comprehensions">Comprehensions</h2>
+<pre><code>-- List comprehension
+let squares = [x ** 2 for x in range(1, 11)]
+
+-- With filter
+let evens = [x for x in range(20) if x % 2 == 0]
+
+-- Map comprehension
+let lookup = {str(n): n * n for n in range(5)}
+</code></pre>
+
+<h2 id="classes">Classes</h2>
+<pre><code>class Point {
+    fn init(x, y) {
+        this.x = x
+        this.y = y
+    }
+
+    fn distance(other) {
+        let dx = this.x - other.x
+        let dy = this.y - other.y
+        return sqrt(dx ** 2 + dy ** 2)
+    }
+
+    fn to_string() {
+        return "({this.x}, {this.y})"
+    }
+}
+
+-- Inheritance
+class Point3D < Point {
+    fn init(x, y, z) {
+        this.x = x
+        this.y = y
+        this.z = z
+    }
+}
+
+-- Instantiation
+let p = Point(3, 4)
+show p.distance(Point(0, 0))  -- 5
+</code></pre>
+
+<h2 id="enums">Enums</h2>
+<pre><code>enum Direction {
+    North = "north",
+    South = "south",
+    East = "east",
+    West = "west"
+}
+
+let d = Direction.North
+show str(d)  -- "north"
+</code></pre>
+
+<h2 id="interfaces">Interfaces</h2>
+<pre><code>interface Drawable {
+    fn draw()
+    fn bounds()
+}
+
+impl Drawable for Circle {
+    fn draw() {
+        show "Drawing circle at ({this.x}, {this.y})"
+    }
+    fn bounds() {
+        return {x: this.x - this.r, y: this.y - this.r,
+                w: this.r * 2, h: this.r * 2}
+    }
+}
+</code></pre>
+
+<h2 id="modules">Modules</h2>
+<pre><code>-- Import specific names
+from "math.clarity" import sqrt, pi
+
+-- Import with alias
+from "collections.clarity" import HashMap as HM
+
+-- Relative import
+from "../lib/utils.clarity" import helper
+</code></pre>
+
+<h2 id="errors">Error Handling</h2>
+<pre><code>try {
+    let data = read("config.json")
+    let config = json_parse(data)
+} catch e {
+    show "Error: " + str(e)
+} finally {
+    show "cleanup"
+}
+
+-- Throw errors
+fn divide(a, b) {
+    if b == 0 { throw "Division by zero" }
+    return a / b
+}
+</code></pre>
+
+<h2 id="async">Async / Await</h2>
+<pre><code>async fn fetch_data(url) {
+    let response = await fetch(url)
+    return json_parse(response)
+}
+
+let data = await fetch_data("https://api.example.com/data")
+</code></pre>
+
+<h2 id="generators">Generators</h2>
+<pre><code>fn fibonacci(n) {
+    mut a = 0
+    mut b = 1
+    for i in 0..n {
+        yield a
+        let tmp = a + b
+        a = b
+        b = tmp
+    }
+}
+
+let fibs = fibonacci(10)
+show fibs  -- [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+</code></pre>
+<p>Functions that use <code>yield</code> become generators. They return a list of all yielded values.</p>
+
+<h2 id="decorators">Decorators</h2>
+<pre><code>fn memoize(wrapped) {
+    let cache = {}
+    return fn(...args) {
+        let key = str(args)
+        if has(cache, key) { return cache[key] }
+        let result = wrapped(...args)
+        cache[key] = result
+        return result
+    }
+}
+
+@memoize
+fn fibonacci(n) {
+    if n <= 1 { return n }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+</code></pre>
+<p>Decorators are functions that wrap other functions. Use <code>@name</code> before a function definition.</p>
+
+<h2 id="null-safety">Null Safety</h2>
+<pre><code>-- Null coalescing
+let name = user.name ?? "Anonymous"
+
+-- Optional chaining
+let city = user?.address?.city
+
+-- Combined
+let zip = user?.address?.zip ?? "00000"
+</code></pre>
+
+</main>
+</div>
+
+<script>
+const sections = document.querySelectorAll('h1[id], h2[id]');
+const navLinks = document.querySelectorAll('nav a');
+window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(s => { if (window.scrollY >= s.offsetTop - 100) current = s.id; });
+    navLinks.forEach(a => { a.classList.toggle('active', a.getAttribute('href') === '#' + current); });
+});
+</script>
+</body>
+</html>

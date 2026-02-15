@@ -1,0 +1,16 @@
+services:
+  registry:
+    build:
+      context: ..
+      dockerfile: registry/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - registry-data:/data
+    environment:
+      - REGISTRY_PORT=8080
+      - REGISTRY_DATA=/data
+    restart: unless-stopped
+
+volumes:
+  registry-data:

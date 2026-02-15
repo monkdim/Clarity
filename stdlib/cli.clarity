@@ -38,7 +38,7 @@ fn _help() {
     show "Usage: clarity <command> [args]"
     show ""
     show "Commands:"
-    show "  run <file.clarity>    Run a Clarity program"
+    show "  run <file.clarity>    Run a Clarity program (--fast for bytecode VM)"
     show "  shell                 Start Clarity Shell (interactive terminal)"
     show "  repl                  Start interactive REPL (basic)"
     show "  check <file.clarity>  Check syntax (--types for type checking)"
@@ -61,6 +61,7 @@ fn _help() {
     show "  smoke                 Run smoke tests on the binary"
     show "  gen-runtime           Regenerate native/runtime.js from spec"
     show "  install-self          Install Clarity from source (clone + build)"
+    show "  bench                 Run performance benchmarks (interp vs bytecode)"
     show "  lsp                   Start language server (for editors)"
     show "  help                  Show this help message"
     show "  version               Show version"
@@ -68,6 +69,7 @@ fn _help() {
     show "Examples:"
     show "  clarity shell"
     show "  clarity run hello.clarity"
+    show "  clarity run app.clarity --fast"
     show "  clarity check file.clarity --types"
     show "  clarity lint stdlib/"
     show "  clarity debug app.clarity"
@@ -141,6 +143,29 @@ fn run_file(path) {
         let source_dir = _dirname(_abspath(path))
         let interp = Interpreter(null, source_dir)
         interp.run(tree)
+    } catch e {
+        show red("\nClarity Error in {path}: {e}")
+        exit(1)
+    }
+}
+
+fn run_file_fast(path) {
+    -- Run through bytecode VM instead of tree-walking interpreter
+    if not exists(path) {
+        show red("  >> File not found: {path}")
+        exit(1)
+    }
+
+    let source = read(path)
+
+    try {
+        from "bytecode.clarity" import compile_to_bytecode, VM, optimize
+        let tokens = tokenize(source, path)
+        let tree = parse(tokens, source)
+        let code = compile_to_bytecode(tree)
+        optimize(code)
+        let vm = VM()
+        vm.run(code)
     } catch e {
         show red("\nClarity Error in {path}: {e}")
         exit(1)
@@ -473,10 +498,16 @@ fn main() {
     -- Run
     if command == "run" {
         if len(cli_args) < 2 {
-            show red("Usage: clarity run <file.clarity>")
+            show red("Usage: clarity run <file.clarity> [--fast]")
             exit(1)
         }
-        run_file(cli_args[1])
+        let fast_mode = contains(cli_args, "--fast")
+        let file_arg = cli_args[1]
+        if fast_mode {
+            run_file_fast(file_arg)
+        } else {
+            run_file(file_arg)
+        }
         return null
     }
 
@@ -631,6 +662,19 @@ fn main() {
     -- Test
     if command == "test" {
         do_test(cli_args)
+        return null
+    }
+
+    -- Bench
+    if command == "bench" {
+        let stdlib_dir = _dirname(_abspath("lexer.clarity"))
+        let bench_path = stdlib_dir + "/benchmark.clarity"
+        if exists(bench_path) {
+            run_file(bench_path)
+        } else {
+            show red("  >> benchmark.clarity not found at: {bench_path}")
+            exit(1)
+        }
         return null
     }
 

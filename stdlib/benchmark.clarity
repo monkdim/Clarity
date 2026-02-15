@@ -1,0 +1,210 @@
+-- Clarity Benchmark Suite
+-- Compares tree-walking interpreter vs bytecode VM execution.
+-- Usage: clarity run stdlib/benchmark.clarity
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "bytecode.clarity" import compile_to_bytecode, VM, optimize
+
+-- ── Benchmark runner ─────────────────────────────────────
+
+fn bench_interpret(name, source, iterations) {
+    let tokens = tokenize(source, "<bench>")
+    let tree = parse(tokens, source)
+    let start = time()
+    mut i = 0
+    while i < iterations {
+        let interp = Interpreter()
+        interp.run(tree)
+        i += 1
+    }
+    let elapsed = time() - start
+    return elapsed
+}
+
+fn bench_bytecode(name, source, iterations) {
+    let tokens = tokenize(source, "<bench>")
+    let tree = parse(tokens, source)
+    let code = compile_to_bytecode(tree)
+    optimize(code)
+    let start = time()
+    mut i = 0
+    while i < iterations {
+        let vm = VM()
+        vm.run(code)
+        i += 1
+    }
+    let elapsed = time() - start
+    return elapsed
+}
+
+fn run_bench(name, source, iterations) {
+    let t_interp = bench_interpret(name, source, iterations)
+    let t_bc = bench_bytecode(name, source, iterations)
+    let speedup = if t_bc > 0 { t_interp / t_bc } else { 0 }
+
+    let interp_ms = round(t_interp * 1000)
+    let bc_ms = round(t_bc * 1000)
+    let sp = round(speedup * 10) / 10
+
+    show "  {_pad(name, 28)} interp: {_pad(str(interp_ms) + \"ms\", 10)} bytecode: {_pad(str(bc_ms) + \"ms\", 10)} speedup: {sp}x"
+}
+
+fn _pad(s, width) {
+    mut result = s
+    while len(result) < width { result = result + " " }
+    return result
+}
+
+-- ── Benchmark programs ───────────────────────────────────
+
+let BENCH_FIB = "fn fib(n) {
+  if n <= 1 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+fib(15)"
+
+let BENCH_FIB_ITER = "fn fib(n) {
+  mut a = 0
+  mut b = 1
+  mut i = 0
+  while i < n {
+    let tmp = a + b
+    a = b
+    b = tmp
+    i += 1
+  }
+  return a
+}
+fib(100)"
+
+let BENCH_BUBBLE_SORT = "fn bsort(lst) {
+  mut arr = lst
+  mut n = len(arr)
+  mut i = 0
+  while i < n {
+    mut j = 0
+    while j < n - i - 1 {
+      if arr[j] > arr[j + 1] {
+        let tmp = arr[j]
+        arr[j] = arr[j + 1]
+        arr[j + 1] = tmp
+      }
+      j += 1
+    }
+    i += 1
+  }
+  return arr
+}
+bsort([9, 4, 7, 2, 1, 8, 3, 6, 5, 0])"
+
+let BENCH_STRING_OPS = "mut result = \"\"
+mut i = 0
+while i < 50 {
+  result = result + str(i) + \"-\"
+  i += 1
+}
+let parts = split(result, \"-\")
+let filtered = filter(parts, fn(x) { return len(x) > 0 })
+len(filtered)"
+
+let BENCH_LIST_OPS = "mut lst = []
+mut i = 0
+while i < 100 {
+  push(lst, i * 2)
+  i += 1
+}
+let mapped = map(lst, fn(x) { return x + 1 })
+let filtered = filter(mapped, fn(x) { return x % 3 == 0 })
+sum(filtered)"
+
+let BENCH_CLASS_DISPATCH = "class Vec2 {
+  fn init(x, y) { this.x = x; this.y = y }
+  fn add(other) { return Vec2(this.x + other.x, this.y + other.y) }
+  fn mag() { return this.x * this.x + this.y * this.y }
+}
+mut v = Vec2(0, 0)
+mut i = 0
+while i < 50 {
+  v = v.add(Vec2(i, i))
+  i += 1
+}
+v.mag()"
+
+let BENCH_NESTED_LOOPS = "mut count = 0
+mut i = 0
+while i < 30 {
+  mut j = 0
+  while j < 30 {
+    count += 1
+    j += 1
+  }
+  i += 1
+}
+count"
+
+let BENCH_MAP_ACCESS = "let data = {}
+mut i = 0
+while i < 100 {
+  data[str(i)] = i * i
+  i += 1
+}
+mut total = 0
+i = 0
+while i < 100 {
+  total += data[str(i)]
+  i += 1
+}
+total"
+
+let BENCH_CLOSURES = "fn make_counter() {
+  mut count = 0
+  return fn() {
+    count += 1
+    return count
+  }
+}
+let c = make_counter()
+mut i = 0
+while i < 50 {
+  c()
+  i += 1
+}
+c()"
+
+let BENCH_HIGHER_ORDER = "fn compose(f, g) {
+  return fn(x) { return f(g(x)) }
+}
+let double = fn(x) { return x * 2 }
+let inc = fn(x) { return x + 1 }
+let double_then_inc = compose(inc, double)
+mut total = 0
+mut i = 0
+while i < 100 {
+  total += double_then_inc(i)
+  i += 1
+}
+total"
+
+-- ── Run benchmarks ───────────────────────────────────────
+
+show ""
+show "  Clarity Bytecode VM Benchmarks"
+show "  =============================="
+show ""
+
+let N = 5
+run_bench("fibonacci(15) recursive", BENCH_FIB, N)
+run_bench("fibonacci(100) iterative", BENCH_FIB_ITER, N * 2)
+run_bench("bubble sort 10 elements", BENCH_BUBBLE_SORT, N * 2)
+run_bench("string operations", BENCH_STRING_OPS, N)
+run_bench("list map/filter/sum", BENCH_LIST_OPS, N)
+run_bench("class method dispatch", BENCH_CLASS_DISPATCH, N)
+run_bench("nested loops 30x30", BENCH_NESTED_LOOPS, N * 2)
+run_bench("map access 100 keys", BENCH_MAP_ACCESS, N)
+run_bench("closures", BENCH_CLOSURES, N * 2)
+run_bench("higher-order functions", BENCH_HIGHER_ORDER, N)
+
+show ""
+show "  Done. (N={N} iterations per benchmark)"

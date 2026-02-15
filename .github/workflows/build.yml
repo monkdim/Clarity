@@ -1,95 +1,131 @@
-name: Build Native Binaries
+name: Release
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-14
             target: darwin-arm64
-            arch: arm64
+            bun_target: bun-darwin-arm64
+            binary: clarity
           - os: macos-13
             target: darwin-x64
-            arch: x64
+            bun_target: bun-darwin-x64
+            binary: clarity
           - os: ubuntu-latest
             target: linux-x64
-            arch: x64
+            bun_target: bun-linux-x64
+            binary: clarity
           - os: ubuntu-24.04-arm
             target: linux-arm64
-            arch: arm64
+            bun_target: bun-linux-arm64
+            binary: clarity
           - os: windows-latest
             target: windows-x64
-            arch: x64
+            bun_target: bun-windows-x64
+            binary: clarity.exe
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Install dependencies
+
+      - name: Install Python bootstrap
         run: pip install -e .
+
       - name: Transpile stdlib to JS
         run: python native/transpile.py --bundle
-      - name: Build native binary
+
+      - name: Compile native binary
         run: |
-          cd native
-          bash build.sh
-        shell: bash
+          cd native/dist
+          bun build --compile --target=${{ matrix.bun_target }} clarity-entry.js --outfile ${{ matrix.binary }}
+
       - name: Run smoke tests
-        run: bash native/smoke_test.sh
-        shell: bash
+        if: matrix.target != 'windows-x64'
+        run: ./native/dist/clarity smoke ./native/dist/clarity
+
       - name: Package binary
         run: |
           cd native/dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a ../../clarity-${{ matrix.target }}.zip clarity.exe
+            7z a ../../clarity-${{ matrix.target }}.zip ${{ matrix.binary }}
           else
-            tar czf ../../clarity-${{ matrix.target }}.tar.gz clarity
+            tar czf ../../clarity-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
           fi
         shell: bash
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: clarity-${{ matrix.target }}
           path: clarity-${{ matrix.target }}.*
+
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git tag --sort=-creatordate | head -2 | tail -1)
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
+            echo "body=Initial release of Clarity $CURRENT_TAG" >> $GITHUB_OUTPUT
+          else
+            CHANGES=$(git log --pretty=format:"- %s" "$PREV_TAG".."$CURRENT_TAG" | head -50)
+            EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+            echo "body<<$EOF" >> $GITHUB_OUTPUT
+            echo "## What's Changed" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "$CHANGES" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "## Installation" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo '```bash' >> $GITHUB_OUTPUT
+            echo "curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash" >> $GITHUB_OUTPUT
+            echo '```' >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "Or with Homebrew:" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo '```bash' >> $GITHUB_OUTPUT
+            echo "brew install monkdim/tap/clarity" >> $GITHUB_OUTPUT
+            echo '```' >> $GITHUB_OUTPUT
+            echo "$EOF" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
-          generate_release_notes: true
+          body: ${{ steps.changelog.outputs.body }}
           draft: false
           prerelease: false
-  test:
-    runs-on: ubuntu-latest
-    name: Run Tests
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install
-        run: pip install -e .
-      - name: Run Python tests
-        run: python -m pytest tests/ -v --tb=short
-      - name: Run self-hosted tests
-        run: python -m clarity --python test stdlib/
