@@ -350,17 +350,17 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 
 ---
 
-## Phase 49 — First Release & CI
+## Phase 49 — First Release & CI ✅
 
 > Ship v1.0.0 as a real GitHub release with pre-built binaries. Set up CI so every push is tested.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **GitHub Actions workflow** | Pending | `.github/workflows/ci.yml` — on push: transpile → compile → run `clarity test stdlib/` + `clarity smoke`. Matrix: macOS (arm64, x64), Linux (x64, arm64) |
-| 2 | **Release workflow** | Pending | On tag `v*`: build all 5 platform binaries, create GitHub Release with assets, generate changelog from commits |
-| 3 | **Tag v1.0.0** | Pending | `git tag v1.0.0` — first official release |
-| 4 | **Homebrew formula** | Pending | `homebrew-clarity` tap — `brew install monkdim/tap/clarity` downloads the binary |
-| 5 | **Install one-liner** | Pending | `curl -fsSL clarity-lang.org/install | bash` — downloads the right binary for the platform |
+| 1 | **GitHub Actions workflow** | Done | `.github/workflows/ci.yml` — on push to main: transpile → compile → run `clarity test stdlib/` + `clarity smoke`. Matrix: macOS (arm64, x64), Linux (x64, arm64) |
+| 2 | **Release workflow** | Done | `.github/workflows/build.yml` rewritten — on tag `v*`: build all 5 platform binaries, generate changelog from commits, create GitHub Release with assets. No shell scripts — uses Bun directly |
+| 3 | **Tag v1.0.0** | Done | `git tag v1.0.0` — first official release |
+| 4 | **Homebrew formula** | Done | `Formula/clarity.rb` — `brew install monkdim/tap/clarity` downloads the right binary for macOS/Linux, arm64/x64. SHA256 placeholders ready for first release |
+| 5 | **Install one-liner** | Done | `curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash` — detects platform/arch, downloads latest release binary, installs to `/usr/local/bin` |
 
 ---
 
