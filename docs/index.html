@@ -130,7 +130,7 @@ th { background: var(--code-bg); font-weight: 600; }
 <body>
 <div class="wrapper">
 <nav>
-    <div class="logo">Clarity <span>v0.5.0</span></div>
+    <div class="logo">Clarity <span>v1.0.0</span></div>
     <div class="section-title">Getting Started</div>
     <ul>
         <li><a href="#intro" class="active">Introduction</a></li>
@@ -171,6 +171,12 @@ th { background: var(--code-bg); font-weight: 600; }
         <li><a href="#editor">Editor Support</a></li>
         <li><a href="#playground">Playground</a></li>
     </ul>
+    <div class="section-title">More</div>
+    <ul>
+        <li><a href="reference.html">Language Reference</a></li>
+        <li><a href="tutorial.html">Tutorial</a></li>
+        <li><a href="../playground/index.html">Playground</a></li>
+    </ul>
 </nav>
 
 <main>
@@ -188,13 +194,15 @@ greet("World")
 </code></pre>
 
 <h2 id="install">Installation</h2>
-<p>Install Clarity using pip (Python bootstrap) or download a native binary:</p>
-<pre><code># From source
-pip install -e .
+<p>Install a prebuilt native binary (no dependencies required):</p>
+<pre><code># One-liner (macOS / Linux)
+curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash
 
-# Or build native binary
-python native/transpile.py
-./clarity-native --version
+# Or with Homebrew
+brew install monkdim/tap/clarity
+
+# Verify
+clarity version
 </code></pre>
 
 <h2 id="hello">Hello World</h2>
@@ -546,7 +554,7 @@ json = "~2.0.0"
 <ul>
 <li>Syntax highlighting via TextMate grammar</li>
 <li>LSP integration for diagnostics, completion, hover</li>
-<li>22 code snippets (<code>fn</code>, <code>class</code>, <code>for</code>, <code>if</code>, etc.)</li>
+<li>31 code snippets (<code>fn</code>, <code>class</code>, <code>for</code>, <code>if</code>, <code>test</code>, <code>impl</code>, etc.)</li>
 <li>Commands: Run, Check, Format, Lint</li>
 </ul>
 <p>Install from <code>editors/vscode/</code> or the VS Code marketplace.</p>
