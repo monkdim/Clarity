@@ -410,10 +410,10 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Complete bytecode compiler** | Pending | `stdlib/bytecode.clarity` — cover all 49 AST node types, currently ~40% complete |
-| 2 | **Stack VM optimization** | Pending | Inline caching, constant folding, dead code elimination at bytecode level |
-| 3 | **`clarity run --fast`** | Pending | Run programs through bytecode VM instead of tree-walking interpreter |
-| 4 | **Benchmarks** | Pending | Fibonacci, sorting, string processing, class dispatch — compare tree-walk vs bytecode vs JS transpiled |
+| 1 | **Complete bytecode compiler** | Done | `stdlib/bytecode.clarity` — all 49 AST node types: classes (VMClass/VMInstance with inheritance), try/catch (SETUP_TRY/POP_TRY/THROW), break/continue (loop stack with jump patching), match (compare chains), enums, interfaces, decorators, destructuring (list/map/rest), comprehensions, null coalesce, optional member, slicing, spread, multi-assign. 8 new opcodes (THROW, MAKE_CLASS, SLICE, SETUP_TRY, POP_TRY, SWAP, ROT3, JUMP_TRUE) |
+| 2 | **Stack VM optimization** | Done | `optimize()` — 3-pass pipeline: constant folding (CONST+CONST+OP → CONST at compile time for arithmetic/comparison), dead code elimination (NOP after RETURN/THROW until next jump target), peephole (CONST+POP removal, DUP+POP elimination) |
+| 3 | **`clarity run --fast`** | Done | `clarity run <file> --fast` routes through bytecode compiler + optimizer + stack VM instead of tree-walking interpreter. `run_file_fast()` in CLI |
+| 4 | **Benchmarks** | Done | `stdlib/benchmark.clarity` — 10 benchmarks: fibonacci recursive/iterative, bubble sort, string ops, list map/filter/sum, class method dispatch, nested loops, map access, closures, higher-order functions. Compares interpreter vs bytecode VM with timing and speedup ratios. `clarity bench` CLI command |
 
 ---
 
