@@ -277,10 +277,10 @@ LSP server, REPL.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Transpiler core in Clarity** | Pending | `stdlib/transpile.clarity` — port all 22 stmt + 25 expr type handlers from Python to Clarity. AST walker that emits JavaScript strings |
-| 2 | **Import resolution** | Pending | Resolve `from "file" import` to bundled JS modules, hoist imports to top level (matching current Python transpiler behavior) |
-| 3 | **`--bundle` mode** | Pending | Concatenate all 20+ stdlib files into a single JS output, same as `transpile.py --bundle` |
-| 4 | **`clarity transpile` command** | Pending | New CLI command: `clarity transpile <file> [--bundle] [-o output.js]` — runs entirely in Clarity |
+| 1 | **Transpiler core in Clarity** | Done | `stdlib/transpile.clarity` — JSEmitter class with all 22 stmt + 25 expr type handlers, AST walker that emits JavaScript. ~450 lines, faithful port of `native/transpile.py` |
+| 2 | **Import resolution** | Done | File imports resolved to `.js` paths, `from "file" import` mapped to ES module imports, nested imports hoisted to module top level via `hoisted_imports` list |
+| 3 | **`--bundle` mode** | Done | `transpile_bundle()` transpiles all 35 stdlib files to JS, copies runtime.js, creates entry point and package.json. Invoked via `clarity transpile --bundle` |
+| 4 | **`clarity transpile` command** | Done | New CLI command in `stdlib/cli.clarity`: `clarity transpile <file> [-o output.js]` for single files, `clarity transpile --bundle [-o dist_dir]` for full stdlib bundle |
 | 5 | **Parity tests** | Pending | Verify transpiled output from Clarity transpiler matches Python transpiler output for all 76 native test cases |
 
 ---

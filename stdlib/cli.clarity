@@ -11,6 +11,7 @@ from "type_checker.clarity" import TypeChecker, check_types_source
 from "docgen.clarity" import generate_docs
 from "debugger.clarity" import debug_file
 from "profiler.clarity" import profile_file
+from "transpile.clarity" import transpile_with_runtime, transpile_bundle, STDLIB_FILES
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -52,6 +53,7 @@ fn _help() {
     show "  publish               Pack and publish to registry"
     show "  search <query>        Search the package registry"
     show "  info <pkg>            Show package info from registry"
+    show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  lsp                   Start language server (for editors)"
     show "  help                  Show this help message"
     show "  version               Show version"
@@ -544,6 +546,12 @@ fn main() {
         return null
     }
 
+    -- Transpile
+    if command == "transpile" {
+        do_transpile(cli_args)
+        return null
+    }
+
     -- LSP
     if command == "lsp" {
         start_lsp()
@@ -852,6 +860,67 @@ fn do_test(cli_args) {
     show ""
 
     if failed > 0 { exit(1) }
+}
+
+-- ── Transpile command ───────────────────────────────────
+
+fn do_transpile(cli_args) {
+    let is_bundle = contains(cli_args, "--bundle")
+
+    -- Parse -o output path
+    mut output_path = null
+    mut i = 0
+    while i < len(cli_args) {
+        if (cli_args[i] == "-o" or cli_args[i] == "--out") and i + 1 < len(cli_args) {
+            output_path = cli_args[i + 1]
+        }
+        i += 1
+    }
+
+    if is_bundle {
+        -- Bundle mode: transpile entire stdlib
+        let stdlib_dir = _dirname(_abspath("lexer.clarity"))
+        let dist_dir = output_path ?? (replace(stdlib_dir, "stdlib", "native") + "/dist")
+        transpile_bundle(stdlib_dir, dist_dir)
+        return null
+    }
+
+    -- Single file mode
+    mut file_path = null
+    i = 1
+    while i < len(cli_args) {
+        let arg = cli_args[i]
+        if not starts(arg, "-") {
+            file_path = arg
+            break
+        }
+        if arg == "-o" or arg == "--out" {
+            i += 2
+            continue
+        }
+        i += 1
+    }
+
+    if file_path == null {
+        show red("Usage: clarity transpile <file.clarity> [-o output.js]")
+        show red("       clarity transpile --bundle [-o dist_dir]")
+        exit(1)
+    }
+
+    if not exists(file_path) {
+        show red("  >> File not found: " + file_path)
+        exit(1)
+    }
+
+    try {
+        let js = transpile_with_runtime(file_path)
+        let out = output_path ?? replace(file_path, ".clarity", ".js")
+        write(out, js)
+        show green("  Transpiled") + ": " + file_path + " -> " + out
+    } catch e {
+        show red("  Transpile error: " + str(e))
+        exit(1)
+    }
 }
 
 -- ── Run ─────────────────────────────────────────────────

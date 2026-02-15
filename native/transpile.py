@@ -609,6 +609,7 @@ def bundle(compile_native=False):
         'semver.clarity', 'registry.clarity',
         'highlight.clarity', 'completer.clarity', 'pretty.clarity',
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
+        'transpile.clarity',
         'cli.clarity',
     ]
 
