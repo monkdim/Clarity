@@ -1,0 +1,115 @@
+-- Type Checker Tests — ported from tests/test_type_checker.py
+-- Tests static type annotation validation and type inference.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "type_checker.clarity" import TypeChecker
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg
+    }
+}
+
+fn get_errors(source) {
+    let tokens = tokenize(source, "<test>")
+    let tree = parse(tokens, source)
+    let checker = TypeChecker()
+    let diags = checker.check(tree)
+    mut errors = []
+    for d in diags {
+        if d["severity"] == "error" {
+            push(errors, d)
+        }
+    }
+    return errors
+}
+
+fn get_diags(source) {
+    let tokens = tokenize(source, "<test>")
+    let tree = parse(tokens, source)
+    let checker = TypeChecker()
+    return checker.check(tree)
+}
+
+-- ── Basic type annotations ──────────────────────────────
+
+show "-- Type Checker: Basic Annotations --"
+
+assert(len(get_errors("let x: int = 42")) == 0, "correct int annotation")
+assert(len(get_errors("let s: string = \"hello\"")) == 0, "correct string annotation")
+assert(len(get_errors("let b: bool = true")) == 0, "correct bool annotation")
+assert(len(get_errors("let xs: list = [1, 2, 3]")) == 0, "correct list annotation")
+assert(len(get_errors("let m: map = {\"a\": 1}")) == 0, "correct map annotation")
+
+-- ── Type mismatches ─────────────────────────────────────
+
+show "-- Type Checker: Mismatches --"
+
+let e1 = get_errors("let x: int = \"hello\"")
+assert(len(e1) == 1, "mismatch int <- string")
+assert(contains(e1[0]["message"], "int"), "mismatch mentions int")
+assert(contains(e1[0]["message"], "string"), "mismatch mentions string")
+
+assert(len(get_errors("let x: string = 42")) == 1, "mismatch string <- int")
+assert(len(get_errors("let b: bool = \"true\"")) == 1, "mismatch bool <- string")
+
+-- ── Special types ───────────────────────────────────────
+
+show "-- Type Checker: Special Types --"
+
+assert(len(get_errors("let x: any = 42\nlet y: any = \"hello\"\nlet z: any = [1]")) == 0, "any accepts everything")
+assert(len(get_errors("let x: number = 42\nlet y: number = 3.14")) == 0, "number accepts int and float")
+assert(len(get_errors("let x: float = 42")) == 0, "float accepts int")
+assert(len(get_errors("let x = null")) == 0, "no annotation with null")
+
+-- ── Function return types ───────────────────────────────
+
+show "-- Type Checker: Functions --"
+
+assert(len(get_errors("fn add(a, b) -> int { return 42 }")) == 0, "correct return type")
+
+let e2 = get_errors("fn greet() -> int { return \"hello\" }")
+assert(len(e2) == 1, "wrong return type detected")
+
+assert(len(get_errors("fn foo() { return \"anything\" }")) == 0, "no annotation no error")
+assert(len(get_errors("fn add(a: int, b: int) -> int { return 42 }")) == 0, "typed params with return type")
+
+-- ── Classes ─────────────────────────────────────────────
+
+show "-- Type Checker: Classes --"
+
+assert(len(get_errors("class Dog {\n    fn init(name) { this.name = name }\n}\nlet d = Dog(\"Rex\")")) == 0, "class constructor")
+assert(len(get_errors("class Math {\n    fn double(x) { return x * 2 }\n}\nlet m = Math()\nshow m.double(5)")) == 0, "class method")
+
+-- ── Expression type inference ───────────────────────────
+
+show "-- Type Checker: Expression Inference --"
+
+assert(len(get_errors("let x: int = 2 + 3")) == 0, "arithmetic inferred as int")
+assert(len(get_errors("let x: float = 10 / 3")) == 0, "division inferred as float")
+assert(len(get_errors("let x: bool = 5 > 3")) == 0, "comparison inferred as bool")
+assert(len(get_errors("let x: string = \"a\" + \"b\"")) == 0, "string concat inferred as string")
+assert(len(get_errors("let n: int = len([1, 2, 3])")) == 0, "builtin return type inferred")
+assert(len(get_errors("let xs: list = 1..10")) == 0, "range inferred as list")
+assert(len(get_errors("let xs: list = [x * 2 for x in [1, 2, 3]]")) == 0, "comprehension inferred as list")
+assert(len(get_errors("let x: int = if true { 1 } else { 2 }")) == 0, "if expression matched types")
+
+-- ── No false positives ──────────────────────────────────
+
+show "-- Type Checker: No False Positives --"
+
+assert(len(get_errors("let x = 42\nlet s = \"hello\"\nfn foo(a, b) { return a + b }\nshow foo(x, 10)")) == 0, "no annotations no errors")
+assert(len(get_errors("class Animal {\n    fn init(name) { this.name = name }\n    fn speak() { return this.name }\n}\nlet a = Animal(\"Dog\")\nshow a.speak()\nfor i in [1, 2, 3] { show i }")) == 0, "complex program no errors")
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Type Checker: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " type checker test(s) failed" }

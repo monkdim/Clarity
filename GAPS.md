@@ -305,12 +305,12 @@ LSP server, REPL.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Port interpreter tests** | Pending | Migrate `tests/test_interpreter.py` (298 lines) → `stdlib/test_interpreter_full.clarity` — cover all edge cases not yet in self-hosted tests |
-| 2 | **Port parser tests** | Pending | Migrate `tests/test_parser.py` (192 lines) → `stdlib/test_parser_full.clarity` — AST structure verification |
-| 3 | **Port feature tests** | Pending | Migrate `tests/test_v2_features.py` (611 lines), `test_v3_features.py` (367 lines), `test_v4_features.py` (503 lines) → `stdlib/test_features.clarity` |
-| 4 | **Port tool tests** | Pending | Migrate `tests/test_type_checker.py`, `test_linter.py`, `test_debugger.py`, `test_profiler.py`, `test_docgen.py` → Clarity equivalents |
+| 1 | **Port interpreter tests** | Done | Already covered by `stdlib/test_interpreter.clarity` (59 tests) and `stdlib/test_clarity.clarity` (130 tests) |
+| 2 | **Port parser tests** | Done | Already covered by `stdlib/test_parser.clarity` (56 tests) — statements, expressions, complex programs, self-parsing |
+| 3 | **Port feature tests** | Done | `stdlib/test_features.clarity` — 55 tests: classes, inheritance, error handling, pattern matching, destructuring, null safety, spread, comprehensions, slicing, bitwise, if expressions, lambdas, pipes, multi-assignment, enums, decorators, map comprehensions, interfaces, raw strings, rest params |
+| 4 | **Port tool tests** | Done | 5 new test files: `test_type_checker_full.clarity` (30 tests — annotations, mismatches, functions, classes, inference, no false positives), `test_linter_full.clarity` (18 tests — W001-W007 all rules), `test_debugger_full.clarity` (18 tests — breakpoints, watches, formatting, state), `test_profiler_full.clarity` (22 tests — FunctionStats, LineStats, time formatting, heat bars, recording, callers), `test_docgen_full.clarity` (20 tests — functions, classes, enums, formats, comment styles) |
 | 5 | **Port native tests** | Pending | Migrate `tests/test_native.py` (821 lines) → `stdlib/test_native.clarity` — transpile-and-verify tests running in Clarity |
-| 6 | **Port lexer tests** | Pending | Migrate `tests/test_lexer.py` (128 lines) → `stdlib/test_lexer_full.clarity` |
+| 6 | **Port lexer tests** | Done | Already covered by `stdlib/test_lexer.clarity` and `stdlib/test_self_lex.clarity` |
 | 7 | **`clarity test` enhanced** | Pending | Support test assertions, expected failures, test fixtures, and summary reporting (X passed, Y failed, Z skipped) |
 
 ---
