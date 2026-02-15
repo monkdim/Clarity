@@ -20,6 +20,7 @@ from "process.clarity" import _quote
 
 let DEFAULT_PORT = 8080
 let DEFAULT_DATA_DIR = "./clarity_registry"
+let VERSION = "1.0.0"
 
 -- ── Filesystem helpers ─────────────────────────────────
 
@@ -265,8 +266,17 @@ fn create_handler(registry) {
         if method == "GET" and len(segments) == 0 {
             return _json_response(200, {
                 "name": "Clarity Package Registry",
-                "version": "1.0.0",
+                "version": VERSION,
                 "packages": len(registry.list_packages())
+            })
+        }
+
+        -- GET /health
+        if method == "GET" and len(segments) == 1 and segments[0] == "health" {
+            return _json_response(200, {
+                "status": "ok",
+                "version": VERSION,
+                "uptime": time()
             })
         }
 
@@ -317,6 +327,27 @@ fn create_handler(registry) {
 
         -- POST /publish
         if method == "POST" and len(segments) == 1 and segments[0] == "publish" {
+            -- Validate auth token if tokens file exists
+            let tokens_path = _join(registry.data_dir, "tokens")
+            if _exists(tokens_path) {
+                mut auth_token = ""
+                if has(req, "headers") and has(req.headers, "authorization") {
+                    let auth = req.headers["authorization"]
+                    if starts(auth, "Bearer ") {
+                        auth_token = substring(auth, 7, len(auth))
+                    }
+                }
+                let valid_tokens = split(trim(read(tokens_path)), "\n")
+                mut token_ok = false
+                for t in valid_tokens {
+                    if trim(t) == auth_token and len(trim(t)) > 0 {
+                        token_ok = true
+                    }
+                }
+                if not token_ok {
+                    return _json_response(401, {"error": "Invalid or missing auth token"})
+                }
+            }
             return _handle_publish(registry, req)
         }
 
@@ -399,6 +430,7 @@ fn start_registry(port, data_dir) {
     show "  Packages: {len(reg.list_packages())}"
     show ""
     show "  API:"
+    show "    GET  /health"
     show "    GET  /packages"
     show "    GET  /packages/:name"
     show "    GET  /packages/:name/:version"

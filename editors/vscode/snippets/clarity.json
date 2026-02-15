@@ -48,6 +48,17 @@
     ],
     "description": "Interface declaration"
   },
+  "Impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Interface} for ${2:Class} {",
+      "    fn ${3:method}(${4:params}) {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Interface implementation"
+  },
   "Enum": {
     "prefix": "enum",
     "body": [
@@ -117,6 +128,25 @@
     ],
     "description": "Match expression"
   },
+  "Test": {
+    "prefix": "test",
+    "body": [
+      "fn test_${1:name}() {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Test function"
+  },
+  "Test with Assert": {
+    "prefix": "testa",
+    "body": [
+      "fn test_${1:name}() {",
+      "    let result = ${2:expr}",
+      "    assert(result == ${3:expected}, \"${4:message}\")",
+      "}"
+    ],
+    "description": "Test function with assertion"
+  },
   "Let": {
     "prefix": "let",
     "body": "let ${1:name} = ${0}",
@@ -171,5 +201,49 @@
     "prefix": "pipe",
     "body": "|> ${1:fn}(${0})",
     "description": "Pipe operator"
+  },
+  "Pipe Chain": {
+    "prefix": "pipec",
+    "body": [
+      "${1:data}",
+      "    |> ${2:step1}()",
+      "    |> ${3:step2}()",
+      "    |> ${0}"
+    ],
+    "description": "Pipe chain"
+  },
+  "Method": {
+    "prefix": "method",
+    "body": [
+      "fn ${1:name}(${2:params}) {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Class method"
+  },
+  "Generator": {
+    "prefix": "gen",
+    "body": [
+      "fn ${1:name}(${2:params}) {",
+      "    yield ${0}",
+      "}"
+    ],
+    "description": "Generator function"
+  },
+  "Async Await": {
+    "prefix": "aw",
+    "body": "let ${1:result} = await ${0}",
+    "description": "Await expression"
+  },
+  "Main Guard": {
+    "prefix": "main",
+    "body": [
+      "fn main() {",
+      "    ${0}",
+      "}",
+      "",
+      "main()"
+    ],
+    "description": "Main function entry point"
   }
 }

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: darwin-arm64
+          - os: macos-13
+            target: darwin-x64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.target }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Python bootstrap
+        run: pip install -e .
+
+      - name: Transpile stdlib to JS
+        run: python native/transpile.py --bundle
+
+      - name: Compile native binary
+        run: |
+          cd native/dist
+          bun build --compile clarity-entry.js --outfile clarity
+
+      - name: Run self-hosted tests
+        run: ./native/dist/clarity test stdlib/
+
+      - name: Run smoke tests
+        run: ./native/dist/clarity smoke ./native/dist/clarity

@@ -2,7 +2,6 @@
 // Provides syntax highlighting, LSP integration, and code commands.
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 import {
     LanguageClient,
     LanguageClientOptions,
@@ -11,10 +10,15 @@ import {
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
+let diagnostics: vscode.DiagnosticCollection;
 
 export function activate(context: vscode.ExtensionContext) {
-    // Start LSP client if enabled
+    diagnostics = vscode.languages.createDiagnosticCollection('clarity');
+    context.subscriptions.push(diagnostics);
+
     const config = vscode.workspace.getConfiguration('clarity');
+
+    // Start LSP client if enabled
     if (config.get<boolean>('lsp.enabled', true)) {
         startLSP(context, config);
     }
@@ -24,19 +28,52 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('clarity.run', runCurrentFile),
         vscode.commands.registerCommand('clarity.check', checkCurrentFile),
         vscode.commands.registerCommand('clarity.format', formatCurrentFile),
-        vscode.commands.registerCommand('clarity.lint', lintCurrentFile)
+        vscode.commands.registerCommand('clarity.lint', lintCurrentFile),
+        vscode.commands.registerCommand('clarity.test', runTests)
+    );
+
+    // Document formatting provider (uses clarity fmt)
+    context.subscriptions.push(
+        vscode.languages.registerDocumentFormattingEditProvider('clarity', {
+            async provideDocumentFormattingEdits(document) {
+                const { execSync } = require('child_process');
+                const lspPath = config.get<string>('lsp.path', 'clarity');
+                try {
+                    const formatted = execSync(
+                        `${lspPath} fmt "${document.uri.fsPath}" --stdout`,
+                        { encoding: 'utf8', timeout: 10000 }
+                    );
+                    const fullRange = new vscode.Range(
+                        document.positionAt(0),
+                        document.positionAt(document.getText().length)
+                    );
+                    return [vscode.TextEdit.replace(fullRange, formatted)];
+                } catch {
+                    return [];
+                }
+            }
+        })
     );
 
     // Format on save
     if (config.get<boolean>('format.onSave', false)) {
         vscode.workspace.onDidSaveTextDocument((doc) => {
             if (doc.languageId === 'clarity') {
-                vscode.commands.executeCommand('clarity.format');
+                vscode.commands.executeCommand('editor.action.formatDocument');
             }
         });
     }
 
-    // Status bar item showing Clarity version
+    // Lint on save (when LSP is not running)
+    if (config.get<boolean>('lint.enabled', true) && !client) {
+        vscode.workspace.onDidSaveTextDocument((doc) => {
+            if (doc.languageId === 'clarity') {
+                lintDocument(doc, config);
+            }
+        });
+    }
+
+    // Status bar
     const statusBar = vscode.window.createStatusBarItem(
         vscode.StatusBarAlignment.Right, 100
     );
@@ -45,10 +82,6 @@ export function activate(context: vscode.ExtensionContext) {
     statusBar.command = 'clarity.run';
     statusBar.show();
     context.subscriptions.push(statusBar);
-
-    // Detect Clarity version
-    const terminal = new vscode.ShellExecution('clarity --version 2>/dev/null');
-    // We just show the icon; version detection is best-effort
 }
 
 function startLSP(context: vscode.ExtensionContext, config: vscode.WorkspaceConfiguration) {
@@ -64,7 +97,11 @@ function startLSP(context: vscode.ExtensionContext, config: vscode.WorkspaceConf
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.clarity')
         },
-        outputChannelName: 'Clarity Language Server'
+        outputChannelName: 'Clarity Language Server',
+        initializationOptions: {
+            lint: config.get<boolean>('lint.enabled', true),
+            format: config.get<boolean>('format.onSave', false)
+        }
     };
 
     client = new LanguageClient(
@@ -75,8 +112,37 @@ function startLSP(context: vscode.ExtensionContext, config: vscode.WorkspaceConf
     );
 
     client.start().catch((err) => {
-        // LSP is optional — don't error if clarity binary not found
+        // LSP is optional — fall back to terminal-based commands
         console.log('Clarity LSP not available:', err.message);
+        client = undefined;
+    });
+}
+
+async function lintDocument(document: vscode.TextDocument, config: vscode.WorkspaceConfiguration) {
+    const { exec } = require('child_process');
+    const lspPath = config.get<string>('lsp.path', 'clarity');
+
+    exec(`${lspPath} lint "${document.uri.fsPath}"`, (err: any, stdout: string) => {
+        const diags: vscode.Diagnostic[] = [];
+
+        if (stdout) {
+            // Parse lint output lines like "  WARN  line 5: unused variable 'x'"
+            const lines = stdout.split('\n');
+            for (const line of lines) {
+                const match = line.match(/line\s+(\d+):\s+(.+)/);
+                if (match) {
+                    const lineNum = parseInt(match[1], 10) - 1;
+                    const msg = match[2];
+                    const severity = line.includes('ERROR')
+                        ? vscode.DiagnosticSeverity.Error
+                        : vscode.DiagnosticSeverity.Warning;
+                    const range = new vscode.Range(lineNum, 0, lineNum, 1000);
+                    diags.push(new vscode.Diagnostic(range, msg, severity));
+                }
+            }
+        }
+
+        diagnostics.set(document.uri, diags);
     });
 }
 
@@ -117,10 +183,7 @@ async function formatCurrentFile() {
     }
 
     await editor.document.save();
-    const filePath = editor.document.uri.fsPath;
-
-    const terminal = getOrCreateTerminal();
-    terminal.sendText(`clarity fmt "${filePath}"`);
+    vscode.commands.executeCommand('editor.action.formatDocument');
 }
 
 async function lintCurrentFile() {
@@ -136,6 +199,15 @@ async function lintCurrentFile() {
     const terminal = getOrCreateTerminal();
     terminal.show();
     terminal.sendText(`clarity lint "${filePath}"`);
+}
+
+async function runTests() {
+    const folders = vscode.workspace.workspaceFolders;
+    const cwd = folders?.[0]?.uri.fsPath || '.';
+
+    const terminal = getOrCreateTerminal();
+    terminal.show();
+    terminal.sendText(`clarity test "${cwd}"`);
 }
 
 function getOrCreateTerminal(): vscode.Terminal {
