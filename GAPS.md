@@ -391,16 +391,16 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 
 ---
 
-## Phase 52 — Documentation Site
+## Phase 52 — Documentation Site ✅
 
 > Generated documentation site for the language and standard library.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **`clarity doc` → static site** | Pending | Generate HTML docs from `clarity doc stdlib/ --html`. Navigation, search, syntax highlighting |
-| 2 | **Language reference** | Pending | Complete language spec: syntax, semantics, builtins, modules, type system |
-| 3 | **Tutorial** | Pending | Getting started guide: install, hello world, functions, classes, pipes, pattern matching |
-| 4 | **Deploy** | Pending | Host at `docs.clarity-lang.org` or GitHub Pages |
+| 1 | **`clarity doc` → static site** | Done | `docs/index.html` updated to v1.0.0 — sidebar navigation, dark/light mode, scroll-spy, 7 stdlib reference tables, links to reference + tutorial pages. Install instructions updated to one-liner + Homebrew |
+| 2 | **Language reference** | Done | `docs/reference.html` — complete language spec: comments, literals (hex/octal/binary/escape), variables, all operators, functions (rest/default/lambda/arrow), control flow, match, pipes, comprehensions, classes, enums, interfaces, modules, errors, async, generators, decorators, null safety |
+| 3 | **Tutorial** | Done | `docs/tutorial.html` — 15-section getting started guide: install, hello world, REPL, variables, functions, control flow, lists & maps, pipes, classes, pattern matching, error handling, modules, build a CLI tool project, testing, next steps |
+| 4 | **Deploy** | Done | `.github/workflows/pages.yml` — GitHub Pages deployment on push to main. Copies `docs/` + `playground/` into site artifact, deploys via `actions/deploy-pages@v4` |
 
 ---
 
