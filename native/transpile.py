@@ -611,6 +611,7 @@ def bundle(compile_native=False):
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
         'transpile.clarity',
         'build.clarity', 'test_smoke.clarity',
+        'runtime_spec.clarity', 'runtime_gen.clarity',
         'cli.clarity',
     ]
 

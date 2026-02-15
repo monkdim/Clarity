@@ -13,6 +13,7 @@ from "debugger.clarity" import debug_file
 from "profiler.clarity" import profile_file
 from "transpile.clarity" import transpile_with_runtime, transpile_bundle, STDLIB_FILES
 from "build.clarity" import build
+from "runtime_gen.clarity" import gen_runtime
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ fn _help() {
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
+    show "  gen-runtime           Regenerate native/runtime.js from spec"
     show "  lsp                   Start language server (for editors)"
     show "  help                  Show this help message"
     show "  version               Show version"
@@ -565,6 +567,12 @@ fn main() {
     if command == "smoke" {
         from "test_smoke.clarity" import run_smoke_tests
         run_smoke_tests()
+        return null
+    }
+
+    -- Generate runtime.js
+    if command == "gen-runtime" {
+        gen_runtime(cli_args)
         return null
     }
 
