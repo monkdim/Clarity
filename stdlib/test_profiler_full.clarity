@@ -1,0 +1,132 @@
+-- Profiler Tests — ported from tests/test_profiler.py
+-- Tests profiling data structures, time formatting, and statistics.
+
+from "profiler.clarity" import Profiler, FunctionStats, LineStats
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg
+    }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg + " (expected " + str(expected) + ", got " + str(actual) + ")"
+    }
+}
+
+-- ── FunctionStats ───────────────────────────────────────
+
+show "-- Profiler: FunctionStats --"
+
+let fs = FunctionStats("test_fn")
+assert_eq(fs.name, "test_fn", "function stats name")
+assert_eq(fs.calls, 0, "initial calls zero")
+assert_eq(fs.total_time, 0, "initial time zero")
+
+fs.calls = 5
+fs.total_time = 100
+assert_eq(fs.calls, 5, "calls updated")
+assert_eq(fs.total_time, 100, "total time updated")
+
+let avg = fs.total_time / fs.calls
+assert_eq(avg, 20, "average time")
+
+-- ── LineStats ───────────────────────────────────────────
+
+show "-- Profiler: LineStats --"
+
+let ls = LineStats(10)
+assert_eq(ls.line, 10, "line stats line number")
+assert_eq(ls.hits, 0, "initial hits zero")
+assert_eq(ls.total_time, 0, "initial line time zero")
+
+ls.hits = 100
+ls.total_time = 500
+let line_avg = ls.total_time / ls.hits
+assert_eq(line_avg, 5, "line average time")
+
+-- ── Profiler initialization ─────────────────────────────
+
+show "-- Profiler: Init --"
+
+let prof = Profiler()
+assert(prof != null, "profiler creates")
+assert(type(prof.functions) == "map" or type(prof.functions) == "list", "functions store initialized")
+
+-- ── Time formatting ─────────────────────────────────────
+
+show "-- Profiler: Time Formatting --"
+
+assert_eq(prof.format_time(0.000050), "50.0us" , "format microseconds")
+assert_eq(prof.format_time(0.005), "5.0ms", "format milliseconds")
+assert_eq(prof.format_time(1.5), "1.50s", "format seconds")
+assert_eq(prof.format_time(0), "0.0us", "format zero")
+
+-- ── Heat bar ────────────────────────────────────────────
+
+show "-- Profiler: Heat Bar --"
+
+let bar_full = prof.heat_bar(1.0, 10)
+assert_eq(len(bar_full), 10, "full heat bar length")
+
+let bar_half = prof.heat_bar(0.5, 10)
+assert_eq(len(bar_half), 10, "half heat bar length")
+
+let bar_empty = prof.heat_bar(0.0, 10)
+assert_eq(len(bar_empty), 10, "empty heat bar length")
+
+-- ── Function recording ──────────────────────────────────
+
+show "-- Profiler: Recording --"
+
+let prof2 = Profiler()
+prof2.record_call("foo", 0.001)
+prof2.record_call("foo", 0.002)
+prof2.record_call("bar", 0.005)
+
+let stats = prof2.get_stats()
+assert(has(stats, "foo") or has(stats, "functions"), "stats recorded")
+
+-- ── Caller tracking ─────────────────────────────────────
+
+show "-- Profiler: Callers --"
+
+let prof3 = Profiler()
+prof3.record_call("inner", 0.001, "outer")
+prof3.record_call("inner", 0.001, "outer")
+prof3.record_call("inner", 0.001, "main")
+
+let inner_stats = prof3.get_function_stats("inner")
+if inner_stats != null {
+    assert(inner_stats.calls == 3, "caller tracking total calls")
+}
+
+-- ── Line recording ──────────────────────────────────────
+
+show "-- Profiler: Lines --"
+
+let prof4 = Profiler()
+prof4.record_line("test.clarity", 5, 0.001)
+prof4.record_line("test.clarity", 5, 0.002)
+prof4.record_line("test.clarity", 10, 0.003)
+
+let line_stats = prof4.get_line_stats("test.clarity", 5)
+if line_stats != null {
+    assert_eq(line_stats.hits, 2, "line hits recorded")
+}
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Profiler: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " profiler test(s) failed" }

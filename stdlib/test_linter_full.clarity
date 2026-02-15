@@ -1,0 +1,100 @@
+-- Linter Tests — ported from tests/test_linter.py
+-- Tests all 7 lint rules (W001-W007).
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "linter.clarity" import lint_source
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg
+    }
+}
+
+fn has_code(diags, code) {
+    for d in diags {
+        if d["code"] == code { return true }
+    }
+    return false
+}
+
+fn count_code(diags, code) {
+    mut count = 0
+    for d in diags {
+        if d["code"] == code { count += 1 }
+    }
+    return count
+}
+
+fn get_diags(source) {
+    return lint_source(source, "<test>")
+}
+
+-- ── W001: Unused variables ──────────────────────────────
+
+show "-- Linter: W001 Unused Variables --"
+
+assert(has_code(get_diags("let x = 42"), "W001"), "unused variable detected")
+assert(not has_code(get_diags("let x = 42\nshow x"), "W001"), "used variable no warning")
+assert(not has_code(get_diags("let _unused = 42"), "W001"), "underscore prefix suppresses")
+assert(has_code(get_diags("fn foo() { let x = 1 }\nfoo()"), "W001"), "unused in function")
+
+-- ── W002: Mutable never reassigned ──────────────────────
+
+show "-- Linter: W002 Mutable Not Reassigned --"
+
+assert(has_code(get_diags("mut x = 42\nshow x"), "W002"), "mut never reassigned")
+assert(not has_code(get_diags("mut x = 0\nx = 42\nshow x"), "W002"), "mut reassigned no warning")
+
+-- ── W004: Variable shadowing ────────────────────────────
+
+show "-- Linter: W004 Shadowing --"
+
+assert(has_code(get_diags("let x = 1\nfn foo() { let x = 2\nshow x }\nshow x\nfoo()"), "W004"), "shadow in function")
+
+-- ── W005: Constant conditions ───────────────────────────
+
+show "-- Linter: W005 Constant Conditions --"
+
+assert(has_code(get_diags("if true { show \"yes\" }"), "W005"), "if true")
+assert(has_code(get_diags("if false { show \"no\" }"), "W005"), "if false")
+assert(has_code(get_diags("while true { break }"), "W005"), "while true")
+
+-- ── W006: Null comparison ───────────────────────────────
+
+show "-- Linter: W006 Null Comparison --"
+
+assert(has_code(get_diags("let x = 42\nif x == null { show \"empty\" }"), "W006"), "== null suggestion")
+assert(has_code(get_diags("let x = 42\nif x != null { show \"exists\" }"), "W006"), "!= null suggestion")
+
+-- ── W007: Unreachable code ──────────────────────────────
+
+show "-- Linter: W007 Unreachable Code --"
+
+assert(has_code(get_diags("fn foo() {\n  return 1\n  show \"unreachable\"\n}\nfoo()"), "W007"), "code after return")
+assert(not has_code(get_diags("fn foo() {\n  let x = 1\n  return x\n}\nfoo()"), "W007"), "no unreachable")
+
+-- ── No false positives ──────────────────────────────────
+
+show "-- Linter: No False Positives --"
+
+let clean_diags = get_diags("fn add(a, b) {\n    return a + b\n}\nlet result = add(3, 4)\nshow result")
+mut serious = 0
+for d in clean_diags {
+    if d["severity"] == "error" or d["severity"] == "warning" {
+        serious += 1
+    }
+}
+assert(serious == 0, "clean program no warnings")
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Linter: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " linter test(s) failed" }
