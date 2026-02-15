@@ -377,17 +377,17 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 
 ---
 
-## Phase 51 — Package Registry
+## Phase 51 — Package Registry ✅
 
 > End-to-end package publishing and installation. `clarity publish` → registry → `clarity install`.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Registry server** | Pending | `stdlib/registry.clarity` already has the skeleton. Deploy as a Clarity HTTP service — publish, search, download |
-| 2 | **`clarity publish` flow** | Pending | Pack project (clarity.toml + source), upload tarball, version validation, duplicate detection |
-| 3 | **`clarity install <pkg>` flow** | Pending | Download from registry, extract to `clarity_modules/`, update clarity.toml dependencies |
-| 4 | **Dependency resolution** | Pending | Semver constraint solving, lock file (`clarity.lock`), transitive dependency handling |
-| 5 | **Registry hosting** | Pending | Deploy registry to a public server. Package index at `registry.clarity-lang.org` |
+| 1 | **Registry server** | Done | `stdlib/registry.clarity` — full HTTP API with `/health` endpoint, auth token validation on publish, 7 routes (health, list, get, version, download, publish, search) |
+| 2 | **`clarity publish` flow** | Done | `stdlib/package.clarity` — pack project (clarity.toml + .clarity files + README), base64 tarball upload, version validation via semver, duplicate detection (409 conflict) |
+| 3 | **`clarity install <pkg>` flow** | Done | Download from registry, extract to `clarity_modules/`, write `.clarity_meta.json` for cache, supports both registry and local path dependencies |
+| 4 | **Dependency resolution** | Done | `stdlib/semver.clarity` + `package.clarity` — full semver range matching (^, ~, >=, wildcards, hyphen, OR), lock file (`clarity.lock`), transitive resolution with depth limit |
+| 5 | **Registry hosting** | Done | `registry/Dockerfile` (multi-stage: build native binary, slim runtime), `registry/docker-compose.yml`, `.github/workflows/deploy-registry.yml` — builds and pushes to GHCR on changes to registry code |
 
 ---
 
