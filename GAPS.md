@@ -417,26 +417,27 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 
 ---
 
-## Phase 54 — Concurrency & Channels
+## Phase 54 — Cut Python from CI/CD ✅
 
-> Structured concurrency with message passing — Go-style channels in Clarity.
+> Clarity bootstraps itself. The build pipeline downloads the last release binary to transpile the next one — no Python anywhere.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Channel primitives** | Pending | `stdlib/channel.clarity` — `Channel()`, `send()`, `receive()`, `select` |
-| 2 | **Task spawning** | Pending | `spawn fn() { ... }` — lightweight concurrent tasks |
-| 3 | **Mutex / sync** | Pending | `stdlib/mutex.clarity` — `Lock()`, `with_lock()`, `Semaphore()` |
-| 4 | **Worker pools** | Pending | `stdlib/worker.clarity` — `Pool(n)`, `pool.submit(task)`, `pool.map(fn, items)` |
+| 1 | **Self-bootstrapping CI** | Done | `ci.yml` — downloads latest release binary, runs `clarity transpile --bundle`, compiles new binary with Bun. Python fallback only for first-ever release |
+| 2 | **Self-bootstrapping Release** | Done | `build.yml` — same bootstrap pattern for release builds. After first release, Python is never invoked again |
+| 3 | **Python-free Dockerfile** | Done | `registry/Dockerfile` — build stage uses `debian:bookworm-slim` instead of `python:3.12-slim`. Downloads release binary to transpile. No Python in the image |
+| 4 | **Registry.clarity in runtime** | Done | Fixed Docker runtime stage to copy `registry.clarity` so the entrypoint can find it. Added `curl` for HEALTHCHECK |
+| 5 | **Pages deployment** | Done | `pages.yml` — added `actions/configure-pages@v5` step for proper GitHub Pages setup |
 
 ---
 
-## Phase 55 — Playground & Community
+## Phase 55 — Community & Polish ✅
 
-> Interactive web playground and community resources.
+> Community resources and contribution guidelines. Concurrency, channels, and playground were already shipped in Phases 41-42.
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Web playground** | Pending | Browser-based Clarity editor + runner. Compile to WASM or use JS transpiler in-browser |
-| 2 | **Example gallery** | Pending | 20+ curated examples: data processing, web server, CLI tool, game, algorithm visualizer |
-| 3 | **Contributing guide** | Pending | `CONTRIBUTING.md` — how to build, test, add features, submit PRs |
-| 4 | **Discord / community** | Pending | Set up community channels for discussion, support, showcases |
+| 1 | **Concurrency & Channels** | Done | Already shipped in Phase 41 — `stdlib/channel.clarity` (Channel, BufferedChannel, FanOut, FanIn, select), `stdlib/task.clarity` (Task, BackgroundTask, TaskGroup, spawn, parallel, race), `stdlib/mutex.clarity` (Mutex, RWLock, Atomic, Semaphore, Once, FileLock), `stdlib/worker.clarity` (WorkerPool, Pipeline, parallel_map/filter/reduce) |
+| 2 | **Web playground** | Done | Already shipped in Phase 42 — `playground/index.html` (self-contained JS interpreter, 6 examples, shareable URLs, dark theme) |
+| 3 | **Example gallery** | Done | `examples/` directory (8 standalone examples) + 6 playground examples covering all major features |
+| 4 | **Contributing guide** | Done | `CONTRIBUTING.md` — how to build from source, run tests, format/lint, submit PRs |
