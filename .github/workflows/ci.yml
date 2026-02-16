@@ -34,9 +34,6 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install Python bootstrap
-        run: pip install -e .
-
       - name: Transpile stdlib to JS
         run: python native/transpile.py --bundle
 

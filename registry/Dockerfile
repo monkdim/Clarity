@@ -10,8 +10,7 @@ WORKDIR /build
 # Copy source
 COPY . .
 
-# Install Python deps and transpile
-RUN pip install --no-cache-dir -e .
+# Transpile stdlib to JS bundle
 RUN python native/transpile.py --bundle
 
 # Compile native binary
@@ -20,9 +19,10 @@ RUN cd native/dist && bun build --compile clarity-entry.js --outfile clarity
 # ── Runtime stage ─────────────────────────────────────
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /build/native/dist/clarity /usr/local/bin/clarity
+COPY --from=build /build/stdlib/registry.clarity /usr/local/bin/registry.clarity
 
 RUN mkdir -p /data
 VOLUME /data
