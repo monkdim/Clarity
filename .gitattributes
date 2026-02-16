@@ -12,6 +12,11 @@
 *.yaml linguist-vendored
 *.toml linguist-vendored
 
+# Build & packaging files
+*.rb linguist-vendored
+Dockerfile linguist-vendored
+registry/Dockerfile linguist-vendored
+
 # Documentation & community assets
 *.html linguist-documentation
 *.md linguist-documentation
