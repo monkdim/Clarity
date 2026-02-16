@@ -40,19 +40,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Install Python bootstrap
-        run: pip install -e .
+      - name: Bootstrap from latest release
+        id: bootstrap
+        run: |
+          curl -fsSL https://github.com/monkdim/Clarity/releases/latest/download/clarity-${{ matrix.target }}.tar.gz -o clarity-bootstrap.tar.gz
+          tar xzf clarity-bootstrap.tar.gz
+          chmod +x clarity
+          mv clarity clarity-bootstrap
+          ./clarity-bootstrap transpile --bundle
+        shell: bash
+        continue-on-error: true
 
-      - name: Transpile stdlib to JS
+      - name: Bootstrap fallback (first release only)
+        if: steps.bootstrap.outcome != 'success'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Transpile via Python fallback
+        if: steps.bootstrap.outcome != 'success'
         run: python native/transpile.py --bundle
 
       - name: Compile native binary
