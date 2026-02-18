@@ -98,12 +98,10 @@ clarity shell
 ## CLI Commands
 
 ```
-clarity run <file>              Run a Clarity program
-clarity run <file> --watch      Run with auto-reload on save
+clarity run <file>              Run a Clarity program (--fast for bytecode VM)
 clarity shell                   Interactive terminal (Clarity + shell commands)
 clarity repl                    Basic interactive REPL
-clarity check <file>            Check syntax
-clarity check <file> --types    Static type checking
+clarity check <file>            Check syntax (--types for static type checking)
 clarity lint <file|dir>         Lint for common issues
 clarity fmt <file|dir>          Format code (--check, --write)
 clarity test [dir]              Run test files (test_*.clarity)
@@ -115,6 +113,16 @@ clarity tokens <file>           Show lexer output
 clarity ast <file>              Show parse tree
 clarity init                    Create a new clarity.toml
 clarity install                 Install dependencies from clarity.toml
+clarity install <pkg>           Add and install a package
+clarity publish                 Pack and publish to registry
+clarity search <query>          Search the package registry
+clarity info <pkg>              Show package info from registry
+clarity transpile <file>        Transpile to JavaScript (-o, --bundle)
+clarity build                   Build native binary (--all, --target, --install)
+clarity smoke                   Run smoke tests on the binary
+clarity gen-runtime             Regenerate native/runtime.js from spec
+clarity install-self            Install Clarity from source
+clarity bench                   Run performance benchmarks
 clarity lsp                     Start language server (for editors)
 ```
 
@@ -521,13 +529,17 @@ Clarity is fully self-hosted. The entire toolchain has been rewritten in Clarity
 | Interpreter | `stdlib/interpreter.clarity` | Tree-walking interpreter with full dispatch |
 | Runtime | `stdlib/runtime.clarity` | Module system (math, json, os, time) |
 | Bytecode | `stdlib/bytecode.clarity` | 48-opcode compiler + stack VM |
-| CLI | `stdlib/cli.clarity` | Full command dispatcher |
+| CLI | `stdlib/cli.clarity` | Full command dispatcher (25 commands) |
 | LSP | `stdlib/lsp.clarity` | JSON-RPC language server |
 | Package Manager | `stdlib/package.clarity` | TOML parser, dependency management |
+| Registry | `stdlib/registry.clarity` | Package registry server |
 | Shell | `stdlib/shell.clarity` | Pipe/redirect tokenizer and parser |
 | REPL | `stdlib/repl.clarity` | Interactive shell with auto-detect |
 | Terminal UI | `stdlib/terminal.clarity` | Colors, cursor control, box drawing |
 | Process | `stdlib/process.clarity` | Process execution, PATH, environment |
+| Transpiler | `stdlib/transpile.clarity` | Self-hosted Clarity-to-JS transpiler |
+| Build | `stdlib/build.clarity` | Self-hosted build pipeline |
+| Installer | `stdlib/install.clarity` | Self-hosted installer |
 
 The native binary runs the self-hosted toolchain directly — no Python dependency required.
 
@@ -598,13 +610,13 @@ clarity smoke
 Clarity/
   stdlib/                   # The language — 100% Clarity
     lexer.clarity           # Tokenizer
-    parser.clarity          # Recursive descent parser (1200 lines)
+    parser.clarity          # Recursive descent parser
     ast_nodes.clarity       # 49 AST node types
     tokens.clarity          # Token type definitions
     interpreter.clarity     # Tree-walking interpreter
     runtime.clarity         # Module system (math, json, os, time)
-    bytecode.clarity        # Bytecode compiler + stack VM (1400 lines)
-    cli.clarity             # CLI dispatcher (18 commands)
+    bytecode.clarity        # Bytecode compiler + stack VM
+    cli.clarity             # CLI dispatcher (25 commands)
     formatter.clarity       # AST pretty-printer
     linter.clarity          # 7-rule linter
     type_checker.clarity    # Static type checker
@@ -612,6 +624,7 @@ Clarity/
     profiler.clarity        # Execution profiler
     docgen.clarity          # Documentation generator
     package.clarity         # Package manager + TOML parser
+    registry.clarity        # Package registry server
     lsp.clarity             # Language server (JSON-RPC 2.0)
     shell.clarity           # Pipe/redirect tokenizer and parser
     repl.clarity            # Interactive shell with auto-detect
@@ -622,15 +635,44 @@ Clarity/
     install.clarity         # Self-hosted installer
     runtime_spec.clarity    # Runtime.js spec (single source of truth)
     runtime_gen.clarity     # JS codegen from runtime spec
+    collections.clarity     # Collection utilities
+    crypto.clarity          # Cryptographic functions
+    datetime.clarity        # Date/time utilities
+    db.clarity              # Database utilities
+    net.clarity             # Networking utilities
+    path.clarity            # Path manipulation
+    semver.clarity          # Semantic versioning
+    channel.clarity         # Channels (concurrency)
+    mutex.clarity           # Mutex synchronization
+    worker.clarity          # Worker threads
+    task.clarity            # Task management
+    benchmark.clarity       # Performance benchmarks
+    highlight.clarity       # Syntax highlighter
+    pretty.clarity          # Pretty printer
+    completer.clarity       # Tab completion
     test_*.clarity          # Test suites (430+ tests)
 
   native/                   # Build tooling (vendored)
     transpile.py            # Clarity-to-JavaScript transpiler
+    parser.py               # Python bootstrap parser
+    lexer.py                # Python bootstrap lexer
+    ast_nodes.py            # Python bootstrap AST
+    tokens.py               # Python bootstrap tokens
+    errors.py               # Python bootstrap errors
     runtime.js              # Auto-generated JS runtime shim
 
   examples/                 # Example programs
+  editors/                  # Editor integrations (VS Code, TextMate, Linguist)
+  registry/                 # Package registry (Dockerfile + compose)
   website/                  # Clarity-powered website
+  playground/               # Web playground
+  docs/                     # HTML documentation (index, reference, tutorial)
+  Formula/                  # Homebrew formula
+  .github/workflows/        # CI/CD (test, build, deploy-registry, pages)
+  install.sh                # Installation script
   GAPS.md                   # Development roadmap
+  BEGINNERS_GUIDE.md        # Getting started guide
+  CONTRIBUTING.md           # Contribution guidelines
 ```
 
 ---
@@ -648,12 +690,16 @@ clarity run stdlib/test_linter_full.clarity
 clarity run stdlib/test_debugger_full.clarity
 clarity run stdlib/test_profiler_full.clarity
 clarity run stdlib/test_docgen_full.clarity
+clarity run stdlib/test_shell.clarity
 
 # Smoke tests (verify the binary)
 clarity smoke
+
+# Performance benchmarks (interpreter vs bytecode)
+clarity bench
 ```
 
-**430+ self-hosted tests** across 14 test files, all written in Clarity.
+**430+ self-hosted tests** across 15 test files, all written in Clarity.
 
 ---
 
