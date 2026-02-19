@@ -785,16 +785,26 @@ def bundle(compile_native=False):
             print('  Then either restart your shell or run:')
             print('    export PATH="$HOME/.bun/bin:$PATH"')
             return
+        # Build targets: current platform + cross-compile for macOS/Linux
+        targets = [
+            ('clarity',              None),                # current platform
+            ('clarity-macos-arm64',  'bun-darwin-arm64'),  # macOS Apple Silicon
+            ('clarity-macos-x64',    'bun-darwin-x64'),    # macOS Intel
+            ('clarity-linux-x64',    'bun-linux-x64'),     # Linux x64
+            ('clarity-linux-arm64',  'bun-linux-arm64'),   # Linux ARM64
+        ]
         try:
-            subprocess.check_call(
-                [bun, 'build', '--compile', entry, '--outfile', out_bin],
-                cwd=dist_dir,
-            )
-            size = os.path.getsize(out_bin) / (1024 * 1024)
-            print(f'  Native binary: {out_bin} ({size:.1f} MB)')
+            for bin_name, target in targets:
+                out = os.path.join(dist_dir, bin_name)
+                cmd = [bun, 'build', '--compile', entry, '--outfile', out]
+                if target:
+                    cmd += [f'--target={target}']
+                subprocess.check_call(cmd, cwd=dist_dir)
+                size = os.path.getsize(out) / (1024 * 1024)
+                print(f'  {bin_name} ({size:.1f} MB)')
             print()
-            print('  Install:')
-            print(f'    sudo cp {out_bin} /usr/local/bin/clarity')
+            print('  Install (pick the right one for your platform):')
+            print(f'    sudo cp {os.path.join(dist_dir, "clarity-macos-arm64")} /usr/local/bin/clarity')
             print('    clarity shell')
         except FileNotFoundError:
             print('  ERROR: Bun not found. Install it:')
