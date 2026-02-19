@@ -581,5 +581,4 @@ fn start_server() {
     server.run()
 }
 
--- Run the server when this module is executed directly
-start_server()
+-- When imported by cli.clarity, start_server() is called explicitly.

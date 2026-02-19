@@ -15,6 +15,7 @@ from "transpile.clarity" import transpile_with_runtime, transpile_bundle, STDLIB
 from "build.clarity" import build
 from "runtime_gen.clarity" import gen_runtime
 from "install.clarity" import install_self
+from "repl.clarity" import repl_start
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -346,14 +347,7 @@ fn repr_val(v) {
 -- ── Shell / REPL delegation ─────────────────────────────
 
 fn start_shell() {
-    let stdlib_dir = _dirname(_abspath("lexer.clarity"))
-    let repl_path = stdlib_dir + "/repl.clarity"
-    if exists(repl_path) {
-        run_file(repl_path)
-    } else {
-        show red("  >> Clarity Shell not found at: {repl_path}")
-        exit(1)
-    }
+    repl_start()
 }
 
 fn start_repl() {

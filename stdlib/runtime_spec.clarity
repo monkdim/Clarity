@@ -136,7 +136,7 @@ let SYSTEM_SECTION = {
         {name: "exec", params: "cmd", body: "try { return execSync(cmd, { encoding: 'utf-8' }).replace(/\\n$/, ''); }\n  catch (e) { return e.stdout || ''; }"},
         {name: "exec_full", params: "cmd", body: "try {\n    const stdout = execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });\n    return { stdout, stderr: '', exit_code: 0 };\n  } catch (e) {\n    return { stdout: e.stdout || '', stderr: e.stderr || '', exit_code: e.status || 1 };\n  }"},
         {name: "exit", params: "code = 0", body: "process.exit(code);"},
-        {name: "sleep", params: "secs", body: "execSync(`sleep ${secs}`);"},
+        {name: "sleep", params: "secs", body: "execSync('sleep ' + secs);"},
         {name: "time", params: "", body: "return Date.now() / 1000;"},
         {name: "env", params: "name", body: "return process.env[name] || null;"},
         {name: "args", params: "", body: "return process.argv.slice(2);"},
@@ -198,8 +198,8 @@ let ERROR_SECTION = {
 let HTTP_SECTION = {
     label: "HTTP",
     fns: [
-        {name: "fetch", params: "url", body: "return execSync(`curl -sL '${url}'`, { encoding: 'utf-8' });"},
-        {name: "serve", params: "port, handler", body: "const server = createServer((req, res) => {\n    const result = handler(req.method, req.url);\n    if (typeof result === 'object' && result !== null) {\n      res.writeHead(result.status || 200, { 'Content-Type': result.type || 'text/html' });\n      res.end(result.body || '');\n    } else {\n      res.writeHead(200, { 'Content-Type': 'text/html' });\n      res.end(display(result));\n    }\n  });\n  server.listen(port);\n  console.log(`  Serving on http://localhost:${port}`);"}
+        {name: "fetch", params: "url", body: "return execSync('curl -sL \\'' + url + '\\'', { encoding: 'utf-8' });"},
+        {name: "serve", params: "port, handler", body: "const server = createServer((req, res) => {\n    const result = handler(req.method, req.url);\n    if (typeof result === 'object' && result !== null) {\n      res.writeHead(result.status || 200, { 'Content-Type': result.type || 'text/html' });\n      res.end(result.body || '');\n    } else {\n      res.writeHead(200, { 'Content-Type': 'text/html' });\n      res.end(display(result));\n    }\n  });\n  server.listen(port);\n  console.log('  Serving on http://localhost:' + port);"}
     ]
 }
 
@@ -223,7 +223,7 @@ let CLASSES_SECTION = {
     label: "Classes support",
     classes: [
         {name: "ClarityInstance", body: "constructor(className, props = {}) {\n    this._className = className;\n    Object.assign(this, props);\n  }"},
-        {name: "ClarityEnum", body: "constructor(name, members) {\n    this.name = name;\n    this.members = members;\n    for (const [k, v] of Object.entries(members)) {\n      this[k] = v;\n    }\n  }\n  toString() { return `<enum ${this.name}>`; }"}
+        {name: "ClarityEnum", body: "constructor(name, members) {\n    this.name = name;\n    this.members = members;\n    for (const [k, v] of Object.entries(members)) {\n      this[k] = v;\n    }\n  }\n  toString() \{ return '<enum ' + this.name + '>'; \}"}
     ]
 }
 
@@ -250,8 +250,8 @@ let OS_MODULE_SECTION = {
 let DISPLAY_SECTION = {
     label: "Display helpers",
     fns: [
-        {name: "display", params: "value", body: "if (value === null || value === undefined) return 'null';\n  if (typeof value === 'boolean') return value ? 'true' : 'false';\n  if (typeof value === 'number') {\n    if (Number.isInteger(value)) return String(value);\n    return String(value);\n  }\n  if (typeof value === 'string') return value;\n  if (Array.isArray(value)) return '[' + value.map(display).join(', ') + ']';\n  if (value instanceof ClarityEnum) return value.toString();\n  if (value instanceof ClarityInstance) return `<${value._className} instance>`;\n  if (typeof value === 'function') return `<fn ${value.name || 'anonymous'}>`;\n  if (typeof value === 'object') {\n    const pairs = Object.entries(value).map(([k, v]) => `${k}: ${repr(v)}`);\n    return '{' + pairs.join(', ') + '}';\n  }\n  return String(value);"},
-        {name: "repr", params: "value", body: "if (typeof value === 'string') return `\"${value}\"`;\n  return display(value);"},
+        {name: "display", params: "value", body: "if (value === null || value === undefined) return 'null';\n  if (typeof value === 'boolean') return value ? 'true' : 'false';\n  if (typeof value === 'number') {\n    if (Number.isInteger(value)) return String(value);\n    return String(value);\n  }\n  if (typeof value === 'string') return value;\n  if (Array.isArray(value)) return '[' + value.map(display).join(', ') + ']';\n  if (value instanceof ClarityEnum) return value.toString();\n  if (value instanceof ClarityInstance) return '<' + value._className + ' instance>';\n  if (typeof value === 'function') return '<fn ' + (value.name || 'anonymous') + '>';\n  if (typeof value === 'object') {\n    const pairs = Object.entries(value).map(([k, v]) => k + ': ' + repr(v));\n    return '{' + pairs.join(', ') + '}';\n  }\n  return String(value);"},
+        {name: "repr", params: "value", body: "if (typeof value === 'string') return '\"' + value + '\"';\n  return display(value);"},
         {name: "truthy", params: "value", body: "if (value === null || value === undefined) return false;\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'number') return value !== 0;\n  if (typeof value === 'string') return value.length > 0;\n  if (Array.isArray(value)) return value.length > 0;\n  return true;"}
     ]
 }
@@ -272,7 +272,7 @@ let SIGNALS_SECTION = {
 let ERROR_FMT_SECTION = {
     label: "Error formatting with Clarity source mapping",
     fns: [
-        {name: "formatClarityError", params: "err, source", body: "if (!(err instanceof Error)) return display(err);\n  const jsStack = err.stack || '';\n  const lines = jsStack.split('\\n');\n  const clarityFrames = [];\n  const linePattern = /at\\s+(?:(\\S+)\\s+)?\\(?.*?:(\\d+):\\d+\\)?/;\n  for (const line of lines) {\n    const m = line.match(linePattern);\n    if (m) {\n      const fnName = m[1] || '<module>';\n      clarityFrames.push(`  at ${fnName}`);\n    }\n  }\n  let msg = `\\x1b[31m\\n  Clarity Error: ${err.message}\\x1b[0m`;\n  if (clarityFrames.length > 0) {\n    msg += '\\n' + clarityFrames.slice(0, 8).join('\\n');\n  }\n  return msg;"},
+        {name: "formatClarityError", params: "err, source", body: "if (!(err instanceof Error)) return display(err);\n  const jsStack = err.stack || '';\n  const lines = jsStack.split('\\n');\n  const clarityFrames = [];\n  const linePattern = /at\\s+(?:(\\S+)\\s+)?\\(?.*?:(\\d+):\\d+\\)?/;\n  for (const line of lines) {\n    const m = line.match(linePattern);\n    if (m) {\n      const fnName = m[1] || '<module>';\n      clarityFrames.push('  at ' + fnName);\n    }\n  }\n  let msg = '\\x1b[31m\\n  Clarity Error: ' + err.message + '\\x1b[0m';\n  if (clarityFrames.length > 0) {\n    msg += '\\n' + clarityFrames.slice(0, 8).join('\\n');\n  }\n  return msg;"},
         {name: "clarityMain", params: "fn", body: "try {\n    fn();\n  } catch (err) {\n    if (err instanceof BreakSignal || err instanceof ContinueSignal || err instanceof ReturnSignal) return;\n    console.error(formatClarityError(err));\n    process.exit(1);\n  }"}
     ]
 }
