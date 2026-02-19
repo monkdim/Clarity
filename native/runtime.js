@@ -59,8 +59,12 @@ export function type(v) {
   if (Array.isArray(v)) return 'list';
   if (v instanceof ClarityEnum) return 'enum';
   if (v instanceof ClarityInstance) return v._className;
-  if (typeof v === 'object') return 'map';
   if (typeof v === 'function') return 'function';
+  // Check for interpreter class instances by their _clarityType marker
+  if (typeof v === 'object' && v._clarityType) {
+    return v._clarityType;
+  }
+  if (typeof v === 'object') return 'map';
   return 'unknown';
 }
 
