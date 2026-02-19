@@ -767,9 +767,27 @@ def bundle(compile_native=False):
         print()
         print('  Compiling to native binary...')
         out_bin = os.path.join(dist_dir, 'clarity')
+        # Find bun — check PATH first, then common install locations
+        import shutil
+        bun = shutil.which('bun')
+        if not bun:
+            home = os.path.expanduser('~')
+            for candidate in [
+                os.path.join(home, '.bun', 'bin', 'bun'),
+                '/usr/local/bin/bun',
+            ]:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    bun = candidate
+                    break
+        if not bun:
+            print('  ERROR: Bun not found. Install it:')
+            print('    curl -fsSL https://bun.sh/install | bash')
+            print('  Then either restart your shell or run:')
+            print('    export PATH="$HOME/.bun/bin:$PATH"')
+            return
         try:
             subprocess.check_call(
-                ['bun', 'build', '--compile', entry, '--outfile', out_bin],
+                [bun, 'build', '--compile', entry, '--outfile', out_bin],
                 cwd=dist_dir,
             )
             size = os.path.getsize(out_bin) / (1024 * 1024)
