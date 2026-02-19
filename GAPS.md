@@ -441,3 +441,11 @@ Clarity is **100% self-hosted**. The bootstrap problem is solved. Everything bel
 | 2 | **Web playground** | Done | Already shipped in Phase 42 — `playground/index.html` (self-contained JS interpreter, 6 examples, shareable URLs, dark theme) |
 | 3 | **Example gallery** | Done | `examples/` directory (8 standalone examples) + 6 playground examples covering all major features |
 | 4 | **Contributing guide** | Done | `CONTRIBUTING.md` — how to build from source, run tests, format/lint, submit PRs |
+
+---
+
+## What's Next: ClarityOS
+
+> **Phases 56–70** — Build an operating system in Clarity.
+>
+> See **[ROADMAP_OS.md](ROADMAP_OS.md)** for the full plan: FFI, graphics, window manager, UI toolkit, desktop shell, core apps, micro-kernel, bootable ISO, and the 1.0 release.
