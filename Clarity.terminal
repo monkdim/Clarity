@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Clarity</string>
+	<key>type</key>
+	<string>Window Settings</string>
+
+	<!-- Launch clarity-terminal on open -->
+	<key>CommandString</key>
+	<string>clarity-terminal</string>
+	<key>RunCommandAsShell</key>
+	<false/>
+
+	<!-- Font: Menlo 14pt (ships with every Mac) -->
+	<key>Font</key>
+	<data>
+	YnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJ G9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCw wTVSRudWxs0w0ODxAREldOU2l6ZVhOU2ZGYWNZV05TRmxhZ3MjQCwAAAAA AAAQEIACXk1lbmxvLVJlZ3VsYXLSFBUWF1okY2xhc3NaJGNsYXNzbmFt ZaIDGBlaVk5TRm9udFhOU09iamVjdAgRGiQpMjdJTFFTWF5nbn+BhImL jZKdo6avAAAAAAAAAQEAAAAAAAAAGgAAAAAAAAAAAAAAAAAAALg=
+	</data>
+
+	<!-- Color scheme: dark background with Clarity-branded accent colors -->
+	<key>BackgroundColor</key>
+	<data>
+	YnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJ G9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCw wRVSRudWxs0w0ODxBfEBpOU0NvbG9yU3BhY2VOU0NvbG9yQ29tcG9uZW50 c1dOU1doaXRlTxAYMC4xMTc2NDcwNTg4IDAuMTIxNTY4NjMEAoACTxAT MC4xMTc2NSAwLjEyMTU3AIAS
+	</data>
+	<key>TextColor</key>
+	<data>
+	YnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJ G9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCw wRVSRudWxs0w0ODxBfEBpOU0NvbG9yU3BhY2VOU0NvbG9yQ29tcG9uZW50 c1dOU1doaXRlTxAOMC45NDExNzY0NyAxBAACAE8QCjAuOTQxMTggMQCA
+	</data>
+	<key>CursorColor</key>
+	<data>
+	YnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJ G9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCw wRVSRudWxs0w0ODxBfEBpOU0NvbG9yU3BhY2VOU0NvbG9yQ29tcG9uZW50 c1dOU1doaXRlTxAOMC45NDExNzY0NyAxBAACAE8QCjAuOTQxMTggMQCA
+	</data>
+
+	<!-- Window size -->
+	<key>columnCount</key>
+	<integer>100</integer>
+	<key>rowCount</key>
+	<integer>30</integer>
+
+	<!-- Cursor style: block -->
+	<key>CursorType</key>
+	<integer>0</integer>
+	<key>CursorBlink</key>
+	<true/>
+
+	<!-- Window behavior -->
+	<key>shellExitAction</key>
+	<integer>1</integer>
+	<key>ScrollbackLines</key>
+	<integer>10000</integer>
+	<key>ShouldRestoreContent</key>
+	<false/>
+
+	<!-- Use Option as Meta key (for keyboard shortcuts) -->
+	<key>useOptionAsMetaKey</key>
+	<true/>
+
+	<!-- Window title -->
+	<key>WindowTitle</key>
+	<string>Clarity Terminal</string>
+</dict>
+</plist>

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# clarity-terminal — Launch an interactive Clarity Terminal session
+#
+# This script opens a dedicated terminal experience for Clarity.
+# It displays a branded welcome screen and drops you into the
+# Clarity interactive shell (clarity shell).
+#
+# Usage:
+#   clarity-terminal              Normal mode
+#   clarity-terminal --repl       REPL-only mode (no shell commands)
+#   clarity-terminal --minimal    Skip the welcome banner
+#
+
+set -euo pipefail
+
+# ── Colors ───────────────────────────────────────────────
+
+ESC="\033"
+BOLD="${ESC}[1m"
+DIM="${ESC}[2m"
+CYAN="${ESC}[36m"
+GREEN="${ESC}[32m"
+YELLOW="${ESC}[33m"
+MAGENTA="${ESC}[35m"
+RESET="${ESC}[0m"
+
+# ── Parse args ───────────────────────────────────────────
+
+MODE="shell"
+MINIMAL=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --repl)    MODE="repl" ;;
+    --minimal) MINIMAL=true ;;
+    --help|-h)
+      echo "Usage: clarity-terminal [options]"
+      echo ""
+      echo "Options:"
+      echo "  --repl       Start in REPL mode instead of shell mode"
+      echo "  --minimal    Skip the welcome banner"
+      echo "  --help, -h   Show this help"
+      echo ""
+      exit 0
+      ;;
+  esac
+done
+
+# ── Find Clarity binary ─────────────────────────────────
+
+CLARITY_BIN=""
+
+if command -v clarity &>/dev/null; then
+  CLARITY_BIN="clarity"
+elif [ -f "./native/dist/clarity" ]; then
+  CLARITY_BIN="./native/dist/clarity"
+elif [ -f "/usr/local/bin/clarity" ]; then
+  CLARITY_BIN="/usr/local/bin/clarity"
+else
+  echo ""
+  echo "  Error: Could not find the clarity binary."
+  echo ""
+  echo "  Install Clarity first:"
+  echo "    bash setup-mac.sh"
+  echo ""
+  echo "  Or download from:"
+  echo "    https://github.com/monkdim/Clarity/releases"
+  echo ""
+  exit 1
+fi
+
+# ── Get version ──────────────────────────────────────────
+
+VERSION=$($CLARITY_BIN version 2>/dev/null | head -1 || echo "unknown")
+
+# ── Welcome banner ───────────────────────────────────────
+
+if [ "$MINIMAL" = false ]; then
+  clear
+  echo ""
+  printf "${BOLD}${CYAN}"
+  echo "    ____  _             _  _        "
+  echo "   / ___|| | __ _  _ __(_)| |_  _   _ "
+  echo "  | |    | |/ _\` || '__| || __|\ \\ / /"
+  echo "  | |___ | | (_| || |  | || |_  \\ V / "
+  echo "   \\____||_|\\__,_||_|  |_| \\__| \\_/  "
+  printf "${RESET}"
+  echo ""
+  printf "  ${BOLD}Simple code. Real power.${RESET}\n"
+  printf "  ${DIM}Version: %s${RESET}\n" "$VERSION"
+  echo ""
+  printf "  ${DIM}────────────────────────────────────────${RESET}\n"
+  echo ""
+  printf "  ${GREEN}Quick reference:${RESET}\n"
+  echo ""
+  printf "    ${CYAN}show \"Hello!\"${RESET}          Print something\n"
+  printf "    ${CYAN}let x = 42${RESET}             Create a variable\n"
+  printf "    ${CYAN}fn greet(n) { ... }${RESET}    Define a function\n"
+  printf "    ${CYAN}[1,2,3] |> map(x=>x*2)${RESET} Pipe data through functions\n"
+  echo ""
+  if [ "$MODE" = "shell" ]; then
+    printf "  ${YELLOW}Tip:${RESET} Type Clarity code or shell commands (ls, cd, git...)\n"
+    printf "  ${YELLOW}Tip:${RESET} Type ${BOLD}.help${RESET} for all REPL commands\n"
+    printf "  ${YELLOW}Tip:${RESET} Press ${BOLD}Ctrl+C${RESET} or type ${BOLD}.exit${RESET} to quit\n"
+  else
+    printf "  ${YELLOW}Tip:${RESET} Type ${BOLD}.help${RESET} for commands, ${BOLD}.exit${RESET} to quit\n"
+  fi
+  echo ""
+  printf "  ${DIM}────────────────────────────────────────${RESET}\n"
+  echo ""
+fi
+
+# ── Launch Clarity ───────────────────────────────────────
+
+exec $CLARITY_BIN $MODE
