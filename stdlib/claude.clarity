@@ -1,0 +1,193 @@
+-- Claude AI integration for Clarity Shell
+-- Connects to the Anthropic API to provide AI assistance in the terminal.
+
+from "terminal.clarity" import dim, yellow, red, cyan
+
+-- ── Configuration ──────────────────────────────────────
+
+let API_URL = "https://api.anthropic.com/v1/messages"
+let MODEL = "claude-sonnet-4-5-20250929"
+let MAX_TOKENS = 4096
+
+-- ── Conversation state ─────────────────────────────────
+
+mut conversation = []
+
+-- ── API Key ────────────────────────────────────────────
+
+fn get_api_key() {
+    let key = env("ANTHROPIC_API_KEY")
+    if key == null or len(key) == 0 {
+        return null
+    }
+    return key
+}
+
+fn has_api_key() {
+    return get_api_key() != null
+}
+
+-- ── Send message to Claude ─────────────────────────────
+
+fn chat(user_message) {
+    let key = get_api_key()
+    if key == null {
+        return {
+            "ok": false,
+            "error": "No API key. Set ANTHROPIC_API_KEY environment variable.\n  export ANTHROPIC_API_KEY='sk-ant-...'"
+        }
+    }
+
+    -- Add user message to conversation
+    push(conversation, {"role": "user", "content": user_message})
+
+    -- Build the messages JSON
+    let messages_json = _build_messages_json(conversation)
+
+    -- Build the full request body
+    let body = "{" + join([
+        "\"model\": \"" + MODEL + "\"",
+        "\"max_tokens\": " + str(MAX_TOKENS),
+        "\"system\": \"You are Claude, an AI assistant embedded in the Clarity programming language shell. Help users write Clarity code, debug issues, and answer questions. Keep responses concise and use code blocks for Clarity code. Clarity syntax is similar to Python/JS: let/mut for variables, fn for functions, show for printing, -- for comments.\"",
+        "\"messages\": [" + messages_json + "]"
+    ], ", ") + "}"
+
+    -- Write the body to a temp file to avoid shell escaping issues
+    let tmp_file = "/tmp/clarity_claude_req.json"
+    write(tmp_file, body)
+
+    -- Call the API via curl
+    let cmd = "curl -sS " + API_URL + " -H 'Content-Type: application/json' -H 'x-api-key: " + key + "' -H 'anthropic-version: 2023-06-01' -d @" + tmp_file + " 2>&1"
+    let result = exec_full(cmd)
+
+    -- Clean up temp file
+    try { exec("rm -f " + tmp_file) } catch e {}
+
+    if result.exit_code != 0 {
+        return {"ok": false, "error": "Request failed: " + result.stderr}
+    }
+
+    -- Parse the response
+    let response = result.stdout
+    return _parse_response(response)
+}
+
+-- ── Single question (no conversation history) ──────────
+
+fn ask_claude(question) {
+    let saved = conversation
+    conversation = []
+    let result = chat(question)
+    conversation = saved
+    return result
+}
+
+-- ── Clear conversation ─────────────────────────────────
+
+fn clear_conversation() {
+    conversation = []
+}
+
+-- ── Build messages JSON array ──────────────────────────
+
+fn _build_messages_json(messages) {
+    mut parts = []
+    for msg in messages {
+        let escaped_content = _escape_json(msg["content"])
+        push(parts, "{\"role\": \"" + msg["role"] + "\", \"content\": \"" + escaped_content + "\"}")
+    }
+    return join(parts, ", ")
+}
+
+-- ── Escape string for JSON ─────────────────────────────
+
+fn _escape_json(s) {
+    mut result = s
+    result = replace(result, "\\", "\\\\")
+    result = replace(result, "\"", "\\\"")
+    result = replace(result, "\n", "\\n")
+    result = replace(result, "\r", "\\r")
+    result = replace(result, "\t", "\\t")
+    return result
+}
+
+-- ── Parse API response ─────────────────────────────────
+
+fn _parse_response(raw) {
+    -- Look for the text content in the response
+    -- Response format: {"content": [{"type": "text", "text": "..."}], ...}
+
+    -- Check for error
+    if contains(raw, "\"error\"") and contains(raw, "\"message\"") {
+        let err_msg = _extract_field(raw, "message")
+        return {"ok": false, "error": err_msg}
+    }
+
+    -- Extract the text field from the first content block
+    let text = _extract_text_content(raw)
+    if text == null {
+        return {"ok": false, "error": "Could not parse response"}
+    }
+
+    -- Add assistant response to conversation
+    push(conversation, {"role": "assistant", "content": text})
+
+    return {"ok": true, "text": text}
+}
+
+-- ── Extract text from content blocks ───────────────────
+
+fn _extract_text_content(raw) {
+    -- Find "text": "..." in the response after "type": "text"
+    -- Simple approach: find the last "text": " and extract until closing "
+    let marker = "\"text\": \""
+    let idx = last_index_of(raw, marker)
+    if idx < 0 { return null }
+
+    let start = idx + len(marker)
+    mut end = start
+    mut escaped = false
+    while end < len(raw) {
+        if escaped {
+            escaped = false
+            end += 1
+            continue
+        }
+        if raw[end] == "\\" {
+            escaped = true
+            end += 1
+            continue
+        }
+        if raw[end] == "\"" {
+            break
+        }
+        end += 1
+    }
+
+    let text = substring(raw, start, end)
+    -- Unescape the JSON string
+    return _unescape_json(text)
+}
+
+fn _extract_field(raw, field) {
+    let marker = "\"" + field + "\": \""
+    let idx = index_of(raw, marker)
+    if idx < 0 { return "Unknown error" }
+
+    let start = idx + len(marker)
+    mut end = start
+    while end < len(raw) and raw[end] != "\"" {
+        end += 1
+    }
+    return substring(raw, start, end)
+}
+
+fn _unescape_json(s) {
+    mut result = s
+    result = replace(result, "\\n", "\n")
+    result = replace(result, "\\r", "\r")
+    result = replace(result, "\\t", "\t")
+    result = replace(result, "\\\"", "\"")
+    result = replace(result, "\\\\", "\\")
+    return result
+}
