@@ -272,9 +272,9 @@ fn handle_builtin(line, state) {
     if trimmed == ".claude" {
         if not has_api_key() {
             show ""
-            show red("  No API key found.")
-            show "  Set your Anthropic API key:"
-            show cyan("    export ANTHROPIC_API_KEY='sk-ant-...'")
+            show red("  Claude Code CLI not found.")
+            show "  Install it (uses your Max plan — no extra cost):"
+            show cyan("    npm install -g @anthropic-ai/claude-code")
             show ""
             return true
         }
