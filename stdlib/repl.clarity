@@ -309,7 +309,7 @@ fn show_banner() {
 
 -- ── Main REPL loop ───────────────────────────────────────
 
-fn start() {
+fn repl_start() {
     let state = ReplState()
 
     -- Load persistent history
@@ -442,5 +442,4 @@ fn _count_char(s, ch) {
 }
 
 -- ── Entry point ──────────────────────────────────────────
-
-start()
+-- When imported by cli.clarity, repl_start() is called explicitly.
