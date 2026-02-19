@@ -74,6 +74,7 @@ class Environment {
 
 class ClarityFunction {
     fn init(name, params, body, closure, is_async) {
+        this._clarityType = "ClarityFunction"
         this.name = name ?? "<anonymous>"
         this.params = params
         this.body = body
@@ -88,6 +89,7 @@ class ClarityFunction {
 
 class ClarityClass {
     fn init(name, methods, parent) {
+        this._clarityType = "ClarityClass"
         this.name = name
         this.methods = methods
         this.parent = parent ?? null
@@ -100,6 +102,7 @@ class ClarityClass {
 
 class ClarityInstance {
     fn init(klass) {
+        this._clarityType = "ClarityInstance"
         this.klass = klass
         this.properties = {}
     }
@@ -133,6 +136,7 @@ class ClarityInstance {
 
 class ClarityInterface {
     fn init(name, method_sigs) {
+        this._clarityType = "ClarityInterface"
         this.name = name
         this.method_sigs = method_sigs
     }
@@ -144,6 +148,7 @@ class ClarityInterface {
 
 class ClarityEnum {
     fn init(name, members) {
+        this._clarityType = "ClarityEnum"
         this.name = name
         this.members = members
     }

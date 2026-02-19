@@ -25,19 +25,91 @@ import ast_nodes as ast
 class JSEmitter:
     """Transpiles a Clarity AST to JavaScript source code."""
 
+    # All known class names across the stdlib — needed for `new` insertion
+    # since individual files don't see class definitions from imports
+    KNOWN_CLASSES = {
+        # tokens.clarity
+        'Token',
+        # ast_nodes.clarity
+        'Program', 'LetStatement', 'DestructureLetStatement', 'AssignStatement',
+        'FnStatement', 'ReturnStatement', 'IfStatement', 'ForStatement',
+        'WhileStatement', 'TryCatch', 'BreakStatement', 'ContinueStatement',
+        'ThrowStatement', 'ShowStatement', 'ImportStatement', 'ClassStatement',
+        'InterfaceStatement', 'MatchStatement', 'MultiAssignStatement',
+        'EnumStatement', 'DecoratedStatement', 'ExpressionStatement', 'Block',
+        'NumberLiteral', 'StringLiteral', 'BoolLiteral', 'NullLiteral',
+        'Identifier', 'ThisExpression', 'ListLiteral', 'MapLiteral',
+        'BinaryOp', 'UnaryOp', 'CallExpression', 'MemberExpression',
+        'OptionalMemberExpression', 'IndexExpression', 'SliceExpression',
+        'FnExpression', 'PipeExpression', 'RangeExpression', 'AskExpression',
+        'NullCoalesce', 'SpreadExpression', 'IfExpression',
+        'ComprehensionExpression', 'MapComprehensionExpression',
+        'AwaitExpression', 'YieldExpression',
+        # lexer.clarity
+        'Lexer',
+        # parser.clarity
+        'Parser',
+        # interpreter.clarity
+        'Environment', 'ClarityFunction', 'ClarityClass', 'ClarityInstance',
+        'ClarityInterface', 'ClarityEnum', 'Interpreter',
+        # bytecode.clarity
+        'CodeObject', 'Compiler', 'VMFrame', 'VMFunction', 'VMClass',
+        'VMInstance', 'VMIterator', 'VM',
+        # collections.clarity
+        'Set', 'OrderedMap', 'Queue', 'Stack', 'PriorityQueue',
+        # channel.clarity
+        'Channel', 'BufferedChannel', 'FanOut', 'FanIn',
+        # completer.clarity
+        'Completer',
+        # datetime.clarity
+        'Duration', 'DateTime',
+        # db.clarity
+        'KVStore', 'Table', 'Query',
+        # debugger.clarity
+        'Breakpoint', 'DebugFrame', 'Debugger',
+        # formatter.clarity
+        'Formatter',
+        # linter.clarity
+        'LintScope', 'Linter',
+        # lsp.clarity
+        'LanguageServer',
+        # mutex.clarity
+        'Mutex', 'RWLock', 'Atomic', 'AtomicFlag', 'Once', 'Semaphore', 'FileLock',
+        # net.clarity
+        'HttpResponse', 'HttpServer', 'URL',
+        # profiler.clarity
+        'Profiler',
+        # registry.clarity
+        'Registry',
+        # repl.clarity
+        'ReplState',
+        # semver.clarity
+        'SemVer', 'VersionRange',
+        # task.clarity
+        'Task', 'BackgroundTask', 'TaskGroup', 'Future',
+        # transpile.clarity
+        'JSEmitter',
+        # type_checker.clarity
+        'TypeScope', 'TypeChecker',
+        # worker.clarity
+        'WorkerPool', 'Pipeline',
+    }
+
     def __init__(self, module_name="<main>"):
         self.indent = 0
         self.module_name = module_name
         self.imports = set()  # Track Clarity imports to resolve
-        self.classes = set()  # Track class names for `new` insertion
+        self.classes = set(self.KNOWN_CLASSES)  # Seed with all known classes
         self.source_map = []  # (js_line, clarity_file, clarity_line) entries
         self.hoisted_imports = []  # Imports found inside blocks, hoisted to top
 
     def emit(self, program):
         """Emit a full program."""
+        self.top_level = True
         lines = []
         for stmt in program.body:
             lines.append(self.emit_stmt(stmt))
+        self.top_level = False
         # Prepend any imports that were inside function/block bodies
         if self.hoisted_imports:
             hoisted = '\n'.join(self.hoisted_imports)
@@ -65,20 +137,23 @@ class JSEmitter:
         return f'{self._indent()}{self.emit_expr(node.expression)};'
 
     def emit_LetStatement(self, node):
-        keyword = 'let' if node.mutable else 'const'
+        # Use 'let' for all declarations in bootstrap build — some Clarity source
+        # reassigns 'let' variables which would fail with JS 'const'
         val = self.emit_expr(node.value)
         name = self._safe_name(node.name)
-        return f'{self._indent()}{keyword} {name} = {val};'
+        export = 'export ' if self.indent == 0 else ''
+        return f'{self._indent()}{export}let {name} = {val};'
 
     def emit_DestructureLetStatement(self, node):
-        keyword = 'let' if node.mutable else 'const'
+        keyword = 'let'
+        export = 'export ' if self.indent == 0 else ''
         val = self.emit_expr(node.value)
         if node.kind == 'list':
             targets = ', '.join(self._safe_name(t) if isinstance(t, str) else self.emit_expr(t) for t in node.targets)
-            return f'{self._indent()}{keyword} [{targets}] = {val};'
+            return f'{self._indent()}{export}{keyword} [{targets}] = {val};'
         else:
             targets = ', '.join(self._safe_name(t) if isinstance(t, str) else self.emit_expr(t) for t in node.targets)
-            return f'{self._indent()}{keyword} {{{targets}}} = {val};'
+            return f'{self._indent()}{export}{keyword} {{{targets}}} = {val};'
 
     def emit_AssignStatement(self, node):
         target = self.emit_expr(node.target)
@@ -96,8 +171,9 @@ class JSEmitter:
         name = self._safe_name(node.name)
         params = ', '.join(self._emit_param(p) for p in node.params)
         prefix = 'async ' if node.is_async else ''
+        export = 'export ' if self.indent == 0 else ''
         body = self._emit_block_body(node.body)
-        return f'{self._indent()}{prefix}function {name}({params}) {{\n{body}\n{self._indent()}}}'
+        return f'{self._indent()}{export}{prefix}function {name}({params}) {{\n{body}\n{self._indent()}}}'
 
     def emit_ReturnStatement(self, node):
         if node.value:
@@ -125,7 +201,7 @@ class JSEmitter:
         var = self._safe_name(node.variable)
         iterable = self.emit_expr(node.iterable)
         body = self._emit_block_body(node.body)
-        return f'{self._indent()}for (const {var} of {iterable}) {{\n{body}\n{self._indent()}}}'
+        return f'{self._indent()}for (let {var} of {iterable}) {{\n{body}\n{self._indent()}}}'
 
     def emit_WhileStatement(self, node):
         cond = self.emit_expr(node.condition)
@@ -184,7 +260,8 @@ class JSEmitter:
         name = self._safe_name(node.name)
         self.classes.add(node.name)
         parent = f' extends {self._safe_name(node.parent)}' if node.parent else ''
-        lines = [f'{self._indent()}class {name}{parent} {{']
+        export = 'export ' if self.indent == 0 else ''
+        lines = [f'{self._indent()}{export}class {name}{parent} {{']
         self.indent += 1
         for method in node.methods:
             if isinstance(method, ast.FnStatement):
@@ -206,7 +283,7 @@ class JSEmitter:
     def emit_MatchStatement(self, node):
         subject = self.emit_expr(node.subject)
         tmp = '__match_val'
-        lines = [f'{self._indent()}const {tmp} = {subject};']
+        lines = [f'{self._indent()}let {tmp} = {subject};']
         first = True
         for arm in node.arms:
             if len(arm) == 3:
@@ -240,7 +317,8 @@ class JSEmitter:
             else:
                 members.append(f'"{mname}": {i}')
         inner = ', '.join(members)
-        return f'{self._indent()}const {name} = new $ClarityEnum("{node.name}", {{{inner}}});'
+        export = 'export ' if self.indent == 0 else ''
+        return f'{self._indent()}{export}let {name} = new $ClarityEnum("{node.name}", {{{inner}}});'
 
     def emit_DecoratedStatement(self, node):
         # Emit the target, then wrap it
@@ -275,13 +353,25 @@ class JSEmitter:
     def expr_StringLiteral(self, node):
         # Convert Clarity string interpolation to JS template literals
         s = node.value
-        if '{' in s and '}' in s:
+        if self._has_interpolation(s):
             # Replace {expr} with ${expr}
             result = self._convert_interpolation(s)
             return f'`{result}`'
-        # Escape backticks and use regular string
-        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+        # Escape special characters for JS string literal
+        escaped = s.replace('\\', '\\\\')
+        escaped = escaped.replace('\n', '\\n')
+        escaped = escaped.replace('\r', '\\r')
+        escaped = escaped.replace('\t', '\\t')
+        escaped = escaped.replace('\0', '\\0')
+        escaped = escaped.replace('"', '\\"')
         return f'"{escaped}"'
+
+    def _has_interpolation(self, s):
+        """Check if a string contains Clarity interpolation {expr} vs literal braces."""
+        import re
+        # Find { that's followed by an identifier-like character (letter, underscore)
+        # This distinguishes {name} (interpolation) from {"key": "val"} (literal JSON)
+        return bool(re.search(r'\{[a-zA-Z_]', s))
 
     def expr_BoolLiteral(self, node):
         return 'true' if node.value else 'false'
@@ -351,15 +441,13 @@ class JSEmitter:
     def expr_MemberExpression(self, node):
         obj = self.emit_expr(node.object)
         prop = node.property
-        if isinstance(node.object, ast.Identifier) and node.object.name in ('this',):
-            return f'{obj}.{prop}'
-        # Use bracket notation for safety
-        return f'{obj}.{self._safe_name(prop)}'
+        # Don't rename properties — JS reserved words are fine as property names
+        return f'{obj}.{prop}'
 
     def expr_OptionalMemberExpression(self, node):
         obj = self.emit_expr(node.object)
         prop = node.property
-        return f'{obj}?.{self._safe_name(prop)}'
+        return f'{obj}?.{prop}'
 
     def expr_IndexExpression(self, node):
         obj = self.emit_expr(node.object)
@@ -380,8 +468,9 @@ class JSEmitter:
             # Arrow function shorthand
             val = self.emit_expr(node.body.statements[0].value)
             return f'(({params}) => {val})'
+        # Use arrow functions to preserve lexical `this` binding
         body = self._emit_block_body(node.body)
-        return f'(function({params}) {{\n{body}\n{self._indent()}}})'
+        return f'(({params}) => {{\n{body}\n{self._indent()}}})'
 
     def expr_PipeExpression(self, node):
         val = self.emit_expr(node.value)
@@ -475,22 +564,39 @@ class JSEmitter:
         js_reserved = {
             'int': '$int', 'float': '$float', 'bool': '$bool',
             'set': '$set', 'min': '$min', 'max': '$max',
-            'join': '$join', 'repeat': '$repeat',
+            'join': '$join', 'repeat': '$repeat', 'range': '$range',
             'class': '$class', 'new': '$new', 'delete': '$delete',
             'switch': '$switch', 'case': '$case', 'default': '$default',
             'typeof': '$typeof', 'void': '$void', 'with': '$with',
             'yield': '$yield', 'debugger': '$debugger',
             'instanceof': '$instanceof', 'in': '$in',
             'var': '$var', 'const': '$const',
+            'function': '$function', 'enum': '$enum',
+            'implements': '$implements', 'interface': '$interface',
+            'package': '$package', 'private': '$private',
+            'protected': '$protected', 'public': '$public',
+            'static': '$static', 'arguments': '$arguments',
+            'eval': '$eval', 'import': '$import', 'export': '$export',
         }
         return js_reserved.get(name, name)
 
     def _convert_interpolation(self, s):
         """Convert Clarity string interpolation {expr} to JS template ${expr}."""
+        import re
         result = []
         i = 0
         while i < len(s):
-            if s[i] == '{':
+            if s[i] == '$' and i + 1 < len(s) and s[i+1] == '{':
+                # Already a ${...} in source — find matching } and pass through as-is
+                depth = 1
+                j = i + 2
+                while j < len(s) and depth > 0:
+                    if s[j] == '{': depth += 1
+                    elif s[j] == '}': depth -= 1
+                    j += 1
+                result.append(s[i:j])
+                i = j
+            elif s[i] == '{':
                 # Find matching close brace
                 depth = 1
                 j = i + 1
@@ -499,7 +605,12 @@ class JSEmitter:
                     elif s[j] == '}': depth -= 1
                     j += 1
                 expr = s[i+1:j-1]
-                result.append('${' + self._safe_name(expr) + '}')
+                # Only treat as interpolation if content starts with identifier char
+                if expr and re.match(r'^[a-zA-Z_]', expr):
+                    result.append('${' + self._safe_name(expr) + '}')
+                else:
+                    # Literal braces — preserve them (safe in template literals)
+                    result.append('{' + expr + '}')
                 i = j
             elif s[i] == '`':
                 result.append('\\`')
@@ -656,16 +767,44 @@ def bundle(compile_native=False):
         print()
         print('  Compiling to native binary...')
         out_bin = os.path.join(dist_dir, 'clarity')
+        # Find bun — check PATH first, then common install locations
+        import shutil
+        bun = shutil.which('bun')
+        if not bun:
+            home = os.path.expanduser('~')
+            for candidate in [
+                os.path.join(home, '.bun', 'bin', 'bun'),
+                '/usr/local/bin/bun',
+            ]:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    bun = candidate
+                    break
+        if not bun:
+            print('  ERROR: Bun not found. Install it:')
+            print('    curl -fsSL https://bun.sh/install | bash')
+            print('  Then either restart your shell or run:')
+            print('    export PATH="$HOME/.bun/bin:$PATH"')
+            return
+        # Build targets: current platform + cross-compile for macOS/Linux
+        targets = [
+            ('clarity',              None),                # current platform
+            ('clarity-macos-arm64',  'bun-darwin-arm64'),  # macOS Apple Silicon
+            ('clarity-macos-x64',    'bun-darwin-x64'),    # macOS Intel
+            ('clarity-linux-x64',    'bun-linux-x64'),     # Linux x64
+            ('clarity-linux-arm64',  'bun-linux-arm64'),   # Linux ARM64
+        ]
         try:
-            subprocess.check_call(
-                ['bun', 'build', '--compile', entry, '--outfile', out_bin],
-                cwd=dist_dir,
-            )
-            size = os.path.getsize(out_bin) / (1024 * 1024)
-            print(f'  Native binary: {out_bin} ({size:.1f} MB)')
+            for bin_name, target in targets:
+                out = os.path.join(dist_dir, bin_name)
+                cmd = [bun, 'build', '--compile', entry, '--outfile', out]
+                if target:
+                    cmd += [f'--target={target}']
+                subprocess.check_call(cmd, cwd=dist_dir)
+                size = os.path.getsize(out) / (1024 * 1024)
+                print(f'  {bin_name} ({size:.1f} MB)')
             print()
-            print('  Install:')
-            print(f'    sudo cp {out_bin} /usr/local/bin/clarity')
+            print('  Install (pick the right one for your platform):')
+            print(f'    sudo cp {os.path.join(dist_dir, "clarity-macos-arm64")} /usr/local/bin/clarity')
             print('    clarity shell')
         except FileNotFoundError:
             print('  ERROR: Bun not found. Install it:')

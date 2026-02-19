@@ -180,6 +180,5 @@ fn run_smoke_tests() {
     if FAILED > 0 { exit(1) }
 }
 
--- ── Run ─────────────────────────────────────────────────
-
-run_smoke_tests()
+-- ── Run (only when executed directly, not when imported) ──
+-- When imported by cli.clarity, run_smoke_tests() is called explicitly.
