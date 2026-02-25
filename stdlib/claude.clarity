@@ -1,0 +1,133 @@
+-- Claude AI integration for Clarity Shell
+-- Uses Claude Code CLI (claude --print) — runs on your Max plan, no extra cost.
+
+from "terminal.clarity" import dim, yellow, red, cyan
+
+-- ── State ──────────────────────────────────────────────
+
+mut session_id = null
+mut conversation_history = []
+
+-- ── Check if Claude Code CLI is installed ──────────────
+
+fn has_api_key() {
+    -- Check if claude CLI is available (uses Max plan, no API key needed)
+    let result = exec_full("which claude 2>/dev/null")
+    return result.exit_code == 0 and len(trim(result.stdout)) > 0
+}
+
+-- ── Find the claude binary ─────────────────────────────
+
+fn _find_claude() {
+    -- Check PATH first
+    let result = exec_full("which claude 2>/dev/null")
+    if result.exit_code == 0 and len(trim(result.stdout)) > 0 {
+        return trim(result.stdout)
+    }
+    -- Common install locations
+    let home = env("HOME")
+    if home != null {
+        let npm_global = home + "/.npm-global/bin/claude"
+        let check = exec_full("test -x " + npm_global + " && echo yes || echo no")
+        if trim(check.stdout) == "yes" { return npm_global }
+    }
+    -- Try npx as fallback
+    return "npx @anthropic-ai/claude-code"
+}
+
+-- ── Send message to Claude ─────────────────────────────
+
+fn chat(user_message) {
+    let claude_bin = _find_claude()
+
+    -- Add to conversation history for context
+    push(conversation_history, {"role": "user", "content": user_message})
+
+    -- Build the prompt with conversation context
+    let prompt = _build_prompt(user_message)
+
+    -- Write prompt to temp file to avoid shell escaping issues
+    let tmp_file = "/tmp/clarity_claude_prompt.txt"
+    write(tmp_file, prompt)
+
+    -- Call claude CLI with --print for non-interactive mode
+    -- --print sends one message and prints the response
+    mut cmd = claude_bin + " --print"
+
+    -- If we have a session, continue it
+    if session_id != null {
+        cmd = cmd + " --continue --session-id " + session_id
+    }
+
+    cmd = cmd + " < " + tmp_file + " 2>/dev/null"
+
+    let result = exec_full(cmd)
+
+    -- Clean up
+    try { exec("rm -f " + tmp_file) } catch e {}
+
+    if result.exit_code != 0 {
+        let err = if len(trim(result.stderr)) > 0 { result.stderr } else { "Claude CLI failed. Is it installed? Run: npm install -g @anthropic-ai/claude-code" }
+        return {"ok": false, "error": trim(err)}
+    }
+
+    let response_text = trim(result.stdout)
+
+    if len(response_text) == 0 {
+        return {"ok": false, "error": "Empty response from Claude"}
+    }
+
+    -- Save assistant response
+    push(conversation_history, {"role": "assistant", "content": response_text})
+
+    return {"ok": true, "text": response_text}
+}
+
+-- ── Single question (no conversation context) ──────────
+
+fn ask_claude(question) {
+    let claude_bin = _find_claude()
+    let tmp_file = "/tmp/clarity_claude_prompt.txt"
+    write(tmp_file, question)
+
+    let cmd = claude_bin + " --print < " + tmp_file + " 2>/dev/null"
+    let result = exec_full(cmd)
+
+    try { exec("rm -f " + tmp_file) } catch e {}
+
+    if result.exit_code != 0 {
+        return {"ok": false, "error": "Claude CLI failed"}
+    }
+
+    return {"ok": true, "text": trim(result.stdout)}
+}
+
+-- ── Clear conversation ─────────────────────────────────
+
+fn clear_conversation() {
+    conversation_history = []
+    session_id = null
+}
+
+-- ── Build prompt with history context ──────────────────
+
+fn _build_prompt(current_message) {
+    -- If this is the first message, add system context
+    if len(conversation_history) <= 1 {
+        return current_message
+    }
+
+    -- Include recent conversation context in the prompt
+    mut context = "Previous conversation context:\n"
+    -- Include last few exchanges for context (skip the current message which is last)
+    let start = if len(conversation_history) > 7 { len(conversation_history) - 7 } else { 0 }
+    mut i = start
+    while i < len(conversation_history) - 1 {
+        let msg = conversation_history[i]
+        let role = if msg["role"] == "user" { "User" } else { "Assistant" }
+        context = context + role + ": " + msg["content"] + "\n\n"
+        i += 1
+    }
+
+    return context + "User: " + current_message
+}

@@ -8,6 +8,7 @@ from "process.clarity" import get_path, home_dir, ls, pwd, _quote
 from "highlight.clarity" import highlight_line
 from "completer.clarity" import Completer, format_completions, common_prefix
 from "pretty.clarity" import pretty, pretty_show, pretty_json
+from "claude.clarity" import chat, ask_claude, clear_conversation, has_api_key
 
 -- ── Constants ───────────────────────────────────────────
 
@@ -28,6 +29,7 @@ class ReplState {
         this.completer = Completer()
         this.show_highlighted = true
         this.pretty_output = true
+        this.claude_mode = false
     }
 }
 
@@ -132,6 +134,13 @@ fn handle_builtin(line, state) {
         show "  " + cyan(".highlight") + "     Toggle syntax highlighting"
         show "  " + cyan(".pretty") + "        Toggle pretty output"
         show "  " + cyan(".complete X") + "    Show completions for X"
+        show ""
+        show bold("  Claude AI")
+        show ""
+        show "  " + cyan("? <question>") + "   Ask Claude anything"
+        show "  " + cyan(".claude") + "        Start Claude chat mode"
+        show "  " + cyan(".claude off") + "    Exit Claude chat mode"
+        show "  " + cyan(".claude clear") + "  Clear conversation history"
         show "  " + cyan("quit") + "           Exit the shell"
         show ""
         show "  " + dim("Prefix with $ or ! to force shell mode")
@@ -259,6 +268,45 @@ fn handle_builtin(line, state) {
         return true
     }
 
+    -- Claude AI commands
+    if trimmed == ".claude" {
+        if not has_api_key() {
+            show ""
+            show red("  Claude Code CLI not found.")
+            show "  Install it (uses your Max plan — no extra cost):"
+            show cyan("    npm install -g @anthropic-ai/claude-code")
+            show ""
+            return true
+        }
+        state.claude_mode = true
+        show ""
+        show bold(magenta("  Claude mode ON")) + " — everything you type goes to Claude."
+        show dim("  Type .claude off to return to normal mode.")
+        show ""
+        return true
+    }
+
+    if trimmed == ".claude off" {
+        state.claude_mode = false
+        show yellow("  Claude mode OFF")
+        return true
+    }
+
+    if trimmed == ".claude clear" {
+        clear_conversation()
+        show yellow("  Claude conversation cleared.")
+        return true
+    }
+
+    -- Quick question: ? <question>
+    if starts(trimmed, "? ") {
+        let question = trim(substring(trimmed, 2, len(trimmed)))
+        if len(question) > 0 {
+            _ask_claude_and_show(question)
+        }
+        return true
+    }
+
     if trimmed == "quit" or trimmed == "exit" {
         -- Save history before exiting
         _save_history(state.history)
@@ -268,6 +316,23 @@ fn handle_builtin(line, state) {
     }
 
     return false
+}
+
+-- ── Claude AI helper ────────────────────────────────────
+
+fn _ask_claude_and_show(question) {
+    show dim("  thinking...")
+    let result = chat(question)
+    if result["ok"] {
+        show ""
+        let lines = split(result["text"], "\n")
+        for line in lines {
+            show "  " + line
+        }
+        show ""
+    } else {
+        show red("  " + result["error"])
+    }
 }
 
 -- ── Show history ────────────────────────────────────────
@@ -294,6 +359,9 @@ fn format_prompt(state) {
     mut display_dir = dir
     if starts(dir, home) {
         display_dir = "~" + substring(dir, len(home))
+    }
+    if state.claude_mode {
+        return bold(magenta("claude")) + " " + cyan(display_dir) + bold(magenta(" > "))
     }
     return bold(green("clarity")) + " " + cyan(display_dir) + bold(green(" > "))
 }
@@ -353,6 +421,12 @@ fn repl_start() {
 
         -- Check for builtin commands (only if not in multi-line mode)
         if len(state.buffer) == 0 and handle_builtin(line, state) {
+            continue
+        }
+
+        -- Claude mode: send everything to Claude
+        if state.claude_mode {
+            _ask_claude_and_show(trim(line))
             continue
         }
 
