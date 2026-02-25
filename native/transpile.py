@@ -718,7 +718,7 @@ def bundle(compile_native=False):
         'collections.clarity', 'datetime.clarity', 'path.clarity',
         'net.clarity', 'db.clarity', 'crypto.clarity',
         'semver.clarity', 'registry.clarity',
-        'highlight.clarity', 'completer.clarity', 'pretty.clarity',
+        'highlight.clarity', 'completer.clarity', 'pretty.clarity', 'claude.clarity',
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
         'transpile.clarity',
         'build.clarity', 'test_smoke.clarity',
