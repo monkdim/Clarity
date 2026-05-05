@@ -51,6 +51,35 @@ export function $int(v) {
 export function $float(v) { return parseFloat(v); }
 export function str(v) { return display(v); }
 export function $bool(v) { return truthy(v); }
+
+export function $eq(a, b) {
+  if (a === b) return true;
+  // Treat null and undefined as equal (Clarity only has null)
+  if (a == null || b == null) return a == null && b == null;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!$eq(a[i], b[i])) return false;
+    return true;
+  }
+  if (typeof a === 'object' && typeof b === 'object') {
+    if (a.constructor !== Object || b.constructor !== Object) return false;
+    const ka = Object.keys(a);
+    if (ka.length !== Object.keys(b).length) return false;
+    for (const k of ka) if (!$eq(a[k], b[k])) return false;
+    return true;
+  }
+  return false;
+}
+
+export function $ne(a, b) { return !$eq(a, b); }
+
+export function $index(obj, idx) {
+  if ((Array.isArray(obj) || typeof obj === 'string') && typeof idx === 'number' && idx < 0) {
+    idx = obj.length + idx;
+  }
+  const v = obj == null ? undefined : obj[idx];
+  return v === undefined ? null : v;
+}
 export function type(v) {
   if (v === null || v === undefined) return 'null';
   if (typeof v === 'boolean') return 'bool';
