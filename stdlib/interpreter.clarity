@@ -363,6 +363,7 @@ class Interpreter {
 
         -- System
         this.global_env.set("exec", fn(cmd) { return exec(cmd) }, true)
+        this.global_env.set("exec_full", fn(cmd) { return exec_full(cmd) }, true)
         this.global_env.set("exit", fn(code) { exit(code ?? 0) }, true)
         this.global_env.set("sleep", fn(s) { sleep(s) }, true)
         this.global_env.set("time", fn() { return time() }, true)
@@ -870,6 +871,14 @@ class Interpreter {
             path = path + ".clarity"
         }
 
+        -- Resolve relative to the importing file's directory
+        if not exists(path) and this.source_dir != null {
+            let candidate = this.source_dir + "/" + path
+            if exists(candidate) {
+                path = candidate
+            }
+        }
+
         -- Check cache
         if has(this._imported, path) {
             let module_env = this._imported[path]
@@ -1025,6 +1034,11 @@ class Interpreter {
         if op == "<=" { return left <= right }
         if op == ">=" { return left >= right }
         if op == "is" { return left == right }
+        if op == "&" { return left & right }
+        if op == "|" { return left | right }
+        if op == "^" { return left ^ right }
+        if op == "<<" { return left << right }
+        if op == ">>" { return left >> right }
         throw "RuntimeError: Unknown operator: {op} (line {line})"
     }
 
@@ -1206,6 +1220,8 @@ class Interpreter {
 
         -- Instance property/method access
         if t == "ClarityInstance" {
+            -- A property explicitly set to null is still present and must return null.
+            if has(obj.properties, prop) { return obj.properties[prop] }
             let val = obj.get_prop(prop)
             if val != null {
                 -- If it's a ClarityFunction (method), bind it
@@ -1445,7 +1461,7 @@ class Interpreter {
         if value == null { return false }
         let t = type(value)
         if t == "bool" { return value }
-        if t == "number" { return value != 0 }
+        if t == "int" or t == "float" or t == "number" { return value != 0 }
         if t == "string" { return len(value) > 0 }
         if t == "list" { return len(value) > 0 }
         if t == "map" { return len(keys(value)) > 0 }

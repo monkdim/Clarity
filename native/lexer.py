@@ -210,6 +210,13 @@ class Lexer:
                     last_was_newline = True
                 continue
 
+            if ch == ";":
+                self.advance()
+                if not last_was_newline and self.paren_depth == 0:
+                    tokens.append(self.make_token(TokenType.NEWLINE, ";"))
+                    last_was_newline = True
+                continue
+
             last_was_newline = False
 
             if ch in '"\'':
