@@ -22,12 +22,18 @@ fn _quote(s) {
 }
 
 fn _get_clarity_cmd() {
-    -- Determine how to invoke clarity
+    -- Determine how to invoke clarity. cli_args[0] is the CLI subcommand
+    -- ("smoke"); cli_args[1] is the optional binary path passed to it.
+    -- Resolve to an absolute path so tests that `cd` to a temp dir still work.
     let cli_args = args()
-    if len(cli_args) > 0 {
-        return cli_args[0]
+    if len(cli_args) > 1 {
+        let bin = cli_args[1]
+        if starts(bin, "/") { return bin }
+        let resolved = exec_full("readlink -f " + _quote(bin) + " 2>/dev/null")
+        let abs = trim(resolved.stdout)
+        if len(abs) > 0 { return abs }
+        return bin
     }
-    -- Default: try clarity binary, fall back to bun dist
     let which_result = exec_full("command -v clarity 2>/dev/null")
     if len(trim(which_result.stdout)) > 0 {
         return "clarity"
