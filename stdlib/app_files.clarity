@@ -1,0 +1,342 @@
+-- File manager app — Phase 63 task 2.
+--
+-- A directory listing with a sidebar (Home, Documents, Downloads,
+-- volumes from storage.mounts), a breadcrumb path bar at the top,
+-- and a list / icon view of the current directory's entries. Click a
+-- directory to navigate; click a file to fire `on_open(path)`.
+--
+-- File operations (copy, move, delete) are exposed as methods so the
+-- desktop shell can wire them up to keyboard shortcuts or context
+-- menus once we ship those.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, hline, vline, line
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font
+from "storage.clarity" import mounts
+
+-- ── Directory entries ─────────────────────────────────
+
+class FileEntry {
+    fn init(name, path, is_dir, size_bytes) {
+        this.name = name
+        this.path = path
+        this.is_dir = is_dir
+        this.size_bytes = size_bytes
+    }
+}
+
+fn _join_path(dir, name) {
+    if ends(dir, "/") { return dir + name }
+    return dir + "/" + name
+}
+
+fn list_directory(path) {
+    let r = exec_full("ls -la --time-style=long-iso " + _quote(path) + " 2>/dev/null")
+    let lines = split(trim(r.stdout), "\n")
+    mut out = []
+    for line in lines {
+        let l = trim(line)
+        -- Skip the "total" header
+        if starts(l, "total ") { continue }
+        if len(l) == 0 { continue }
+        -- Skip "." and ".."
+        let parts = _split_ls(l)
+        if len(parts) < 8 { continue }
+        let name = parts[len(parts) - 1]
+        if name == "." or name == ".." { continue }
+        let perms = parts[0]
+        let is_dir = starts(perms, "d")
+        let size = if len(parts) >= 5 { int(parts[4]) } else { 0 }
+        push(out, FileEntry(name, _join_path(path, name), is_dir, size))
+    }
+    return out
+}
+
+-- ls output is space-separated but the last field can contain spaces;
+-- collapse runs of spaces and limit to 8 fields, with the final field
+-- being the rest of the line.
+fn _split_ls(line) {
+    mut parts = []
+    mut current = ""
+    mut count = 0
+    let max = 7
+    mut i = 0
+    while i < len(line) {
+        let c = char_at(line, i)
+        if c == " " or c == "\t" {
+            if len(current) > 0 {
+                push(parts, current)
+                current = ""
+                count += 1
+                if count == max {
+                    -- Skip remaining spaces, then take the rest
+                    while i < len(line) and (char_at(line, i) == " " or char_at(line, i) == "\t") { i += 1 }
+                    if i < len(line) { push(parts, substring(line, i, len(line))) }
+                    return parts
+                }
+            }
+        } else {
+            current = current + c
+        }
+        i += 1
+    }
+    if len(current) > 0 { push(parts, current) }
+    return parts
+}
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+-- ── File operations ───────────────────────────────────
+
+fn copy_file(src, dst) {
+    let r = exec_full("cp " + _quote(src) + " " + _quote(dst) + " 2>&1")
+    return r.exit_code == 0
+}
+
+fn move_file(src, dst) {
+    let r = exec_full("mv " + _quote(src) + " " + _quote(dst) + " 2>&1")
+    return r.exit_code == 0
+}
+
+fn delete_file(path) {
+    let r = exec_full("rm -rf " + _quote(path) + " 2>&1")
+    return r.exit_code == 0
+}
+
+fn make_directory(path) {
+    let r = exec_full("mkdir -p " + _quote(path) + " 2>&1")
+    return r.exit_code == 0
+}
+
+-- ── Path utilities ────────────────────────────────────
+
+fn parent_directory(path) {
+    if path == "/" { return "/" }
+    let trimmed = if ends(path, "/") and len(path) > 1 { substring(path, 0, len(path) - 1) } else { path }
+    let last = _last_index_of(trimmed, "/")
+    if last <= 0 { return "/" }
+    return substring(trimmed, 0, last)
+}
+
+fn breadcrumbs(path) {
+    let parts = split(path, "/")
+    mut crumbs = ["/"]
+    mut cumul = ""
+    for p in parts {
+        if len(p) == 0 { continue }
+        cumul = cumul + "/" + p
+        push(crumbs, cumul)
+    }
+    return crumbs
+}
+
+fn _last_index_of(s, ch) {
+    mut i = len(s) - 1
+    while i >= 0 {
+        if char_at(s, i) == ch { return i }
+        i -= 1
+    }
+    return -1
+}
+
+-- ── App widget ────────────────────────────────────────
+
+class FilesApp < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "files"
+        this.focusable = true
+        this.cwd = "/"
+        this.entries = []
+        this.selected = -1
+        this.row_height = 22
+        this.sidebar_w = 160
+        this.crumb_h = 28
+        this._on_open = null
+    }
+
+    fn navigate(path) {
+        this.cwd = path
+        this.entries = list_directory(path)
+        this.selected = -1
+    }
+
+    fn on_open(fn_) { this._on_open = fn_ }
+
+    fn _sidebar_items() {
+        let home = env("HOME", "/root")
+        mut items = [
+            {"label": "Home", "path": home},
+            {"label": "Documents", "path": _join_path(home, "Documents")},
+            {"label": "Downloads", "path": _join_path(home, "Downloads")},
+            {"label": "Root", "path": "/"}
+        ]
+        for m in mounts() {
+            -- Show non-pseudo mountpoints in the sidebar
+            let mp = m["mountpoint"]
+            let fs = m["fstype"]
+            if fs != "proc" and fs != "sysfs" and fs != "tmpfs" and fs != "cgroup2" and fs != "devpts" and mp != "/" {
+                push(items, {"label": mp, "path": mp})
+            }
+        }
+        return items
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "background")
+        let surface = theme_color(t, "surface")
+        let surface_e = theme_color(t, "surface_elevated")
+        let fg = theme_color(t, "foreground")
+        let muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+        let border = theme_color(t, "border")
+
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+
+        -- Sidebar
+        fill_rect(fb, r[0], r[1], this.sidebar_w, r[3], surface)
+        vline(fb, r[0] + this.sidebar_w - 1, r[1], r[1] + r[3] - 1, border)
+        let items = this._sidebar_items()
+        mut si = 0
+        while si < len(items) {
+            let it = items[si]
+            let row_y = r[1] + 12 + si * this.row_height
+            draw_text(fb, r[0] + 12, row_y, it["label"], f, muted)
+            si += 1
+        }
+
+        -- Breadcrumbs strip
+        let cb_x = r[0] + this.sidebar_w
+        let cb_y = r[1]
+        let cb_w = r[2] - this.sidebar_w
+        fill_rect(fb, cb_x, cb_y, cb_w, this.crumb_h, surface_e)
+        hline(fb, cb_x, cb_y + this.crumb_h - 1, cb_x + cb_w - 1, border)
+        let crumbs = breadcrumbs(this.cwd)
+        mut cx = cb_x + 12
+        for c in crumbs {
+            let label = _crumb_label(c)
+            let m = measure_text(f, label)
+            draw_text(fb, cx, cb_y + (this.crumb_h - m[1]) / 2, label, f, fg)
+            cx += m[0] + 8
+            -- Separator
+            draw_text(fb, cx, cb_y + (this.crumb_h - m[1]) / 2, "›", f, muted)
+            cx += 12
+        }
+
+        -- File rows
+        let list_x = r[0] + this.sidebar_w
+        let list_y = cb_y + this.crumb_h
+        let list_w = r[2] - this.sidebar_w
+        let list_h = r[3] - this.crumb_h
+        mut i = 0
+        while i < len(this.entries) {
+            let row_y = list_y + i * this.row_height
+            if row_y >= r[1] + r[3] { break }
+            let e = this.entries[i]
+            if i == this.selected {
+                fill_rect(fb, list_x, row_y, list_w, this.row_height, accent)
+            }
+            -- Icon glyph: ▣ for dirs, · for files
+            let icon = if e.is_dir { "▣" } else { "·" }
+            draw_text(fb, list_x + 8, row_y + 3, icon, f, fg)
+            draw_text(fb, list_x + 28, row_y + 3, e.name, f, fg)
+            -- Right-aligned size for files
+            if not e.is_dir {
+                let sz = _human_size(e.size_bytes)
+                let sm = measure_text(f, sz)
+                draw_text(fb, list_x + list_w - sm[0] - 16, row_y + 3, sz, f, muted)
+            }
+            i += 1
+        }
+    }
+
+    fn _hit_row(sx, sy) {
+        let r = this.screen_rect()
+        let list_y = r[1] + this.crumb_h
+        if sx < r[0] + this.sidebar_w { return -1 }
+        if sy < list_y { return -1 }
+        let idx = int((sy - list_y) / this.row_height)
+        if idx < 0 or idx >= len(this.entries) { return -1 }
+        return idx
+    }
+
+    fn _hit_sidebar(sx, sy) {
+        let r = this.screen_rect()
+        if sx > r[0] + this.sidebar_w { return -1 }
+        let local_y = sy - r[1] - 12
+        if local_y < 0 { return -1 }
+        let idx = int(local_y / this.row_height)
+        if idx < 0 or idx >= len(this._sidebar_items()) { return -1 }
+        return idx
+    }
+
+    fn _activate_selected() {
+        if this.selected < 0 or this.selected >= len(this.entries) { return null }
+        let e = this.entries[this.selected]
+        if e.is_dir {
+            this.navigate(e.path)
+        } else {
+            if this._on_open != null { this._on_open(e.path) }
+        }
+    }
+
+    fn _handle(event) {
+        let kind = type(event)
+        if kind == "MouseEvent" and event.is_press {
+            let sb_idx = this._hit_sidebar(event.x, event.y)
+            if sb_idx >= 0 {
+                let item = this._sidebar_items()[sb_idx]
+                this.navigate(item["path"])
+                this.focus()
+                return true
+            }
+            let row = this._hit_row(event.x, event.y)
+            if row >= 0 {
+                if this.selected == row {
+                    this._activate_selected()
+                } else {
+                    this.selected = row
+                }
+                this.focus()
+                return true
+            }
+            return false
+        }
+        if kind == "KeyEvent" and event.is_press {
+            let n = event.name
+            if n == "Down" {
+                if this.selected < len(this.entries) - 1 { this.selected += 1 }
+                return true
+            }
+            if n == "Up" {
+                if this.selected > 0 { this.selected -= 1 }
+                return true
+            }
+            if n == "Enter" { this._activate_selected(); return true }
+            if n == "Backspace" { this.navigate(parent_directory(this.cwd)); return true }
+        }
+        return false
+    }
+}
+
+fn _crumb_label(path) {
+    if path == "/" { return "/" }
+    let last = _last_index_of(path, "/")
+    return substring(path, last + 1, len(path))
+}
+
+fn _human_size(bytes) {
+    if bytes < 1024 { return str(bytes) + " B" }
+    if bytes < 1024 * 1024 { return str(bytes / 1024) + " KB" }
+    if bytes < 1024 * 1024 * 1024 { return str(bytes / (1024 * 1024)) + " MB" }
+    return str(bytes / (1024 * 1024 * 1024)) + " GB"
+}
+
+fn files() { return FilesApp() }
