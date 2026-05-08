@@ -168,8 +168,8 @@ assert_single("null coalesce value", "let x = 3 ?? 5\nshow x", "3")
 
 show "Section 12: Slicing"
 
-assert_single("list slice", "let lst = [1, 2, 3, 4, 5]\nshow lst[1:3]", "[2, 3]")
-assert_single("string slice", "show \"hello\"[1:4]", "ell")
+assert_single("list slice", "let lst = [1, 2, 3, 4, 5]\nshow lst[1..3]", "[2, 3]")
+assert_single("string slice", "show \"hello\"[1..4]", "ell")
 
 -- ── Section 13: Destructuring ────────────────────────────
 
@@ -177,15 +177,15 @@ show "Section 13: Destructuring"
 
 assert_single("list destruct", "let [a, b, c] = [1, 2, 3]\nshow a + b + c", "6")
 assert_single("map destruct", "let {x, y} = {\"x\": 10, \"y\": 20}\nshow x + y", "30")
-assert_single("rest destruct", "let [first, ...rest] = [1, 2, 3, 4]\nshow first\nshow rest", "1")
+assert_output("rest destruct", "let [first, ...rest] = [1, 2, 3, 4]\nshow first\nshow rest", ["1", "[2, 3, 4]"])
 
 -- ── Section 14: Match ────────────────────────────────────
 
 show "Section 14: Match"
 
-assert_single("match literal", "let x = 2\nmatch x {\n  1 => { show \"one\" }\n  2 => { show \"two\" }\n  _ => { show \"other\" }\n}", "two")
+assert_single("match literal", "let x = 2\nmatch x {\n  when 1 { show \"one\" }\n  when 2 { show \"two\" }\n  else { show \"other\" }\n}", "two")
 
-assert_single("match default", "let x = 99\nmatch x {\n  1 => { show \"one\" }\n  _ => { show \"default\" }\n}", "default")
+assert_single("match default", "let x = 99\nmatch x {\n  when 1 { show \"one\" }\n  else { show \"default\" }\n}", "default")
 
 -- ── Section 15: Enums ────────────────────────────────────
 
