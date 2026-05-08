@@ -1,0 +1,249 @@
+-- App sandbox — enforce manifest permissions at runtime
+-- (Phase 64 task 2).
+--
+-- Wraps an `AppManifest` and a per-app data directory and answers
+-- "is this app allowed to <X>?" for filesystem reads/writes,
+-- network connections, audio, notifications, clipboard, and child
+-- processes. Apps always get unrestricted read/write inside their
+-- own data dir; everything else needs an explicit grant.
+--
+--     let m = read_manifest("./clarity-app.toml")
+--     let sb = sandbox_for(m)
+--     sb.check_read("/etc/passwd")         -> false (no filesystem.read)
+--     sb.check_read(sb.data_dir + "/save") -> true  (own data dir)
+--     sb.check_network("api.example.com")  -> true if matched a pattern
+--
+-- The runtime hooks (`SandboxedFs`, `SandboxedNet`) delegate the
+-- permission decision to a Sandbox and then call the real stdlib
+-- function — so the app sees a normal-looking API but every op is
+-- gated. PermissionError on denial.
+
+from "app_manifest.clarity" import AppManifest
+
+-- ── Path helpers ─────────────────────────────────────
+
+fn _normalize(path) {
+    let parts = split(path, "/")
+    mut stack = []
+    let is_abs = starts(path, "/")
+    for part in parts {
+        if part == "" or part == "." { continue }
+        if part == ".." {
+            if len(stack) > 0 and stack[len(stack) - 1] != ".." {
+                pop(stack)
+            } elif not is_abs {
+                push(stack, part)
+            }
+            continue
+        }
+        push(stack, part)
+    }
+    mut result = join(stack, "/")
+    if is_abs { result = "/" + result }
+    if len(result) == 0 { return "." }
+    return result
+}
+
+fn _is_under(parent, child) {
+    let p = _normalize(parent)
+    let c = _normalize(child)
+    if p == c { return true }
+    let with_sep = if ends(p, "/") { p } else { p + "/" }
+    return starts(c, with_sep)
+}
+
+fn _resolve_against(base, path) {
+    if starts(path, "/") { return _normalize(path) }
+    return _normalize(base + "/" + path)
+}
+
+fn _home() {
+    let h = env("HOME", "")
+    if len(h) > 0 { return h }
+    return "/tmp"
+}
+
+fn default_app_dir(name) {
+    return _home() + "/.clarity-os/apps/" + name
+}
+
+-- ── Host pattern matching ────────────────────────────
+
+fn _host_matches(pattern, host) {
+    if pattern == "*" { return true }
+    if pattern == host { return true }
+    -- "*.example.com" wildcard subdomain
+    if starts(pattern, "*.") {
+        let suffix = substring(pattern, 1, len(pattern))   -- ".example.com"
+        return ends(host, suffix) and host != suffix
+    }
+    return false
+}
+
+-- ── Sandbox ──────────────────────────────────────────
+
+class Sandbox {
+    fn init(manifest_obj, app_dir) {
+        this.manifest = manifest_obj
+        let dir = if app_dir != null and len(app_dir) > 0 {
+            app_dir
+        } else {
+            default_app_dir(manifest_obj.name)
+        }
+        this.app_dir = _normalize(dir)
+        this.data_dir = this.app_dir + "/data"
+        this.cwd = this.app_dir
+        this.audit = []                   -- list of {kind, target, allowed}
+        this._audit_enabled = false
+    }
+
+    fn enable_audit() { this._audit_enabled = true }
+
+    fn _record(kind, target, allowed) {
+        if this._audit_enabled {
+            push(this.audit, {"kind": kind, "target": target, "allowed": allowed})
+        }
+    }
+
+    -- Resolve any relative path against the sandbox's cwd.
+    fn _resolve(path) { return _resolve_against(this.cwd, path) }
+
+    -- Filesystem -------------------------------------------------
+
+    fn check_read(path) {
+        let abs = this._resolve(path)
+        let ok = _is_under(this.app_dir, abs) or this.manifest.requests("filesystem.read")
+        this._record("read", abs, ok)
+        return ok
+    }
+
+    fn check_write(path) {
+        let abs = this._resolve(path)
+        let ok = _is_under(this.app_dir, abs) or this.manifest.requests("filesystem.write")
+        this._record("write", abs, ok)
+        return ok
+    }
+
+    fn enforce_read(path) {
+        if not this.check_read(path) {
+            throw "PermissionError: read '" + path + "' denied (filesystem.read not granted)"
+        }
+    }
+
+    fn enforce_write(path) {
+        if not this.check_write(path) {
+            throw "PermissionError: write '" + path + "' denied (filesystem.write not granted)"
+        }
+    }
+
+    -- Network ----------------------------------------------------
+
+    fn check_network(host) {
+        if not this.manifest.requests("network") {
+            this._record("network", host, false)
+            return false
+        }
+        let allowed = this.manifest.allowed_hosts()
+        for pattern in allowed {
+            if _host_matches(pattern, host) {
+                this._record("network", host, true)
+                return true
+            }
+        }
+        this._record("network", host, false)
+        return false
+    }
+
+    fn enforce_network(host) {
+        if not this.check_network(host) {
+            throw "PermissionError: network '" + host + "' denied"
+        }
+    }
+
+    -- Audio / notifications / clipboard / process ----------------
+
+    fn check_audio() {
+        let ok = this.manifest.requests("audio")
+        this._record("audio", null, ok)
+        return ok
+    }
+
+    fn check_notifications() {
+        let ok = this.manifest.requests("notifications")
+        this._record("notifications", null, ok)
+        return ok
+    }
+
+    fn check_clipboard() {
+        let ok = this.manifest.requests("clipboard")
+        this._record("clipboard", null, ok)
+        return ok
+    }
+
+    fn check_process() {
+        let ok = this.manifest.requests("process")
+        this._record("process", null, ok)
+        return ok
+    }
+
+    fn enforce_audio() {
+        if not this.check_audio() { throw "PermissionError: audio not granted" }
+    }
+    fn enforce_notifications() {
+        if not this.check_notifications() { throw "PermissionError: notifications not granted" }
+    }
+    fn enforce_clipboard() {
+        if not this.check_clipboard() { throw "PermissionError: clipboard not granted" }
+    }
+    fn enforce_process() {
+        if not this.check_process() { throw "PermissionError: process spawning not granted" }
+    }
+
+    -- Bootstrap --------------------------------------------------
+
+    fn ensure_data_dir() {
+        exec("mkdir -p '" + this.data_dir + "'")
+        return this.data_dir
+    }
+}
+
+fn sandbox_for(manifest_obj, ...rest) {
+    let app_dir = if len(rest) > 0 { rest[0] } else { null }
+    return Sandbox(manifest_obj, app_dir)
+}
+
+-- ── Sandboxed filesystem façade ──────────────────────
+
+class SandboxedFs {
+    fn init(sandbox_obj) { this.sandbox = sandbox_obj }
+
+    fn read(path) {
+        this.sandbox.enforce_read(path)
+        return read(path)
+    }
+
+    fn write(path, content) {
+        this.sandbox.enforce_write(path)
+        return write(path, content)
+    }
+
+    fn exists(path) {
+        -- exists() is a read-shaped query; it discloses whether a
+        -- file is there, so we gate it on the read permission.
+        if not this.sandbox.check_read(path) { return false }
+        return exists(path)
+    }
+
+    fn append(path, content) {
+        this.sandbox.enforce_write(path)
+        let prior = if exists(path) { read(path) } else { "" }
+        return write(path, prior + content)
+    }
+
+    fn data_path(rel) {
+        this.sandbox.ensure_data_dir()
+        return this.sandbox.data_dir + "/" + rel
+    }
+}
+
+fn sandboxed_fs(sandbox_obj) { return SandboxedFs(sandbox_obj) }
