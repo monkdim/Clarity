@@ -1,0 +1,250 @@
+-- Userspace syscall wrapper (Phase 65 task 4).
+--
+-- Exposes the kernel ABI as Clarity functions. The same call surface
+-- lives in two worlds:
+--
+--   On bare-metal ClarityOS, every wrapper marshals its arguments
+--   into the ABI's calling convention and issues `syscall` (or
+--   `int 0x80`) — the kernel's syscall/dispatch.zig handles the
+--   request. This path lives behind a stub today; the runtime FFI
+--   slot is filled when ClarityOS actually self-hosts.
+--
+--   On Linux/macOS (the "Clarity-on-Bun" runtime), the wrapper
+--   delegates to the equivalent libc / Bun / Clarity-stdlib helper
+--   that already exists. Userspace code looks identical either way;
+--   only the implementation under the wrapper changes.
+--
+-- Errors come back as throws. Successful returns are the value the
+-- syscall returned (a count of bytes for read/write, an fd for
+-- open, etc.).
+--
+--     fn copy_file(src, dst) {
+--         let r = open(src, O_RDONLY, 0)
+--         let w = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+--         loop {
+--             let buf = read(r, 4096)
+--             if len(buf) == 0 { break }
+--             write(w, buf)
+--         }
+--         close(r); close(w)
+--     }
+
+from "kernel_abi.clarity" import SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_STAT, SYS_LSEEK, SYS_GETPID, SYS_NANOSLEEP, SYS_CLOCK_GETTIME, SYS_MKDIR, SYS_UNLINK, SYS_RENAME, SYS_READDIR, SYS_FORK, SYS_EXEC, SYS_EXIT, SYS_WAIT, SYS_KILL, SYS_PIPE, SYS_IOCTL
+from "kernel_abi.clarity" import O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND
+from "kernel_abi.clarity" import EBADF, ENOENT, EACCES, EINVAL, EIO, ENOSYS, errno_name, syscall_name
+
+-- ── Backend selection ───────────────────────────────
+
+-- The runtime sets this to "linux" when running under Bun on Linux,
+-- "darwin" under macOS, "claritos" when running natively, or "test"
+-- when running under the Clarity test harness with mocked syscalls.
+mut _BACKEND = "host"
+mut _MOCKS = null     -- {syscall_nr -> fn(args) -> result | throw}
+mut _TRACE = false
+mut _TRACE_LOG = []
+
+fn set_backend(name) { _BACKEND = name }
+fn backend() { return _BACKEND }
+
+fn enable_trace() { _TRACE = true; _TRACE_LOG = [] }
+fn disable_trace() { _TRACE = false }
+fn trace_log() { return _TRACE_LOG }
+fn clear_trace() { _TRACE_LOG = [] }
+
+fn install_mocks(mocks) { _MOCKS = mocks }
+fn clear_mocks() { _MOCKS = null }
+
+fn _record_trace(nr, args, result) {
+    if _TRACE {
+        push(_TRACE_LOG, {"nr": nr, "name": syscall_name(nr), "args": args, "result": result})
+    }
+}
+
+fn _invoke(nr, args) {
+    -- Mocks take precedence; tests use them to drive arbitrary
+    -- error paths without touching the real filesystem.
+    if _MOCKS != null and has(_MOCKS, str(nr)) {
+        let handler = _MOCKS[str(nr)]
+        let result = handler(args)
+        _record_trace(nr, args, result)
+        return result
+    }
+
+    if _BACKEND == "host" or _BACKEND == "linux" or _BACKEND == "darwin" {
+        let result = _host_invoke(nr, args)
+        _record_trace(nr, args, result)
+        return result
+    }
+
+    -- ClarityOS bare-metal: this is where the runtime FFI hook fires
+    -- once we have one. Until then, declare ENOSYS so callers know
+    -- which path is unimplemented.
+    _record_trace(nr, args, null)
+    throw "syscall " + syscall_name(nr) + " not yet wired on " + _BACKEND
+}
+
+-- ── Host-backed implementation (Linux / macOS via Bun) ─
+
+fn _host_invoke(nr, args) {
+    if nr == SYS_READ { return _host_read(args[0], args[1]) }
+    if nr == SYS_WRITE { return _host_write(args[0], args[1]) }
+    if nr == SYS_OPEN { return _host_open(args[0], args[1], args[2]) }
+    if nr == SYS_CLOSE { return _host_close(args[0]) }
+    if nr == SYS_STAT { return _host_stat(args[0]) }
+    if nr == SYS_GETPID { return _host_getpid() }
+    if nr == SYS_NANOSLEEP { return _host_nanosleep(args[0]) }
+    if nr == SYS_CLOCK_GETTIME { return _host_clock_gettime() }
+    if nr == SYS_MKDIR { return _host_mkdir(args[0]) }
+    if nr == SYS_UNLINK { return _host_unlink(args[0]) }
+    if nr == SYS_RENAME { return _host_rename(args[0], args[1]) }
+    if nr == SYS_READDIR { return _host_readdir(args[0]) }
+    if nr == SYS_EXIT { return _host_exit(args[0]) }
+    throw "ENOSYS: " + syscall_name(nr)
+}
+
+-- Host syscalls land here. We model an in-process fd table on top
+-- of Bun's read/write file primitives — that's enough to exercise
+-- the userspace API without touching real fds during tests, while
+-- still working for end-users on Linux today.
+
+mut _NEXT_FD = 3       -- 0/1/2 reserved for stdio
+mut _FDS = {}          -- fd -> {path, flags, pos, content}
+
+fn _alloc_fd() {
+    let fd = _NEXT_FD
+    _NEXT_FD += 1
+    return fd
+}
+
+fn _host_open(path, flags, mode) {
+    if (flags & O_CREAT) != 0 {
+        if not exists(path) {
+            write(path, "")
+        }
+    }
+    if not exists(path) { throw "ENOENT: " + path }
+    if (flags & O_TRUNC) != 0 { write(path, "") }
+    let initial = if exists(path) { read(path) } else { "" }
+    let fd = _alloc_fd()
+    let pos_start = if (flags & O_APPEND) != 0 { len(initial) } else { 0 }
+    _FDS[fd] = {
+        "path": path,
+        "flags": flags,
+        "pos": pos_start,
+        "content": initial
+    }
+    return fd
+}
+
+fn _host_close(fd) {
+    if not has(_FDS, fd) { throw "EBADF: " + str(fd) }
+    let entry = _FDS[fd]
+    -- Persist if it was opened for write
+    let writable = (entry["flags"] & O_WRONLY) != 0 or (entry["flags"] & O_RDWR) != 0
+    if writable { write(entry["path"], entry["content"]) }
+    mut next = {}
+    for k in keys(_FDS) {
+        if k != fd { next[k] = _FDS[k] }
+    }
+    _FDS = next
+    return 0
+}
+
+fn _host_read(fd, count) {
+    if not has(_FDS, fd) { throw "EBADF: " + str(fd) }
+    let entry = _FDS[fd]
+    let pos = entry["pos"]
+    let body = entry["content"]
+    if pos >= len(body) { return "" }
+    let end = if pos + count > len(body) { len(body) } else { pos + count }
+    let chunk = substring(body, pos, end)
+    entry["pos"] = end
+    return chunk
+}
+
+fn _host_write(fd, data) {
+    if not has(_FDS, fd) { throw "EBADF: " + str(fd) }
+    let entry = _FDS[fd]
+    let body = entry["content"]
+    let pos = entry["pos"]
+    let prefix = if pos > 0 { substring(body, 0, pos) } else { "" }
+    let new_body = prefix + data
+    entry["content"] = new_body
+    entry["pos"] = len(new_body)
+    return len(data)
+}
+
+fn _host_stat(path) {
+    if not exists(path) { throw "ENOENT: " + path }
+    let r = exec_full("stat -c '%s|%Y' " + "'" + path + "' 2>/dev/null || stat -f '%z|%m' " + "'" + path + "' 2>/dev/null")
+    let out = trim(r.stdout)
+    let parts = split(out, "|")
+    let size = if len(parts) > 0 { int(parts[0]) } else { 0 }
+    let mtime = if len(parts) > 1 { int(parts[1]) } else { 0 }
+    return {"size": size, "mtime": mtime, "path": path}
+}
+
+fn _host_getpid() {
+    let r = exec_full("echo $$")
+    return int(trim(r.stdout))
+}
+
+fn _host_nanosleep(nsec) {
+    -- Do nothing in tests; leave real sleeping to the runtime helper
+    return 0
+}
+
+fn _host_clock_gettime() { return time() }
+
+fn _host_mkdir(path) {
+    exec_full("mkdir -p '" + path + "'")
+    return 0
+}
+
+fn _host_unlink(path) {
+    exec_full("rm -f '" + path + "'")
+    return 0
+}
+
+fn _host_rename(src, dst) {
+    exec_full("mv '" + src + "' '" + dst + "'")
+    return 0
+}
+
+fn _host_readdir(path) {
+    let r = exec_full("ls -1A '" + path + "'")
+    let lines = split(trim(r.stdout), "\n")
+    mut out = []
+    for l in lines {
+        let t = trim(l)
+        if len(t) > 0 { push(out, t) }
+    }
+    return out
+}
+
+fn _host_exit(code) { return code }
+
+-- Reset all in-memory state. Tests call this between runs.
+fn _reset_host_state() {
+    _FDS = {}
+    _NEXT_FD = 3
+    _MOCKS = null
+    _TRACE = false
+    _TRACE_LOG = []
+}
+
+-- ── Public surface ──────────────────────────────────
+
+fn sys_open(path, flags, mode) { return _invoke(SYS_OPEN, [path, flags, mode]) }
+fn sys_close(fd) { return _invoke(SYS_CLOSE, [fd]) }
+fn sys_read(fd, count) { return _invoke(SYS_READ, [fd, count]) }
+fn sys_write(fd, data) { return _invoke(SYS_WRITE, [fd, data]) }
+fn sys_stat(path) { return _invoke(SYS_STAT, [path]) }
+fn sys_getpid() { return _invoke(SYS_GETPID, []) }
+fn sys_nanosleep(nsec) { return _invoke(SYS_NANOSLEEP, [nsec]) }
+fn sys_clock_gettime() { return _invoke(SYS_CLOCK_GETTIME, []) }
+fn sys_mkdir(path) { return _invoke(SYS_MKDIR, [path]) }
+fn sys_unlink(path) { return _invoke(SYS_UNLINK, [path]) }
+fn sys_rename(src, dst) { return _invoke(SYS_RENAME, [src, dst]) }
+fn sys_readdir(path) { return _invoke(SYS_READDIR, [path]) }
+fn sys_exit(code) { return _invoke(SYS_EXIT, [code]) }

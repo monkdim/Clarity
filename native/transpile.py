@@ -778,6 +778,7 @@ def bundle(compile_native=False):
         'app_editor.clarity', 'app_files.clarity', 'app_terminal.clarity',
         'app_manifest.clarity', 'app_sandbox.clarity', 'app_store.clarity',
         'app_scaffold.clarity', 'hot_reload.clarity',
+        'kernel_abi.clarity', 'syscall.clarity', 'scheduler.clarity', 'vfs.clarity',
         'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
