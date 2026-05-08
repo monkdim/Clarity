@@ -1,0 +1,147 @@
+-- Window — a single rectangular surface with chrome-aware geometry.
+--
+-- Each Window owns its own Framebuffer (Phase 57) sized to the full
+-- outer bounds — title bar, borders, and the content area all live in
+-- the same buffer so the Compositor can blit it as one block. App code
+-- draws into the content rectangle; chrome is drawn around it via
+-- decorate(window, theme) from `chrome.clarity`.
+--
+-- Chrome metrics live on the Window so the WM can compute hit-tests
+-- without a separate theme handle:
+--   title_h    height of the title bar in pixels (0 = borderless)
+--   border_w   width of the side/bottom border in pixels
+--   resize_h   size of the corner resize handle in pixels
+--
+-- Coordinates are screen-relative.
+
+from "graphics.clarity" import framebuffer, Framebuffer
+
+class Window {
+    fn init(title, x, y, width, height) {
+        this.title = title
+        this.x = x
+        this.y = y
+        this.width = width
+        this.height = height
+
+        -- Default chrome geometry — borderless windows pass title_h = 0.
+        this.title_h = 24
+        this.border_w = 1
+        this.resize_h = 12
+
+        -- Backing surface. Re-allocated whenever the window is resized.
+        this.framebuffer = framebuffer(width, height)
+
+        -- State flags consumed by the compositor and WM.
+        this.visible = true
+        this.focused = false
+        this.resizable = true
+        this.minimized = false
+        this.maximized = false
+        this._restored = null   -- pre-maximise [x, y, w, h] for restore
+    }
+
+    -- ── Geometry ────────────────────────────────────────
+
+    fn move(x, y) {
+        this.x = x
+        this.y = y
+    }
+
+    fn resize(w, h) {
+        if w == this.width and h == this.height { return null }
+        if w < 1 { w = 1 }
+        if h < 1 { h = 1 }
+        this.width = w
+        this.height = h
+        this.framebuffer = framebuffer(w, h)
+    }
+
+    -- Inner content rect (inside chrome): [x, y, w, h], in window-local
+    -- coordinates. Apps blit/draw inside this rectangle.
+    fn content_rect() {
+        let x = this.border_w
+        let y = this.title_h
+        let w = this.width - 2 * this.border_w
+        let h = this.height - this.title_h - this.border_w
+        return [x, if y > 0 { y } else { 0 }, if w > 0 { w } else { 0 }, if h > 0 { h } else { 0 }]
+    }
+
+    -- Title-bar rectangle in window-local coordinates.
+    fn title_rect() {
+        return [0, 0, this.width, this.title_h]
+    }
+
+    -- Resize-handle rectangle (bottom-right corner) in window-local coords.
+    -- Returns null when the window isn't resizable.
+    fn resize_rect() {
+        if not this.resizable { return null }
+        let s = this.resize_h
+        return [this.width - s, this.height - s, s, s]
+    }
+
+    -- True if the screen-space point (px, py) falls inside this window.
+    fn contains(px, py) {
+        return px >= this.x and px < this.x + this.width
+           and py >= this.y and py < this.y + this.height
+    }
+
+    -- Hit-test a screen-space point and return where it landed:
+    --   "title"  — inside the title bar (drag region)
+    --   "resize" — inside the bottom-right resize handle
+    --   "content" — inside the chromeless content area
+    --   "border" — anywhere else inside the window
+    --   null     — outside the window entirely
+    fn hit_test(px, py) {
+        if not this.contains(px, py) { return null }
+        let lx = px - this.x
+        let ly = py - this.y
+        let rr = this.resize_rect()
+        if rr != null and lx >= rr[0] and ly >= rr[1] {
+            return "resize"
+        }
+        if ly < this.title_h {
+            return "title"
+        }
+        let cr = this.content_rect()
+        if lx >= cr[0] and lx < cr[0] + cr[2] and ly >= cr[1] and ly < cr[1] + cr[3] {
+            return "content"
+        }
+        return "border"
+    }
+
+    -- ── State ───────────────────────────────────────────
+
+    fn focus() { this.focused = true }
+    fn blur()  { this.focused = false }
+    fn set_visible(v) { this.visible = v }
+
+    fn minimize() { this.minimized = true }
+    fn restore_from_min() { this.minimized = false }
+
+    -- Maximise to the bounds of the given screen size, remembering the
+    -- previous geometry so unmaximise can restore it.
+    fn maximize(screen_w, screen_h) {
+        if this.maximized { return null }
+        this._restored = [this.x, this.y, this.width, this.height]
+        this.x = 0
+        this.y = 0
+        this.resize(screen_w, screen_h)
+        this.maximized = true
+    }
+
+    fn unmaximize() {
+        if not this.maximized or this._restored == null { return null }
+        this.x = this._restored[0]
+        this.y = this._restored[1]
+        this.resize(this._restored[2], this._restored[3])
+        this.maximized = false
+        this._restored = null
+    }
+}
+
+-- ── Constructor helper (matches the style of framebuffer/image) ──
+
+fn window(title, x, y, width, height) {
+    return Window(title, x, y, width, height)
+}

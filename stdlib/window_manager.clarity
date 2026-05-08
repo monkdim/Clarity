@@ -1,0 +1,185 @@
+-- WindowManager — interactive layer that ties Compositor + InputBus
+-- together: dragging title bars to move, dragging the bottom-right
+-- handle to resize, edge-snapping, and Alt-Tab focus cycling.
+--
+--     let wm = WindowManager(compositor)
+--     wm.attach_to_bus(input_bus)
+--     wm.add(my_window)
+--
+-- After construction, raw input events that flow into the bus get
+-- routed to the right window automatically.
+
+from "compositor.clarity" import Compositor
+from "event_bus.clarity" import InputBus
+
+let _DRAG_NONE = "none"
+let _DRAG_MOVE = "move"
+let _DRAG_RESIZE = "resize"
+
+class WindowManager {
+    fn init(compositor) {
+        this.compositor = compositor
+        -- Drag state
+        this._mode = _DRAG_NONE
+        this._target = null
+        this._anchor_x = 0    -- mouse position when drag started
+        this._anchor_y = 0
+        this._origin_x = 0    -- target window position/size at drag start
+        this._origin_y = 0
+        this._origin_w = 0
+        this._origin_h = 0
+        -- Snap configuration
+        this.snap_threshold = 12     -- px from screen edge to trigger snap
+        this.min_window_w = 80
+        this.min_window_h = 40
+    }
+
+    -- ── Window registration (delegates to compositor) ──
+
+    fn add(window) { this.compositor.add(window) }
+    fn remove(window) { this.compositor.remove(window) }
+    fn focus(window) { this.compositor.focus(window) }
+
+    fn windows() { return this.compositor.windows }
+
+    -- ── InputBus wiring ────────────────────────────────
+
+    -- Hook this WindowManager up to an InputBus so mouse + keyboard
+    -- events drive window-management. Returns the WM (chainable).
+    fn attach_to_bus(bus) {
+        let wm = this
+        bus.on_mouse(fn(me) { return wm.handle_mouse(me) })
+        bus.on_key(fn(ke) { return wm.handle_key(ke) })
+        return this
+    }
+
+    -- ── Mouse handling ─────────────────────────────────
+
+    fn handle_mouse(me) {
+        if me.is_press {
+            return this._on_press(me)
+        }
+        if me.is_release {
+            return this._on_release(me)
+        }
+        if me.is_motion {
+            return this._on_motion(me)
+        }
+        return false
+    }
+
+    fn _on_press(me) {
+        let target = this.compositor.window_at(me.x, me.y)
+        if target == null { return false }
+        this.compositor.focus(target)
+
+        if me.button != 1 { return true }    -- only left button initiates drag
+
+        let zone = target.hit_test(me.x, me.y)
+        if zone == "title" {
+            this._mode = _DRAG_MOVE
+        } elif zone == "resize" and target.resizable {
+            this._mode = _DRAG_RESIZE
+        } else {
+            return true
+        }
+        this._target = target
+        this._anchor_x = me.x; this._anchor_y = me.y
+        this._origin_x = target.x; this._origin_y = target.y
+        this._origin_w = target.width; this._origin_h = target.height
+        return true
+    }
+
+    fn _on_release(me) {
+        if this._mode == _DRAG_NONE { return false }
+        -- Final snap on release for clean window layouts
+        if this._mode == _DRAG_MOVE { this._snap(this._target) }
+        this._mode = _DRAG_NONE
+        this._target = null
+        return true
+    }
+
+    fn _on_motion(me) {
+        if this._mode == _DRAG_NONE or this._target == null { return false }
+        let dx = me.x - this._anchor_x
+        let dy = me.y - this._anchor_y
+        let win = this._target
+        let prev_rect = [win.x, win.y, win.width, win.height]
+        if this._mode == _DRAG_MOVE {
+            win.move(this._origin_x + dx, this._origin_y + dy)
+        } else {
+            mut nw = this._origin_w + dx
+            mut nh = this._origin_h + dy
+            if nw < this.min_window_w { nw = this.min_window_w }
+            if nh < this.min_window_h { nh = this.min_window_h }
+            win.resize(nw, nh)
+        }
+        -- Mark both old and new positions dirty so the compositor
+        -- repaints the trail behind a moved window.
+        this.compositor.paint(prev_rect)
+        this.compositor.mark_window(win)
+        return true
+    }
+
+    -- Snap a window to a screen edge if it's within snap_threshold.
+    -- Doesn't change size — just nudges position so the edge aligns.
+    fn _snap(window) {
+        if window == null { return null }
+        let s = this.snap_threshold
+        let prev_rect = [window.x, window.y, window.width, window.height]
+        mut nx = window.x
+        mut ny = window.y
+        if window.x < s { nx = 0 }
+        if window.y < s { ny = 0 }
+        let right_gap = this.compositor.width - (window.x + window.width)
+        let bottom_gap = this.compositor.height - (window.y + window.height)
+        if right_gap >= 0 - s and right_gap < s {
+            nx = this.compositor.width - window.width
+        }
+        if bottom_gap >= 0 - s and bottom_gap < s {
+            ny = this.compositor.height - window.height
+        }
+        if nx != window.x or ny != window.y {
+            window.move(nx, ny)
+            this.compositor.paint(prev_rect)
+            this.compositor.mark_window(window)
+        }
+    }
+
+    -- ── Keyboard handling: Alt-Tab cycle ───────────────
+
+    fn handle_key(ke) {
+        if ke.is_press and ke.modifiers["alt"] and ke.name == "Tab" {
+            this.cycle_focus()
+            return true
+        }
+        return false
+    }
+
+    -- Move focus to the next-most-recent window. Does nothing with 0
+    -- or 1 windows.
+    fn cycle_focus() {
+        let n = len(this.compositor.windows)
+        if n < 2 { return null }
+        -- Currently focused window is the top of the stack.
+        let current = this.compositor.top_window()
+        -- Pick the highest non-current visible window.
+        mut next_w = null
+        mut i = n - 2
+        while i >= 0 and next_w == null {
+            let w = this.compositor.windows[i]
+            if w.visible and not w.minimized { next_w = w }
+            i -= 1
+        }
+        if next_w == null { return null }
+        this.compositor.focus(next_w)
+    }
+
+    -- ── State queries ──────────────────────────────────
+
+    fn is_dragging() { return this._mode != _DRAG_NONE }
+    fn drag_mode() { return this._mode }
+    fn drag_target() { return this._target }
+}
+
+fn window_manager(compositor) { return WindowManager(compositor) }

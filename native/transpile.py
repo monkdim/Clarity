@@ -767,6 +767,8 @@ def bundle(compile_native=False):
         'transpile.clarity',
         'graphics.clarity', 'draw.clarity', 'font.clarity', 'image.clarity',
         'input.clarity', 'keymap.clarity', 'mouse.clarity', 'touch.clarity', 'event_bus.clarity',
+        'window.clarity', 'compositor.clarity', 'chrome.clarity',
+        'window_manager.clarity', 'workspace.clarity',
         'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
