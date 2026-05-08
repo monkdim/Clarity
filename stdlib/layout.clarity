@@ -1,0 +1,187 @@
+-- Layout — Flex / Grid / Stack arrangers.
+--
+-- Layouts are standalone objects (not Widgets) that arrange a parent
+-- widget's children. Attach one to a Widget by setting `widget.layout`
+-- and the Widget's `relayout()` will delegate to `layout.arrange(widget)`
+-- before recursing.
+--
+--     let panel = Widget()
+--     panel.set_bounds(0, 0, 400, 300)
+--     panel.layout = flex_row({"gap": 8, "padding": 16, "align": "center"})
+--     panel.add(label1)
+--     panel.add(button1)
+--     panel.relayout()
+--
+-- Constraint hints come from each child via `preferred_size()` and the
+-- optional `min_/max_width/height` clamps on the Widget itself.
+
+-- ── FlexLayout ──────────────────────────────────────────
+
+class FlexLayout {
+    fn init(direction) {
+        this.direction = direction ?? "row"     -- "row" | "column"
+        this.gap = 0
+        this.justify = "start"                  -- start|center|end|space_between|space_around
+        this.align = "start"                    -- start|center|end|stretch
+        this.padding = [0, 0, 0, 0]             -- [top, right, bottom, left]
+    }
+
+    fn set_padding(p) {
+        if type(p) == "int" {
+            this.padding = [p, p, p, p]
+        } else {
+            this.padding = p
+        }
+    }
+
+    fn arrange(widget) {
+        let pad = this.padding
+        let inner_x = widget.x + pad[3]
+        let inner_y = widget.y + pad[0]
+        let inner_w = widget.width - pad[1] - pad[3]
+        let inner_h = widget.height - pad[0] - pad[2]
+        if inner_w <= 0 or inner_h <= 0 { return null }
+
+        let is_row = this.direction != "column"
+        let main_total = if is_row { inner_w } else { inner_h }
+        let cross_total = if is_row { inner_h } else { inner_w }
+
+        mut visible = []
+        for c in widget.children {
+            if c.visible { push(visible, c) }
+        }
+        let n = len(visible)
+        if n == 0 { return null }
+
+        mut main_used = (n - 1) * this.gap
+        mut sizes = []
+        for c in visible {
+            let p = c.preferred_size()
+            let m = if is_row { p[0] } else { p[1] }
+            push(sizes, m)
+            main_used += m
+        }
+
+        mut leading = 0
+        mut between = this.gap
+        let slack = main_total - main_used
+        if slack > 0 {
+            if this.justify == "center" {
+                leading = slack / 2
+            } elif this.justify == "end" {
+                leading = slack
+            } elif this.justify == "space_between" and n > 1 {
+                between = this.gap + slack / (n - 1)
+            } elif this.justify == "space_around" {
+                let pad_each = slack / (n * 2)
+                leading = pad_each
+                between = this.gap + pad_each * 2
+            }
+        }
+
+        mut cursor = leading
+        mut i = 0
+        while i < n {
+            let c = visible[i]
+            let pref = c.preferred_size()
+            let main_size = sizes[i]
+            mut cross_size = if is_row { pref[1] } else { pref[0] }
+            if this.align == "stretch" { cross_size = cross_total }
+            if cross_size > cross_total { cross_size = cross_total }
+            mut cross_off = 0
+            if this.align == "center" { cross_off = (cross_total - cross_size) / 2 }
+            elif this.align == "end" { cross_off = cross_total - cross_size }
+
+            if is_row {
+                c.set_bounds(inner_x + cursor, inner_y + cross_off, main_size, cross_size)
+            } else {
+                c.set_bounds(inner_x + cross_off, inner_y + cursor, cross_size, main_size)
+            }
+            cursor += main_size + between
+            i += 1
+        }
+    }
+}
+
+-- Convenience constructors so call sites don't have to wire up flags.
+fn flex_row(opts) {
+    let l = FlexLayout("row")
+    if opts != null { _apply_flex_opts(l, opts) }
+    return l
+}
+
+fn flex_column(opts) {
+    let l = FlexLayout("column")
+    if opts != null { _apply_flex_opts(l, opts) }
+    return l
+}
+
+fn _apply_flex_opts(l, opts) {
+    if has(opts, "gap") { l.gap = opts["gap"] }
+    if has(opts, "justify") { l.justify = opts["justify"] }
+    if has(opts, "align") { l.align = opts["align"] }
+    if has(opts, "padding") { l.set_padding(opts["padding"]) }
+}
+
+-- ── GridLayout ──────────────────────────────────────────
+
+class GridLayout {
+    fn init(rows, cols) {
+        this.rows = rows
+        this.cols = cols
+        this.gap = 0
+        this.padding = [0, 0, 0, 0]
+    }
+
+    fn set_padding(p) {
+        if type(p) == "int" {
+            this.padding = [p, p, p, p]
+        } else {
+            this.padding = p
+        }
+    }
+
+    fn arrange(widget) {
+        let pad = this.padding
+        let inner_x = widget.x + pad[3]
+        let inner_y = widget.y + pad[0]
+        let inner_w = widget.width - pad[1] - pad[3]
+        let inner_h = widget.height - pad[0] - pad[2]
+        if this.rows <= 0 or this.cols <= 0 { return null }
+        let cell_w = (inner_w - this.gap * (this.cols - 1)) / this.cols
+        let cell_h = (inner_h - this.gap * (this.rows - 1)) / this.rows
+        mut idx = 0
+        for c in widget.children {
+            if not c.visible { continue }
+            let r = idx / this.cols
+            let col = idx % this.cols
+            if r >= this.rows { break }
+            let cx = inner_x + col * (cell_w + this.gap)
+            let cy = inner_y + r * (cell_h + this.gap)
+            c.set_bounds(cx, cy, cell_w, cell_h)
+            idx += 1
+        }
+    }
+}
+
+fn grid(rows, cols, opts) {
+    let l = GridLayout(rows, cols)
+    if opts != null {
+        if has(opts, "gap") { l.gap = opts["gap"] }
+        if has(opts, "padding") { l.set_padding(opts["padding"]) }
+    }
+    return l
+}
+
+-- ── StackLayout (absolute positioning, the default) ───
+
+class StackLayout {
+    fn init() {
+        -- Nothing to configure; arrange() leaves children alone so
+        -- whatever bounds were set on them before stick.
+    }
+
+    fn arrange(widget) { return null }
+}
+
+fn stack() { return StackLayout() }
