@@ -38,7 +38,7 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **FFI binding layer** | Pending | `stdlib/ffi.clarity` — `dlopen()`, `dlsym()`, `dlclose()` wrappers. Define C function signatures from Clarity: `let puts = ffi.bind("libc", "puts", ["string"], "int")` |
+| 1 | **FFI binding layer** | Done | `stdlib/ffi.clarity` — Bun-backed `dlopen`/`dlsym`/`dlclose`. `let getpid = ffi.bind("libc", "getpid", [], "int")`. `Library` class for opening multiple symbols at once. `libc`/`libm` resolve to the platform-correct shared library. |
 | 2 | **Type marshalling** | Pending | Map Clarity types to C types: int, float, string (char*), bool, null (void), list (array pointer), map (struct pointer). Handle memory ownership (who frees?) |
 | 3 | **Pointer abstraction** | Pending | `Pointer` class — wrap raw addresses safely. `alloc(size)`, `free(ptr)`, `read_byte/write_byte`, `read_int/write_int`, `read_string/write_string`. No raw pointer arithmetic exposed |
 | 4 | **Struct definition** | Pending | Define C structs from Clarity: `let Point = ffi.struct("Point", [["x", "f64"], ["y", "f64"]])`. Auto-calculate offsets and padding |

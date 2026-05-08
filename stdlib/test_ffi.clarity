@@ -1,0 +1,97 @@
+-- FFI Tests — exercise the Phase 56 binding layer.
+-- Calls a few well-known libc functions to confirm dlopen, type
+-- marshalling for the simple primitives, and the Library wrapper.
+
+from "ffi.clarity" import bind, open, Library
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg
+    }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + msg + " (expected " + str(expected) + ", got " + str(actual) + ")"
+    }
+}
+
+-- ── bind: int return, no args ────────────────────────────
+
+show "-- FFI: bind libc:getpid --"
+
+let getpid = bind("libc", "getpid", [], "int")
+let pid = getpid()
+assert(type(pid) == "int", "getpid returns an int")
+assert(pid > 0, "getpid is positive")
+-- Same call twice should return the same pid (we're the same process)
+assert_eq(getpid(), pid, "getpid is stable")
+
+-- ── bind: int return with int arg ────────────────────────
+
+show "-- FFI: bind libc:abs --"
+
+let c_abs = bind("libc", "abs", ["int"], "int")
+assert_eq(c_abs(-7), 7, "abs(-7)")
+assert_eq(c_abs(0), 0, "abs(0)")
+assert_eq(c_abs(42), 42, "abs(42)")
+
+-- ── Library: open + call multiple symbols ───────────────
+
+show "-- FFI: Library wrapper --"
+
+let libc = open("libc", {
+    getpid: {args: [], returns: "int"},
+    getuid: {args: [], returns: "int"}
+})
+
+assert(libc != null, "Library opens")
+assert(type(libc) == "Library", "open returns a Library instance")
+
+let pid_via_lib = libc.call("getpid", [])
+assert_eq(pid_via_lib, pid, "Library.call('getpid') matches bound getpid")
+
+let uid = libc.call("getuid", [])
+assert(type(uid) == "int", "getuid returns an int")
+assert(uid >= 0, "getuid is non-negative")
+
+-- get() returns a callable for repeat use without dict lookups
+let getpid_fn = libc.get("getpid")
+assert_eq(getpid_fn(), pid, "Library.get('getpid')() matches")
+
+libc.close()
+
+-- ── Errors ──────────────────────────────────────────────
+
+show "-- FFI: error paths --"
+
+mut threw = false
+try {
+    bind("libc", "this_symbol_does_not_exist_anywhere", [], "void")
+} catch e {
+    threw = true
+}
+assert(threw, "bind throws on missing symbol")
+
+mut threw_type = false
+try {
+    bind("libc", "getpid", [], "not-a-real-type")
+} catch e {
+    threw_type = true
+}
+assert(threw_type, "bind throws on unknown type name")
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "FFI: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " ffi test(s) failed" }

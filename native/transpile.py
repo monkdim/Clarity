@@ -372,11 +372,27 @@ class JSEmitter:
         return f'"{escaped}"'
 
     def _has_interpolation(self, s):
-        """Check if a string contains Clarity interpolation {expr} vs literal braces."""
+        """Check if a string contains Clarity interpolation {expr} vs literal braces.
+
+        Skips ${...} ranges (JS template-literal syntax that may appear in
+        embedded JS strings) so they don't trigger interpolation just because
+        they happen to contain {letter."""
         import re
-        # Find { that's followed by an identifier-like character (letter, underscore)
-        # This distinguishes {name} (interpolation) from {"key": "val"} (literal JSON)
-        return bool(re.search(r'\{[a-zA-Z_]', s))
+        i = 0
+        while i < len(s):
+            if s[i] == '$' and i + 1 < len(s) and s[i+1] == '{':
+                depth = 1
+                j = i + 2
+                while j < len(s) and depth > 0:
+                    if s[j] == '{': depth += 1
+                    elif s[j] == '}': depth -= 1
+                    j += 1
+                i = j
+            elif s[i] == '{' and i + 1 < len(s) and re.match(r'[a-zA-Z_]', s[i+1]):
+                return True
+            else:
+                i += 1
+        return False
 
     def expr_BoolLiteral(self, node):
         return 'true' if node.value else 'false'
@@ -602,14 +618,15 @@ class JSEmitter:
         i = 0
         while i < len(s):
             if s[i] == '$' and i + 1 < len(s) and s[i+1] == '{':
-                # Already a ${...} in source — find matching } and pass through as-is
+                # Literal ${...} from source — escape the $ so the surrounding
+                # JS template literal doesn't try to evaluate it.
                 depth = 1
                 j = i + 2
                 while j < len(s) and depth > 0:
                     if s[j] == '{': depth += 1
                     elif s[j] == '}': depth -= 1
                     j += 1
-                result.append(s[i:j])
+                result.append('\\' + s[i:j])
                 i = j
             elif s[i] == '{':
                 # Find matching close brace
@@ -624,8 +641,10 @@ class JSEmitter:
                 if expr and re.match(r'^[a-zA-Z_]', expr):
                     result.append('${' + self._safe_name(expr) + '}')
                 else:
-                    # Literal braces — preserve them (safe in template literals)
-                    result.append('{' + expr + '}')
+                    # Literal braces — preserve them. Still escape any
+                    # backticks inside, since the surrounding string is
+                    # being emitted as a JS template literal.
+                    result.append('{' + expr.replace('`', '\\`') + '}')
                 i = j
             elif s[i] == '`':
                 result.append('\\`')
@@ -679,6 +698,7 @@ def transpile_with_runtime(path):
         '  fetch, serve, compose, tap, $set, error as $error,\n'
         '  display, repr, truthy as $truthy, ClarityEnum as $ClarityEnum,\n'
         '  ClarityInstance as $ClarityInstance,\n'
+        '  _ffi_open, _ffi_bind, _ffi_close,\n'
         '  formatClarityError, clarityMain\n'
         '} from "./runtime.js";\n\n'
     )

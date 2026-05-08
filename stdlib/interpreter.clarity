@@ -364,6 +364,9 @@ class Interpreter {
         -- System
         this.global_env.set("exec", fn(cmd) { return exec(cmd) }, true)
         this.global_env.set("exec_full", fn(cmd) { return exec_full(cmd) }, true)
+        this.global_env.set("_ffi_open", fn(lib, spec) { return _ffi_open(lib, spec) }, true)
+        this.global_env.set("_ffi_bind", fn(lib, sym, args, ret) { return _ffi_bind(lib, sym, args, ret) }, true)
+        this.global_env.set("_ffi_close", fn(h) { return _ffi_close(h) }, true)
         this.global_env.set("exit", fn(code) { exit(code ?? 0) }, true)
         this.global_env.set("sleep", fn(s) { sleep(s) }, true)
         this.global_env.set("time", fn() { return time() }, true)
