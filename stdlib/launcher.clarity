@@ -1,0 +1,259 @@
+-- Launcher — full-screen app picker (Phase 62 task 2).
+--
+-- A grid of apps with a search field at the top. Type to filter,
+-- arrow keys to navigate, Enter to launch, Escape to dismiss.
+--
+--     let l = launcher([
+--         app_entry("terminal", "Terminal", fn() { spawn_terminal() }),
+--         app_entry("files",    "Files",    fn() { spawn_files() })
+--     ])
+--     l.set_bounds(0, 0, screen_w, screen_h)
+--     l.open()
+--     -- ... feed input through the bus / WidgetRoot ...
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, hline
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font, theme_spacing
+
+class AppEntry {
+    fn init(id, name, launch_fn) {
+        this.id = id
+        this.name = name
+        this.launch_fn = launch_fn
+        this.icon = null
+        this.keywords = []         -- alternate search terms
+    }
+}
+
+fn app_entry(id, name, launch_fn) { return AppEntry(id, name, launch_fn) }
+
+class Launcher < Widget {
+    fn init(apps) {
+        this._setup_widget()
+        this.role = "launcher"
+        this.focusable = true
+        this.apps = apps ?? []
+        this.query = ""
+        this.selected = 0          -- index into _filtered()
+        this.cell_w = 110
+        this.cell_h = 110
+        this.search_h = 56
+        this.is_open = false
+        this._on_launch = null
+        this._on_dismiss = null
+    }
+
+    fn open() {
+        this.is_open = true
+        this.visible = true
+        this.query = ""
+        this.selected = 0
+        this.focus()
+    }
+
+    fn close() {
+        this.is_open = false
+        this.visible = false
+        if this._on_dismiss != null { this._on_dismiss() }
+    }
+
+    fn on_launch(fn_)  { this._on_launch  = fn_ }
+    fn on_dismiss(fn_) { this._on_dismiss = fn_ }
+
+    -- ── Filtering ────────────────────────────────────
+
+    fn _filtered() {
+        if len(this.query) == 0 { return this.apps }
+        let q = lower(this.query)
+        mut out = []
+        for app in this.apps {
+            if contains(lower(app.name), q) {
+                push(out, app)
+                continue
+            }
+            mut matched = false
+            for kw in app.keywords {
+                if contains(lower(kw), q) { matched = true }
+            }
+            if matched { push(out, app) }
+        }
+        return out
+    }
+
+    fn _columns(width) {
+        let inner_w = width - 80
+        let n = inner_w / (this.cell_w + 16)
+        if n < 1 { return 1 }
+        return n
+    }
+
+    fn _cell_rect(i, base_x, base_y, columns) {
+        let row = i / columns
+        let col = i % columns
+        return [
+            base_x + col * (this.cell_w + 16),
+            base_y + row * (this.cell_h + 16),
+            this.cell_w,
+            this.cell_h
+        ]
+    }
+
+    -- ── Painting ─────────────────────────────────────
+
+    fn _paint(fb) {
+        if not this.is_open { return null }
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "background")
+        let surface = theme_color(t, "surface")
+        let surface_e = theme_color(t, "surface_elevated")
+        let fg = theme_color(t, "foreground")
+        let fg_muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+
+        -- Dim everything below us
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+
+        -- Search bar at the top
+        let pad = 40
+        let sx = r[0] + pad
+        let sy = r[1] + pad
+        let sw = r[2] - pad * 2
+        fill_rect(fb, sx, sy, sw, this.search_h, surface)
+        rect(fb, sx, sy, sw, this.search_h, theme_color(t, "border"))
+        let prompt = if len(this.query) > 0 { this.query } else { "Search apps…" }
+        let pcolor = if len(this.query) > 0 { fg } else { fg_muted }
+        draw_text(fb, sx + 16, sy + (this.search_h - f.height) / 2, prompt, f, pcolor)
+
+        -- Cursor caret
+        let qm = measure_text(f, this.query)
+        let cx = sx + 16 + qm[0]
+        let cy_top = sy + (this.search_h - f.height) / 2
+        fb.put_pixel(cx, cy_top, fg)
+        fb.put_pixel(cx, cy_top + 1, fg)
+        fb.put_pixel(cx, cy_top + 2, fg)
+
+        -- Grid below
+        let grid_y = sy + this.search_h + 24
+        let columns = this._columns(r[2])
+        let filtered = this._filtered()
+        if this.selected >= len(filtered) and len(filtered) > 0 {
+            this.selected = len(filtered) - 1
+        }
+        if this.selected < 0 { this.selected = 0 }
+
+        mut i = 0
+        while i < len(filtered) {
+            let cell = this._cell_rect(i, sx, grid_y, columns)
+            if cell[1] >= r[1] + r[3] { break }
+            let is_sel = i == this.selected
+            let cell_bg = if is_sel { accent } else { surface_e }
+            fill_rect(fb, cell[0], cell[1], cell[2], cell[3], cell_bg)
+            rect(fb, cell[0], cell[1], cell[2], cell[3], theme_color(t, "border"))
+            -- Big initial as placeholder icon
+            let app = filtered[i]
+            let initial = if len(app.name) > 0 { substring(app.name, 0, 1) } else { "?" }
+            let im = measure_text(f, initial)
+            draw_text(fb, cell[0] + (cell[2] - im[0]) / 2, cell[1] + 24, initial, f, fg)
+            -- Name underneath
+            let name = app.name
+            let nm = measure_text(f, name)
+            mut name_x = cell[0] + (cell[2] - nm[0]) / 2
+            if nm[0] > cell[2] - 8 { name_x = cell[0] + 4 }
+            draw_text(fb, name_x, cell[1] + cell[3] - 18, name, f, fg)
+            i += 1
+        }
+    }
+
+    -- ── Events ───────────────────────────────────────
+
+    fn _handle(event) {
+        if not this.is_open { return false }
+        let kind = type(event)
+        if kind == "MouseEvent" {
+            return this._handle_mouse(event)
+        }
+        if kind == "KeyEvent" and event.is_press {
+            return this._handle_key(event)
+        }
+        return false
+    }
+
+    fn _handle_mouse(event) {
+        if not event.is_press { return false }
+        let r = this.screen_rect()
+        let pad = 40
+        let sx = r[0] + pad
+        let sy = r[1] + pad
+        let grid_y = sy + this.search_h + 24
+        let columns = this._columns(r[2])
+        let filtered = this._filtered()
+        mut i = 0
+        while i < len(filtered) {
+            let cell = this._cell_rect(i, sx, grid_y, columns)
+            if event.x >= cell[0] and event.x < cell[0] + cell[2]
+               and event.y >= cell[1] and event.y < cell[1] + cell[3] {
+                this.selected = i
+                this._launch_selected()
+                return true
+            }
+            i += 1
+        }
+        return true
+    }
+
+    fn _handle_key(event) {
+        let filtered = this._filtered()
+        let columns = this._columns(this.screen_rect()[2])
+        if event.name == "Escape" {
+            this.close()
+            return true
+        }
+        if event.name == "Enter" {
+            this._launch_selected()
+            return true
+        }
+        if event.name == "Backspace" {
+            if len(this.query) > 0 {
+                this.query = substring(this.query, 0, len(this.query) - 1)
+                this.selected = 0
+            }
+            return true
+        }
+        if event.name == "Right" {
+            if this.selected < len(filtered) - 1 { this.selected += 1 }
+            return true
+        }
+        if event.name == "Left" {
+            if this.selected > 0 { this.selected -= 1 }
+            return true
+        }
+        if event.name == "Down" {
+            if this.selected + columns < len(filtered) { this.selected += columns }
+            return true
+        }
+        if event.name == "Up" {
+            if this.selected - columns >= 0 { this.selected -= columns }
+            return true
+        }
+        if event.char != null and len(event.char) > 0 {
+            this.query = this.query + event.char
+            this.selected = 0
+            return true
+        }
+        return false
+    }
+
+    fn _launch_selected() {
+        let filtered = this._filtered()
+        if this.selected < 0 or this.selected >= len(filtered) { return null }
+        let app = filtered[this.selected]
+        if app.launch_fn != null { app.launch_fn() }
+        if this._on_launch != null { this._on_launch(app) }
+        this.close()
+    }
+}
+
+fn launcher(apps) { return Launcher(apps) }

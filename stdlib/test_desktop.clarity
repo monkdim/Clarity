@@ -1,0 +1,298 @@
+-- Phase 62 — desktop shell tests.
+-- Exercises every shell component against a synthetic Framebuffer:
+-- Wallpaper paint modes, StatusBar layout + bus integration, Dock
+-- item lifecycle + click handling, Launcher search + keyboard nav,
+-- LockScreen password buffer + unlock callback, SettingsPanel
+-- category switching.
+
+from "graphics.clarity" import framebuffer, BLACK, WHITE, RED, BLUE
+from "image.clarity" import image
+from "wallpaper.clarity" import Wallpaper, wallpaper
+from "statusbar.clarity" import StatusBar, status_bar
+from "dock.clarity" import Dock, DockItem, dock, dock_item
+from "launcher.clarity" import Launcher, AppEntry, launcher, app_entry
+from "lockscreen.clarity" import LockScreen, lock_screen
+from "settings.clarity" import SettingsPanel, settings
+from "ui.clarity" import Widget
+from "theme.clarity" import dark
+from "ipc.clarity" import Bus
+from "mouse.clarity" import MouseEvent
+from "keymap.clarity" import KeyEvent, Modifiers
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+fn me_press(x, y, button) {
+    let e = MouseEvent()
+    e.x = x; e.y = y; e.button = button; e.is_press = true
+    return e
+}
+
+fn ke_press(name, char_) {
+    let m = Modifiers()
+    return KeyEvent(0, name, char_, true, false, m.snapshot())
+}
+
+-- ── Wallpaper: solid color & gradient ─────────────────
+
+show "-- Shell: Wallpaper --"
+
+let fb = framebuffer(64, 32)
+fb.clear(WHITE)
+let w = wallpaper()
+w.set_bounds(0, 0, 64, 32)
+w.set_color(RED)
+w.draw(fb)
+assert_eq(fb.get_pixel(0, 0), RED, "solid color top-left")
+assert_eq(fb.get_pixel(63, 31), RED, "solid color bottom-right")
+
+w.set_gradient(RED, BLUE)
+fb.clear(WHITE)
+w.draw(fb)
+let top_pixel = fb.get_pixel(32, 0)
+let bot_pixel = fb.get_pixel(32, 31)
+assert(top_pixel != bot_pixel, "gradient differs top vs bottom")
+let top_r = (top_pixel >> 16) & 0xFF
+let bot_r = (bot_pixel >> 16) & 0xFF
+assert(top_r > bot_r, "red component fades downward in gradient")
+
+-- Image mode (centered) — make a tiny 4×4 blue square image
+let img = image(4, 4)
+mut yy = 0
+while yy < 4 {
+    mut xx = 0
+    while xx < 4 {
+        img.put_pixel(xx, yy, BLUE)
+        xx += 1
+    }
+    yy += 1
+}
+let w2 = wallpaper()
+w2.set_bounds(0, 0, 32, 32)
+fb.clear(BLACK)
+w2.set_image(img, "centered")
+w2.draw(fb)
+-- Centered 4×4 inside 32×32 lands at (14,14)..(17,17)
+assert_eq(fb.get_pixel(15, 15), BLUE, "centered image painted at center")
+assert_eq(fb.get_pixel(0, 0), BLACK, "outside the image stays untouched (mode=centered)")
+
+-- ── StatusBar: bus integration ────────────────────────
+
+show "-- Shell: StatusBar --"
+
+let bus = Bus()
+let sb = status_bar()
+sb.set_theme(dark())
+sb.set_bounds(0, 0, 800, 24)
+sb.attach_to_bus(bus)
+assert_eq(sb.notification_count, 0, "starts at zero")
+
+bus.publish("notification.new", {"id": 1})
+bus.publish("notification.new", {"id": 2})
+bus.publish("notification.new", {"id": 3})
+assert_eq(sb.notification_count, 3, "three notifications counted")
+
+bus.publish("notification.dismissed", {"id": 1})
+assert_eq(sb.notification_count, 2, "dismiss decrements")
+
+-- StatusBar paints onto the framebuffer
+let big_fb = framebuffer(800, 32)
+big_fb.clear(BLACK)
+sb.draw(big_fb)
+assert(big_fb.get_pixel(0, 0) != BLACK, "status bar background drawn")
+
+-- ── Dock: items, running flag, click handling ─────────
+
+show "-- Shell: Dock --"
+
+let d = dock()
+d.set_theme(dark())
+d.set_bounds(0, 540, 800, 60)
+
+mut launched = []
+let term = dock_item("term", "Terminal", fn() { push(launched, "Terminal") })
+let mail = dock_item("mail", "Mail", fn() { push(launched, "Mail") })
+d.add_item(term)
+d.add_item(mail)
+assert_eq(len(d.items), 2, "two items")
+
+assert(d.item("term") == term, "lookup by id")
+assert(d.item("nope") == null, "missing returns null")
+
+-- Hit-test then click the first icon — launches Terminal
+let r0 = d._icon_rect(0)
+let cx = r0[0] + r0[2] / 2
+let cy = r0[1] + r0[3] / 2
+d.handle_event(me_press(cx, cy, 1))
+assert_eq(launched, ["Terminal"], "clicking pinned icon launches it")
+assert(term.running, "auto-marked running on launch")
+
+-- Mark mail running externally, focus is exclusive
+d.mark_running("mail", true)
+d.mark_focused("mail", true)
+assert(mail.running, "mail running")
+assert(mail.focused, "mail focused")
+d.mark_focused("term", true)
+assert(not mail.focused, "focus is exclusive")
+
+-- Click on running mail — calls click handler instead of launch_fn
+mut click_seen = []
+d.on_click(fn(it) { push(click_seen, it.id) })
+let r1 = d._icon_rect(1)
+d.handle_event(me_press(r1[0] + r1[2] / 2, r1[1] + r1[3] / 2, 1))
+assert_eq(click_seen, ["mail"], "click handler fired for running item")
+assert_eq(launched, ["Terminal"], "running item didn't re-launch")
+
+-- Badge stored
+d.set_badge("mail", 3)
+assert_eq(d.item("mail").badge, 3, "badge stored")
+
+-- ── Launcher: search + keyboard nav ───────────────────
+
+show "-- Shell: Launcher --"
+
+let apps = [
+    app_entry("term", "Terminal", fn() { return null }),
+    app_entry("mail", "Mail", fn() { return null }),
+    app_entry("file", "Files", fn() { return null }),
+    app_entry("settings", "Settings", fn() { return null })
+]
+let l = launcher(apps)
+l.set_theme(dark())
+l.set_bounds(0, 0, 800, 600)
+mut launched_apps = []
+l.on_launch(fn(app) { push(launched_apps, app.name) })
+
+l.open()
+assert(l.is_open, "open()")
+assert_eq(l.query, "", "empty query on open")
+assert_eq(len(l._filtered()), 4, "all apps visible initially")
+
+-- Type "ma" — narrows to "Mail"
+l.handle_event(ke_press("m", "m"))
+l.handle_event(ke_press("a", "a"))
+let filtered = l._filtered()
+assert_eq(len(filtered), 1, "search narrowed to 1")
+assert_eq(filtered[0].name, "Mail", "found Mail")
+
+-- Backspace re-expands
+l.handle_event(ke_press("Backspace", null))
+assert(len(l._filtered()) >= 2, "backspace re-expands")
+
+-- Clear and arrow-navigate
+l.handle_event(ke_press("Backspace", null))
+assert_eq(l.query, "", "query cleared")
+assert_eq(l.selected, 0, "selection back to 0")
+l.handle_event(ke_press("Right", null))
+assert_eq(l.selected, 1, "right arrow")
+l.handle_event(ke_press("Right", null))
+assert_eq(l.selected, 2, "right again")
+l.handle_event(ke_press("Left", null))
+assert_eq(l.selected, 1, "left arrow")
+
+-- Enter launches the selected app and dismisses
+l.handle_event(ke_press("Enter", null))
+assert_eq(launched_apps, ["Mail"], "Enter launched selected app")
+assert(not l.is_open, "launcher closes on launch")
+
+-- Reopen + Escape dismisses without launching
+launched_apps = []
+l.open()
+l.handle_event(ke_press("Escape", null))
+assert(not l.is_open, "Escape closes")
+assert_eq(launched_apps, [], "Escape didn't launch")
+
+-- ── LockScreen: password buffer + on_unlock ───────────
+
+show "-- Shell: LockScreen --"
+
+let ls = lock_screen()
+ls.set_theme(dark())
+ls.set_bounds(0, 0, 800, 600)
+ls.lock()
+assert(ls.is_locked, "locked on lock()")
+
+mut unlock_attempts = []
+ls.on_unlock(fn(pw) {
+    push(unlock_attempts, pw)
+    return pw == "secret"
+})
+
+-- Type "wrong" then Enter → fails, error_message set
+for c in chars("wrong") { ls.handle_event(ke_press(c, c)) }
+ls.handle_event(ke_press("Enter", null))
+assert(ls.is_locked, "still locked on wrong password")
+assert(ls.error_message != null, "error message set")
+assert_eq(ls.password_buffer, "", "buffer cleared after wrong password")
+
+-- Type "secret" then Enter → succeeds, lock released
+for c in chars("secret") { ls.handle_event(ke_press(c, c)) }
+assert_eq(ls.password_buffer, "secret", "buffer accumulated")
+ls.handle_event(ke_press("Enter", null))
+assert(not ls.is_locked, "unlocked")
+
+-- Backspace removes the most recent char
+ls.lock()
+for c in chars("abcd") { ls.handle_event(ke_press(c, c)) }
+ls.handle_event(ke_press("Backspace", null))
+assert_eq(ls.password_buffer, "abc", "backspace shortens buffer")
+
+-- Escape clears the buffer
+ls.handle_event(ke_press("Escape", null))
+assert_eq(ls.password_buffer, "", "escape cleared")
+
+-- ── SettingsPanel: category selection ─────────────────
+
+show "-- Shell: SettingsPanel --"
+
+let s = settings()
+s.set_theme(dark())
+s.set_bounds(0, 0, 720, 480)
+
+let display = Widget(); display.set_bounds(0, 0, 1, 1)
+let sound = Widget(); sound.set_bounds(0, 0, 1, 1)
+let about = Widget(); about.set_bounds(0, 0, 1, 1)
+s.add_category("Display", display)
+s.add_category("Sound", sound)
+s.add_category("About", about)
+assert_eq(len(s.categories), 3, "three categories")
+
+s.select(0)
+assert(display.visible, "display visible")
+assert(not sound.visible, "sound hidden")
+
+s.select(1)
+assert(sound.visible, "sound visible after select")
+assert(not display.visible, "display hidden")
+
+-- Click on the 'About' row in the sidebar — row_h is 32, starts at y=16
+let click_y = 16 + 32 * 2 + 8
+s.handle_event(me_press(40, click_y, 1))
+assert_eq(s.selected, 2, "click selected About")
+assert(about.visible, "about visible")
+
+-- Down/Up arrow keys move the selection
+s.select(0)
+s.handle_event(ke_press("Down", null))
+assert_eq(s.selected, 1, "down advanced")
+s.handle_event(ke_press("Up", null))
+assert_eq(s.selected, 0, "up retreated")
+
+-- ── Summary ────────────────────────────────────────────
+
+show ""
+show "Desktop: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " desktop test(s) failed" }
