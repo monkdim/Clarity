@@ -1,0 +1,132 @@
+-- InputBus — central dispatcher for keyboard / mouse / touch events.
+--
+-- Apps register listeners via on_key / on_mouse / on_touch, then feed
+-- raw evdev events into `dispatch_raw`. The bus runs each listener for
+-- the matching event kind and stops as soon as one returns true (the
+-- "consume" pattern, similar to most GUI toolkits).
+--
+-- Listeners receive typed events:
+--
+--     bus.on_key(fn(ke) { if ke.name == "Escape" { quit() } })
+--     bus.on_mouse(fn(me) { if me.is_click() { ... } })
+--     bus.on_touch(fn(te) { ... })
+
+from "keymap.clarity" import Modifiers, decode_key
+from "mouse.clarity" import MouseTracker
+from "touch.clarity" import TouchTracker
+
+class InputBus {
+    fn init() {
+        this._key_listeners = []
+        this._mouse_listeners = []
+        this._touch_listeners = []
+        this.modifiers = Modifiers()
+        this.mouse = MouseTracker(null, null)
+        this.touch = TouchTracker()
+    }
+
+    fn on_key(fn_)   { push(this._key_listeners,   fn_) }
+    fn on_mouse(fn_) { push(this._mouse_listeners, fn_) }
+    fn on_touch(fn_) { push(this._touch_listeners, fn_) }
+
+    -- Constrain mouse motion to a width x height window.
+    fn set_bounds(width, height) {
+        this.mouse.width = width
+        this.mouse.height = height
+    }
+
+    -- Feed one raw evdev event (a map from input.clarity:parse_event).
+    -- Returns a list of typed events the bus actually emitted (mostly
+    -- useful for testing).
+    fn dispatch_raw(raw_event) {
+        let t = raw_event["type"]
+        mut emitted = []
+
+        if t == 1 {     -- EV_KEY: keyboard or mouse button
+            let code = raw_event["code"]
+            -- Mouse buttons live in 0x100..0x1FF
+            if code >= 256 and code < 512 {
+                let outs = this.mouse.feed(raw_event)
+                for me in outs {
+                    push(emitted, me)
+                    this._dispatch_mouse(me)
+                }
+                let touched = this.touch.feed(raw_event)
+                for te in touched {
+                    push(emitted, te)
+                    this._dispatch_touch(te)
+                }
+                return emitted
+            }
+            -- Keyboard
+            this.modifiers.update(raw_event)
+            let ke = decode_key(raw_event, this.modifiers)
+            if ke != null {
+                push(emitted, ke)
+                this._dispatch_key(ke)
+            }
+            return emitted
+        }
+
+        if t == 2 {     -- EV_REL → mouse
+            let outs = this.mouse.feed(raw_event)
+            for me in outs {
+                push(emitted, me)
+                this._dispatch_mouse(me)
+            }
+            return emitted
+        }
+
+        if t == 3 {     -- EV_ABS → touch
+            let outs = this.touch.feed(raw_event)
+            for te in outs {
+                push(emitted, te)
+                this._dispatch_touch(te)
+            }
+            return emitted
+        }
+
+        if t == 0 {     -- EV_SYN — flush both trackers
+            for me in this.mouse.feed(raw_event) {
+                push(emitted, me)
+                this._dispatch_mouse(me)
+            }
+            for te in this.touch.feed(raw_event) {
+                push(emitted, te)
+                this._dispatch_touch(te)
+            }
+            return emitted
+        }
+
+        return emitted
+    }
+
+    -- Convenience: feed a list of raw events.
+    fn dispatch_all(raw_events) {
+        mut all = []
+        for e in raw_events {
+            for ev in this.dispatch_raw(e) {
+                push(all, ev)
+            }
+        }
+        return all
+    }
+
+    fn _dispatch_key(ke) {
+        for h in this._key_listeners {
+            if h(ke) == true { break }
+        }
+    }
+
+    fn _dispatch_mouse(me) {
+        for h in this._mouse_listeners {
+            if h(me) == true { break }
+        }
+    }
+
+    fn _dispatch_touch(te) {
+        for h in this._touch_listeners {
+            if h(te) == true { break }
+        }
+    }
+}
