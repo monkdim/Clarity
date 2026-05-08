@@ -110,3 +110,51 @@ fn flush_tlb_entry(virt: u64) void {
         : "memory"
     );
 }
+
+// ── Page-fault decision logic ─────────────────────
+
+pub const PageFaultError = error{
+    OutOfMemory,
+    NotMapped,
+    Protection,
+    Unaligned,
+};
+
+pub const FaultCause = enum {
+    not_present,
+    write_to_readonly,
+    user_access_to_kernel,
+    reserved_bit_set,
+    instruction_fetch,
+};
+
+pub fn classify_fault(error_code: u64) FaultCause {
+    if ((error_code & 0x10) != 0) return .instruction_fetch;
+    if ((error_code & 0x08) != 0) return .reserved_bit_set;
+    if ((error_code & 0x04) != 0 and (error_code & 0x01) == 0) return .user_access_to_kernel;
+    if ((error_code & 0x02) != 0 and (error_code & 0x01) != 0) return .write_to_readonly;
+    return .not_present;
+}
+
+/// Walk the address space's region list; if `addr` falls inside a
+/// known region, allocate a page (or COW a shared one) and map it.
+/// Returns `error.NotMapped` for true segfaults.
+pub fn handle_page_fault(space: *AddressSpace, faulting_addr: u64, error_code: u64) PageFaultError!void {
+    const cause = classify_fault(error_code);
+    const region = find_region(space, faulting_addr) orelse return error.NotMapped;
+    if (cause == .write_to_readonly and (region.flags & PAGE_WRITE) == 0) {
+        return error.Protection;
+    }
+    const phys = pmm.alloc_page() orelse return error.OutOfMemory;
+    var flags: u64 = PAGE_PRESENT | PAGE_USER;
+    if ((region.flags & PAGE_WRITE) != 0) flags |= PAGE_WRITE;
+    const aligned = faulting_addr & ~@as(u64, pmm.PAGE_SIZE - 1);
+    map_page(space, aligned, phys, flags) catch return error.OutOfMemory;
+}
+
+fn find_region(space: *AddressSpace, addr: u64) ?*const AddressSpace.Region {
+    for (space.regions.items) |*r| {
+        if (addr >= r.start and addr < r.end) return r;
+    }
+    return null;
+}

@@ -158,6 +158,21 @@ fn resolve(path: []const u8) !?*Inode {
     return null;
 }
 
+/// Read the entire file at `path` into a freshly-allocated buffer.
+/// Used by sched.spawn_user when loading the executable for a new
+/// process. Caller frees with `gpa.free`.
+pub fn read_file_into_heap(path: []const u8, gpa: std.mem.Allocator) ![]u8 {
+    const inode = (try resolve(path)) orelse return error.NotFound;
+    const out = try gpa.alloc(u8, inode.size);
+    var off: u64 = 0;
+    while (off < out.len) {
+        const n = try inode.fs.ops.read(inode.fs, inode, off, out[off..]);
+        if (n == 0) break;
+        off += n;
+    }
+    return out[0..off];
+}
+
 fn resolve_parent(path: []const u8) !*Inode {
     _ = path;
     return error.NotFound;

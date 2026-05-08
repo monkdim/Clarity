@@ -239,9 +239,28 @@
 
 ---
 
-## Phase 70 — Polish & Ship ClarityOS 1.0
+## Phase 70 — Kernel completion
 
-> The release.
+> Replaces the Phase 65 scaffolds with a kernel that actually runs userspace. The first of five phases (70–74) bridging the gap from "scaffold + simulation" to "boots in QEMU and you can use the apps." Original Phase 70 ("Polish & Ship") moved to Phase 75.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **ELF loader** | Done | `kernel/loader/elf.zig` — strict ELF64 LE parser with header validation (magic / class / data / type / machine), program-header walk, PT_LOAD segment list, `LoadedExecutable` with entry / is_dynamic / segments. `kernel/loader/load.zig` — loads segments into a fresh `AddressSpace`, allocates pages from `pmm`, copies file-backed bytes + zero-fills BSS, maps with `PAGE_USER` + `PAGE_NX` where appropriate, sets up an 8-page user stack, returns the `LoadedProcess` with entry RIP / user RSP / brk_start. Mirrored as `stdlib/elf.clarity` (parser + `build_test_elf` constructor) so the test suite drives a real synthetic ELF round-trip. |
+| 2 | **Real `spawn_user` + ring switch** | Done | `kernel/sched/scheduler.zig` `spawn_user` is no longer `error.NotImplemented`: reads the ELF off the VFS, parses + loads, allocates a 16-KiB kernel stack + a `Process` + main `Thread`, builds the IRET frame with user CS=0x1B / SS=0x23 / RFLAGS=0x202 pointing at the entry RIP, queues the thread. `kernel/arch/x86_64/context.zig` defines the `Context` save-area, `init_kernel_thread` / `build_iret_frame` / `enter_userland` (the `iretq` trampoline). |
+| 3 | **SYSCALL/SYSRET fast-path** | Done | `kernel/arch/x86_64/syscall.zig` — `init()` programs `IA32_EFER.SCE`, `IA32_STAR` (CS selectors), `IA32_LSTAR` (entry trampoline), `IA32_FMASK` (mask IF/DF/TF), `IA32_KERNEL_GS_BASE` (per-CPU scratch). `syscall_entry` (naked) does `swapgs` → save user RSP into per-CPU `gs:8` → load kernel RSP → push user RIP/RFLAGS/RSP + arg registers → call C dispatcher → restore and `sysretq`. The `dispatch_syscall_c` bridge translates the System V ABI args into `syscall/dispatch.zig`'s `Args` struct. |
+| 4 | **Context switching** | Done | `context.switch_to(prev, next)` saves the six callee-saved registers + RSP into `prev`, restores them from `next`, then jumps through `next.rip`. New kernel threads get pre-pushed register slots so the first switch lands at their entry function. |
+| 5 | **Page-fault handler + demand paging** | Done | `kernel/mm/vmm.zig` `classify_fault(error_code)` returns one of `.not_present` / `.write_to_readonly` / `.user_access_to_kernel` / `.reserved_bit_set` / `.instruction_fetch`. `handle_page_fault(space, addr, error_code)` walks the address-space region list, lazily allocates a page from `pmm`, maps it with the region's flags. Returns `error.NotMapped` for a true segfault. Mirrored as `process_model.FaultModel` so the test suite drives the same decision tree. |
+| 6 | **Timer-driven scheduling** | Done | `kernel/arch/x86_64/timer.zig` — 8254 PIT channel 0, mode 2, configurable Hz (default 100). IRQ vector 0x20 increments the global tick counter, EOIs the master PIC, and calls `sched.schedule()`. `uptime_ms` + `uptime_seconds` for clock_gettime. |
+| 7 | **fork / exec / wait / kill** | Done | `kernel/sched/scheduler.zig` adds `fork` (clones address space, allocates child Process + Thread, registers parent/child link), `exec` (parses+loads the new ELF, replaces address space, rebuilds the IRET frame, re-enters userland), `waitpid` (any-child or specific PID, removes from process table on reap), `kill` (SIGKILL terminates immediately and posts a zombie record to the parent). `kernel/sched/process.zig` owns `Process` + `Table` + `ZombieRecord` + `reparent_children` (orphans go to init=PID 1). Errno enum extended with `echild`. Mirrored as `process_model.UserspaceSim` — the test suite forks two children, exits one, kills the other with SIGKILL, asserts both reach the parent's zombie queue and waitpid reaps them in order. |
+| 8 | **Multiboot2 framebuffer parsing** | Done | `kernel/boot/multiboot2.zig` `ParsedBootInfo.parse(blob, gpa)` walks the tag stream, extracts framebuffer (addr/pitch/width/height/bpp), memory map (entries copied into a heap-allocated slice), cmdline (null-terminated), RSDP v1 + v2 pointers. Same parser logic mirrored as `process_model.parse_multiboot_blob` over a list of bytes — test suite synthesises a blob with all four tag types and asserts every field round-trips. (Discovered + fixed an int32 sign-extension bug in the byte-→u32 helper while writing the test.) |
+
+**Tests:** `stdlib/test_kernel_full.clarity` — 77 assertions: ELF parser (synthetic ELF64 build → parse round-trip with two PT_LOAD segments — code R+X, data R+W with BSS padding; rejects bad magic, 32-bit class, ARM machine), process table (alloc_pid monotonicity, register/lookup/remove, child registration), userspace fork/exec/waitpid/kill (init forks two children; one execs `/bin/sh` and exits 0; the other gets SIGKILL'd; both end up in init's zombie queue and waitpid reaps them in pid order; waitpid with no children returns null), orphan reparenting (parent with two grandchildren exits before they do; grandchildren end up under init=1), page-fault classifier (all five cause categories), page-fault handler (lazy-mapping on first touch, spurious-fault returning false on second access, segfault throw for out-of-region address, write-to-RO throw, RO read succeeds), multiboot2 parser (cmdline + framebuffer all 6 fields + memory map with two entries — available 0..1 GiB, reserved 1..1.5 GiB).
+
+---
+
+## Phase 75 — Polish & Ship ClarityOS 1.0
+
+> The release. (Renumbered from Phase 70; phases 70–74 finish the bare-metal port first.)
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
