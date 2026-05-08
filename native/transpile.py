@@ -765,7 +765,7 @@ def bundle(compile_native=False):
         'highlight.clarity', 'completer.clarity', 'pretty.clarity', 'claude.clarity',
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
         'transpile.clarity',
-        'graphics.clarity', 'draw.clarity', 'ffi.clarity',
+        'graphics.clarity', 'draw.clarity', 'font.clarity', 'image.clarity', 'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
         'install.clarity',

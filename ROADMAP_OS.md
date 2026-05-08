@@ -52,10 +52,10 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Framebuffer abstraction** | Pending | `stdlib/graphics.clarity` — `Framebuffer` class: create (width, height), put_pixel, get_pixel, fill_rect, clear, blit (copy region). Backed by FFI to platform framebuffer (Linux: `/dev/fb0` or DRM, macOS: IOSurface) |
-| 2 | **2D drawing primitives** | Pending | `stdlib/draw.clarity` — line (Bresenham), circle (midpoint), rounded_rect, polygon, arc. Anti-aliased variants. All in pure Clarity operating on the framebuffer |
-| 3 | **Text rendering** | Pending | `stdlib/font.clarity` — BDF/PSF bitmap font loader, `draw_text(fb, x, y, text, font, color)`, `measure_text()`. Ship a default monospace + proportional font. Glyph caching |
-| 4 | **Image loading** | Pending | `stdlib/image.clarity` — BMP loader/writer (simple, no dependencies), PNG decoder (inflate + unfilter), JPEG decoder (baseline DCT). `Image` class with resize, crop, rotate |
+| 1 | **Framebuffer abstraction** | Done | `stdlib/graphics.clarity` — 32-bit BGRA `Framebuffer` over a stable Pointer-backed buffer. `put_pixel` / `get_pixel` / `clear` / `fill_rect` / `stroke_rect` / `blit` / `save_bmp`. Bulk fills go through a `_ffi_fill_u32` runtime helper for native-speed `clear`. Color helpers + named constants. |
+| 2 | **2D drawing primitives** | Done | `stdlib/draw.clarity` — `line` (Bresenham), `hline`/`vline`, `rect`/`fill_rect`, `circle` + `circle_outline` (midpoint + scanline fill), `rounded_rect`, `arc` (sampled), `polygon`/`polyline`. |
+| 3 | **Text rendering** | Done | `stdlib/font.clarity` — `Font` class, embedded 8x8 ASCII bitmap font (95 printable chars), `draw_text` / `measure_text`, plus a `load_psf` parser for Linux PSF v1 console fonts. |
+| 4 | **Image loading** | Done | `stdlib/image.clarity` — `Image` with `crop`, `resize` (nearest), `rotate_90`. `load_bmp` reads 24- and 32-bit BMPs, top-down or bottom-up; `save_bmp` writes 32-bit. `from_framebuffer`/`to_framebuffer` for interop. PNG/JPEG decoders deferred to a follow-up phase since DEFLATE/DCT are sizeable. |
 | 5 | **GPU acceleration (optional)** | Pending | FFI bindings to Vulkan/Metal for hardware-accelerated rendering. Shader compilation, vertex buffers, texture upload. Falls back to software framebuffer |
 
 ---
