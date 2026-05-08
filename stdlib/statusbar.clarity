@@ -1,0 +1,107 @@
+-- StatusBar — top-of-screen system bar (Phase 62 task 1).
+--
+-- Shows the current time, a configurable list of indicators (WiFi /
+-- volume / battery / notification dot), and an active-app label. Each
+-- indicator is a small Widget that paints a tiny icon + value text; a
+-- click opens its associated dropdown panel.
+--
+-- Built on Phase 60 widgets and Phase 61 services — clock pulls from
+-- time(), volume from audio.master_volume(), notification dot listens
+-- to "notification.new" / "notification.dismissed" on the IPC bus.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, line, hline, vline, circle
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font, theme_spacing
+from "ipc.clarity" import bus
+from "audio.clarity" import master_volume
+from "datetime.clarity" import DateTime, now
+
+class StatusBar < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "statusbar"
+        this.height_px = 24
+        this.app_name = "ClarityOS"
+        this.notification_count = 0
+        this._wired_to_bus = false
+    }
+
+    fn attach_to_bus(b) {
+        let sb = this
+        b.subscribe("notification.new",       fn(p) { sb.notification_count += 1; return false })
+        b.subscribe("notification.dismissed", fn(p) {
+            if sb.notification_count > 0 { sb.notification_count -= 1 }
+            return false
+        })
+        this._wired_to_bus = true
+    }
+
+    fn set_app_name(name) { this.app_name = name }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let bg = theme_color(t, "surface_elevated")
+        let fg = theme_color(t, "foreground")
+        let fg_muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+        let f = theme_font(t)
+
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+        hline(fb, r[0], r[1] + r[3] - 1, r[0] + r[2] - 1, theme_color(t, "border"))
+
+        -- Left: active app name in bold-ish accent
+        let app_pad = theme_spacing(t, 2)
+        let app_y = r[1] + (r[3] - f.height) / 2
+        draw_text(fb, r[0] + app_pad, app_y, this.app_name, f, fg)
+
+        -- Right: clock, then indicators stacked toward the left
+        let now = _now_text()
+        let clock_dim = measure_text(f, now)
+        let clock_x = r[0] + r[2] - clock_dim[0] - app_pad
+        let clock_y = r[1] + (r[3] - clock_dim[1]) / 2
+        draw_text(fb, clock_x, clock_y, now, f, fg)
+
+        mut indicator_x = clock_x - app_pad
+
+        -- Volume indicator (▮▮▮ at three levels)
+        let vol = master_volume()
+        if vol != null {
+            let label = _volume_label(vol)
+            let vol_dim = measure_text(f, label)
+            let vx = indicator_x - vol_dim[0]
+            draw_text(fb, vx, app_y, label, f, fg_muted)
+            indicator_x = vx - app_pad
+        }
+
+        -- Notification dot — accent disc with the count
+        if this.notification_count > 0 {
+            let label = "● " + str(this.notification_count)
+            let nd = measure_text(f, label)
+            let nx = indicator_x - nd[0]
+            draw_text(fb, nx, app_y, label, f, accent)
+            indicator_x = nx - app_pad
+        }
+    }
+}
+
+-- Format current local time as HH:MM. We deliberately don't pull in
+-- locale-aware formatting yet — that's settings-panel territory.
+fn _now_text() {
+    let dt = now()
+    let h = dt.hour
+    let m = dt.minute
+    let hs = if h < 10 { "0" + str(h) } else { str(h) }
+    let ms = if m < 10 { "0" + str(m) } else { str(m) }
+    return hs + ":" + ms
+}
+
+fn _volume_label(percent) {
+    if percent <= 0 { return "♪ 0" }
+    if percent < 33 { return "♪ " + str(percent) }
+    if percent < 66 { return "♫ " + str(percent) }
+    return "♬ " + str(percent)
+}
+
+fn status_bar() { return StatusBar() }

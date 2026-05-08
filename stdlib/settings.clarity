@@ -1,0 +1,139 @@
+-- Settings — system preferences panel (Phase 62 task 6).
+--
+-- A two-column app: a category list on the left (Display / Sound /
+-- Network / Notifications / About), and a content panel on the right
+-- with the controls for the current category. Categories register
+-- themselves via add_category — the desktop shell wires them up at
+-- launch with the relevant Phase 60 widgets.
+--
+--     let s = settings()
+--     s.set_bounds(0, 0, 720, 480)
+--     s.add_category("Display",  display_panel)
+--     s.add_category("Sound",    sound_panel)
+--     s.select(0)
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, hline, vline
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font, theme_spacing
+
+class SettingsPanel < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "settings"
+        this.focusable = true
+        this.categories = []        -- list of {name, content_widget}
+        this.selected = 0
+        this.sidebar_w = 180
+        this._content_root = null
+    }
+
+    fn add_category(name, content) {
+        push(this.categories, {"name": name, "content": content})
+        if content != null { this.add(content) }
+    }
+
+    fn select(idx) {
+        if idx < 0 or idx >= len(this.categories) { return null }
+        mut i = 0
+        for cat in this.categories {
+            if cat["content"] != null { cat["content"].visible = i == idx }
+            i += 1
+        }
+        this.selected = idx
+        this.relayout()
+    }
+
+    fn relayout() {
+        let r = this.screen_rect()
+        let inner_x = this.x + this.sidebar_w
+        let inner_y = this.y
+        let inner_w = this.width - this.sidebar_w
+        let inner_h = this.height
+        mut i = 0
+        for cat in this.categories {
+            if cat["content"] != null {
+                let c = cat["content"]
+                c.set_bounds(inner_x, inner_y, inner_w, inner_h)
+                c.visible = i == this.selected
+                c.relayout()
+            }
+            i += 1
+        }
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "background")
+        let surface = theme_color(t, "surface")
+        let surface_e = theme_color(t, "surface_elevated")
+        let fg = theme_color(t, "foreground")
+        let fg_muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+        let border = theme_color(t, "border")
+
+        -- Sidebar background
+        fill_rect(fb, r[0], r[1], this.sidebar_w, r[3], surface)
+        vline(fb, r[0] + this.sidebar_w - 1, r[1], r[1] + r[3] - 1, border)
+
+        -- Category list
+        let row_h = 32
+        mut i = 0
+        while i < len(this.categories) {
+            let cat = this.categories[i]
+            let row_y = r[1] + 16 + i * row_h
+            if i == this.selected {
+                fill_rect(fb, r[0] + 8, row_y, this.sidebar_w - 16, row_h - 4, accent)
+                draw_text(fb, r[0] + 16, row_y + (row_h - f.height) / 2, cat["name"], f, fg)
+            } else {
+                draw_text(fb, r[0] + 16, row_y + (row_h - f.height) / 2, cat["name"], f, fg_muted)
+            }
+            i += 1
+        }
+
+        -- Right-side content area background
+        let cx = r[0] + this.sidebar_w
+        let cw = r[2] - this.sidebar_w
+        fill_rect(fb, cx, r[1], cw, r[3], bg)
+
+        -- Title strip at the top of the content area
+        if this.selected < len(this.categories) {
+            let title = this.categories[this.selected]["name"]
+            let tm = measure_text(f, title)
+            draw_text(fb, cx + 24, r[1] + 16, title, f, fg)
+            hline(fb, cx + 24, r[1] + 16 + tm[1] + 8, cx + cw - 24, border)
+        }
+    }
+
+    fn _handle(event) {
+        let kind = type(event)
+        let r = this.screen_rect()
+        if kind == "MouseEvent" and event.is_press {
+            if event.x >= r[0] and event.x < r[0] + this.sidebar_w {
+                let row_h = 32
+                let local_y = event.y - r[1] - 16
+                if local_y < 0 { return true }
+                let idx = int(local_y / row_h)
+                if idx >= 0 and idx < len(this.categories) {
+                    this.select(idx)
+                }
+                return true
+            }
+        }
+        if kind == "KeyEvent" and event.is_press {
+            if event.name == "Down" and this.selected < len(this.categories) - 1 {
+                this.select(this.selected + 1)
+                return true
+            }
+            if event.name == "Up" and this.selected > 0 {
+                this.select(this.selected - 1)
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn settings() { return SettingsPanel() }

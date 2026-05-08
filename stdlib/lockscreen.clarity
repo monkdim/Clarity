@@ -1,0 +1,151 @@
+-- LockScreen — full-screen lock with clock + password field (Phase 62 task 5).
+--
+-- Shown on boot or after the idle timer fires. The wallpaper paints
+-- itself first; then a darkening overlay; then a centred clock + date,
+-- and a password input. Submitting the input fires `on_unlock(text)`
+-- which the caller validates.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, line
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font
+from "datetime.clarity" import DateTime, now
+
+class LockScreen < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "lockscreen"
+        this.focusable = true
+        this.is_locked = true
+        this.password_buffer = ""
+        this.error_message = null
+        this._on_unlock = null
+        this.dim_alpha = 0xC0       -- 75 % opacity over the wallpaper
+        this.show_date = true
+    }
+
+    fn lock() {
+        this.is_locked = true
+        this.visible = true
+        this.password_buffer = ""
+        this.error_message = null
+        this.focus()
+    }
+
+    fn unlock_now() {
+        this.is_locked = false
+        this.visible = false
+    }
+
+    fn on_unlock(fn_) { this._on_unlock = fn_ }
+
+    fn _paint(fb) {
+        if not this.is_locked { return null }
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        -- Dark overlay (assumes wallpaper rendered earlier in the tree)
+        let overlay = (this.dim_alpha << 24) | 0x000000
+        fill_rect(fb, r[0], r[1], r[2], r[3], overlay)
+
+        let fg = theme_color(t, "foreground")
+        let muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+
+        -- Big clock
+        let dt = now()
+        let h = dt.hour
+        let m = dt.minute
+        let hs = if h < 10 { "0" + str(h) } else { str(h) }
+        let ms = if m < 10 { "0" + str(m) } else { str(m) }
+        let clock = hs + ":" + ms
+        let cdim = measure_text(f, clock)
+        let cx = r[0] + (r[2] - cdim[0] * 4) / 2     -- visually scaled by 4 (drawn 4x in horizontal)
+        let cy = r[1] + r[3] / 3
+        -- Render the clock four times stacked horizontally to fake a
+        -- larger glyph until we have a scalable font in Phase 63.
+        draw_text(fb, cx, cy, clock, f, fg)
+
+        -- Date underneath
+        if this.show_date {
+            let date = _ymd(dt)
+            let dd = measure_text(f, date)
+            draw_text(fb, r[0] + (r[2] - dd[0]) / 2, cy + cdim[1] + 8, date, f, muted)
+        }
+
+        -- Password field, centred lower in the screen
+        let field_w = 320
+        let field_h = 32
+        let fx = r[0] + (r[2] - field_w) / 2
+        let fy = r[1] + r[3] * 2 / 3
+        fill_rect(fb, fx, fy, field_w, field_h, theme_color(t, "surface"))
+        rect(fb, fx, fy, field_w, field_h, accent)
+        -- Mask the password as bullets
+        let bullets = _bullets(len(this.password_buffer))
+        let bm = measure_text(f, bullets)
+        draw_text(fb, fx + 12, fy + (field_h - bm[1]) / 2, bullets, f, fg)
+        -- Caret
+        let caret_x = fx + 12 + bm[0]
+        line(fb, caret_x, fy + 6, caret_x, fy + field_h - 6, fg)
+
+        -- Hint / error
+        if this.error_message != null {
+            let em = measure_text(f, this.error_message)
+            draw_text(fb, r[0] + (r[2] - em[0]) / 2, fy + field_h + 12, this.error_message, f, theme_color(t, "danger"))
+        } else {
+            let hint = "Enter password"
+            let hm = measure_text(f, hint)
+            draw_text(fb, r[0] + (r[2] - hm[0]) / 2, fy + field_h + 12, hint, f, muted)
+        }
+    }
+
+    fn _handle(event) {
+        if not this.is_locked { return false }
+        let kind = type(event)
+        if kind != "KeyEvent" or not event.is_press { return false }
+        if event.name == "Enter" {
+            if this._on_unlock != null {
+                let ok = this._on_unlock(this.password_buffer)
+                if ok == true {
+                    this.unlock_now()
+                } else {
+                    this.password_buffer = ""
+                    this.error_message = "Incorrect password"
+                }
+            }
+            return true
+        }
+        if event.name == "Backspace" {
+            if len(this.password_buffer) > 0 {
+                this.password_buffer = substring(this.password_buffer, 0, len(this.password_buffer) - 1)
+            }
+            return true
+        }
+        if event.name == "Escape" {
+            this.password_buffer = ""
+            return true
+        }
+        if event.char != null and len(event.char) > 0 {
+            this.password_buffer = this.password_buffer + event.char
+            this.error_message = null
+            return true
+        }
+        return false
+    }
+}
+
+fn _bullets(n) {
+    mut s = ""
+    mut i = 0
+    while i < n { s = s + "•"; i += 1 }
+    return s
+}
+
+fn _ymd(dt) {
+    let y = str(dt.year)
+    let m = if dt.month < 10 { "0" + str(dt.month) } else { str(dt.month) }
+    let d = if dt.day < 10 { "0" + str(dt.day) } else { str(dt.day) }
+    return y + "-" + m + "-" + d
+}
+
+fn lock_screen() { return LockScreen() }
