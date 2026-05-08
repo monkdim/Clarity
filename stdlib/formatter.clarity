@@ -324,7 +324,7 @@ class Formatter {
     fn fmt_expr(node) {
         if node == null { return "null" }
 
-        let nt = null
+        mut nt = null
         try { nt = node.node_type } catch e { return str(node) }
         if nt == null { return str(node) }
 
