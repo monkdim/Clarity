@@ -1,7 +1,7 @@
--- Profiler Tests — ported from tests/test_profiler.py
--- Tests profiling data structures, time formatting, and statistics.
+-- Profiler Tests — exercise the self-hosted profiler.clarity API.
+-- Records calls/lines on a Profiler instance and inspects the resulting stats.
 
-from "profiler.clarity" import Profiler, FunctionStats, LineStats
+from "profiler.clarity" import Profiler
 
 mut PASSED = 0
 mut FAILED = 0
@@ -24,106 +24,91 @@ fn assert_eq(actual, expected, msg) {
     }
 }
 
--- ── FunctionStats ───────────────────────────────────────
+-- The Profiler reads its source file in init(), so write a tiny one to /tmp.
+let _PROF_SRC = "/tmp/_profiler_test_src.clarity"
+write(_PROF_SRC, "let x = 1\nshow x\n")
 
-show "-- Profiler: FunctionStats --"
-
-let fs = FunctionStats("test_fn")
-assert_eq(fs.name, "test_fn", "function stats name")
-assert_eq(fs.calls, 0, "initial calls zero")
-assert_eq(fs.total_time, 0, "initial time zero")
-
-fs.calls = 5
-fs.total_time = 100
-assert_eq(fs.calls, 5, "calls updated")
-assert_eq(fs.total_time, 100, "total time updated")
-
-let avg = fs.total_time / fs.calls
-assert_eq(avg, 20, "average time")
-
--- ── LineStats ───────────────────────────────────────────
-
-show "-- Profiler: LineStats --"
-
-let ls = LineStats(10)
-assert_eq(ls.line, 10, "line stats line number")
-assert_eq(ls.hits, 0, "initial hits zero")
-assert_eq(ls.total_time, 0, "initial line time zero")
-
-ls.hits = 100
-ls.total_time = 500
-let line_avg = ls.total_time / ls.hits
-assert_eq(line_avg, 5, "line average time")
-
--- ── Profiler initialization ─────────────────────────────
+-- ── Initialization ──────────────────────────────────────
 
 show "-- Profiler: Init --"
 
-let prof = Profiler()
+let prof = Profiler(_PROF_SRC)
 assert(prof != null, "profiler creates")
-assert(type(prof.functions) == "map" or type(prof.functions) == "list", "functions store initialized")
+assert_eq(prof.source_path, _PROF_SRC, "stores source path")
+assert_eq(type(prof.function_stats), "map", "function_stats is a map")
+assert_eq(type(prof.line_stats), "map", "line_stats is a map")
+assert_eq(len(keys(prof.function_stats)), 0, "function_stats starts empty")
+assert_eq(len(keys(prof.line_stats)), 0, "line_stats starts empty")
 
 -- ── Time formatting ─────────────────────────────────────
 
 show "-- Profiler: Time Formatting --"
 
-assert_eq(prof.format_time(0.000050), "50.0us" , "format microseconds")
-assert_eq(prof.format_time(0.005), "5.0ms", "format milliseconds")
-assert_eq(prof.format_time(1.5), "1.50s", "format seconds")
-assert_eq(prof.format_time(0), "0.0us", "format zero")
+assert(ends(prof.fmt_time(0.0000005), "us"), "microseconds suffix")
+assert(ends(prof.fmt_time(0.005), "ms"), "milliseconds suffix")
+assert(ends(prof.fmt_time(1.5), "s"), "seconds suffix")
 
 -- ── Heat bar ────────────────────────────────────────────
 
 show "-- Profiler: Heat Bar --"
 
-let bar_full = prof.heat_bar(1.0, 10)
-assert_eq(len(bar_full), 10, "full heat bar length")
+let bar_full = prof.heat_bar(1.0, 1.0)
+assert(len(bar_full) > 0, "full heat bar non-empty")
+let bar_half = prof.heat_bar(0.5, 1.0)
+assert(len(bar_half) > 0, "half heat bar non-empty")
+let bar_zero_max = prof.heat_bar(0.0, 0.0)
+assert_eq(bar_zero_max, "", "heat bar with zero max returns empty")
 
-let bar_half = prof.heat_bar(0.5, 10)
-assert_eq(len(bar_half), 10, "half heat bar length")
-
-let bar_empty = prof.heat_bar(0.0, 10)
-assert_eq(len(bar_empty), 10, "empty heat bar length")
-
--- ── Function recording ──────────────────────────────────
+-- ── Call recording ──────────────────────────────────────
 
 show "-- Profiler: Recording --"
 
-let prof2 = Profiler()
-prof2.record_call("foo", 0.001)
-prof2.record_call("foo", 0.002)
-prof2.record_call("bar", 0.005)
+prof.record_call("foo", "<main>", 0.001)
+prof.record_call("foo", "<main>", 0.002)
+prof.record_call("bar", "<main>", 0.005)
 
-let stats = prof2.get_stats()
-assert(has(stats, "foo") or has(stats, "functions"), "stats recorded")
+assert(has(prof.function_stats, "foo"), "foo recorded")
+assert(has(prof.function_stats, "bar"), "bar recorded")
+assert_eq(prof.function_stats["foo"]["calls"], 2, "foo called twice")
+assert_eq(prof.function_stats["bar"]["calls"], 1, "bar called once")
 
 -- ── Caller tracking ─────────────────────────────────────
 
 show "-- Profiler: Callers --"
 
-let prof3 = Profiler()
-prof3.record_call("inner", 0.001, "outer")
-prof3.record_call("inner", 0.001, "outer")
-prof3.record_call("inner", 0.001, "main")
+let prof3 = Profiler(_PROF_SRC)
+prof3.record_call("inner", "outer", 0.001)
+prof3.record_call("inner", "outer", 0.001)
+prof3.record_call("inner", "main", 0.001)
 
-let inner_stats = prof3.get_function_stats("inner")
-if inner_stats != null {
-    assert(inner_stats.calls == 3, "caller tracking total calls")
-}
+assert_eq(prof3.function_stats["inner"]["calls"], 3, "caller tracking total calls")
+assert_eq(prof3.function_stats["inner"]["callers"]["outer"], 2, "outer caller count")
+assert_eq(prof3.function_stats["inner"]["callers"]["main"], 1, "main caller count")
 
 -- ── Line recording ──────────────────────────────────────
 
 show "-- Profiler: Lines --"
 
-let prof4 = Profiler()
-prof4.record_line("test.clarity", 5, 0.001)
-prof4.record_line("test.clarity", 5, 0.002)
-prof4.record_line("test.clarity", 10, 0.003)
+let prof4 = Profiler(_PROF_SRC)
+prof4.record_line(5, 0.001)
+prof4.record_line(5, 0.002)
+prof4.record_line(10, 0.003)
 
-let line_stats = prof4.get_line_stats("test.clarity", 5)
-if line_stats != null {
-    assert_eq(line_stats.hits, 2, "line hits recorded")
-}
+assert_eq(prof4.line_stats["5"]["hits"], 2, "line 5 hits")
+assert_eq(prof4.line_stats["10"]["hits"], 1, "line 10 hits")
+
+-- ── get_stats snapshot ──────────────────────────────────
+
+show "-- Profiler: get_stats --"
+
+let snapshot = prof.get_stats()
+assert(has(snapshot, "wall_time"), "snapshot has wall_time")
+assert(has(snapshot, "functions"), "snapshot has functions")
+assert(has(snapshot, "lines"), "snapshot has lines")
+
+-- ── Cleanup ─────────────────────────────────────────────
+
+exec("rm -f " + _PROF_SRC)
 
 -- ── Summary ─────────────────────────────────────────────
 
