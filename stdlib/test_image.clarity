@@ -1,0 +1,173 @@
+-- Image tests — Phase 57 task 4. Exercises BMP load/save round-trip
+-- through Clarity, plus the Image methods (crop, resize, rotate_90)
+-- and conversion to/from Framebuffer.
+
+from "image.clarity" import Image, image, load_bmp, save_bmp, from_framebuffer, to_framebuffer
+from "graphics.clarity" import framebuffer, BLACK, WHITE, RED, GREEN, BLUE
+from "ffi.clarity" import alloc, Pointer
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+-- ── Image basics ────────────────────────────────────────
+
+show "-- Image: init / put / get --"
+
+let img = image(8, 6)
+assert_eq(img.width, 8, "width")
+assert_eq(img.height, 6, "height")
+assert_eq(img.size, 8 * 6 * 4, "size")
+
+img.put_pixel(0, 0, RED)
+img.put_pixel(7, 5, BLUE)
+assert_eq(img.get_pixel(0, 0), RED, "top-left")
+assert_eq(img.get_pixel(7, 5), BLUE, "bottom-right")
+assert_eq(img.get_pixel(3, 3), 0, "uninitialised pixel is zero")
+assert_eq(img.get_pixel(-1, 0), 0, "OOB read")
+
+-- ── crop ────────────────────────────────────────────────
+
+show "-- Image: crop --"
+
+let src = image(10, 10)
+mut y = 0
+while y < 10 {
+    mut x = 0
+    while x < 10 {
+        src.put_pixel(x, y, x * 100 + y + 1)  -- distinctive value per pixel
+        x += 1
+    }
+    y += 1
+}
+
+let cr = src.crop(2, 3, 4, 4)
+assert_eq(cr.width, 4, "crop width")
+assert_eq(cr.height, 4, "crop height")
+assert_eq(cr.get_pixel(0, 0), src.get_pixel(2, 3), "crop top-left matches")
+assert_eq(cr.get_pixel(3, 3), src.get_pixel(5, 6), "crop bottom-right matches")
+
+-- ── resize (nearest-neighbour) ─────────────────────────
+
+show "-- Image: resize --"
+
+let small = image(2, 2)
+small.put_pixel(0, 0, RED)
+small.put_pixel(1, 0, GREEN)
+small.put_pixel(0, 1, BLUE)
+small.put_pixel(1, 1, WHITE)
+
+let big = small.resize(4, 4)
+assert_eq(big.width, 4, "resize width")
+assert_eq(big.height, 4, "resize height")
+-- Each 2x2 quadrant takes the colour of the source pixel
+assert_eq(big.get_pixel(0, 0), RED, "tl quadrant tl")
+assert_eq(big.get_pixel(1, 1), RED, "tl quadrant br")
+assert_eq(big.get_pixel(2, 0), GREEN, "tr quadrant tl")
+assert_eq(big.get_pixel(0, 2), BLUE, "bl quadrant tl")
+assert_eq(big.get_pixel(3, 3), WHITE, "br quadrant br")
+
+let shrunk = big.resize(2, 2)
+assert_eq(shrunk.get_pixel(0, 0), RED, "shrunk tl")
+assert_eq(shrunk.get_pixel(1, 1), WHITE, "shrunk br")
+
+-- ── rotate_90 ───────────────────────────────────────────
+
+show "-- Image: rotate_90 --"
+
+-- A 3x2 image with one column of red on the left:
+let r = image(3, 2)
+r.put_pixel(0, 0, RED); r.put_pixel(1, 0, GREEN); r.put_pixel(2, 0, BLUE)
+r.put_pixel(0, 1, RED); r.put_pixel(1, 1, GREEN); r.put_pixel(2, 1, BLUE)
+
+let rot = r.rotate_90()
+assert_eq(rot.width, 2, "rotated width")
+assert_eq(rot.height, 3, "rotated height")
+-- After 90° CCW rotation: (x, y) → (height-1-y, x), so the original
+-- top-left (RED at 0,0) ends up at (1, 0) in the new image.
+assert_eq(rot.get_pixel(1, 0), RED, "rot RED column 0 of original")
+assert_eq(rot.get_pixel(1, 1), GREEN, "rot GREEN")
+assert_eq(rot.get_pixel(1, 2), BLUE, "rot BLUE")
+
+-- ── BMP write + read round-trip ────────────────────────
+
+show "-- Image: BMP round-trip --"
+
+let test = image(5, 4)
+test.put_pixel(0, 0, RED)
+test.put_pixel(4, 0, GREEN)
+test.put_pixel(0, 3, BLUE)
+test.put_pixel(4, 3, WHITE)
+test.put_pixel(2, 2, 0xFF808080)   -- a mid grey with full alpha
+
+let bmp_path = "/tmp/_clarity_test_image.bmp"
+save_bmp(test, bmp_path)
+assert(exists(bmp_path), "save_bmp creates file")
+
+let loaded = load_bmp(bmp_path)
+assert_eq(loaded.width, 5, "loaded width")
+assert_eq(loaded.height, 4, "loaded height")
+assert_eq(loaded.get_pixel(0, 0), RED, "loaded top-left RED")
+assert_eq(loaded.get_pixel(4, 0), GREEN, "loaded top-right GREEN")
+assert_eq(loaded.get_pixel(0, 3), BLUE, "loaded bottom-left BLUE")
+assert_eq(loaded.get_pixel(4, 3), WHITE, "loaded bottom-right WHITE")
+assert_eq(loaded.get_pixel(2, 2), 0xFF808080, "loaded grey")
+-- Uninitialised source pixels are fully transparent (alpha=0, rgb=0); the
+-- 32-bit BMP preserves the alpha byte, so they round-trip identically.
+assert_eq(loaded.get_pixel(1, 1), 0, "loaded uninit pixel preserves zero alpha")
+
+exec("rm -f " + bmp_path)
+
+-- ── Save a Framebuffer round-trip via from_framebuffer ─
+
+show "-- Image: from_framebuffer / to_framebuffer --"
+
+let fb = framebuffer(4, 4)
+fb.clear(BLACK)
+fb.put_pixel(1, 1, RED)
+fb.put_pixel(2, 2, GREEN)
+
+let img2 = from_framebuffer(fb)
+assert_eq(img2.width, 4, "fb→img width")
+assert_eq(img2.get_pixel(1, 1), RED, "fb→img picks up RED")
+assert_eq(img2.get_pixel(2, 2), GREEN, "fb→img picks up GREEN")
+
+-- Modifying the image after the conversion shouldn't reach back into the
+-- framebuffer (we copied bytes, not references).
+img2.put_pixel(0, 0, BLUE)
+assert_eq(fb.get_pixel(0, 0), BLACK, "fb is independent of img after copy")
+
+let fb2 = to_framebuffer(img2)
+assert_eq(fb2.get_pixel(0, 0), BLUE, "img→fb carries the BLUE")
+assert_eq(fb2.get_pixel(1, 1), RED, "img→fb carries the RED")
+
+-- ── BMP errors ──────────────────────────────────────────
+
+show "-- Image: BMP errors --"
+
+let bad_path = "/tmp/_clarity_test_image_bad.bmp"
+let bad = alloc(20)
+bad.write_u8(0, 0)   -- wrong magic
+_ffi_write_buffer(bad._handle, bad_path)
+mut threw = false
+try { load_bmp(bad_path) } catch e { threw = true }
+assert(threw, "bad magic throws")
+exec("rm -f " + bad_path)
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Image: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " image test(s) failed" }
