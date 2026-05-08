@@ -1,0 +1,266 @@
+-- Kernel ABI — single source of truth for syscall numbers, errno
+-- values, file-mode bits, mmap/protection flags, signals, and the
+-- shape of stat / dirent structs (Phase 65 task 4).
+--
+-- The Zig kernel's enum constants in kernel/syscall/dispatch.zig
+-- and kernel/fs/vfs.zig must match the values defined here. The
+-- Clarity-side syscall wrapper (syscall.clarity) consumes these
+-- constants directly, so userspace code never has to know whether
+-- it's running on the bare-metal ClarityOS kernel or under Linux.
+
+-- ── Syscall numbers ──────────────────────────────────
+
+let SYS_READ = 0
+let SYS_WRITE = 1
+let SYS_OPEN = 2
+let SYS_CLOSE = 3
+let SYS_STAT = 4
+let SYS_FSTAT = 5
+let SYS_LSEEK = 6
+let SYS_MMAP = 7
+let SYS_MUNMAP = 8
+let SYS_BRK = 9
+
+let SYS_FORK = 10
+let SYS_EXEC = 11
+let SYS_EXIT = 12
+let SYS_WAIT = 13
+let SYS_GETPID = 14
+let SYS_GETPPID = 15
+let SYS_KILL = 16
+let SYS_NANOSLEEP = 17
+
+let SYS_PIPE = 20
+let SYS_DUP = 21
+let SYS_DUP2 = 22
+let SYS_SOCKET = 23
+let SYS_BIND = 24
+let SYS_LISTEN = 25
+let SYS_ACCEPT = 26
+let SYS_CONNECT = 27
+let SYS_SEND = 28
+let SYS_RECV = 29
+
+let SYS_MKDIR = 30
+let SYS_RMDIR = 31
+let SYS_UNLINK = 32
+let SYS_RENAME = 33
+let SYS_READDIR = 34
+let SYS_CHDIR = 35
+let SYS_GETCWD = 36
+let SYS_MOUNT = 37
+let SYS_UMOUNT = 38
+
+let SYS_IOCTL = 40
+let SYS_CLOCK_GETTIME = 41
+let SYS_FUTEX_WAIT = 42
+let SYS_FUTEX_WAKE = 43
+
+-- ── Errno ────────────────────────────────────────────
+
+let E_OK = 0
+let EPERM = 1
+let ENOENT = 2
+let ESRCH = 3
+let EINTR = 4
+let EIO = 5
+let ENXIO = 6
+let E2BIG = 7
+let ENOEXEC = 8
+let EBADF = 9
+let EAGAIN = 11
+let ENOMEM = 12
+let EACCES = 13
+let EFAULT = 14
+let EBUSY = 16
+let EEXIST = 17
+let ENODEV = 19
+let ENOTDIR = 20
+let EISDIR = 21
+let EINVAL = 22
+let ENFILE = 23
+let EMFILE = 24
+let ENOTTY = 25
+let ESPIPE = 29
+let EROFS = 30
+let ERANGE = 34
+let ENOSYS = 38
+let ENOTEMPTY = 39
+
+-- ── Open flags ───────────────────────────────────────
+
+let O_RDONLY = 0
+let O_WRONLY = 1
+let O_RDWR = 2
+let O_CREAT = 64
+let O_EXCL = 128
+let O_TRUNC = 512
+let O_APPEND = 1024
+let O_NONBLOCK = 2048
+let O_DIRECTORY = 65536
+
+-- ── File mode bits ───────────────────────────────────
+
+let S_IFMT = 0xF000
+let S_IFREG = 0x8000
+let S_IFDIR = 0x4000
+let S_IFCHR = 0x2000
+let S_IFBLK = 0x6000
+let S_IFLNK = 0xA000
+let S_IFIFO = 0x1000
+let S_IFSOCK = 0xC000
+
+let S_IRUSR = 0x100
+let S_IWUSR = 0x80
+let S_IXUSR = 0x40
+let S_IRGRP = 0x20
+let S_IWGRP = 0x10
+let S_IXGRP = 0x08
+let S_IROTH = 0x04
+let S_IWOTH = 0x02
+let S_IXOTH = 0x01
+
+-- ── mmap flags ───────────────────────────────────────
+
+let PROT_NONE = 0
+let PROT_READ = 1
+let PROT_WRITE = 2
+let PROT_EXEC = 4
+
+let MAP_SHARED = 1
+let MAP_PRIVATE = 2
+let MAP_ANONYMOUS = 32
+let MAP_FIXED = 16
+
+-- ── Signals ──────────────────────────────────────────
+
+let SIGHUP = 1
+let SIGINT = 2
+let SIGQUIT = 3
+let SIGILL = 4
+let SIGTRAP = 5
+let SIGABRT = 6
+let SIGKILL = 9
+let SIGSEGV = 11
+let SIGPIPE = 13
+let SIGALRM = 14
+let SIGTERM = 15
+let SIGCHLD = 17
+let SIGSTOP = 19
+let SIGCONT = 18
+
+-- ── Wait flags ───────────────────────────────────────
+
+let WNOHANG = 1
+let WUNTRACED = 2
+
+-- ── Standard fds ─────────────────────────────────────
+
+let STDIN = 0
+let STDOUT = 1
+let STDERR = 2
+
+-- ── Helpers ──────────────────────────────────────────
+
+fn s_isdir(mode) { return (mode & S_IFMT) == S_IFDIR }
+fn s_isreg(mode) { return (mode & S_IFMT) == S_IFREG }
+fn s_islnk(mode) { return (mode & S_IFMT) == S_IFLNK }
+fn s_ischr(mode) { return (mode & S_IFMT) == S_IFCHR }
+fn s_isblk(mode) { return (mode & S_IFMT) == S_IFBLK }
+fn s_isfifo(mode) { return (mode & S_IFMT) == S_IFIFO }
+fn s_issock(mode) { return (mode & S_IFMT) == S_IFSOCK }
+
+fn errno_name(n) {
+    if n == E_OK { return "OK" }
+    if n == EPERM { return "EPERM" }
+    if n == ENOENT { return "ENOENT" }
+    if n == ESRCH { return "ESRCH" }
+    if n == EINTR { return "EINTR" }
+    if n == EIO { return "EIO" }
+    if n == ENXIO { return "ENXIO" }
+    if n == E2BIG { return "E2BIG" }
+    if n == ENOEXEC { return "ENOEXEC" }
+    if n == EBADF { return "EBADF" }
+    if n == EAGAIN { return "EAGAIN" }
+    if n == ENOMEM { return "ENOMEM" }
+    if n == EACCES { return "EACCES" }
+    if n == EFAULT { return "EFAULT" }
+    if n == EBUSY { return "EBUSY" }
+    if n == EEXIST { return "EEXIST" }
+    if n == ENODEV { return "ENODEV" }
+    if n == ENOTDIR { return "ENOTDIR" }
+    if n == EISDIR { return "EISDIR" }
+    if n == EINVAL { return "EINVAL" }
+    if n == ENFILE { return "ENFILE" }
+    if n == EMFILE { return "EMFILE" }
+    if n == ENOTTY { return "ENOTTY" }
+    if n == ESPIPE { return "ESPIPE" }
+    if n == EROFS { return "EROFS" }
+    if n == ERANGE { return "ERANGE" }
+    if n == ENOSYS { return "ENOSYS" }
+    if n == ENOTEMPTY { return "ENOTEMPTY" }
+    return "errno(" + str(n) + ")"
+}
+
+fn signal_name(n) {
+    if n == SIGHUP { return "SIGHUP" }
+    if n == SIGINT { return "SIGINT" }
+    if n == SIGQUIT { return "SIGQUIT" }
+    if n == SIGILL { return "SIGILL" }
+    if n == SIGTRAP { return "SIGTRAP" }
+    if n == SIGABRT { return "SIGABRT" }
+    if n == SIGKILL { return "SIGKILL" }
+    if n == SIGSEGV { return "SIGSEGV" }
+    if n == SIGPIPE { return "SIGPIPE" }
+    if n == SIGALRM { return "SIGALRM" }
+    if n == SIGTERM { return "SIGTERM" }
+    if n == SIGCHLD { return "SIGCHLD" }
+    if n == SIGSTOP { return "SIGSTOP" }
+    if n == SIGCONT { return "SIGCONT" }
+    return "signal(" + str(n) + ")"
+}
+
+fn syscall_name(n) {
+    if n == SYS_READ { return "read" }
+    if n == SYS_WRITE { return "write" }
+    if n == SYS_OPEN { return "open" }
+    if n == SYS_CLOSE { return "close" }
+    if n == SYS_STAT { return "stat" }
+    if n == SYS_FSTAT { return "fstat" }
+    if n == SYS_LSEEK { return "lseek" }
+    if n == SYS_MMAP { return "mmap" }
+    if n == SYS_MUNMAP { return "munmap" }
+    if n == SYS_BRK { return "brk" }
+    if n == SYS_FORK { return "fork" }
+    if n == SYS_EXEC { return "exec" }
+    if n == SYS_EXIT { return "exit" }
+    if n == SYS_WAIT { return "wait" }
+    if n == SYS_GETPID { return "getpid" }
+    if n == SYS_GETPPID { return "getppid" }
+    if n == SYS_KILL { return "kill" }
+    if n == SYS_NANOSLEEP { return "nanosleep" }
+    if n == SYS_PIPE { return "pipe" }
+    if n == SYS_DUP { return "dup" }
+    if n == SYS_DUP2 { return "dup2" }
+    if n == SYS_SOCKET { return "socket" }
+    if n == SYS_BIND { return "bind" }
+    if n == SYS_LISTEN { return "listen" }
+    if n == SYS_ACCEPT { return "accept" }
+    if n == SYS_CONNECT { return "connect" }
+    if n == SYS_SEND { return "send" }
+    if n == SYS_RECV { return "recv" }
+    if n == SYS_MKDIR { return "mkdir" }
+    if n == SYS_RMDIR { return "rmdir" }
+    if n == SYS_UNLINK { return "unlink" }
+    if n == SYS_RENAME { return "rename" }
+    if n == SYS_READDIR { return "readdir" }
+    if n == SYS_CHDIR { return "chdir" }
+    if n == SYS_GETCWD { return "getcwd" }
+    if n == SYS_MOUNT { return "mount" }
+    if n == SYS_UMOUNT { return "umount" }
+    if n == SYS_IOCTL { return "ioctl" }
+    if n == SYS_CLOCK_GETTIME { return "clock_gettime" }
+    if n == SYS_FUTEX_WAIT { return "futex_wait" }
+    if n == SYS_FUTEX_WAKE { return "futex_wake" }
+    return "syscall(" + str(n) + ")"
+}

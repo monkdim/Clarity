@@ -1,0 +1,273 @@
+-- Process scheduler model — pure-state simulation of the kernel
+-- scheduler in kernel/sched/scheduler.zig (Phase 65 task 3).
+--
+-- The Zig scheduler is hardware-driven; we can't run it in this
+-- environment. So we mirror its public behaviour as a Clarity class
+-- that's fully testable: priorities, runqueues, blocked threads,
+-- watchdog ticks, exit + reap. Same enqueue / dequeue / preempt
+-- semantics. Keeps the design contract honest, lets us experiment
+-- with policy changes (priority inheritance, fair-share weighting)
+-- without booting QEMU.
+--
+-- Threads are plain dicts: {tid, pid, name, priority, state, wait,
+-- ticks_run, exit_code}. The Scheduler class owns a list of
+-- runqueues indexed by priority, plus a parallel list of blocked
+-- threads.
+
+let PRIO_HIGH = 0
+let PRIO_NORMAL = 1
+let PRIO_IDLE = 2
+let PRIO_COUNT = 3
+
+let STATE_RUNNABLE = "runnable"
+let STATE_RUNNING = "running"
+let STATE_BLOCKED = "blocked"
+let STATE_ZOMBIE = "zombie"
+
+let WAIT_NONE = "none"
+let WAIT_IO = "io"
+let WAIT_SLEEP = "sleep"
+let WAIT_PID = "waitpid"
+let WAIT_FUTEX = "futex"
+let WAIT_CHANNEL = "channel"
+
+fn priority_name(p) {
+    if p == PRIO_HIGH { return "high" }
+    if p == PRIO_NORMAL { return "normal" }
+    if p == PRIO_IDLE { return "idle" }
+    return "?"
+}
+
+fn make_thread(tid, name, priority) {
+    return {
+        "tid": tid,
+        "pid": 0,
+        "name": name,
+        "priority": priority,
+        "state": STATE_RUNNABLE,
+        "wait": WAIT_NONE,
+        "wait_arg": null,
+        "ticks_run": 0,
+        "exit_code": 0
+    }
+}
+
+class Scheduler {
+    fn init() {
+        this.queues = [[], [], []]            -- one per priority level
+        this.blocked = []
+        this.zombies = []
+        this.current = null
+        this._next_tid = 1
+        this._tick_count = 0
+        this.events = []                      -- {event, ...} log
+        this._record = false
+    }
+
+    fn enable_event_log() { this._record = true }
+
+    fn _emit(ev) {
+        if this._record { push(this.events, ev) }
+    }
+
+    -- ── Spawning ─────────────────────────────────────
+
+    fn spawn(name, priority) {
+        let t = make_thread(this._next_tid, name, priority)
+        this._next_tid = this._next_tid + 1
+        push(this.queues[priority], t)
+        this._emit({"event": "spawn", "tid": t["tid"], "name": name, "priority": priority})
+        return t
+    }
+
+    -- ── Dispatch ─────────────────────────────────────
+
+    -- Pick the next runnable thread. Returns the thread or null
+    -- if every queue is empty.
+    fn _pick_next() {
+        mut i = 0
+        while i < PRIO_COUNT {
+            let q = this.queues[i]
+            if len(q) > 0 {
+                let head = q[0]
+                this.queues[i] = _tail(q)
+                return head
+            }
+            i = i + 1
+        }
+        return null
+    }
+
+    fn schedule() {
+        -- Move the current thread (if any) back to its queue.
+        if this.current != null {
+            let prev = this.current
+            if prev["state"] == STATE_RUNNING {
+                prev["state"] = STATE_RUNNABLE
+                push(this.queues[prev["priority"]], prev)
+            }
+        }
+        let next = this._pick_next()
+        if next == null {
+            this.current = null
+            this._emit({"event": "idle"})
+            return null
+        }
+        next["state"] = STATE_RUNNING
+        next["ticks_run"] = next["ticks_run"] + 1
+        this.current = next
+        this._emit({"event": "dispatch", "tid": next["tid"]})
+        return next
+    }
+
+    -- One full timer tick: schedule, then advance ticks.
+    fn tick() {
+        this._tick_count = this._tick_count + 1
+        return this.schedule()
+    }
+
+    -- ── Block / wake ─────────────────────────────────
+
+    fn block(reason, arg) {
+        if this.current == null { return null }
+        let t = this.current
+        t["state"] = STATE_BLOCKED
+        t["wait"] = reason
+        t["wait_arg"] = arg
+        push(this.blocked, t)
+        this.current = null
+        this._emit({"event": "block", "tid": t["tid"], "reason": reason})
+        return this.schedule()
+    }
+
+    fn wake(tid) {
+        mut idx = -1
+        mut i = 0
+        while i < len(this.blocked) {
+            if this.blocked[i]["tid"] == tid { idx = i; break }
+            i = i + 1
+        }
+        if idx < 0 { return false }
+        let t = this.blocked[idx]
+        this.blocked = _remove_at(this.blocked, idx)
+        t["state"] = STATE_RUNNABLE
+        t["wait"] = WAIT_NONE
+        t["wait_arg"] = null
+        push(this.queues[t["priority"]], t)
+        this._emit({"event": "wake", "tid": tid})
+        return true
+    }
+
+    fn wake_all(reason) {
+        mut woken = []
+        mut still_blocked = []
+        for t in this.blocked {
+            if t["wait"] == reason {
+                t["state"] = STATE_RUNNABLE
+                t["wait"] = WAIT_NONE
+                t["wait_arg"] = null
+                push(this.queues[t["priority"]], t)
+                push(woken, t["tid"])
+            } else {
+                push(still_blocked, t)
+            }
+        }
+        this.blocked = still_blocked
+        if len(woken) > 0 {
+            this._emit({"event": "wake_all", "reason": reason, "tids": woken})
+        }
+        return woken
+    }
+
+    -- Advance any sleep_until threads whose deadline has passed.
+    -- now: an integer "tick" or "epoch" comparable to wait_arg.
+    fn wake_sleepers(now) {
+        mut woken = []
+        mut still_blocked = []
+        for t in this.blocked {
+            if t["wait"] == WAIT_SLEEP and t["wait_arg"] != null and t["wait_arg"] <= now {
+                t["state"] = STATE_RUNNABLE
+                t["wait"] = WAIT_NONE
+                t["wait_arg"] = null
+                push(this.queues[t["priority"]], t)
+                push(woken, t["tid"])
+            } else {
+                push(still_blocked, t)
+            }
+        }
+        this.blocked = still_blocked
+        return woken
+    }
+
+    -- ── Exit / reap ──────────────────────────────────
+
+    fn exit(code) {
+        if this.current == null { return null }
+        let t = this.current
+        t["state"] = STATE_ZOMBIE
+        t["exit_code"] = code
+        push(this.zombies, t)
+        this.current = null
+        this._emit({"event": "exit", "tid": t["tid"], "code": code})
+        return this.schedule()
+    }
+
+    fn reap(tid) {
+        mut idx = -1
+        mut i = 0
+        while i < len(this.zombies) {
+            if this.zombies[i]["tid"] == tid { idx = i; break }
+            i = i + 1
+        }
+        if idx < 0 { return null }
+        let t = this.zombies[idx]
+        this.zombies = _remove_at(this.zombies, idx)
+        return t
+    }
+
+    -- ── Introspection ────────────────────────────────
+
+    fn queue_len(priority) { return len(this.queues[priority]) }
+    fn blocked_count() { return len(this.blocked) }
+    fn zombie_count() { return len(this.zombies) }
+    fn tick_count() { return this._tick_count }
+
+    fn all_threads() {
+        mut out = []
+        for q in this.queues {
+            for t in q { push(out, t) }
+        }
+        for t in this.blocked { push(out, t) }
+        for t in this.zombies { push(out, t) }
+        if this.current != null { push(out, this.current) }
+        return out
+    }
+
+    fn find(tid) {
+        for t in this.all_threads() {
+            if t["tid"] == tid { return t }
+        }
+        return null
+    }
+}
+
+fn scheduler() { return Scheduler() }
+
+-- ── List helpers ────────────────────────────────────
+
+fn _tail(list) {
+    mut out = []
+    mut i = 1
+    while i < len(list) { push(out, list[i]); i = i + 1 }
+    return out
+}
+
+fn _remove_at(list, idx) {
+    mut out = []
+    mut i = 0
+    while i < len(list) {
+        if i != idx { push(out, list[i]) }
+        i = i + 1
+    }
+    return out
+}
