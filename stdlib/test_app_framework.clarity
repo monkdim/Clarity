@@ -1,0 +1,508 @@
+-- Phase 64 — app framework tests.
+-- Manifest parser/validator, sandbox permission gating, app store
+-- with a fake client, scaffolder file output, hot-reload watcher +
+-- StateBox + HotReloader. We never hit the real registry; the
+-- AppStore tests use LocalAppStoreClient with hand-built tarballs
+-- in /tmp.
+
+from "app_manifest.clarity" import AppManifest, manifest, manifest_from_text, parse_manifest, generate_manifest, MANIFEST_FILENAME
+from "app_sandbox.clarity" import Sandbox, sandbox_for, SandboxedFs, sandboxed_fs, default_app_dir
+from "app_store.clarity" import AppStore, app_store, AppEntry, LocalAppStoreClient, default_install_root
+from "app_scaffold.clarity" import scaffold_app
+from "hot_reload.clarity" import FileWatcher, file_watcher, StateBox, state_box, HotReloader, hot_reloader
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _exists(path) {
+    let r = exec_full("test -e " + _quote(path) + " && echo y || echo n")
+    return trim(r.stdout) == "y"
+}
+
+fn _rm_rf(path) { exec_full("rm -rf " + _quote(path)) }
+
+-- ── Manifest: parse + serialise + validate ───────────
+
+show "-- Apps: manifest parser --"
+
+let sample = "[app]\nname = \"calc\"\nversion = \"0.2.1\"\nentry = \"main.clarity\"\ndescription = \"A small calculator\"\ncategories = [\"utility\", \"math\"]\n\n[window]\ntitle = \"Calc\"\nwidth = 320\nheight = 480\nresizable = false\n\n[permissions]\nfilesystem = [\"read\"]\nnetwork = false\nnotifications = true\n"
+let parsed = parse_manifest(sample)
+assert_eq(parsed["app"]["name"], "calc", "parsed app.name")
+assert_eq(parsed["app"]["version"], "0.2.1", "parsed app.version (string, not float)")
+assert_eq(parsed["window"]["width"], 320, "parsed window.width as int")
+assert_eq(parsed["window"]["resizable"], false, "parsed bool false")
+assert_eq(parsed["permissions"]["filesystem"], ["read"], "parsed array of strings")
+assert_eq(parsed["app"]["categories"], ["utility", "math"], "parsed multi-element array")
+
+let m = manifest(parsed)
+assert_eq(m.name, "calc", "AppManifest.name")
+assert_eq(m.window["width"], 320, "window width default override")
+assert_eq(m.window["title"], "Calc", "window title")
+
+-- Validation passes on a complete manifest
+assert_eq(len(m.validate()), 0, "valid manifest has no errors")
+
+-- Permission queries
+assert(m.requests("filesystem.read"), "filesystem.read granted")
+assert(not m.requests("filesystem.write"), "filesystem.write not granted")
+assert(not m.requests("network"), "network not granted")
+assert(m.requests("notifications"), "notifications granted")
+assert(not m.requests("audio"), "audio not granted")
+
+-- Round-trip via to_text() preserves the important bits
+let regen = m.to_text()
+let m2 = manifest_from_text(regen)
+assert_eq(m2.name, "calc", "round-trip name")
+assert_eq(m2.version, "0.2.1", "round-trip version")
+assert_eq(m2.requests("filesystem.read"), true, "round-trip permission")
+
+-- ── Manifest: validation catches errors ──────────────
+
+show "-- Apps: manifest validation --"
+
+let bad = manifest({
+    "app": {"name": "", "version": "", "entry": ""},
+    "window": {"width": 0, "height": -1},
+    "permissions": {
+        "filesystem": "read",                       -- should be a list
+        "network": "yes",                           -- should be bool or list
+        "audio": ["maybe"],                         -- should be bool
+        "blarg": true                               -- unknown group
+    }
+})
+let errs = bad.validate()
+assert(len(errs) >= 5, "multiple errors caught")
+
+fn _has_substring(list, sub) {
+    for s in list {
+        if contains(s, sub) { return true }
+    }
+    return false
+}
+
+assert(_has_substring(errs, "app.name"), "missing name reported")
+assert(_has_substring(errs, "filesystem"), "filesystem must be list reported")
+assert(_has_substring(errs, "blarg"), "unknown permission group reported")
+
+-- Network as a list of hosts
+let net_m = manifest({
+    "app": {"name": "x", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 400, "height": 300},
+    "permissions": {"network": ["api.example.com", "*.cdn.com"]}
+})
+assert_eq(len(net_m.validate()), 0, "network=list valid")
+assert(net_m.requests("network"), "network granted via list")
+assert_eq(net_m.allowed_hosts(), ["api.example.com", "*.cdn.com"], "allowed_hosts from list")
+
+let bare_net = manifest({
+    "app": {"name": "x", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 400, "height": 300},
+    "permissions": {"network": true}
+})
+assert_eq(bare_net.allowed_hosts(), ["*"], "network=true means wildcard host")
+
+-- ── Sandbox: filesystem ──────────────────────────────
+
+show "-- Apps: sandbox filesystem --"
+
+let m_no_fs = manifest({
+    "app": {"name": "sbx", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 400, "height": 300},
+    "permissions": {}
+})
+let app_dir = "/tmp/_clarity_sandbox_test"
+_rm_rf(app_dir)
+let sb = sandbox_for(m_no_fs, app_dir)
+sb.ensure_data_dir()
+
+-- Inside the app's own dir always allowed, even with no permissions
+assert(sb.check_read(app_dir + "/data/save.json"), "own data_dir read allowed")
+assert(sb.check_write(app_dir + "/data/save.json"), "own data_dir write allowed")
+assert(sb.check_write(app_dir + "/anywhere.txt"), "own app_dir write allowed")
+
+-- Outside the app dir denied without permission
+assert(not sb.check_read("/etc/passwd"), "outside read denied without grant")
+assert(not sb.check_write("/etc/something"), "outside write denied without grant")
+
+-- Path traversal does not break the gate
+assert(not sb.check_write(app_dir + "/data/../../../etc/passwd"), "../ escape blocked")
+
+-- With grant
+let m_read = manifest({
+    "app": {"name": "sbx", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 400, "height": 300},
+    "permissions": {"filesystem": ["read"]}
+})
+let sb2 = sandbox_for(m_read, app_dir)
+assert(sb2.check_read("/etc/passwd"), "grant: read allowed")
+assert(not sb2.check_write("/etc/passwd"), "grant: write still denied")
+
+let m_rw = manifest({
+    "app": {"name": "sbx", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 400, "height": 300},
+    "permissions": {"filesystem": ["read", "write"]}
+})
+let sb3 = sandbox_for(m_rw, app_dir)
+assert(sb3.check_write("/tmp/anywhere.txt"), "rw grant: write allowed")
+
+-- Enforce throws on denial
+mut threw = false
+try { sb.enforce_read("/etc/passwd") } catch e { threw = true }
+assert(threw, "enforce_read throws on denial")
+
+-- ── Sandbox: network host patterns ───────────────────
+
+show "-- Apps: sandbox network --"
+
+let m_net = manifest({
+    "app": {"name": "n", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 100, "height": 100},
+    "permissions": {"network": ["api.example.com", "*.cdn.com"]}
+})
+let nb = sandbox_for(m_net, "/tmp/_n")
+assert(nb.check_network("api.example.com"), "exact host match")
+assert(not nb.check_network("evil.com"), "host not in list denied")
+assert(nb.check_network("static.cdn.com"), "wildcard subdomain match")
+assert(nb.check_network("a.b.cdn.com"), "deep wildcard subdomain match")
+assert(not nb.check_network("cdn.com"), "wildcard does not match the bare host")
+
+-- Wildcard everywhere
+let m_any = manifest({
+    "app": {"name": "any", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 100, "height": 100},
+    "permissions": {"network": true}
+})
+let any_sb = sandbox_for(m_any, "/tmp/_any")
+assert(any_sb.check_network("anything.example"), "network=true allows anything")
+
+-- ── Sandbox: audio / notifications / clipboard / process ──
+
+show "-- Apps: sandbox simple grants --"
+
+let m_a = manifest({
+    "app": {"name": "a", "version": "1.0.0", "entry": "main.clarity"},
+    "window": {"width": 100, "height": 100},
+    "permissions": {"audio": true, "notifications": true}
+})
+let a_sb = sandbox_for(m_a, "/tmp/_a")
+assert(a_sb.check_audio(), "audio granted")
+assert(a_sb.check_notifications(), "notifications granted")
+assert(not a_sb.check_clipboard(), "clipboard not granted")
+assert(not a_sb.check_process(), "process not granted")
+
+-- Audit log
+a_sb.enable_audit()
+a_sb.check_audio()
+a_sb.check_clipboard()
+assert_eq(len(a_sb.audit), 2, "audit recorded 2 events")
+assert_eq(a_sb.audit[0]["kind"], "audio", "audit kind: audio")
+assert_eq(a_sb.audit[0]["allowed"], true, "audit allowed: true")
+assert_eq(a_sb.audit[1]["allowed"], false, "audit allowed: false on clipboard")
+
+-- ── Sandboxed FS façade ──────────────────────────────
+
+show "-- Apps: SandboxedFs --"
+
+let sb_fs = sandboxed_fs(sb3)              -- has rw grant
+sb_fs.write("/tmp/_clarity_sbxfs.txt", "hello sandbox")
+assert(sb_fs.exists("/tmp/_clarity_sbxfs.txt"), "wrote and exists")
+assert_eq(sb_fs.read("/tmp/_clarity_sbxfs.txt"), "hello sandbox", "read back")
+sb_fs.append("/tmp/_clarity_sbxfs.txt", "!")
+assert_eq(sb_fs.read("/tmp/_clarity_sbxfs.txt"), "hello sandbox!", "append concatenates")
+exec_full("rm -f /tmp/_clarity_sbxfs.txt")
+
+-- Without grant, write throws
+let no_grant_fs = sandboxed_fs(sb)
+mut fs_threw = false
+try { no_grant_fs.write("/tmp/_should_fail.txt", "x") } catch e { fs_threw = true }
+assert(fs_threw, "SandboxedFs.write blocks without grant")
+
+-- ── App store: catalogue + install via local client ──
+
+show "-- Apps: AppStore catalogue --"
+
+let store_root = "/tmp/_clarity_app_store_test"
+_rm_rf(store_root)
+
+-- Build a fake catalogue
+let lc = LocalAppStoreClient()
+lc.set("/apps", [
+    {"name": "calc", "version": "0.1.0", "description": "calculator"},
+    {"name": "editor", "version": "1.2.3", "description": "text editor", "categories": ["dev"]}
+])
+lc.set("/apps/calc", {
+    "name": "calc",
+    "version": "0.1.0",
+    "description": "calculator",
+    "tarball_url": "local://calc-0.1.0.tar.gz",
+    "rating": 4.5,
+    "categories": ["utility", "math"]
+})
+lc.set("/apps/search?q=ed", {"apps": [{"name": "editor", "version": "1.2.3"}]})
+lc.set("/apps/featured", [{"name": "calc", "version": "0.1.0"}])
+lc.set("/apps/category/utility", [{"name": "calc", "version": "0.1.0"}])
+
+-- Build an actual tarball on disk for the install path
+let app_src = "/tmp/_clarity_app_store_src"
+_rm_rf(app_src)
+exec_full("mkdir -p " + _quote(app_src))
+let app_manifest_text = "[app]\nname = \"calc\"\nversion = \"0.1.0\"\nentry = \"main.clarity\"\n\n[window]\nwidth = 320\nheight = 480\n\n[permissions]\n"
+write(app_src + "/clarity-app.toml", app_manifest_text)
+write(app_src + "/main.clarity", "show \"calc\"\n")
+let tarball_src = "/tmp/_clarity_calc.tar.gz"
+exec_full("rm -f " + tarball_src)
+exec_full("cd " + _quote(app_src) + " && tar czf " + tarball_src + " .")
+lc.set_tarball("local://calc-0.1.0.tar.gz", tarball_src)
+
+let store = app_store({"client": lc, "install_root": store_root})
+
+let listed = store.list()
+assert_eq(len(listed), 2, "list() returned both apps")
+assert_eq(listed[0].name, "calc", "first entry name")
+
+let info = store.info("calc")
+assert(info != null, "info returned")
+assert_eq(info.name, "calc", "info name")
+assert_eq(info.rating, 4.5, "info rating")
+assert_eq(info.categories, ["utility", "math"], "info categories")
+
+let searched = store.search("ed")
+assert_eq(len(searched), 1, "search wraps {apps: [...]}")
+assert_eq(searched[0].name, "editor", "search hit name")
+
+let featured = store.featured()
+assert_eq(len(featured), 1, "featured returned")
+let by_cat = store.by_category("utility")
+assert_eq(by_cat[0].name, "calc", "by_category returned calc")
+
+-- Missing app
+assert_eq(store.info("nope"), null, "missing app -> null")
+
+-- ── App store: install + remove ──────────────────────
+
+show "-- Apps: AppStore install/remove --"
+
+assert(not store.is_installed("calc"), "not installed yet")
+let installed_entry = store.install("calc")
+assert_eq(installed_entry.name, "calc", "install returned entry")
+assert(store.is_installed("calc"), "is_installed after install")
+let install_dir = store.install_dir("calc")
+assert(_exists(install_dir + "/clarity-app.toml"), "manifest landed in install dir")
+assert(_exists(install_dir + "/main.clarity"), "main.clarity landed")
+
+let installed = store.installed()
+assert_eq(len(installed), 1, "one installed")
+assert_eq(installed[0]["name"], "calc", "installed name")
+assert_eq(installed[0]["version"], "0.1.0", "installed version")
+
+let m_loaded = store.manifest_for("calc")
+assert(m_loaded != null, "manifest loaded back")
+assert_eq(m_loaded.name, "calc", "loaded manifest name")
+
+let cmd = store.launch_command("calc")
+assert(contains(cmd, "main.clarity"), "launch command points to entry")
+
+let removed = store.remove("calc")
+assert(removed, "remove() returned true")
+assert(not store.is_installed("calc"), "not installed after remove")
+assert(not _exists(install_dir + "/clarity-app.toml"), "files gone after remove")
+
+-- Install of unknown app throws
+mut store_threw = false
+try { store.install("nope") } catch e { store_threw = true }
+assert(store_threw, "install of missing app throws")
+
+-- Install of an entry without tarball_url throws
+lc.set("/apps/broken", {"name": "broken", "version": "0.0.1"})
+mut store_threw2 = false
+try { store.install("broken") } catch e { store_threw2 = true }
+assert(store_threw2, "install of tarball-less entry throws")
+
+-- install_local from a local source dir
+let local_pkg = "/tmp/_clarity_local_pkg"
+_rm_rf(local_pkg)
+exec_full("mkdir -p " + _quote(local_pkg))
+write(local_pkg + "/clarity-app.toml", "[app]\nname = \"localapp\"\nversion = \"0.0.1\"\nentry = \"main.clarity\"\n\n[window]\nwidth = 200\nheight = 200\n\n[permissions]\n")
+write(local_pkg + "/main.clarity", "show \"local\"\n")
+let local_m = store.install_local(local_pkg)
+assert_eq(local_m.name, "localapp", "install_local returned manifest")
+assert(store.is_installed("localapp"), "local app installed")
+store.remove("localapp")
+
+-- Cleanup
+exec_full("rm -f " + tarball_src)
+_rm_rf(app_src)
+_rm_rf(local_pkg)
+_rm_rf(store_root)
+
+-- ── Scaffolder ───────────────────────────────────────
+
+show "-- Apps: scaffolder --"
+
+let scaff_root = "/tmp/_clarity_scaffold_test"
+_rm_rf(scaff_root)
+
+let result = scaffold_app(scaff_root + "/myapp", {"template": "basic", "author": "you", "description": "test"})
+assert_eq(result["name"], "myapp", "name inferred from path")
+assert_eq(result["template"], "basic", "template recorded")
+assert(_exists(result["manifest_path"]), "manifest written")
+assert(_exists(scaff_root + "/myapp/main.clarity"), "main.clarity written")
+assert(_exists(scaff_root + "/myapp/.gitignore"), ".gitignore written")
+assert(_exists(scaff_root + "/myapp/README.md"), "README written")
+
+-- Generated manifest validates clean
+let scaff_manifest = manifest_from_text(read(result["manifest_path"]))
+assert_eq(len(scaff_manifest.validate()), 0, "scaffolded manifest validates")
+assert_eq(scaff_manifest.author, "you", "author propagated")
+assert_eq(scaff_manifest.description, "test", "description propagated")
+
+-- Generated main.clarity for basic template runs `show`
+let main_src = read(scaff_root + "/myapp/main.clarity")
+assert(contains(main_src, "Hello from myapp"), "basic main says hello")
+
+-- gui template uses different scaffolding
+let gui_result = scaffold_app(scaff_root + "/guiapp", {"template": "gui"})
+let gui_main = read(scaff_root + "/guiapp/main.clarity")
+assert(contains(gui_main, "WidgetRoot"), "gui main imports WidgetRoot")
+let gui_m = gui_result["manifest"]
+assert_eq(gui_m.window["width"], 480, "gui window default width")
+assert(gui_m.requests("notifications"), "gui template requests notifications")
+
+-- Re-scaffolding into the same dir refuses (manifest already there)
+mut scaff_threw = false
+try { scaffold_app(scaff_root + "/myapp", {}) } catch e { scaff_threw = true }
+assert(scaff_threw, "scaffold refuses overwrite")
+
+-- Unknown template throws
+mut scaff_threw2 = false
+try { scaffold_app(scaff_root + "/u", {"template": "wat"}) } catch e { scaff_threw2 = true }
+assert(scaff_threw2, "unknown template throws")
+
+_rm_rf(scaff_root)
+
+-- ── StateBox ─────────────────────────────────────────
+
+show "-- Apps: StateBox --"
+
+let sb_box = state_box()
+assert_eq(sb_box.size(), 0, "empty StateBox")
+sb_box.put("scroll", 42)
+sb_box.put("text", "hello")
+assert_eq(sb_box.size(), 2, "two keys")
+assert(sb_box.has("scroll"), "has(scroll)")
+assert_eq(sb_box.get("scroll", 0), 42, "get scroll")
+assert_eq(sb_box.get("missing", "default"), "default", "missing falls through to default")
+sb_box.remove("scroll")
+assert(not sb_box.has("scroll"), "remove deleted")
+sb_box.clear()
+assert_eq(sb_box.size(), 0, "clear empties")
+
+-- ── FileWatcher diff ─────────────────────────────────
+
+show "-- Apps: FileWatcher diff --"
+
+let fw = file_watcher("/tmp", ".clarity-no-such-thing")
+-- We pass a synthetic "snapshot" so we don't depend on the real
+-- filesystem; the test only exercises the diff machinery.
+fw._set_snapshot_for_test({"/a.clarity": "10:5", "/b.clarity": "20:7"})
+let changes1 = fw.poll_with({"/a.clarity": "10:5", "/b.clarity": "20:7"})
+assert_eq(len(changes1), 0, "identical snapshot -> no changes")
+
+let changes2 = fw.poll_with({"/a.clarity": "11:5", "/b.clarity": "20:7", "/c.clarity": "30:9"})
+assert_eq(len(changes2), 2, "1 modified + 1 added = 2 changes")
+
+-- Find the modified entry vs added entry
+mut found_mod = false
+mut found_add = false
+for ch in changes2 {
+    if ch["path"] == "/a.clarity" and ch["kind"] == "modified" { found_mod = true }
+    if ch["path"] == "/c.clarity" and ch["kind"] == "added" { found_add = true }
+}
+assert(found_mod, "saw modified")
+assert(found_add, "saw added")
+
+-- And a removal: drop /b.clarity
+let changes3 = fw.poll_with({"/a.clarity": "11:5", "/c.clarity": "30:9"})
+mut found_rem = false
+for ch in changes3 {
+    if ch["path"] == "/b.clarity" and ch["kind"] == "removed" { found_rem = true }
+}
+assert(found_rem, "saw removed")
+
+-- ── HotReloader: rebuild + state preservation ────────
+
+show "-- Apps: HotReloader --"
+
+mut build_calls = 0
+fn _builder(state, prev) {
+    build_calls = build_calls + 1
+    -- Carry over a "counter" across rebuilds
+    let prev_counter = state.get("counter", 0)
+    let next_counter = prev_counter + 1
+    state.put("counter", next_counter)
+    return {"counter": next_counter, "name": "app"}
+}
+
+let hr = hot_reloader("/tmp", _builder, {"ext": ".clarity-no-such"})
+hr.build_initial()
+assert_eq(build_calls, 1, "initial build ran")
+assert_eq(hr.app["counter"], 1, "first build set counter=1")
+
+-- Watch events
+mut events = []
+hr.on(fn(ev) { push(events, ev["event"]) })
+
+-- No file changes -> no rebuild
+let no_change = hr.tick_with_snapshot({})
+assert_eq(len(no_change), 0, "no changes -> no reload")
+assert_eq(build_calls, 1, "no rebuild without changes")
+
+-- Synthetic change -> rebuild
+let with_change = hr.tick_with_snapshot({"/x.clarity": "1:1"})
+assert_eq(len(with_change), 1, "one change reported")
+assert_eq(build_calls, 2, "rebuild ran on change")
+assert_eq(hr.app["counter"], 2, "state survived: counter=2")
+assert_eq(hr.reload_count, 1, "reload_count incremented")
+
+-- Force a reload manually
+hr.force_reload()
+assert_eq(build_calls, 3, "force_reload rebuilds")
+assert_eq(hr.app["counter"], 3, "counter=3 after force reload")
+assert_eq(hr.reload_count, 2, "reload_count=2")
+
+-- Listener saw before/after pairs
+assert(contains(events, "before_reload"), "before_reload event fired")
+assert(contains(events, "after_reload"), "after_reload event fired")
+
+-- Errors are caught and surfaced via .error
+fn _broken_builder(state, prev) {
+    throw "boom"
+}
+let hr2 = hot_reloader("/tmp", _broken_builder, {"ext": ".clarity-no-such"})
+hr2.build_initial()
+assert(hr2.error != null, "error captured on build_initial")
+assert(contains(hr2.error, "boom"), "error message preserved")
+
+-- ── Summary ─────────────────────────────────────────
+
+show ""
+show "App framework: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " app-framework test(s) failed" }

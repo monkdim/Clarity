@@ -1,0 +1,384 @@
+-- Phase 67 — bootable ISO + installer + QEMU + hardware tests.
+--
+-- Pure-state coverage of the build tooling that ships ClarityOS:
+--   * IsoBuilder + LiveUsbBuilder (validate / plan / GRUB config)
+--   * Installer state machine (transitions, validation, plan,
+--     dry-run install)
+--   * QemuRunner command-line composition + boot-test wiring
+--   * HardwareDb lookup + tier classification
+--
+-- None of these tests touch real disks, real ISOs, or actually
+-- launch QEMU. The two builders + the runner all expose a `plan()`
+-- (or `cmd()`) method that returns the operation list verbatim,
+-- which is what we assert on.
+
+from "mkiso.clarity" import IsoBuilder, iso_builder
+from "live_usb.clarity" import LiveUsbBuilder, live_usb_builder
+from "run_vm.clarity" import QemuRunner, qemu_runner
+from "installer.clarity" import Installer, installer, STEP_WELCOME, STEP_DISK, STEP_PARTITION, STEP_ACCOUNT, STEP_REVIEW, STEP_INSTALL, STEP_DONE, LAYOUT_AUTO, LAYOUT_AUTO_LUKS, LAYOUT_MANUAL
+from "hardware.clarity" import HardwareDb, hw_db, TIER_1, TIER_2, TIER_EXPERIMENTAL
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── ISO builder: plan + GRUB config ────────────────
+
+show "-- Phase 67: ISO builder --"
+
+let iso = iso_builder({"output": "claritos-test.iso", "label": "ClarityOS Test"})
+iso.add_kernel("/staging/clarity-kernel")
+iso.add_runtime("/staging/clarity-init")
+iso.add_uefi_loader("/staging/BOOTX64.EFI")
+iso.add_stdlib_bundle("/staging/stdlib")
+iso.add_app("calc", "/staging/calc")
+iso.add_app("editor", "/staging/editor")
+
+assert_eq(len(iso.validate()), 0, "complete config validates")
+
+let plan = iso.plan()
+assert(len(plan) > 5, "plan has multiple steps")
+
+mut kinds = []
+for op in plan { push(kinds, op["kind"]) }
+assert(contains(kinds, "mkdir"), "plan creates dirs")
+assert(contains(kinds, "copy"), "plan copies files")
+assert(contains(kinds, "copy_tree"), "plan copies trees")
+assert(contains(kinds, "write"), "plan writes config files")
+assert(contains(kinds, "pack"), "plan ends with pack")
+
+-- pack op is last
+let last = plan[len(plan) - 1]
+assert_eq(last["kind"], "pack", "pack is the final op")
+assert_eq(last["image"], "claritos-test.iso", "pack uses configured output")
+assert_eq(last["label"], "ClarityOS Test", "pack uses configured label")
+
+-- GRUB config has the right entries
+let bios_cfg = iso.bios_grub_cfg()
+assert(contains(bios_cfg, "menuentry 'ClarityOS'"), "bios cfg has main entry")
+assert(contains(bios_cfg, "menuentry 'ClarityOS (rescue shell)'"), "rescue entry")
+assert(contains(bios_cfg, "menuentry 'ClarityOS installer'"), "installer entry")
+assert(contains(bios_cfg, "multiboot2 /boot/clarity-kernel"), "loads kernel")
+assert(contains(bios_cfg, "set timeout=5"), "default timeout")
+
+let uefi_cfg = iso.uefi_grub_cfg()
+assert(contains(uefi_cfg, "menuentry 'ClarityOS'"), "uefi cfg present")
+assert(contains(uefi_cfg, "(UEFI)"), "uefi mode tag")
+
+-- Validation catches missing pieces
+let bad = iso_builder({"output": "broken"})
+let errs = bad.validate()
+assert(len(errs) >= 2, "missing kernel + bad output ext flagged")
+mut flagged_kernel = false
+mut flagged_ext = false
+for e in errs {
+    if contains(e, "kernel") { flagged_kernel = true }
+    if contains(e, ".iso") { flagged_ext = true }
+}
+assert(flagged_kernel, "missing kernel reported")
+assert(flagged_ext, "non-.iso output reported")
+
+-- bios=false + uefi=false flagged
+let neither = iso_builder({"bios": false, "uefi": false, "output": "x.iso"})
+neither.add_kernel("k"); neither.add_runtime("r")
+let n_errs = neither.validate()
+mut flagged_neither = false
+for e in n_errs { if contains(e, "bios / uefi") { flagged_neither = true } }
+assert(flagged_neither, "bios + uefi both off flagged")
+
+-- ── Live USB builder ───────────────────────────────
+
+show "-- Phase 67: live USB --"
+
+let live = live_usb_builder({
+    "output": "claritos-live.iso",
+    "label": "ClarityOS Live",
+    "persistence": true,
+    "persistence_size_mb": 512
+})
+live.add_kernel("/staging/clarity-kernel")
+live.add_runtime("/staging/clarity-init")
+live.add_uefi_loader("/staging/BOOTX64.EFI")
+live.add_root_tree("/staging/rootfs")
+
+assert_eq(len(live.validate()), 0, "live config valid")
+
+let live_plan = live.plan()
+mut live_kinds = []
+for op in live_plan { push(live_kinds, op["kind"]) }
+assert(contains(live_kinds, "squashfs"), "live plan packs squashfs")
+assert(contains(live_kinds, "pack"), "live plan still packs the ISO")
+
+-- Manifest is JSON and has the right keys
+let manifest = live.manifest()
+assert_eq(manifest["kind"], "live", "manifest kind=live")
+assert(manifest["persistence"], "manifest persistence=true")
+assert_eq(manifest["persistence_size_mb"], 512, "manifest size carried over")
+assert_eq(manifest["kernel_cmdline"], "boot=live", "live mode cmdline default")
+
+-- The plan's manifest write op carries JSON
+mut found_manifest = false
+for op in live_plan {
+    if op["kind"] == "write" and contains(op["path"], "manifest.json") {
+        found_manifest = true
+        assert(contains(op["content"], "\"kind\""), "manifest JSON has kind key")
+        assert(contains(op["content"], "\"live\""), "manifest JSON has live value")
+    }
+}
+assert(found_manifest, "live plan writes manifest.json")
+
+-- Validation: missing rootfs + tiny persistence
+let live_bad = live_usb_builder({"output": "x.iso", "persistence_size_mb": 1})
+live_bad.add_kernel("k"); live_bad.add_runtime("r"); live_bad.add_uefi_loader("u")
+let live_errs = live_bad.validate()
+mut flagged_root = false
+mut flagged_size = false
+for e in live_errs {
+    if contains(e, "root tree") { flagged_root = true }
+    if contains(e, "persistence_size") { flagged_size = true }
+}
+assert(flagged_root, "missing root tree flagged")
+assert(flagged_size, "tiny persistence flagged")
+
+-- ── Installer state machine ────────────────────────
+
+show "-- Phase 67: installer state machine --"
+
+let inst = installer()
+inst.enable_dry_run()
+assert_eq(inst.step, STEP_WELCOME, "starts at welcome")
+inst.set_disks([
+    {"path": "/dev/sda", "size_gb": 256, "model": "Test SSD"},
+    {"path": "/dev/nvme0n1", "size_gb": 1024, "model": "Test NVMe"}
+])
+
+-- Welcome → disk freely
+assert(inst.next(), "welcome → disk")
+assert_eq(inst.step, STEP_DISK, "now at disk")
+
+-- Disk → partition refused without choosing
+assert(not inst.next(), "no disk chosen, transition refused")
+assert(len(inst.errors) > 0, "errors populated")
+assert(contains(inst.errors[0], "select a disk"), "error says select a disk")
+
+-- Choose unknown disk
+assert(not inst.choose_disk("/dev/no-such"), "unknown disk rejected")
+assert(inst.choose_disk("/dev/nvme0n1"), "known disk accepted")
+assert(inst.next(), "disk → partition")
+assert_eq(inst.step, STEP_PARTITION, "at partition")
+
+-- Layout choice
+assert(not inst.choose_layout("foo"), "unknown layout rejected")
+assert(inst.choose_layout(LAYOUT_AUTO_LUKS), "AUTO_LUKS accepted")
+assert(inst.next(), "partition → account")
+assert_eq(inst.step, STEP_ACCOUNT, "at account")
+
+-- Account validation
+assert(not inst.next(), "no account, transition refused")
+inst.set_account("alex", "1234")
+assert(not inst.next(), "short password refused")
+inst.set_account("alex", "secret123")
+assert(inst.next(), "account → review")
+assert_eq(inst.step, STEP_REVIEW, "at review")
+
+-- Back works
+assert(inst.back(), "back from review")
+assert_eq(inst.step, STEP_ACCOUNT, "back to account")
+assert(inst.next(), "account → review again")
+
+-- Confirm install (dry run)
+assert(inst.confirm_install(), "confirm install")
+assert_eq(inst.step, STEP_DONE, "ended at done")
+assert_eq(inst.progress, 100, "progress = 100")
+assert(len(inst.log) > 5, "log captured operations")
+
+-- Cannot back out of done
+assert(not inst.back(), "back blocked from done")
+
+-- Plan shape
+let inst2 = installer()
+inst2.set_disks([{"path": "/dev/sda", "size_gb": 256}])
+inst2.choose_disk("/dev/sda")
+inst2.choose_layout(LAYOUT_AUTO_LUKS)
+inst2.set_account("u", "longenoughpassword")
+inst2.set_hostname("myhost")
+let inst_plan = inst2.plan()
+mut op_kinds = []
+for o in inst_plan { push(op_kinds, o["kind"]) }
+assert(contains(op_kinds, "wipe"), "plan wipes")
+assert(contains(op_kinds, "partition"), "plan partitions")
+assert(contains(op_kinds, "make_efi"), "plan makes EFI")
+assert(contains(op_kinds, "make_swap"), "plan makes swap")
+assert(contains(op_kinds, "make_root"), "plan makes root")
+assert(contains(op_kinds, "create_user"), "plan creates user")
+assert(contains(op_kinds, "install_bootloader"), "plan installs bootloader")
+
+-- LUKS encryption flag propagates
+mut found_root = null
+for o in inst_plan { if o["kind"] == "make_root" { found_root = o } }
+assert(found_root != null, "make_root present")
+assert_eq(found_root["encryption"], "luks2", "LUKS encryption flag")
+
+-- Layout=AUTO (no LUKS) skips encryption
+let inst3 = installer()
+inst3.set_disks([{"path": "/dev/sda", "size_gb": 64}])
+inst3.choose_disk("/dev/sda"); inst3.choose_layout(LAYOUT_AUTO)
+inst3.set_account("u", "longenoughpassword")
+mut found_root3 = null
+for o in inst3.plan() { if o["kind"] == "make_root" { found_root3 = o } }
+assert(found_root3 != null, "make_root for AUTO")
+assert(not has(found_root3, "encryption"), "no encryption for AUTO")
+
+-- Disk too small caught at the partition gate
+let inst_small = installer()
+inst_small.set_disks([{"path": "/dev/sda", "size_gb": 4}])
+inst_small.next()                                 -- welcome → disk
+inst_small.choose_disk("/dev/sda")
+let advanced = inst_small.next()                  -- disk → partition?
+assert(not advanced, "advance refused for tiny disk")
+assert_eq(inst_small.step, STEP_DISK, "stays at disk on validation fail")
+mut size_err = false
+for e in inst_small.errors { if contains(e, "too small") { size_err = true } }
+assert(size_err, "size error reported")
+
+-- Summary shape
+let s = inst2.summary()
+assert_eq(s["disk"], "/dev/sda", "summary disk")
+assert_eq(s["hostname"], "myhost", "summary hostname")
+assert(has(s, "log"), "summary has log")
+
+-- ── QEMU runner ────────────────────────────────────
+
+show "-- Phase 67: QEMU runner --"
+
+let vm = qemu_runner({
+    "iso": "claritos.iso",
+    "uefi": true,
+    "memory_mb": 1024,
+    "cores": 4,
+    "headless": true,
+    "serial": "stdio"
+})
+let vm_errs = vm.validate()
+assert_eq(len(vm_errs), 0, "complete VM config validates")
+
+let argv = vm.cmd()
+assert(contains(argv, "qemu-system-x86_64"), "uses qemu binary")
+assert(contains(argv, "-cdrom"), "boots from cdrom")
+assert(contains(argv, "claritos.iso"), "iso path in argv")
+assert(contains(argv, "-m"), "-m flag present")
+assert(contains(argv, "1024"), "memory size in argv")
+assert(contains(argv, "-smp"), "smp flag present")
+assert(contains(argv, "4"), "core count")
+assert(contains(argv, "-display"), "display flag")
+assert(contains(argv, "none"), "headless display=none")
+assert(contains(argv, "-serial"), "serial flag")
+assert(contains(argv, "stdio"), "serial=stdio")
+assert(contains(argv, "-no-reboot"), "no-reboot for cleanly capturable runs")
+
+-- UEFI flags
+assert(contains(argv, "-drive"), "uefi adds pflash")
+let shell = vm.shell_command()
+assert(contains(shell, "qemu-system-x86_64"), "shell command starts with binary")
+
+-- Direct kernel mode (no ISO)
+let vm_k = qemu_runner({"kernel": "kernel.elf", "memory_mb": 128, "cmdline": "boot=installer"})
+let argv_k = vm_k.cmd()
+assert(contains(argv_k, "-kernel"), "-kernel for direct boot")
+assert(contains(argv_k, "kernel.elf"), "kernel path passed")
+assert(contains(argv_k, "-append"), "-append for cmdline")
+assert(contains(argv_k, "boot=installer"), "cmdline carried over")
+
+-- Validation: both iso and kernel
+let vm_both = qemu_runner({"iso": "x.iso", "kernel": "k.elf"})
+let both_errs = vm_both.validate()
+mut flagged_both = false
+for e in both_errs { if contains(e, "exactly one") { flagged_both = true } }
+assert(flagged_both, "both iso+kernel flagged")
+
+-- Validation: too little memory
+let vm_tiny = qemu_runner({"iso": "x.iso", "memory_mb": 16})
+let tiny_errs = vm_tiny.validate()
+mut flagged_tiny = false
+for e in tiny_errs { if contains(e, "memory_mb") { flagged_tiny = true } }
+assert(flagged_tiny, "tiny memory flagged")
+
+-- Validation: bad network
+let vm_net = qemu_runner({"iso": "x.iso", "network": "bridge"})
+let net_errs = vm_net.validate()
+mut flagged_net = false
+for e in net_errs { if contains(e, "network must be") { flagged_net = true } }
+assert(flagged_net, "bad network flagged")
+
+-- network=none drops the netdev
+let vm_no_net = qemu_runner({"iso": "x.iso", "network": "none"})
+let argv_no_net = vm_no_net.cmd()
+assert(contains(argv_no_net, "-nic"), "network=none uses -nic")
+
+-- ── Hardware DB ────────────────────────────────────
+
+show "-- Phase 67: hardware DB --"
+
+let db = hw_db()
+assert(len(db.all()) > 15, "DB has >15 entries")
+
+-- Lookup virtio-net
+let virtio_net = db.lookup_pci(0x1AF4, 0x1000)
+assert(virtio_net != null, "virtio-net found")
+assert_eq(virtio_net["driver"], "virtio_net", "virtio-net driver")
+assert_eq(virtio_net["tier"], TIER_1, "virtio-net tier1")
+
+-- Vendor-only fallback (Intel HD Graphics catch-all)
+let intel_gpu = db.lookup_pci(0x8086, 0x9999)         -- unknown Intel device
+assert(intel_gpu != null, "vendor-only fallback hits")
+assert_eq(intel_gpu["driver"], "i915_min", "falls back to i915_min")
+assert_eq(intel_gpu["tier"], TIER_EXPERIMENTAL, "experimental tier")
+
+-- Exact match wins over vendor fallback
+let exact = db.lookup_pci(0x8086, 0x10D3)
+assert_eq(exact["driver"], "e1000e", "exact match (Intel 82574L) wins")
+
+-- Unknown vendor
+assert_eq(db.lookup_pci(0xDEAD, 0xBEEF), null, "unknown vendor returns null")
+
+-- Driver lookup convenience
+assert_eq(db.driver_for(0x1AF4, 0x1000), "virtio_net", "driver_for shorthand")
+assert_eq(db.driver_for(0xDEAD, 0xBEEF), null, "driver_for null when no entry")
+assert_eq(db.tier(0x1AF4, 0x1000), TIER_1, "tier query")
+
+-- Kind/category queries
+assert(db.kind_supported("storage"), "storage supported")
+assert(db.kind_supported("network"), "network supported")
+assert(db.kind_supported("display"), "display supported")
+assert(not db.kind_supported("printer"), "printer not in DB")
+
+let storage_entries = db.entries_by_kind("storage")
+assert(len(storage_entries) >= 4, "multiple storage drivers")
+
+-- Tier counts: every tier represented
+let counts = db.count_by_tier()
+assert(counts[TIER_1] > 0, "at least one tier1")
+assert(counts[TIER_2] > 0, "at least one tier2")
+assert(counts[TIER_EXPERIMENTAL] > 0, "at least one experimental")
+let total_tiered = counts[TIER_1] + counts[TIER_2] + counts[TIER_EXPERIMENTAL]
+assert_eq(total_tiered, len(db.all()), "every entry has a tier")
+
+-- Report shape
+let report = db.report()
+assert(contains(report, "## storage"), "report has storage section")
+assert(contains(report, "## network"), "report has network section")
+assert(contains(report, "## display"), "report has display section")
+assert(contains(report, "0x1AF4"), "report formats vendor IDs as hex")
+
+-- ── Summary ───────────────────────────────────────
+
+show ""
+show "Phase 67: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 67 test(s) failed" }

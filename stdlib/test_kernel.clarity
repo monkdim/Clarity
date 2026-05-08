@@ -1,0 +1,390 @@
+-- Phase 65 — micro-kernel tests (Clarity side).
+--
+-- Covers the Clarity mirrors of the kernel ABI: syscall + errno +
+-- signal + open-flag + file-mode constants, the priority round-robin
+-- scheduler model, the syscall wrapper (host backend, mock backend,
+-- trace log), the VFS + tmpfs.
+
+from "kernel_abi.clarity" import SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_GETPID, SYS_EXIT, SYS_NANOSLEEP, SYS_MKDIR, SYS_UNLINK
+from "kernel_abi.clarity" import EBADF, ENOENT, ENOSYS, EINVAL, ENOTDIR, EISDIR, ENOTEMPTY, EEXIST
+from "kernel_abi.clarity" import O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND
+from "kernel_abi.clarity" import S_IFREG, S_IFDIR, S_IFLNK, s_isdir, s_isreg, s_islnk
+from "kernel_abi.clarity" import PROT_READ, PROT_WRITE, PROT_EXEC, MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS
+from "kernel_abi.clarity" import SIGINT, SIGKILL, SIGTERM, SIGCHLD, errno_name, signal_name, syscall_name
+from "scheduler.clarity" import Scheduler, scheduler, PRIO_HIGH, PRIO_NORMAL, PRIO_IDLE, STATE_RUNNABLE, STATE_RUNNING, STATE_BLOCKED, STATE_ZOMBIE, WAIT_IO, WAIT_SLEEP, priority_name
+from "vfs.clarity" import Tmpfs, tmpfs, Vfs, vfs, TYPE_REG, TYPE_DIR
+from "syscall.clarity" import sys_open, sys_close, sys_read, sys_write, sys_stat, sys_getpid, sys_mkdir, sys_unlink, set_backend, backend, install_mocks, clear_mocks, enable_trace, disable_trace, trace_log, _reset_host_state
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── ABI: constants are sane and don't collide ────────
+
+show "-- Kernel: ABI constants --"
+
+-- All syscall numbers distinct
+let nrs = [SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_GETPID, SYS_EXIT, SYS_NANOSLEEP, SYS_MKDIR, SYS_UNLINK]
+mut seen = {}
+for nr in nrs {
+    assert(not has(seen, str(nr)), "syscall " + str(nr) + " is unique")
+    seen[str(nr)] = true
+}
+
+assert_eq(syscall_name(SYS_READ), "read", "syscall_name(0) = read")
+assert_eq(syscall_name(SYS_WRITE), "write", "syscall_name(1) = write")
+assert_eq(syscall_name(SYS_OPEN), "open", "syscall_name(2) = open")
+assert(contains(syscall_name(999), "syscall("), "unknown syscall has fallback name")
+
+assert_eq(errno_name(0), "OK", "errno 0")
+assert_eq(errno_name(EBADF), "EBADF", "EBADF name")
+assert_eq(errno_name(ENOENT), "ENOENT", "ENOENT name")
+assert_eq(errno_name(ENOSYS), "ENOSYS", "ENOSYS name")
+
+assert_eq(signal_name(SIGINT), "SIGINT", "SIGINT name")
+assert_eq(signal_name(SIGKILL), "SIGKILL", "SIGKILL name")
+assert(SIGKILL == 9, "SIGKILL = 9 (matches POSIX)")
+assert(SIGTERM == 15, "SIGTERM = 15")
+
+-- File mode predicates
+assert(s_isreg(S_IFREG | 0x1A4), "0x81A4 is regular")
+assert(s_isdir(S_IFDIR | 0x1ED), "0x41ED is directory")
+assert(s_islnk(S_IFLNK | 0x1FF), "0xA1FF is symlink")
+assert(not s_isreg(S_IFDIR), "directory is not regular")
+
+-- Open flags compose correctly (bitwise OR)
+let creat_trunc = O_WRONLY | O_CREAT | O_TRUNC
+assert((creat_trunc & O_CREAT) != 0, "O_CREAT bit set")
+assert((creat_trunc & O_TRUNC) != 0, "O_TRUNC bit set")
+assert((creat_trunc & O_APPEND) == 0, "O_APPEND bit not set")
+
+-- mmap protection bits are independent
+assert(((PROT_READ | PROT_WRITE) & PROT_EXEC) == 0, "PROT_EXEC distinct from RW")
+assert(MAP_SHARED != MAP_PRIVATE, "shared and private are distinct")
+assert(MAP_ANONYMOUS != 0, "MAP_ANONYMOUS is set")
+
+-- ── Scheduler: priority round-robin ────────────────
+
+show "-- Kernel: scheduler priorities --"
+
+-- Strict priority: a runnable high-priority thread always wins.
+let s_pri = scheduler()
+let lo = s_pri.spawn("lo", PRIO_NORMAL)
+let hi = s_pri.spawn("hi", PRIO_HIGH)
+let p1 = s_pri.tick()
+assert_eq(p1["tid"], hi["tid"], "high-priority dispatched first")
+let p2 = s_pri.tick()
+assert_eq(p2["tid"], hi["tid"], "high-priority keeps winning while runnable")
+-- Block the high-priority thread; the normal one should now run.
+s_pri.block(WAIT_IO, null)
+let p3 = s_pri.tick()
+assert_eq(p3["tid"], lo["tid"], "normal-priority dispatched once high blocks")
+-- Wake the high-priority one and it preempts on the next tick.
+s_pri.wake(hi["tid"])
+let p4 = s_pri.tick()
+assert_eq(p4["tid"], hi["tid"], "wake brings high back to head")
+
+-- Within a single priority level we get FIFO round-robin.
+let s_fifo = scheduler()
+let t1 = s_fifo.spawn("a", PRIO_NORMAL)
+let t2 = s_fifo.spawn("b", PRIO_NORMAL)
+let t3 = s_fifo.spawn("c", PRIO_NORMAL)
+assert_eq(s_fifo.queue_len(PRIO_NORMAL), 3, "normal queue has 3")
+assert_eq(s_fifo.tick()["tid"], t1["tid"], "FIFO: a")
+assert_eq(s_fifo.tick()["tid"], t2["tid"], "FIFO: b")
+assert_eq(s_fifo.tick()["tid"], t3["tid"], "FIFO: c")
+assert_eq(s_fifo.tick()["tid"], t1["tid"], "FIFO wraps back to a")
+assert_eq(s_fifo.tick_count(), 4, "tick count = 4")
+
+-- ── Scheduler: block / wake ──────────────────────────
+
+show "-- Kernel: block / wake --"
+
+let s2 = scheduler()
+let bt = s2.spawn("blocky", PRIO_NORMAL)
+s2.tick()                              -- bt is now running
+assert_eq(s2.current["tid"], bt["tid"], "bt is current")
+
+s2.block(WAIT_IO, "stdin")
+assert_eq(s2.blocked_count(), 1, "1 blocked")
+assert_eq(s2.queue_len(PRIO_NORMAL), 0, "queue drained")
+assert_eq(s2.current, null, "no current after block (no other thread)")
+
+assert(s2.wake(bt["tid"]), "wake returns true")
+assert_eq(s2.blocked_count(), 0, "0 blocked")
+let woke = s2.tick()
+assert_eq(woke["tid"], bt["tid"], "bt runs again after wake")
+
+-- Wake-all by reason
+let s3 = scheduler()
+let a = s3.spawn("a", PRIO_NORMAL)
+let b = s3.spawn("b", PRIO_NORMAL)
+s3.tick()                              -- a running
+s3.block(WAIT_IO, null)                -- a blocked
+s3.tick()                              -- b running
+s3.block(WAIT_IO, null)                -- b blocked
+assert_eq(s3.blocked_count(), 2, "two blocked on IO")
+let woken_tids = s3.wake_all(WAIT_IO)
+assert_eq(len(woken_tids), 2, "wake_all woke both")
+assert_eq(s3.blocked_count(), 0, "blocked queue drained")
+
+-- Sleep wakers fire when deadline passes
+let s4 = scheduler()
+let sleeper = s4.spawn("sleep", PRIO_NORMAL)
+s4.tick()
+s4.block(WAIT_SLEEP, 100)
+assert_eq(s4.blocked_count(), 1, "sleeping")
+let woken_early = s4.wake_sleepers(50)
+assert_eq(len(woken_early), 0, "deadline not yet — no wake")
+let woken_late = s4.wake_sleepers(150)
+assert_eq(len(woken_late), 1, "deadline passed — woke 1")
+
+-- ── Scheduler: exit / reap ──────────────────────────
+
+show "-- Kernel: exit / reap --"
+
+let s5 = scheduler()
+let e1 = s5.spawn("dying", PRIO_NORMAL)
+s5.tick()                              -- now running
+s5.exit(42)
+assert_eq(s5.zombie_count(), 1, "1 zombie")
+let reaped = s5.reap(e1["tid"])
+assert(reaped != null, "reap returned the zombie")
+assert_eq(reaped["exit_code"], 42, "exit code preserved")
+assert_eq(s5.zombie_count(), 0, "zombie reaped")
+assert_eq(s5.reap(999), null, "reap of unknown tid is null")
+
+-- Event log
+let s6 = scheduler()
+s6.enable_event_log()
+let q = s6.spawn("q", PRIO_NORMAL)
+s6.tick(); s6.block(WAIT_IO, null); s6.wake(q["tid"]); s6.tick(); s6.exit(0)
+mut event_kinds = []
+for ev in s6.events { push(event_kinds, ev["event"]) }
+assert(contains(event_kinds, "spawn"), "spawn event")
+assert(contains(event_kinds, "dispatch"), "dispatch event")
+assert(contains(event_kinds, "block"), "block event")
+assert(contains(event_kinds, "wake"), "wake event")
+assert(contains(event_kinds, "exit"), "exit event")
+
+assert_eq(priority_name(PRIO_HIGH), "high", "priority name high")
+assert_eq(priority_name(PRIO_IDLE), "idle", "priority name idle")
+
+-- ── VFS: tmpfs basic operations ─────────────────────
+
+show "-- Kernel: tmpfs basic ops --"
+
+let fs = tmpfs()
+let v = vfs(fs)
+assert_eq(v.cwd, "/", "cwd starts at /")
+
+-- Create + read + write through the VFS
+let fd = v.open("/hello.txt", O_CREAT | O_WRONLY, 0x1A4)
+assert(fd >= 3, "open returns fd >= 3")
+assert_eq(v.write(fd, "hello world"), 11, "write returned byte count")
+v.close(fd)
+
+let st = v.stat("/hello.txt")
+assert_eq(st["size"], 11, "file size 11")
+assert_eq(st["file_type"], TYPE_REG, "file is regular")
+
+-- Re-open for read
+let fd_r = v.open("/hello.txt", O_RDONLY, 0)
+assert_eq(v.read(fd_r, 5), "hello", "first 5 bytes")
+assert_eq(v.read(fd_r, 6), " world", "next 6 bytes")
+assert_eq(v.read(fd_r, 100), "", "EOF returns empty")
+v.close(fd_r)
+
+-- Append flag positions cursor at end
+let fd_a = v.open("/hello.txt", O_WRONLY | O_APPEND, 0)
+v.write(fd_a, "!")
+v.close(fd_a)
+let fd_r2 = v.open("/hello.txt", O_RDONLY, 0)
+assert_eq(v.read(fd_r2, 100), "hello world!", "append concatenates")
+v.close(fd_r2)
+
+-- Truncate via O_TRUNC
+let fd_t = v.open("/hello.txt", O_WRONLY | O_TRUNC, 0)
+v.write(fd_t, "smaller")
+v.close(fd_t)
+let fd_r3 = v.open("/hello.txt", O_RDONLY, 0)
+assert_eq(v.read(fd_r3, 100), "smaller", "truncate reset content")
+v.close(fd_r3)
+
+-- ── VFS: directories ───────────────────────────────
+
+show "-- Kernel: tmpfs directories --"
+
+v.mkdir("/etc", 0x1ED)
+v.mkdir("/tmp", 0x1FF)
+let fd_in_etc = v.open("/etc/hostname", O_CREAT | O_WRONLY, 0x1A4)
+v.write(fd_in_etc, "claritos")
+v.close(fd_in_etc)
+
+let st_etc = v.stat("/etc")
+assert_eq(st_etc["file_type"], TYPE_DIR, "etc is directory")
+
+let listing = v.readdir("/")
+mut names = []
+for entry in listing { push(names, entry["name"]) }
+assert(contains(names, "etc"), "/ contains etc")
+assert(contains(names, "tmp"), "/ contains tmp")
+assert(contains(names, "hello.txt"), "/ contains hello.txt")
+
+let etc_listing = v.readdir("/etc")
+assert_eq(len(etc_listing), 1, "/etc has 1 entry")
+assert_eq(etc_listing[0]["name"], "hostname", "/etc/hostname")
+
+-- chdir + relative paths
+v.chdir("/etc")
+assert_eq(v.getcwd(), "/etc", "cwd updated")
+let st_rel = v.stat("hostname")
+assert_eq(st_rel["size"], 8, "relative stat resolved against cwd")
+v.chdir("/")
+
+-- ── VFS: error paths ────────────────────────────────
+
+show "-- Kernel: tmpfs error paths --"
+
+mut threw = false
+try { v.open("/no_such_file", O_RDONLY, 0) } catch e {
+    threw = true
+    assert(contains(str(e), "ENOENT"), "open of missing file gives ENOENT")
+}
+assert(threw, "open(missing, O_RDONLY) throws")
+
+mut bad_fd = false
+try { v.read(999, 10) } catch e {
+    bad_fd = true
+    assert(contains(str(e), "EBADF"), "EBADF on bogus fd")
+}
+assert(bad_fd, "read on bad fd throws")
+
+mut isdir = false
+try { v.unlink("/etc") } catch e {
+    isdir = true
+    assert(contains(str(e), "EISDIR"), "unlink on dir is EISDIR")
+}
+assert(isdir, "unlink on directory throws")
+
+mut notempty = false
+try { v.rmdir("/etc") } catch e {
+    notempty = true
+    assert(contains(str(e), "ENOTEMPTY"), "rmdir on non-empty is ENOTEMPTY")
+}
+assert(notempty, "rmdir non-empty throws")
+
+mut already = false
+try { v.mkdir("/etc", 0) } catch e {
+    already = true
+    assert(contains(str(e), "EEXIST"), "mkdir of existing is EEXIST")
+}
+assert(already, "mkdir existing throws")
+
+-- After unlink + rmdir, /etc should be removable
+v.unlink("/etc/hostname")
+v.rmdir("/etc")
+mut etc_gone = false
+try { v.readdir("/etc") } catch e { etc_gone = true }
+assert(etc_gone, "removed /etc is unreachable")
+
+-- ── VFS: lseek + fd table ────────────────────────────
+
+show "-- Kernel: lseek --"
+
+v.unlink("/hello.txt")
+let fd_l = v.open("/seek.bin", O_CREAT | O_WRONLY, 0x1A4)
+v.write(fd_l, "abcdefghij")
+v.close(fd_l)
+
+let fd_l2 = v.open("/seek.bin", O_RDWR, 0)
+assert_eq(v.lseek(fd_l2, 0, 0), 0, "seek to 0")
+assert_eq(v.read(fd_l2, 3), "abc", "read after seek 0")
+assert_eq(v.lseek(fd_l2, 5, 0), 5, "seek to 5")
+assert_eq(v.read(fd_l2, 3), "fgh", "read after seek 5")
+assert_eq(v.lseek(fd_l2, -2, 1), 6, "seek -2 from current")
+assert_eq(v.lseek(fd_l2, 0, 2), 10, "seek end")
+v.close(fd_l2)
+
+-- ── Syscall wrapper: host backend round-trip ────────
+
+show "-- Kernel: syscall wrapper (host backend) --"
+
+_reset_host_state()
+set_backend("host")
+assert_eq(backend(), "host", "backend reflects setting")
+
+let test_path = "/tmp/_clarity_syscall_test.txt"
+exec_full("rm -f " + test_path)
+
+let fd_h = sys_open(test_path, O_CREAT | O_RDWR, 0x1A4)
+assert(fd_h >= 3, "host open returned fd")
+assert_eq(sys_write(fd_h, "kernel hello"), 12, "host write returned count")
+sys_close(fd_h)
+
+let fd_r4 = sys_open(test_path, O_RDONLY, 0)
+let chunk = sys_read(fd_r4, 6)
+assert_eq(chunk, "kernel", "host read first chunk")
+assert_eq(sys_read(fd_r4, 100), " hello", "host read remainder")
+sys_close(fd_r4)
+
+let st_h = sys_stat(test_path)
+assert_eq(st_h["size"], 12, "host stat size")
+
+let pid = sys_getpid()
+assert(pid > 0, "host getpid > 0")
+
+exec_full("rm -f " + test_path)
+
+-- Closing an unknown fd throws EBADF
+mut sys_threw = false
+try { sys_close(8888) } catch e {
+    sys_threw = true
+    assert(contains(str(e), "EBADF"), "EBADF on bad close")
+}
+assert(sys_threw, "host close bad fd throws")
+
+-- ── Syscall wrapper: mocks + trace ─────────────────
+
+show "-- Kernel: syscall wrapper (mocks + trace) --"
+
+_reset_host_state()
+install_mocks({
+    str(SYS_READ): fn(args) { return "MOCKED-" + str(args[0]) },
+    str(SYS_GETPID): fn(args) { return 12345 }
+})
+enable_trace()
+assert_eq(sys_read(7, 99), "MOCKED-7", "mocked read")
+assert_eq(sys_getpid(), 12345, "mocked getpid")
+let trace = trace_log()
+assert_eq(len(trace), 2, "two trace entries")
+assert_eq(trace[0]["name"], "read", "first trace name")
+assert_eq(trace[0]["result"], "MOCKED-7", "first trace result")
+assert_eq(trace[1]["name"], "getpid", "second trace name")
+disable_trace()
+clear_mocks()
+
+-- Bare-metal backend reports ENOSYS for now
+_reset_host_state()
+set_backend("claritos")
+mut not_wired = false
+try { sys_getpid() } catch e {
+    not_wired = true
+    assert(contains(str(e), "not yet wired"), "claritos backend yet to wire")
+}
+assert(not_wired, "claritos backend throws")
+set_backend("host")
+_reset_host_state()
+
+-- ── Summary ─────────────────────────────────────────
+
+show ""
+show "Kernel: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " kernel test(s) failed" }

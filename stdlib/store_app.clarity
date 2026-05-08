@@ -1,0 +1,187 @@
+-- Store front-end — Phase 68 task 4.
+--
+-- Sits on top of stdlib/app_store.clarity (the registry client +
+-- local install index) and exposes the app-side state a UI binds
+-- to: which view we're showing (browse / search / category / app
+-- detail / installed), search query, selected category, current
+-- entry, install progress.
+--
+-- The transport layer (HttpAppStoreClient or LocalAppStoreClient)
+-- is injected via the AppStore reference, so the same state machine
+-- runs against a real registry and against the test harness's fake.
+
+from "app_store.clarity" import AppStore, AppEntry, app_store
+
+let VIEW_BROWSE = "browse"
+let VIEW_SEARCH = "search"
+let VIEW_CATEGORY = "category"
+let VIEW_DETAIL = "detail"
+let VIEW_INSTALLED = "installed"
+
+let SORT_NAME = "name"
+let SORT_RATING = "rating"
+let SORT_INSTALLS = "installs"
+
+class StoreApp {
+    fn init(store) {
+        this.store = store ?? app_store({})
+        this.view = VIEW_BROWSE
+        this.query = ""
+        this.category = null
+        this.entries = []                 -- entries currently displayed
+        this.selected = null              -- currently-detailed AppEntry
+        this.sort_by = SORT_NAME
+        this.sort_descending = false
+        this.installing = null            -- {name, progress, error}
+        this.errors = []
+        this.last_refresh = 0
+    }
+
+    -- ── View transitions ────────────────────────
+
+    fn open_browse() {
+        this.view = VIEW_BROWSE
+        this.query = ""
+        this.category = null
+        this.entries = this._sorted(this.store.list())
+        this.last_refresh = time()
+        return this.entries
+    }
+
+    fn open_category(name) {
+        this.view = VIEW_CATEGORY
+        this.category = name
+        this.entries = this._sorted(this.store.by_category(name))
+        return this.entries
+    }
+
+    fn search(query) {
+        this.view = VIEW_SEARCH
+        this.query = query
+        if len(trim(query)) == 0 {
+            this.entries = []
+            return this.entries
+        }
+        this.entries = this._sorted(this.store.search(query))
+        return this.entries
+    }
+
+    fn open_detail(name) {
+        let info = this.store.info(name)
+        if info == null {
+            push(this.errors, "not found: " + name)
+            return null
+        }
+        this.selected = info
+        this.view = VIEW_DETAIL
+        return info
+    }
+
+    fn open_installed() {
+        this.view = VIEW_INSTALLED
+        let installed = this.store.installed()
+        mut as_entries = []
+        for r in installed {
+            let stub = {"name": r["name"], "version": r["version"], "description": "(installed)"}
+            push(as_entries, AppEntry(stub))
+        }
+        this.entries = as_entries
+        return as_entries
+    }
+
+    fn back_to_list() {
+        this.selected = null
+        if len(this.query) > 0 {
+            this.view = VIEW_SEARCH
+        } elif this.category != null {
+            this.view = VIEW_CATEGORY
+        } else {
+            this.view = VIEW_BROWSE
+        }
+    }
+
+    -- ── Sorting ─────────────────────────────────
+
+    fn set_sort(by, descending) {
+        this.sort_by = by
+        this.sort_descending = descending == true
+        this.entries = this._sorted(this.entries)
+        return this.entries
+    }
+
+    fn _sorted(list) {
+        if list == null { return [] }
+        mut copy = []
+        for e in list { push(copy, e) }
+        let by = this.sort_by
+        let desc = this.sort_descending
+        -- Insertion sort: stable, easy to read, n is small.
+        mut i = 1
+        while i < len(copy) {
+            let cur = copy[i]
+            mut j = i - 1
+            while j >= 0 and _cmp(copy[j], cur, by, desc) > 0 {
+                copy[j + 1] = copy[j]
+                j = j - 1
+            }
+            copy[j + 1] = cur
+            i = i + 1
+        }
+        return copy
+    }
+
+    -- ── Install / remove ────────────────────────
+
+    fn install(name) {
+        this.installing = {"name": name, "progress": 0, "error": null}
+        try {
+            let entry = this.store.install(name)
+            this.installing = {"name": name, "progress": 100, "error": null, "result": entry}
+            return entry
+        } catch e {
+            this.installing = {"name": name, "progress": 0, "error": str(e)}
+            push(this.errors, str(e))
+            return null
+        }
+    }
+
+    fn remove(name) {
+        return this.store.remove(name)
+    }
+
+    fn is_installed(name) { return this.store.is_installed(name) }
+
+    -- ── Introspection ──────────────────────────
+
+    fn summary() {
+        return {
+            "view": this.view,
+            "query": this.query,
+            "category": this.category,
+            "entries": len(this.entries),
+            "selected": if this.selected != null { this.selected.name } else { null },
+            "sort_by": this.sort_by,
+            "sort_descending": this.sort_descending,
+            "installing": this.installing,
+            "errors": this.errors
+        }
+    }
+}
+
+fn _cmp(a, b, key, descending) {
+    mut left = 0
+    if key == SORT_NAME {
+        if a.name < b.name { left = -1 }
+        elif a.name > b.name { left = 1 }
+    } elif key == SORT_RATING {
+        if a.rating < b.rating { left = -1 }
+        elif a.rating > b.rating { left = 1 }
+    } elif key == SORT_INSTALLS {
+        if a.installs < b.installs { left = -1 }
+        elif a.installs > b.installs { left = 1 }
+    }
+    if descending { return -left }
+    return left
+}
+
+fn store_app(store) { return StoreApp(store) }

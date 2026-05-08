@@ -1,0 +1,187 @@
+-- Phase 66 — runtime portability tests.
+--
+-- Covers the platform module (host detection, override hooks,
+-- canonical OS / arch names, line separator), the bare-metal vs
+-- host I/O branching paths (host path exercised live; bare-metal
+-- path exercised via override + the syscall mock harness from
+-- test_kernel.clarity), and the portability audit (every stdlib
+-- file is classified either bare-metal-safe or host-only with no
+-- overlap).
+
+from "platform.clarity" import host_name, os_name, arch_name, endianness, line_separator
+from "platform.clarity" import is_bare_metal, is_host, is_linux, is_darwin, is_windows, is_unix
+from "platform.clarity" import override, reset_override
+from "platform.clarity" import read_file, write_file, list_dir, make_dir, remove_file, now_seconds
+from "platform.clarity" import BARE_METAL_SAFE, HOST_ONLY, is_bare_metal_safe, requires_host, audit
+from "syscall.clarity" import set_backend, install_mocks, clear_mocks, _reset_host_state
+from "kernel_abi.clarity" import O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, SYS_OPEN, SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_READDIR, SYS_MKDIR, SYS_UNLINK, SYS_CLOCK_GETTIME
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Detection on the live host ─────────────────────
+
+show "-- Runtime: live host detection --"
+
+reset_override()
+let host = host_name()
+assert(host == "bun" or host == "node" or host == "claritos", "host_name returns a known value: " + host)
+let os_id = os_name()
+assert(os_id == "linux" or os_id == "darwin" or os_id == "windows" or os_id == "claritos" or os_id == "unknown",
+       "os_name is a known value: " + os_id)
+let arch = arch_name()
+assert(len(arch) > 0, "arch_name not empty: " + arch)
+assert(endianness() == "little" or endianness() == "big", "endianness sane")
+
+-- The host runtime should not claim to be bare metal.
+assert(not is_bare_metal(), "host runtime is_bare_metal == false")
+assert(is_host(), "host runtime is_host == true")
+
+if os_id == "linux" {
+    assert(is_linux(), "linux: is_linux true")
+    assert(is_unix(), "linux: is_unix true")
+    assert_eq(line_separator(), "\n", "linux line sep")
+}
+if os_id == "darwin" {
+    assert(is_darwin(), "darwin: is_darwin true")
+    assert(is_unix(), "darwin: is_unix true")
+}
+
+-- ── Override hook: simulate ClarityOS ──────────────
+
+show "-- Runtime: override hook --"
+
+override({
+    "host": "claritos",
+    "os": "claritos",
+    "arch": "x86_64",
+    "endian": "little",
+    "line_sep": "\n"
+})
+assert_eq(host_name(), "claritos", "override host")
+assert_eq(os_name(), "claritos", "override os")
+assert(is_bare_metal(), "override flips is_bare_metal")
+assert(not is_host(), "override flips is_host")
+assert(not is_linux(), "claritos is not linux")
+
+-- ── I/O helpers branch on platform ─────────────────
+
+show "-- Runtime: I/O branches --"
+
+-- Host branch first
+reset_override()
+let test_path = "/tmp/_clarity_runtime_io.txt"
+exec_full("rm -f " + test_path)
+write_file(test_path, "hello platform")
+assert_eq(read_file(test_path), "hello platform", "host write+read round-trip")
+let listing = list_dir("/tmp")
+assert(len(listing) > 0, "host list_dir returns something")
+remove_file(test_path)
+let after = exec_full("test -e " + test_path + " && echo y || echo n")
+assert_eq(trim(after.stdout), "n", "host remove_file actually removes")
+
+let now1 = now_seconds()
+assert(now1 > 0, "host now_seconds > 0")
+
+-- Bare-metal branch via override + syscall mocks
+override({"host": "claritos", "os": "claritos", "arch": "x86_64", "endian": "little", "line_sep": "\n"})
+set_backend("host")          -- still routed through the host fd table
+
+mut sycall_log = []
+install_mocks({
+    str(SYS_OPEN): fn(args) { push(sycall_log, ["open", args[0]]); return 7 },
+    str(SYS_READ): fn(args) {
+        push(sycall_log, ["read", args[0], args[1]])
+        if len(sycall_log) > 5 { return "" }
+        return "MOCK"
+    },
+    str(SYS_WRITE): fn(args) { push(sycall_log, ["write", args[0]]); return len(args[1]) },
+    str(SYS_CLOSE): fn(args) { push(sycall_log, ["close", args[0]]); return 0 },
+    str(SYS_READDIR): fn(args) { push(sycall_log, ["readdir", args[0]]); return ["a", "b", "c"] },
+    str(SYS_MKDIR): fn(args) { push(sycall_log, ["mkdir", args[0]]); return 0 },
+    str(SYS_UNLINK): fn(args) { push(sycall_log, ["unlink", args[0]]); return 0 },
+    str(SYS_CLOCK_GETTIME): fn(args) { return 1234567890 }
+})
+
+let bm_content = read_file("/etc/hostname")
+assert(contains(bm_content, "MOCK"), "bare-metal read_file went through syscalls")
+let bm_dir = list_dir("/etc")
+assert_eq(bm_dir, ["a", "b", "c"], "bare-metal list_dir returned mock")
+make_dir("/etc/foo")
+remove_file("/etc/foo/bar")
+let bm_now = now_seconds()
+assert_eq(bm_now, 1234567890, "bare-metal now_seconds via SYS_CLOCK_GETTIME")
+
+write_file("/etc/cfg", "ok")
+
+-- Verify the syscall_log captured the right operations
+mut saw_open = false
+mut saw_read = false
+mut saw_write = false
+mut saw_close = false
+mut saw_readdir = false
+for entry in sycall_log {
+    if entry[0] == "open" { saw_open = true }
+    if entry[0] == "read" { saw_read = true }
+    if entry[0] == "write" { saw_write = true }
+    if entry[0] == "close" { saw_close = true }
+    if entry[0] == "readdir" { saw_readdir = true }
+}
+assert(saw_open, "open issued")
+assert(saw_read, "read issued")
+assert(saw_write, "write issued")
+assert(saw_close, "close issued")
+assert(saw_readdir, "readdir issued")
+
+clear_mocks()
+_reset_host_state()
+reset_override()
+
+-- ── Audit ─────────────────────────────────────────
+
+show "-- Runtime: portability audit --"
+
+let info = audit()
+assert(info["safe_count"] >= 30, "at least 30 stdlib files declared bare-metal-safe")
+assert(info["host_only_count"] > 0, "some files explicitly host-only")
+
+assert(is_bare_metal_safe("kernel_abi"), "kernel_abi is bare-metal safe")
+assert(is_bare_metal_safe("scheduler"), "scheduler is bare-metal safe")
+assert(is_bare_metal_safe("vfs"), "vfs is bare-metal safe")
+assert(is_bare_metal_safe("ui"), "ui is bare-metal safe")
+assert(is_bare_metal_safe("layout"), "layout is bare-metal safe")
+assert(is_bare_metal_safe("widgets"), "widgets is bare-metal safe")
+
+assert(requires_host("shell"), "shell requires host")
+assert(requires_host("net"), "net requires host")
+assert(requires_host("registry"), "registry requires host")
+assert(requires_host("hot_reload"), "hot_reload requires host")
+assert(requires_host("app_store"), "app_store requires host")
+
+assert(not requires_host("kernel_abi"), "kernel_abi not in host-only")
+assert(not is_bare_metal_safe("shell"), "shell not in bare-metal-safe")
+
+-- No overlap between BARE_METAL_SAFE and HOST_ONLY
+mut overlap = 0
+for mod in BARE_METAL_SAFE {
+    if contains(HOST_ONLY, mod) { overlap = overlap + 1 }
+}
+assert_eq(overlap, 0, "no overlap between BARE_METAL_SAFE and HOST_ONLY")
+
+-- Every kernel-abi-related module in the safe list
+assert(contains(BARE_METAL_SAFE, "syscall"), "syscall classified safe")
+assert(contains(BARE_METAL_SAFE, "platform"), "platform itself classified safe")
+
+-- ── Summary ───────────────────────────────────────
+
+show ""
+show "Runtime portability: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " runtime portability test(s) failed" }

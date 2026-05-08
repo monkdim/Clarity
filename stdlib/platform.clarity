@@ -1,0 +1,237 @@
+-- Platform abstraction — host vs bare-metal detection + cross-
+-- platform helpers (Phase 66 task 4).
+--
+-- Stdlib code that touches I/O, processes, or environment should
+-- branch through this module rather than calling exec_full /
+-- env / time directly. That makes the same source compile cleanly
+-- against the host runtime (Bun on Linux/macOS) AND against the
+-- ClarityOS bare-metal runtime, where the syscall surface is
+-- different.
+--
+--     if platform.is_bare_metal() {
+--         from "syscall.clarity" import sys_open, sys_read, sys_close, sys_write
+--         ...
+--     } else {
+--         ... use the runtime's read()/write()/exec() ...
+--     }
+--
+-- Or, more idiomatically, use the helpers below which already
+-- branch internally:
+--
+--     platform.read_file(path)        -- returns string
+--     platform.write_file(path, body) -- returns true
+--     platform.list_dir(path)         -- returns list of names
+--     platform.now_seconds()          -- monotonic seconds (float)
+--     platform.os_name()              -- "linux" | "darwin" | "claritos"
+--     platform.arch_name()            -- "x86_64" | "arm64" | "wasm32"
+--     platform.endianness()           -- "little" | "big"
+--     platform.line_separator()       -- "\n" | "\r\n"
+
+let HOST_BUN = "bun"
+let HOST_NODE = "node"
+let HOST_LINUX = "linux"
+let HOST_DARWIN = "darwin"
+let HOST_WINDOWS = "windows"
+let HOST_CLARITOS = "claritos"
+
+mut _OVERRIDE = null     -- {host, os, arch, endian, line_sep}
+
+fn override(info) { _OVERRIDE = info }
+fn reset_override() { _OVERRIDE = null }
+
+fn _detect_uname_s() {
+    let r = exec_full("uname -s 2>/dev/null")
+    if r.exit_code != 0 { return "" }
+    return lower(trim(r.stdout))
+}
+
+fn _detect_uname_m() {
+    let r = exec_full("uname -m 2>/dev/null")
+    if r.exit_code != 0 { return "" }
+    return lower(trim(r.stdout))
+}
+
+fn _arch_canon(raw) {
+    if raw == "x86_64" or raw == "amd64" { return "x86_64" }
+    if raw == "aarch64" or raw == "arm64" { return "arm64" }
+    if raw == "i386" or raw == "i686" { return "x86" }
+    if starts(raw, "arm") { return "arm" }
+    if starts(raw, "wasm") { return "wasm32" }
+    return raw
+}
+
+fn _info() {
+    if _OVERRIDE != null { return _OVERRIDE }
+    -- Bare-metal marker: the bare-metal runtime sets the env var
+    -- CLARITY_HOST=claritos before evaluating user code.
+    let host_env = env("CLARITY_HOST", "")
+    if host_env == "claritos" {
+        return {
+            "host": HOST_CLARITOS,
+            "os": "claritos",
+            "arch": "x86_64",
+            "endian": "little",
+            "line_sep": "\n"
+        }
+    }
+    let uname_s = _detect_uname_s()
+    let uname_m = _detect_uname_m()
+    mut os_name = "unknown"
+    if contains(uname_s, "linux") { os_name = HOST_LINUX }
+    elif contains(uname_s, "darwin") { os_name = HOST_DARWIN }
+    elif contains(uname_s, "mingw") or contains(uname_s, "msys") or contains(uname_s, "cygwin") { os_name = HOST_WINDOWS }
+    elif contains(uname_s, "windows") { os_name = HOST_WINDOWS }
+    let arch = _arch_canon(uname_m)
+    let line_sep = if os_name == HOST_WINDOWS { "\r\n" } else { "\n" }
+    return {
+        "host": HOST_BUN,
+        "os": os_name,
+        "arch": arch,
+        "endian": "little",
+        "line_sep": line_sep
+    }
+}
+
+-- ── Public introspection ─────────────────────────
+
+fn host_name() { return _info()["host"] }
+fn os_name() { return _info()["os"] }
+fn arch_name() { return _info()["arch"] }
+fn endianness() { return _info()["endian"] }
+fn line_separator() { return _info()["line_sep"] }
+
+fn is_bare_metal() { return host_name() == HOST_CLARITOS }
+fn is_host() { return not is_bare_metal() }
+fn is_linux() { return os_name() == HOST_LINUX }
+fn is_darwin() { return os_name() == HOST_DARWIN }
+fn is_windows() { return os_name() == HOST_WINDOWS }
+fn is_unix() { return is_linux() or is_darwin() }
+
+-- ── I/O helpers that branch internally ───────────
+
+fn read_file(path) {
+    if is_bare_metal() {
+        from "syscall.clarity" import sys_open, sys_read, sys_close
+        from "kernel_abi.clarity" import O_RDONLY
+        let fd = sys_open(path, O_RDONLY, 0)
+        mut buf = ""
+        while true {
+            let chunk = sys_read(fd, 4096)
+            if len(chunk) == 0 { break }
+            buf = buf + chunk
+        }
+        sys_close(fd)
+        return buf
+    }
+    return read(path)
+}
+
+fn write_file(path, content) {
+    if is_bare_metal() {
+        from "syscall.clarity" import sys_open, sys_write, sys_close
+        from "kernel_abi.clarity" import O_WRONLY, O_CREAT, O_TRUNC
+        let fd = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4)
+        sys_write(fd, content)
+        sys_close(fd)
+        return true
+    }
+    write(path, content)
+    return true
+}
+
+fn list_dir(path) {
+    if is_bare_metal() {
+        from "syscall.clarity" import sys_readdir
+        return sys_readdir(path)
+    }
+    let r = exec_full("ls -1 '" + path + "' 2>/dev/null")
+    let raw = split(trim(r.stdout), "\n")
+    mut out = []
+    for line in raw {
+        let t = trim(line)
+        if len(t) > 0 { push(out, t) }
+    }
+    return out
+}
+
+fn make_dir(path) {
+    if is_bare_metal() {
+        from "syscall.clarity" import sys_mkdir
+        sys_mkdir(path)
+        return true
+    }
+    exec_full("mkdir -p '" + path + "'")
+    return true
+}
+
+fn remove_file(path) {
+    if is_bare_metal() {
+        from "syscall.clarity" import sys_unlink
+        sys_unlink(path)
+        return true
+    }
+    exec_full("rm -f '" + path + "'")
+    return true
+}
+
+fn now_seconds() {
+    if is_bare_metal() {
+        from "syscall.clarity" import sys_clock_gettime
+        return sys_clock_gettime()
+    }
+    return time()
+}
+
+-- ── Portability audit ────────────────────────────
+
+-- Runs at boot or in tests to declare which stdlib modules are
+-- bare-metal safe. The list reflects what we've validated; modules
+-- not listed here are assumed to be host-only until reviewed.
+let BARE_METAL_SAFE = [
+    "tokens", "lexer", "ast_nodes", "parser",
+    "interpreter", "bytecode",
+    "collections", "datetime", "semver",
+    "ffi",
+    "kernel_abi", "syscall", "scheduler", "vfs",
+    "graphics", "draw", "font", "image",
+    "input", "keymap", "mouse", "touch", "event_bus",
+    "window", "compositor", "chrome", "window_manager", "workspace",
+    "theme", "ui", "layout", "widgets",
+    "ipc", "init", "notify",
+    "wallpaper", "statusbar", "dock", "launcher", "lockscreen", "settings",
+    "app_calc", "app_viewer", "app_monitor",
+    "app_editor", "app_files", "app_terminal",
+    "app_manifest", "app_sandbox",
+    "platform"
+]
+
+let HOST_ONLY = [
+    -- These reach for /proc, shell tooling, or real network sockets
+    -- and will need bare-metal ports (a follow-up phase) before they
+    -- can run on ClarityOS.
+    "shell", "process",
+    "net", "db", "crypto",
+    "registry", "package",
+    "lsp", "debugger", "profiler",
+    "storage", "network", "audio",
+    "build", "install", "transpile",
+    "runtime", "runtime_gen", "runtime_spec",
+    "app_store", "app_scaffold", "hot_reload"
+]
+
+fn is_bare_metal_safe(mod) {
+    return contains(BARE_METAL_SAFE, mod)
+}
+
+fn requires_host(mod) {
+    return contains(HOST_ONLY, mod)
+}
+
+fn audit() {
+    return {
+        "bare_metal_safe": BARE_METAL_SAFE,
+        "host_only": HOST_ONLY,
+        "safe_count": len(BARE_METAL_SAFE),
+        "host_only_count": len(HOST_ONLY)
+    }
+}

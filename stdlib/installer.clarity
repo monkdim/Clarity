@@ -1,0 +1,258 @@
+-- ClarityOS Installer (Phase 67 task 3).
+--
+-- Wizard-style installer that walks a user from "boot live ISO" to
+-- "first reboot into installed system". Built with the Phase 60 UI
+-- toolkit so it reuses the same widget surface as the rest of the
+-- desktop.
+--
+-- Steps (state machine):
+--
+--     welcome   -> disk      -> partition -> account -> review -> install -> done
+--
+-- The state machine is the testable part. Widget composition for
+-- each step lives in _build_step_*; the installer logic itself
+-- doesn't know about pixels.
+--
+--     let inst = installer()
+--     inst.set_disks([{"path": "/dev/nvme0n1", "size_gb": 512}])
+--     inst.choose_disk("/dev/nvme0n1")
+--     inst.choose_layout("auto")
+--     inst.set_account("alex", "secret")
+--     inst.review()             -- moves to review step
+--     inst.confirm_install()    -- moves to install step + drives the plan
+
+let STEP_WELCOME = "welcome"
+let STEP_DISK = "disk"
+let STEP_PARTITION = "partition"
+let STEP_ACCOUNT = "account"
+let STEP_REVIEW = "review"
+let STEP_INSTALL = "install"
+let STEP_DONE = "done"
+
+let STEP_ORDER = [STEP_WELCOME, STEP_DISK, STEP_PARTITION, STEP_ACCOUNT, STEP_REVIEW, STEP_INSTALL, STEP_DONE]
+
+let LAYOUT_AUTO = "auto"           -- single ext4 root + swap
+let LAYOUT_AUTO_LUKS = "auto_luks"  -- LUKS2-encrypted root
+let LAYOUT_MANUAL = "manual"
+
+let MIN_DISK_GB = 8
+let MIN_USERNAME_LEN = 1
+let MIN_PASSWORD_LEN = 6
+
+class Installer {
+    fn init() {
+        this.step = STEP_WELCOME
+        this.disks = []                  -- list of {path, size_gb, model?}
+        this.disk = null                 -- chosen disk path
+        this.layout = LAYOUT_AUTO
+        this.swap_gb = 4
+        this.username = null
+        this.password = null
+        this.hostname = "claritos"
+        this.timezone = "UTC"
+        this.errors = []
+        this.progress = 0                -- 0..100 during STEP_INSTALL
+        this.log = []                    -- append-only install log
+        this._dry_run = false
+    }
+
+    fn enable_dry_run() { this._dry_run = true }
+
+    -- ── Step transitions ────────────────────────────
+
+    fn _idx(step) {
+        mut i = 0
+        while i < len(STEP_ORDER) {
+            if STEP_ORDER[i] == step { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    fn next() {
+        let i = this._idx(this.step)
+        if i < 0 or i >= len(STEP_ORDER) - 1 { return false }
+        let target = STEP_ORDER[i + 1]
+        let errs = this._validate_for(target)
+        if len(errs) > 0 {
+            this.errors = errs
+            return false
+        }
+        this.errors = []
+        this.step = target
+        return true
+    }
+
+    fn back() {
+        let i = this._idx(this.step)
+        if i <= 0 { return false }
+        if this.step == STEP_INSTALL or this.step == STEP_DONE { return false }
+        this.step = STEP_ORDER[i - 1]
+        this.errors = []
+        return true
+    }
+
+    -- Each step has prerequisites that must be satisfied to leave it.
+    -- _validate_for(target) returns the list of errors if the user
+    -- isn't ready to ENTER `target`.
+    fn _validate_for(target) {
+        mut errs = []
+        if target == STEP_PARTITION {
+            if this.disk == null { push(errs, "select a disk first") }
+            else {
+                let d = this._disk_record(this.disk)
+                if d == null { push(errs, "selected disk not in disks list") }
+                elif d["size_gb"] < MIN_DISK_GB {
+                    push(errs, "disk too small: need >= " + str(MIN_DISK_GB) + " GiB")
+                }
+            }
+        }
+        if target == STEP_ACCOUNT {
+            if this.layout != LAYOUT_AUTO and this.layout != LAYOUT_AUTO_LUKS and this.layout != LAYOUT_MANUAL {
+                push(errs, "choose a partition layout")
+            }
+        }
+        if target == STEP_REVIEW {
+            if this.username == null or len(this.username) < MIN_USERNAME_LEN {
+                push(errs, "username must be at least " + str(MIN_USERNAME_LEN) + " char")
+            }
+            if this.password == null or len(this.password) < MIN_PASSWORD_LEN {
+                push(errs, "password must be at least " + str(MIN_PASSWORD_LEN) + " chars")
+            }
+        }
+        if target == STEP_INSTALL {
+            -- Already validated upstream; double-check key fields.
+            if this.disk == null { push(errs, "no disk") }
+            if this.username == null { push(errs, "no username") }
+        }
+        return errs
+    }
+
+    -- ── Setters used by the UI step widgets ─────────
+
+    fn set_disks(list) { this.disks = list }
+
+    fn _disk_record(path) {
+        for d in this.disks {
+            if d["path"] == path { return d }
+        }
+        return null
+    }
+
+    fn choose_disk(path) {
+        if this._disk_record(path) == null {
+            this.errors = ["unknown disk: " + path]
+            return false
+        }
+        this.disk = path
+        this.errors = []
+        return true
+    }
+
+    fn choose_layout(name) {
+        if name != LAYOUT_AUTO and name != LAYOUT_AUTO_LUKS and name != LAYOUT_MANUAL {
+            this.errors = ["unknown layout: " + name]
+            return false
+        }
+        this.layout = name
+        return true
+    }
+
+    fn set_swap(gb) {
+        if gb < 0 { return false }
+        this.swap_gb = gb
+        return true
+    }
+
+    fn set_account(username, password) {
+        this.username = username
+        this.password = password
+    }
+
+    fn set_hostname(name) { this.hostname = name }
+    fn set_timezone(tz) { this.timezone = tz }
+
+    -- ── Plan + execution ───────────────────────────
+
+    -- Returns the list of operations the installer will perform.
+    -- Pure: does not touch the disk. The test suite asserts shape
+    -- without ever mutating real storage.
+    fn plan() {
+        mut ops = []
+        push(ops, {"kind": "wipe", "disk": this.disk})
+        push(ops, {"kind": "partition", "disk": this.disk, "scheme": "gpt"})
+        if this.layout == LAYOUT_AUTO or this.layout == LAYOUT_AUTO_LUKS {
+            push(ops, {"kind": "make_efi", "disk": this.disk, "size_mb": 512})
+            if this.swap_gb > 0 {
+                push(ops, {"kind": "make_swap", "disk": this.disk, "size_gb": this.swap_gb})
+            }
+            mut root_op = {"kind": "make_root", "disk": this.disk, "fs": "ext4"}
+            if this.layout == LAYOUT_AUTO_LUKS {
+                root_op["encryption"] = "luks2"
+            }
+            push(ops, root_op)
+        }
+        push(ops, {"kind": "format", "disk": this.disk, "layout": this.layout})
+        push(ops, {"kind": "mount_target"})
+        push(ops, {"kind": "copy_system"})
+        push(ops, {"kind": "install_bootloader", "disk": this.disk})
+        push(ops, {"kind": "create_user", "username": this.username, "hostname": this.hostname})
+        push(ops, {"kind": "set_timezone", "tz": this.timezone})
+        push(ops, {"kind": "unmount_target"})
+        return ops
+    }
+
+    fn confirm_install() {
+        if this.step != STEP_REVIEW {
+            this.errors = ["not on review step"]
+            return false
+        }
+        let target_errs = this._validate_for(STEP_INSTALL)
+        if len(target_errs) > 0 {
+            this.errors = target_errs
+            return false
+        }
+        this.step = STEP_INSTALL
+        this.progress = 0
+        this.errors = []
+        let ops = this.plan()
+        let total = len(ops)
+        mut i = 0
+        for op in ops {
+            i = i + 1
+            this.progress = (i * 100) / total
+            push(this.log, op["kind"])
+            if not this._dry_run {
+                this._run_op(op)
+            }
+        }
+        this.step = STEP_DONE
+        return true
+    }
+
+    fn _run_op(op) {
+        -- Real execution would shell out to parted/mkfs.ext4/mount/
+        -- grub-install/etc here. We deliberately keep that surface
+        -- behind a flag so installer testing never touches host
+        -- storage. Set this._dry_run = false explicitly to enable.
+    }
+
+    -- ── Reportable summary ─────────────────────────
+
+    fn summary() {
+        return {
+            "step": this.step,
+            "disk": this.disk,
+            "layout": this.layout,
+            "swap_gb": this.swap_gb,
+            "username": this.username,
+            "hostname": this.hostname,
+            "timezone": this.timezone,
+            "progress": this.progress,
+            "log": this.log,
+            "errors": this.errors
+        }
+    }
+}
+
+fn installer() { return Installer() }

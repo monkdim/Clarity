@@ -1,0 +1,181 @@
+-- Hardware compatibility database (Phase 67 task 5).
+--
+-- Static catalogue of hardware ClarityOS knows how to drive, plus
+-- a lookup helper that takes a {vendor, device, class} PCI tuple
+-- and returns the driver record (or null).
+--
+-- This is the "it's known to work" matrix. Expanding the matrix is
+-- a follow-up phase task; here we build the data structure and the
+-- query API the rest of the OS uses to decide whether to bind a
+-- driver, fall back, or warn the user.
+--
+--     let db = hw_db()
+--     db.lookup_pci(0x8086, 0x10D3)   -- Intel 82574L NIC → "e1000e"
+--     db.kind_supported("storage")    -- true if any storage entry
+--     db.tier(0x1AF4, 0x1000)         -- "tier1" / "tier2" / "experimental"
+
+-- Tier levels:
+--   tier1         daily-driver quality, used in CI
+--   tier2         works, light testing only
+--   experimental  driver scaffolded; basic init succeeds
+
+let TIER_1 = "tier1"
+let TIER_2 = "tier2"
+let TIER_EXPERIMENTAL = "experimental"
+
+-- ── Vendor IDs (PCI) ─────────────────────────────
+
+let VENDOR_INTEL = 0x8086
+let VENDOR_AMD = 0x1022
+let VENDOR_NVIDIA = 0x10DE
+let VENDOR_REDHAT = 0x1AF4    -- virtio
+let VENDOR_VMWARE = 0x15AD
+let VENDOR_QEMU = 0x1234       -- bochs / cirrus
+let VENDOR_REALTEK = 0x10EC
+let VENDOR_BROADCOM = 0x14E4
+
+-- ── Catalogue entries ────────────────────────────
+
+let _ENTRIES = [
+    -- ── CPU / chipset ─────────────────────────────
+    {"kind": "cpu", "vendor": VENDOR_INTEL, "name": "Intel x86_64 (any)", "tier": TIER_1, "driver": "x86_64"},
+    {"kind": "cpu", "vendor": VENDOR_AMD, "name": "AMD x86_64 (any)", "tier": TIER_1, "driver": "x86_64"},
+
+    -- ── Storage ───────────────────────────────────
+    -- Class 01:06:01 = SATA AHCI
+    {"kind": "storage", "vendor": VENDOR_INTEL, "device": 0x2922, "name": "Intel ICH9 AHCI", "tier": TIER_1, "driver": "ahci"},
+    {"kind": "storage", "vendor": VENDOR_INTEL, "device": 0xA102, "name": "Intel Sunrise Point AHCI", "tier": TIER_1, "driver": "ahci"},
+    -- Class 01:08:02 = NVMe — generic match
+    {"kind": "storage", "vendor": VENDOR_INTEL, "name": "Intel SSD (NVMe)", "tier": TIER_2, "driver": "nvme"},
+    {"kind": "storage", "vendor": VENDOR_REDHAT, "device": 0x1001, "name": "virtio-blk", "tier": TIER_1, "driver": "virtio_blk"},
+    {"kind": "storage", "vendor": VENDOR_REDHAT, "device": 0x1042, "name": "virtio-blk (modern)", "tier": TIER_1, "driver": "virtio_blk"},
+
+    -- ── Network ───────────────────────────────────
+    {"kind": "network", "vendor": VENDOR_REDHAT, "device": 0x1000, "name": "virtio-net", "tier": TIER_1, "driver": "virtio_net"},
+    {"kind": "network", "vendor": VENDOR_REDHAT, "device": 0x1041, "name": "virtio-net (modern)", "tier": TIER_1, "driver": "virtio_net"},
+    {"kind": "network", "vendor": VENDOR_INTEL, "device": 0x10D3, "name": "Intel 82574L (e1000e)", "tier": TIER_2, "driver": "e1000e"},
+    {"kind": "network", "vendor": VENDOR_INTEL, "device": 0x100E, "name": "Intel 82540EM (e1000)", "tier": TIER_1, "driver": "e1000"},
+    {"kind": "network", "vendor": VENDOR_INTEL, "device": 0x2723, "name": "Intel Wi-Fi 6 AX200", "tier": TIER_EXPERIMENTAL, "driver": "iwlwifi"},
+    {"kind": "network", "vendor": VENDOR_INTEL, "device": 0x2725, "name": "Intel Wi-Fi 6E AX210", "tier": TIER_EXPERIMENTAL, "driver": "iwlwifi"},
+    {"kind": "network", "vendor": VENDOR_REALTEK, "device": 0x8139, "name": "Realtek RTL8139", "tier": TIER_2, "driver": "rtl8139"},
+
+    -- ── Display / framebuffer ─────────────────────
+    {"kind": "display", "vendor": VENDOR_QEMU, "device": 0x1111, "name": "QEMU std VGA", "tier": TIER_1, "driver": "framebuffer"},
+    {"kind": "display", "vendor": VENDOR_REDHAT, "device": 0x1050, "name": "virtio-gpu", "tier": TIER_2, "driver": "virtio_gpu"},
+    {"kind": "display", "vendor": VENDOR_VMWARE, "device": 0x0405, "name": "VMware SVGA II", "tier": TIER_2, "driver": "vmwgfx"},
+    {"kind": "display", "vendor": VENDOR_INTEL, "name": "Intel HD Graphics (generic)", "tier": TIER_EXPERIMENTAL, "driver": "i915_min"},
+
+    -- ── Input ─────────────────────────────────────
+    {"kind": "input", "vendor": null, "name": "PS/2 keyboard (8042)", "tier": TIER_1, "driver": "ps2_kbd"},
+    {"kind": "input", "vendor": null, "name": "PS/2 mouse (8042)", "tier": TIER_1, "driver": "ps2_mouse"},
+    {"kind": "input", "vendor": VENDOR_INTEL, "device": 0xA37C, "name": "Intel xHCI USB 3.0", "tier": TIER_2, "driver": "xhci"},
+
+    -- ── Audio ─────────────────────────────────────
+    {"kind": "audio", "vendor": VENDOR_INTEL, "device": 0x2668, "name": "Intel HDA (ICH6)", "tier": TIER_2, "driver": "intel_hda"},
+    {"kind": "audio", "vendor": VENDOR_REDHAT, "device": 0x1002, "name": "virtio-sound", "tier": TIER_EXPERIMENTAL, "driver": "virtio_sound"}
+]
+
+class HardwareDb {
+    fn init() {
+        this.entries = _ENTRIES
+    }
+
+    fn all() { return this.entries }
+
+    fn lookup_pci(vendor, device) {
+        -- Most-specific match wins: exact (vendor, device) > vendor-only.
+        mut exact = null
+        mut vendor_match = null
+        for e in this.entries {
+            if has(e, "vendor") and e["vendor"] == vendor {
+                if has(e, "device") and e["device"] == device {
+                    exact = e
+                } elif not has(e, "device") {
+                    vendor_match = e
+                }
+            }
+        }
+        if exact != null { return exact }
+        return vendor_match
+    }
+
+    fn driver_for(vendor, device) {
+        let entry = this.lookup_pci(vendor, device)
+        if entry == null { return null }
+        return entry["driver"]
+    }
+
+    fn tier(vendor, device) {
+        let entry = this.lookup_pci(vendor, device)
+        if entry == null { return null }
+        return entry["tier"]
+    }
+
+    fn entries_by_kind(kind) {
+        mut out = []
+        for e in this.entries {
+            if e["kind"] == kind { push(out, e) }
+        }
+        return out
+    }
+
+    fn entries_by_tier(tier) {
+        mut out = []
+        for e in this.entries {
+            if e["tier"] == tier { push(out, e) }
+        }
+        return out
+    }
+
+    fn kind_supported(kind) {
+        return len(this.entries_by_kind(kind)) > 0
+    }
+
+    fn count_by_tier() {
+        mut counts = {}
+        counts[TIER_1] = 0
+        counts[TIER_2] = 0
+        counts[TIER_EXPERIMENTAL] = 0
+        for e in this.entries {
+            let t = e["tier"]
+            if has(counts, t) { counts[t] = counts[t] + 1 }
+        }
+        return counts
+    }
+
+    fn report() {
+        mut lines = []
+        push(lines, "# ClarityOS hardware compatibility")
+        push(lines, "")
+        let kinds = ["cpu", "storage", "network", "display", "input", "audio"]
+        for kind in kinds {
+            let entries = this.entries_by_kind(kind)
+            if len(entries) == 0 { continue }
+            push(lines, "## " + kind)
+            push(lines, "")
+            for e in entries {
+                let vendor_str = if has(e, "vendor") and e["vendor"] != null { _hex(e["vendor"]) } else { "—" }
+                let device_str = if has(e, "device") { _hex(e["device"]) } else { "any" }
+                push(lines, "- " + e["name"] + " — " + vendor_str + ":" + device_str + " (" + e["tier"] + ", " + e["driver"] + ")")
+            }
+            push(lines, "")
+        }
+        return join(lines, "\n")
+    }
+}
+
+fn _hex(n) {
+    let h = "0123456789ABCDEF"
+    if n == 0 { return "0x0000" }
+    mut s = ""
+    mut v = n
+    while v > 0 {
+        let d = v & 0xF
+        s = char_at(h, d) + s
+        v = v >> 4
+    }
+    while len(s) < 4 { s = "0" + s }
+    return "0x" + s
+}
+
+fn hw_db() { return HardwareDb() }

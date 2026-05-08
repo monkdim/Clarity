@@ -1,0 +1,147 @@
+-- Live USB image builder (Phase 67 task 2).
+--
+-- Wraps the ISO builder with the extra layout a "live" image needs:
+-- a SquashFS-packed root filesystem the kernel mounts read-only,
+-- plus an optional persistence overlay so settings + user files
+-- survive between boots.
+--
+-- Layout produced (in addition to the regular ISO tree):
+--
+--     live/
+--     ├── filesystem.squashfs        # the read-only root
+--     ├── manifest.json              # versions + capabilities
+--     └── persistence/               # only present if persistence=true
+--         └── README                 # explains the overlay slot
+--
+-- The kernel cmdline gains `boot=live` so init knows to mount the
+-- squashfs and (optionally) overlay the persistence directory.
+--
+--     let live = LiveUsbBuilder({
+--         "output": "claritos-live.iso",
+--         "label":  "ClarityOS Live",
+--         "persistence": true,
+--         "persistence_size_mb": 512
+--     })
+--     live.add_root_tree("/path/to/rootfs")
+--     live.add_kernel("/path/to/clarity-kernel")
+--     live.add_runtime("/path/to/clarity-init")
+--     live.add_uefi_loader("/path/to/BOOTX64.EFI")
+--     live.build()
+
+from "mkiso.clarity" import IsoBuilder
+
+class LiveUsbBuilder {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.iso = IsoBuilder(o)
+        -- Live mode: cmdline switch tells kernel to mount the squashfs.
+        if not has(o, "cmdline") {
+            this.iso.cmdline = "boot=live"
+        }
+        this.persistence = if has(o, "persistence") { o["persistence"] } else { false }
+        this.persistence_size_mb = if has(o, "persistence_size_mb") { o["persistence_size_mb"] } else { 256 }
+        this.root_tree = null
+        this.manifest_overrides = if has(o, "manifest") { o["manifest"] } else { {} }
+    }
+
+    fn add_root_tree(path) { this.root_tree = path }
+    fn add_kernel(path) { this.iso.add_kernel(path) }
+    fn add_runtime(path) { this.iso.add_runtime(path) }
+    fn add_uefi_loader(path) { this.iso.add_uefi_loader(path) }
+    fn add_stdlib_bundle(path) { this.iso.add_stdlib_bundle(path) }
+    fn add_app(name, dir) { this.iso.add_app(name, dir) }
+
+    fn manifest() {
+        mut m = {
+            "name": "ClarityOS Live",
+            "version": "0.1.0",
+            "kind": "live",
+            "persistence": this.persistence,
+            "persistence_size_mb": this.persistence_size_mb,
+            "kernel_cmdline": this.iso.cmdline,
+            "label": this.iso.label
+        }
+        for kv in entries(this.manifest_overrides) { m[kv[0]] = kv[1] }
+        return m
+    }
+
+    fn plan() {
+        mut ops = this.iso.plan()
+        let live_dir = this.iso.staging_dir + "/live"
+        push(ops, {"kind": "mkdir", "path": live_dir})
+        if this.root_tree != null {
+            push(ops, {
+                "kind": "squashfs",
+                "src": this.root_tree,
+                "dst": live_dir + "/filesystem.squashfs"
+            })
+        }
+        push(ops, {
+            "kind": "write",
+            "path": live_dir + "/manifest.json",
+            "content": json_string(this.manifest(), 2)
+        })
+        if this.persistence {
+            push(ops, {"kind": "mkdir", "path": live_dir + "/persistence"})
+            push(ops, {
+                "kind": "write",
+                "path": live_dir + "/persistence/README",
+                "content": _persistence_readme(this.persistence_size_mb)
+            })
+        }
+        return ops
+    }
+
+    fn validate() {
+        mut errors = this.iso.validate()
+        if this.root_tree == null { push(errors, "missing root tree (call add_root_tree)") }
+        if this.persistence_size_mb < 16 { push(errors, "persistence_size_mb must be >= 16") }
+        return errors
+    }
+
+    fn build() {
+        let errs = this.validate()
+        if len(errs) > 0 { throw "LiveUsbError: " + join(errs, "; ") }
+        let ops = this.plan()
+        for op in ops { this._execute(op) }
+        return this.iso.output
+    }
+
+    fn _execute(op) {
+        let kind = op["kind"]
+        if kind == "mkdir" {
+            exec_full("mkdir -p '" + op["path"] + "'")
+        } elif kind == "copy" {
+            exec_full("cp '" + op["src"] + "' '" + op["dst"] + "'")
+        } elif kind == "copy_tree" {
+            exec_full("mkdir -p '" + op["dst"] + "'")
+            exec_full("cp -R '" + op["src"] + "/.' '" + op["dst"] + "'")
+        } elif kind == "write" {
+            write(op["path"], op["content"])
+        } elif kind == "squashfs" {
+            this._squash(op)
+        } elif kind == "pack" {
+            -- Delegate the final pack to the embedded IsoBuilder.
+            this.iso._pack(op)
+        }
+    }
+
+    fn _squash(op) {
+        let r = exec_full("command -v mksquashfs >/dev/null 2>&1 && echo yes || echo no")
+        if trim(r.stdout) != "yes" {
+            throw "LiveUsbError: mksquashfs not on PATH; install squashfs-tools"
+        }
+        exec_full("mksquashfs '" + op["src"] + "' '" + op["dst"] + "' -comp zstd -noappend")
+    }
+}
+
+fn _persistence_readme(size_mb) {
+    return "ClarityOS Live persistence overlay\n\n" +
+           "This directory is reserved for an overlayfs on top of the\n" +
+           "read-only squashfs root. The init script will mount a writable\n" +
+           "image of " + str(size_mb) + " MiB here on boot.\n\n" +
+           "Saving files anywhere outside this overlay survives only until\n" +
+           "the next reboot.\n"
+}
+
+fn live_usb_builder(opts) { return LiveUsbBuilder(opts) }
