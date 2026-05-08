@@ -1,0 +1,111 @@
+-- IPC — in-process message bus (Phase 61 task 2).
+--
+-- Apps register named services on the bus, call them by name (sync
+-- request/response), or use pub/sub for one-to-many messaging:
+--
+--     let b = bus()
+--     b.register("storage.list_mounts", fn(req) { return mounts() })
+--     let m = b.call("storage.list_mounts", null)
+--
+--     b.subscribe("storage.mounted", fn(msg) { show "new disk: {msg}" })
+--     b.publish("storage.mounted", {"device": "/dev/sdb1"})
+--
+-- This is the "transport-neutral" half of the IPC story. The current
+-- bus is in-process — every register/call/publish stays inside the
+-- caller's runtime. A future commit can drop a Unix-domain-socket
+-- backend in behind the same API so cross-process calls just work.
+--
+-- Design choices:
+--   * Synchronous request/response. Async builds on top with channels.
+--   * Last-registered-wins for service names — re-registering replaces
+--     the previous handler, useful for hot-reload / test mocks.
+--   * Subscribers can return true to consume an event and stop further
+--     dispatch (matches the InputBus pattern from Phase 58).
+
+class Bus {
+    fn init() {
+        this._services = {}        -- name -> handler fn
+        this._subscriptions = {}   -- topic -> list of handler fns
+        this._intercept = null     -- optional fn(name, request) for tests/logging
+    }
+
+    -- ── Service registry (request/response) ───────────
+
+    fn register(name, handler) {
+        this._services[name] = handler
+    }
+
+    fn unregister(name) {
+        if has(this._services, name) {
+            mut out = {}
+            for k in keys(this._services) {
+                if k != name { out[k] = this._services[k] }
+            }
+            this._services = out
+        }
+    }
+
+    fn has_service(name) { return has(this._services, name) }
+    fn services() { return keys(this._services) }
+
+    -- Call a service by name. Returns whatever the handler returns.
+    -- Throws if the service isn't registered.
+    fn call(name, request) {
+        if this._intercept != null { this._intercept(name, request) }
+        if not has(this._services, name) {
+            throw "IPCError: service '" + name + "' not registered"
+        }
+        return this._services[name](request)
+    }
+
+    -- Like call() but returns null instead of throwing when the
+    -- service isn't registered. Useful for optional integrations.
+    fn try_call(name, request) {
+        if not has(this._services, name) { return null }
+        return this._services[name](request)
+    }
+
+    -- ── Pub/sub ───────────────────────────────────────
+
+    fn subscribe(topic, handler) {
+        if not has(this._subscriptions, topic) { this._subscriptions[topic] = [] }
+        push(this._subscriptions[topic], handler)
+    }
+
+    fn unsubscribe(topic, handler) {
+        if not has(this._subscriptions, topic) { return null }
+        mut out = []
+        for h in this._subscriptions[topic] {
+            if h != handler { push(out, h) }
+        }
+        this._subscriptions[topic] = out
+    }
+
+    fn topics() { return keys(this._subscriptions) }
+
+    -- Publish a message to every subscriber of `topic`. Returns the
+    -- count of handlers that ran. A handler returning true stops
+    -- propagation (consume pattern, like the InputBus).
+    fn publish(topic, message) {
+        if not has(this._subscriptions, topic) { return 0 }
+        mut count = 0
+        for h in this._subscriptions[topic] {
+            count += 1
+            if h(message) == true { break }
+        }
+        return count
+    }
+
+    -- ── Test / debug ──────────────────────────────────
+
+    -- Set a function to be called on every `call()` for logging or
+    -- test-side recording. Pass null to clear.
+    fn set_intercept(fn_) { this._intercept = fn_ }
+}
+
+-- The default process-wide bus — same role that DBus's session bus
+-- plays on Linux. Apps that don't need their own bus instance just
+-- import this and use it.
+let DEFAULT_BUS = Bus()
+
+fn bus() { return DEFAULT_BUS }
