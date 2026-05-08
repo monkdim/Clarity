@@ -19,23 +19,37 @@ jobs:
           - os: macos-14
             target: darwin-arm64
             bun_target: bun-darwin-arm64
+            bootstrap_target: darwin-arm64
             binary: clarity
-          - os: macos-13
+            run_smoke: true
+          # darwin-x64 is cross-compiled from a Linux runner — Bun targets
+          # the binary regardless of host, and macos-13 has the slowest
+          # GitHub Actions queue. Smoke tests skip here since a Mach-O
+          # binary can't run on Linux; darwin-arm64 covers macOS coverage.
+          - os: ubuntu-latest
             target: darwin-x64
             bun_target: bun-darwin-x64
+            bootstrap_target: linux-x64
             binary: clarity
+            run_smoke: false
           - os: ubuntu-latest
             target: linux-x64
             bun_target: bun-linux-x64
+            bootstrap_target: linux-x64
             binary: clarity
+            run_smoke: true
           - os: ubuntu-24.04-arm
             target: linux-arm64
             bun_target: bun-linux-arm64
+            bootstrap_target: linux-arm64
             binary: clarity
+            run_smoke: true
           - os: windows-latest
             target: windows-x64
             bun_target: bun-windows-x64
+            bootstrap_target: windows-x64
             binary: clarity.exe
+            run_smoke: false
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
     steps:
@@ -49,7 +63,7 @@ jobs:
       - name: Bootstrap from latest release
         id: bootstrap
         run: |
-          curl -fsSL https://github.com/monkdim/Clarity/releases/latest/download/clarity-${{ matrix.target }}.tar.gz -o clarity-bootstrap.tar.gz
+          curl -fsSL https://github.com/monkdim/Clarity/releases/latest/download/clarity-${{ matrix.bootstrap_target }}.tar.gz -o clarity-bootstrap.tar.gz
           tar xzf clarity-bootstrap.tar.gz
           chmod +x clarity
           mv clarity clarity-bootstrap
@@ -73,7 +87,7 @@ jobs:
           bun build --compile --target=${{ matrix.bun_target }} clarity-entry.js --outfile ${{ matrix.binary }}
 
       - name: Run smoke tests
-        if: matrix.target != 'windows-x64'
+        if: matrix.run_smoke
         run: ./native/dist/clarity smoke ./native/dist/clarity
 
       - name: Package binary
