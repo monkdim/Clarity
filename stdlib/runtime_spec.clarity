@@ -39,6 +39,9 @@ let TYPE_SECTION = {
         {name: "$float", params: "v", body: "return parseFloat(v);"},
         {name: "str", params: "v", body: "return display(v);"},
         {name: "$bool", params: "v", body: "return truthy(v);"},
+        {name: "$eq", params: "a, b", body: "if (a === b) return true;\n  if (a == null || b == null) return a == null && b == null;\n  if (Array.isArray(a)) {\n    if (!Array.isArray(b) || a.length !== b.length) return false;\n    for (let i = 0; i < a.length; i++) if (!$eq(a[i], b[i])) return false;\n    return true;\n  }\n  if (typeof a === 'object' && typeof b === 'object') {\n    if (a.constructor !== Object || b.constructor !== Object) return false;\n    const ka = Object.keys(a);\n    if (ka.length !== Object.keys(b).length) return false;\n    for (const k of ka) if (!$eq(a[k], b[k])) return false;\n    return true;\n  }\n  return false;"},
+        {name: "$ne", params: "a, b", body: "return !$eq(a, b);"},
+        {name: "$index", params: "obj, idx", body: "if ((Array.isArray(obj) || typeof obj === 'string') && typeof idx === 'number' && idx < 0) {\n    idx = obj.length + idx;\n  }\n  const v = obj == null ? undefined : obj[idx];\n  return v === undefined ? null : v;"},
         {name: "type", params: "v", body: "if (v === null || v === undefined) return 'null';\n  if (typeof v === 'boolean') return 'bool';\n  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';\n  if (typeof v === 'string') return 'string';\n  if (Array.isArray(v)) return 'list';\n  if (v instanceof ClarityEnum) return 'enum';\n  if (v instanceof ClarityInstance) return v._className;\n  if (typeof v === 'object') return 'map';\n  if (typeof v === 'function') return 'function';\n  return 'unknown';"}
     ]
 }

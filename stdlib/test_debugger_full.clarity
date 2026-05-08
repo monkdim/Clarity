@@ -1,5 +1,7 @@
--- Debugger Tests — ported from tests/test_debugger.py
--- Tests breakpoint management, watch expressions, value formatting.
+-- Debugger Tests — exercise the self-hosted debugger.clarity API.
+-- Constructs a Debugger over a tiny temp source, then drives the
+-- breakpoint / watch / format primitives that don't require an
+-- interactive prompt.
 
 from "debugger.clarity" import Debugger
 
@@ -24,70 +26,80 @@ fn assert_eq(actual, expected, msg) {
     }
 }
 
--- ── Debugger initialization ─────────────────────────────
+-- The Debugger reads its source file in init(); write a tiny one to /tmp.
+let _DBG_SRC = "/tmp/_debugger_test_src.clarity"
+write(_DBG_SRC, "let x = 1\nlet y = 2\nlet z = x + y\nshow z\n")
+
+-- ── Initialization ──────────────────────────────────────
 
 show "-- Debugger: Init --"
 
-let dbg = Debugger()
+let dbg = Debugger(_DBG_SRC)
 assert(dbg != null, "debugger creates")
-assert(type(dbg.breakpoints) == "list" or type(dbg.breakpoints) == "map", "breakpoints initialized")
-assert(type(dbg.watches) == "list" or type(dbg.watches) == "map", "watches initialized")
+assert_eq(type(dbg.breakpoints), "list", "breakpoints is a list")
+assert_eq(type(dbg.watches), "list", "watches is a list")
+assert_eq(len(dbg.breakpoints), 0, "no initial breakpoints")
+assert_eq(len(dbg.watches), 0, "no initial watches")
+assert_eq(dbg.mode, "step", "default mode is step")
+assert_eq(dbg.paused, false, "not paused initially")
 
--- ── Breakpoint management ───────────────────────────────
+-- ── Breakpoints (via cmd_breakpoint) ────────────────────
 
 show "-- Debugger: Breakpoints --"
 
-let dbg2 = Debugger()
-dbg2.add_breakpoint("test.clarity", 5)
-assert(len(dbg2.breakpoints) >= 1, "breakpoint added")
+let dbg2 = Debugger(_DBG_SRC)
+dbg2.cmd_breakpoint("2")
+assert_eq(len(dbg2.breakpoints), 1, "breakpoint added")
+assert_eq(dbg2.breakpoints[0].line, 2, "breakpoint at line 2")
 
-dbg2.add_breakpoint("test.clarity", 10)
-assert(len(dbg2.breakpoints) >= 2, "second breakpoint added")
+dbg2.cmd_breakpoint("3")
+assert_eq(len(dbg2.breakpoints), 2, "second breakpoint added")
 
--- Remove breakpoint
-dbg2.remove_breakpoint("test.clarity", 5)
-assert(len(dbg2.breakpoints) >= 1, "breakpoint removed")
+let first_id = dbg2.breakpoints[0].id
+dbg2.cmd_delete_bp(str(first_id))
+assert_eq(len(dbg2.breakpoints), 1, "breakpoint removed")
 
--- ── Watch expressions ───────────────────────────────────
+-- file:line form
+let dbg2b = Debugger(_DBG_SRC)
+dbg2b.cmd_breakpoint("other.clarity:7")
+assert_eq(dbg2b.breakpoints[0].file, "other.clarity", "file:line parses file")
+assert_eq(dbg2b.breakpoints[0].line, 7, "file:line parses line")
+
+-- ── Watches (via cmd_watch / cmd_unwatch) ───────────────
 
 show "-- Debugger: Watches --"
 
-let dbg3 = Debugger()
-dbg3.add_watch("x + 1")
-assert(len(dbg3.watches) >= 1, "watch added")
+let dbg3 = Debugger(_DBG_SRC)
+dbg3.cmd_watch("x + 1")
+assert_eq(len(dbg3.watches), 1, "watch added")
+assert_eq(dbg3.watches[0], "x + 1", "watch stored")
 
-dbg3.add_watch("y * 2")
-assert(len(dbg3.watches) >= 2, "second watch added")
+dbg3.cmd_watch("y * 2")
+assert_eq(len(dbg3.watches), 2, "second watch added")
 
-dbg3.remove_watch("x + 1")
-assert(len(dbg3.watches) >= 1, "watch removed")
+dbg3.cmd_unwatch("1")
+assert_eq(len(dbg3.watches), 1, "watch removed by index")
+assert_eq(dbg3.watches[0], "y * 2", "remaining watch is correct")
 
 -- ── Value formatting ────────────────────────────────────
 
 show "-- Debugger: Value Formatting --"
 
-assert_eq(dbg.format_value(42), "42", "format int")
-assert_eq(dbg.format_value("hello"), "\"hello\"", "format string")
-assert_eq(dbg.format_value(true), "true", "format bool")
-assert_eq(dbg.format_value(null), "null", "format null")
-assert(contains(dbg.format_value([1, 2, 3]), "1"), "format list")
-assert(contains(dbg.format_value({a: 1}), "a"), "format map")
+-- format_value wraps output in ANSI color codes; check the payload is present.
+assert(contains(dbg.format_value(42), "42"), "format int contains 42")
+assert(contains(dbg.format_value("hello"), "\"hello\""), "format string contains quoted text")
+assert(contains(dbg.format_value(true), "true"), "format bool contains true")
+assert(contains(dbg.format_value(null), "null"), "format null contains null")
+assert(contains(dbg.format_value([1, 2, 3]), "1"), "format list contains element")
+assert(contains(dbg.format_value({a: 1}), "a"), "format map contains key")
 
--- ── Long value summaries ────────────────────────────────
-
-show "-- Debugger: Long Values --"
-
+-- Long values still produce non-empty output
 let long_list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-let formatted = dbg.format_value(long_list)
-assert(len(formatted) > 0, "long list formats")
+assert(len(dbg.format_value(long_list)) > 0, "long list formats")
 
--- ── Debugger state ──────────────────────────────────────
+-- ── Cleanup ─────────────────────────────────────────────
 
-show "-- Debugger: State --"
-
-let dbg4 = Debugger()
-assert(dbg4.mode == "step" or dbg4.mode == null or true, "initial mode")
-assert(dbg4.running == false or dbg4.running == null or true, "initial running state")
+exec("rm -f " + _DBG_SRC)
 
 -- ── Summary ─────────────────────────────────────────────
 
