@@ -772,6 +772,8 @@ def bundle(compile_native=False):
         'theme.clarity', 'ui.clarity', 'layout.clarity', 'widgets.clarity',
         'ipc.clarity', 'init.clarity', 'storage.clarity', 'network.clarity',
         'audio.clarity', 'notify.clarity',
+        'wallpaper.clarity', 'statusbar.clarity', 'dock.clarity', 'launcher.clarity',
+        'lockscreen.clarity', 'settings.clarity',
         'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',

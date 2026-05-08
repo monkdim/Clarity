@@ -1,0 +1,163 @@
+-- Wallpaper — desktop background (Phase 62 task 4).
+--
+-- A Wallpaper paints itself into a Framebuffer underneath everything
+-- else. Three modes are supported:
+--
+--   color(c)             solid fill
+--   gradient(top, bot)   vertical gradient between two colors
+--   image(img, mode)     bitmap, with mode in {"fill", "fit",
+--                                              "centered", "tiled"}
+--
+-- A Wallpaper is also a Widget so it composes with the rest of the
+-- desktop tree — set it as the bottom child of your WidgetRoot and the
+-- compositor blits everything else on top.
+
+from "ui.clarity" import Widget
+from "graphics.clarity" import rgb, rgba, red_of, green_of, blue_of, alpha_of
+from "draw.clarity" import fill_rect, hline
+
+class Wallpaper < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "wallpaper"
+        this.mode = "color"
+        this.color = 0xFF1A1A1A
+        this.color_top = 0xFF1A1A1A
+        this.color_bottom = 0xFF000000
+        this.image = null
+        this.image_mode = "fill"   -- fill | fit | centered | tiled
+    }
+
+    fn set_color(c) {
+        this.mode = "color"
+        this.color = c
+    }
+
+    fn set_gradient(top, bottom) {
+        this.mode = "gradient"
+        this.color_top = top
+        this.color_bottom = bottom
+    }
+
+    fn set_image(img, mode) {
+        this.mode = "image"
+        this.image = img
+        if mode != null { this.image_mode = mode }
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        if this.mode == "color" {
+            fill_rect(fb, r[0], r[1], r[2], r[3], this.color)
+            return null
+        }
+        if this.mode == "gradient" {
+            this._paint_gradient(fb, r)
+            return null
+        }
+        if this.mode == "image" and this.image != null {
+            this._paint_image(fb, r)
+        }
+    }
+
+    fn _paint_gradient(fb, r) {
+        let h = r[3]
+        if h <= 0 { return null }
+        let r1 = red_of(this.color_top);   let g1 = green_of(this.color_top);   let b1 = blue_of(this.color_top)
+        let r2 = red_of(this.color_bottom); let g2 = green_of(this.color_bottom); let b2 = blue_of(this.color_bottom)
+        mut row = 0
+        while row < h {
+            let t = row * 1.0 / h
+            let rc = int(r1 + (r2 - r1) * t)
+            let gc = int(g1 + (g2 - g1) * t)
+            let bc = int(b1 + (b2 - b1) * t)
+            let color = rgb(rc, gc, bc)
+            hline(fb, r[0], r[1] + row, r[0] + r[2] - 1, color)
+            row += 1
+        }
+    }
+
+    fn _paint_image(fb, r) {
+        let img = this.image
+        let mode = this.image_mode
+        if mode == "tiled" {
+            mut y = 0
+            while y < r[3] {
+                mut x = 0
+                while x < r[2] {
+                    this._blit_image(fb, r, img, x, y, img.width, img.height)
+                    x += img.width
+                }
+                y += img.height
+            }
+            return null
+        }
+        if mode == "centered" {
+            let cx = r[0] + (r[2] - img.width) / 2
+            let cy = r[1] + (r[3] - img.height) / 2
+            this._blit_image_at(fb, img, cx, cy)
+            return null
+        }
+        if mode == "fit" {
+            -- Letterbox: shrink to fit while keeping aspect
+            let sx = r[2] * 1.0 / img.width
+            let sy = r[3] * 1.0 / img.height
+            let s = if sx < sy { sx } else { sy }
+            let dw = int(img.width * s)
+            let dh = int(img.height * s)
+            this._blit_scaled(fb, r, img, r[0] + (r[2] - dw) / 2, r[1] + (r[3] - dh) / 2, dw, dh)
+            return null
+        }
+        -- "fill" — cover the whole rect, may crop image edges
+        let sx = r[2] * 1.0 / img.width
+        let sy = r[3] * 1.0 / img.height
+        let s = if sx > sy { sx } else { sy }
+        let dw = int(img.width * s)
+        let dh = int(img.height * s)
+        this._blit_scaled(fb, r, img, r[0] + (r[2] - dw) / 2, r[1] + (r[3] - dh) / 2, dw, dh)
+    }
+
+    fn _blit_image_at(fb, img, dst_x, dst_y) {
+        mut yy = 0
+        while yy < img.height {
+            mut xx = 0
+            while xx < img.width {
+                fb.put_pixel(dst_x + xx, dst_y + yy, img.get_pixel(xx, yy))
+                xx += 1
+            }
+            yy += 1
+        }
+    }
+
+    fn _blit_image(fb, clip, img, dst_x, dst_y, w, h) {
+        mut yy = 0
+        while yy < h {
+            mut xx = 0
+            while xx < w {
+                let sx = xx
+                let sy = yy
+                fb.put_pixel(clip[0] + dst_x + xx, clip[1] + dst_y + yy, img.get_pixel(sx, sy))
+                xx += 1
+            }
+            yy += 1
+        }
+    }
+
+    -- Nearest-neighbour scaled blit. Fast and aspect-honest.
+    fn _blit_scaled(fb, clip, img, dst_x, dst_y, dw, dh) {
+        if dw <= 0 or dh <= 0 { return null }
+        mut yy = 0
+        while yy < dh {
+            let src_y = int(yy * img.height / dh)
+            mut xx = 0
+            while xx < dw {
+                let src_x = int(xx * img.width / dw)
+                fb.put_pixel(dst_x + xx, dst_y + yy, img.get_pixel(src_x, src_y))
+                xx += 1
+            }
+            yy += 1
+        }
+    }
+}
+
+fn wallpaper() { return Wallpaper() }

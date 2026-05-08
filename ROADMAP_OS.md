@@ -123,12 +123,12 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Status bar** | Pending | `desktop/statusbar.clarity` — top-of-screen bar: clock, WiFi/battery/volume indicators, notification bell, app name. Clickable widgets that open dropdowns (calendar, WiFi picker, volume slider) |
-| 2 | **App launcher** | Pending | `desktop/launcher.clarity` — grid of installed apps with icons and names. Search bar to filter. Keyboard-driven (type to search, Enter to launch). Categories or recent/favorites |
-| 3 | **Dock / taskbar** | Pending | `desktop/dock.clarity` — bottom bar with pinned app icons + running app indicators. Click to focus/launch. Drag to reorder. Minimize-to-dock animation |
-| 4 | **Wallpaper** | Pending | `desktop/wallpaper.clarity` — solid color, gradient, or image. Tiled/centered/fill/fit modes. Per-workspace wallpapers. Slideshow mode with timer |
-| 5 | **Lock screen** | Pending | `desktop/lockscreen.clarity` — shown on boot and after idle timeout. Clock, date, password field. Blur wallpaper background |
-| 6 | **Settings panel** | Pending | `desktop/settings.clarity` — system preferences app: display (resolution, scaling), appearance (theme, accent color, wallpaper), sound (volume, output device), network (WiFi, IP), accounts, keyboard shortcuts, about |
+| 1 | **Status bar** | Done | `stdlib/statusbar.clarity` — `StatusBar` Widget paints theme-aware bar with active app name, clock (HH:MM via `datetime_now()`), volume indicator (`audio.master_volume`), and a notification dot. `attach_to_bus(b)` subscribes to `notification.new` / `notification.dismissed` for live counts. |
+| 2 | **App launcher** | Done | `stdlib/launcher.clarity` — `Launcher` + `AppEntry`. Search field at the top, grid below with arrow-key navigation; type-to-filter (matches names + keywords), Enter to launch, Escape to dismiss. `on_launch` / `on_dismiss` callbacks. |
+| 3 | **Dock / taskbar** | Done | `stdlib/dock.clarity` — `Dock` + `DockItem`. Pinned + running indicators (accent dot under each running icon), badge pills, click-to-launch / click-to-focus depending on `running` flag. `mark_running`/`mark_focused`/`set_badge`. Drag-to-reorder + minimize-to-dock animation deferred. |
+| 4 | **Wallpaper** | Done | `stdlib/wallpaper.clarity` — `Wallpaper` Widget with `set_color`, `set_gradient` (vertical lerp between two colours), and `set_image(img, mode)` for `fill` / `fit` / `centered` / `tiled`. Nearest-neighbour scaling for fill/fit. |
+| 5 | **Lock screen** | Done | `stdlib/lockscreen.clarity` — `LockScreen` Widget. Dark overlay over the wallpaper, centred clock + date, password field that masks input as bullets. `on_unlock(password)` callback returns `true` to release the lock; `false` clears the buffer and shows an error. Backspace/Escape supported. |
+| 6 | **Settings panel** | Done | `stdlib/settings.clarity` — `SettingsPanel` two-column layout: sidebar with category list, content area swaps based on selection. `add_category(name, content_widget)` registers panes; arrow keys + sidebar clicks change selection; the panel auto-relayouts the active content widget into the right pane. |
 
 ---
 
