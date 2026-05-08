@@ -769,6 +769,7 @@ def bundle(compile_native=False):
         'input.clarity', 'keymap.clarity', 'mouse.clarity', 'touch.clarity', 'event_bus.clarity',
         'window.clarity', 'compositor.clarity', 'chrome.clarity',
         'window_manager.clarity', 'workspace.clarity',
+        'theme.clarity', 'ui.clarity', 'layout.clarity', 'widgets.clarity',
         'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
