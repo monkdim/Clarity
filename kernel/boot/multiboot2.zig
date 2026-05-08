@@ -100,3 +100,76 @@ pub const TagHeader = extern struct {
     tag_type: u32,
     size: u32,
 };
+
+pub const FramebufferTag = extern struct {
+    header: TagHeader,
+    framebuffer: Framebuffer,
+};
+
+pub const MmapTagHeader = extern struct {
+    header: TagHeader,
+    entry_size: u32,
+    entry_version: u32,
+    // Followed by `entry_size` × N MemoryMapEntry records
+};
+
+pub const ParsedBootInfo = struct {
+    framebuffer: ?Framebuffer = null,
+    memory_map: []const MemoryMapEntry = &.{},
+    cmdline: []const u8 = "",
+    rsdp_v1: ?u64 = null,
+    rsdp_v2: ?u64 = null,
+
+    pub fn parse(blob_ptr: [*]const u8, gpa: ?std.mem.Allocator) !ParsedBootInfo {
+        const total_size = @as(*const u32, @ptrCast(@alignCast(blob_ptr))).*;
+        var info = ParsedBootInfo{};
+        var cursor: u32 = 8;
+        while (cursor < total_size) {
+            const hdr = @as(*const TagHeader, @ptrCast(@alignCast(blob_ptr + cursor))).*;
+            if (hdr.tag_type == 0) break;
+            const tag_payload = blob_ptr + cursor;
+            switch (hdr.tag_type) {
+                @intFromEnum(InfoTag.framebuffer) => {
+                    const fbt = @as(*const FramebufferTag, @ptrCast(@alignCast(tag_payload))).*;
+                    info.framebuffer = fbt.framebuffer;
+                },
+                @intFromEnum(InfoTag.mmap) => {
+                    const mh = @as(*const MmapTagHeader, @ptrCast(@alignCast(tag_payload))).*;
+                    const entries_start = tag_payload + @sizeOf(MmapTagHeader);
+                    const entries_bytes = hdr.size - @sizeOf(MmapTagHeader);
+                    const count = entries_bytes / mh.entry_size;
+                    if (gpa) |allocator| {
+                        const list = try allocator.alloc(MemoryMapEntry, count);
+                        var i: usize = 0;
+                        while (i < count) : (i += 1) {
+                            const off = entries_start + i * mh.entry_size;
+                            list[i] = @as(*const MemoryMapEntry, @ptrCast(@alignCast(off))).*;
+                        }
+                        info.memory_map = list;
+                    } else {
+                        // Best effort: alias the firmware-supplied table (only
+                        // valid until the kernel maps it elsewhere).
+                        info.memory_map = @as([*]const MemoryMapEntry, @ptrCast(@alignCast(entries_start)))[0..count];
+                    }
+                },
+                @intFromEnum(InfoTag.cmdline) => {
+                    const text = tag_payload + @sizeOf(TagHeader);
+                    var len: usize = 0;
+                    while (text[len] != 0 and cursor + @sizeOf(TagHeader) + len < total_size) : (len += 1) {}
+                    info.cmdline = text[0..len];
+                },
+                @intFromEnum(InfoTag.acpi_old) => {
+                    const ptr = tag_payload + @sizeOf(TagHeader);
+                    info.rsdp_v1 = @intFromPtr(ptr);
+                },
+                @intFromEnum(InfoTag.acpi_new) => {
+                    const ptr = tag_payload + @sizeOf(TagHeader);
+                    info.rsdp_v2 = @intFromPtr(ptr);
+                },
+                else => {},
+            }
+            cursor += (hdr.size + 7) & ~@as(u32, 7);
+        }
+        return info;
+    }
+};

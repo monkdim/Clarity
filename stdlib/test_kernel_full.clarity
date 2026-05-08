@@ -1,0 +1,325 @@
+-- Phase 70 — full-kernel tests.
+--
+-- ELF parser (synthetic ELF64 → header + segments + entry round-trip),
+-- process model (fork / exec / waitpid / kill, orphan reparenting,
+-- zombie reaping), page-fault classifier + handler decision logic,
+-- multiboot2 boot-info blob parsing.
+
+from "elf.clarity" import parse_elf, build_test_elf, ElfExecutable, ElfSegment, PT_LOAD, PF_R, PF_W, PF_X, ET_EXEC, ET_DYN, EM_X86_64
+from "process_model.clarity" import KernProcess, kern_process, ProcessTable, process_table, UserspaceSim, userspace_sim, FaultModel, fault_model, classify_fault, parse_multiboot_blob, MultibootBootInfo
+from "process_model.clarity" import STATE_RUNNABLE, STATE_RUNNING, STATE_ZOMBIE, SIGKILL, SIGTERM
+from "process_model.clarity" import CAUSE_NOT_PRESENT, CAUSE_WRITE_RO, CAUSE_USER_TO_KERNEL, CAUSE_RESERVED, CAUSE_INSTRUCTION_FETCH
+from "process_model.clarity" import REGION_FLAG_WRITE, MB2_TAG_FRAMEBUFFER, MB2_TAG_MMAP, MB2_TAG_CMDLINE, MB2_TAG_END
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── ELF: synthetic exe round-trip ────────────────
+
+show "-- Phase 70: ELF parser --"
+
+let entry_addr = 0x401000
+let code_seg = {
+    "vaddr": 0x401000,
+    "flags": PF_R | PF_X,
+    "data": [0x90, 0x90, 0xC3]               -- nop, nop, ret
+}
+let data_seg = {
+    "vaddr": 0x402000,
+    "flags": PF_R | PF_W,
+    "data": [0x01, 0x02, 0x03, 0x04],
+    "bss_extra": 16                            -- BSS pads memsz beyond filesz
+}
+
+let bytes = build_test_elf(entry_addr, [code_seg, data_seg])
+assert(len(bytes) >= 64 + 56 * 2, "synthetic ELF has at least header + 2 phdrs")
+
+let exe = parse_elf(bytes)
+assert_eq(exe.entry, entry_addr, "entry RIP preserved")
+assert_eq(exe.machine, EM_X86_64, "machine is x86_64")
+assert_eq(exe.elf_type, ET_EXEC, "type is ET_EXEC")
+assert(not exe.is_dynamic, "static exe")
+assert_eq(len(exe.segments), 2, "2 PT_LOAD segments")
+
+let s0 = exe.segments[0]
+assert_eq(s0.vaddr, 0x401000, "s0 vaddr")
+assert_eq(s0.filesz, 3, "s0 filesz")
+assert_eq(s0.memsz, 3, "s0 memsz (no bss)")
+assert(s0.executable(), "s0 executable")
+assert(not s0.writable(), "s0 not writable")
+assert(s0.readable(), "s0 readable")
+
+let s1 = exe.segments[1]
+assert_eq(s1.vaddr, 0x402000, "s1 vaddr")
+assert_eq(s1.filesz, 4, "s1 filesz")
+assert_eq(s1.memsz, 20, "s1 memsz includes bss padding")
+assert(s1.writable(), "s1 writable")
+assert(not s1.executable(), "s1 not executable")
+
+assert_eq(exe.highest_address(), 0x402000 + 20, "highest address spans bss")
+assert_eq(exe.loadable_size(), 23, "total loadable bytes (memsz sum)")
+
+-- Validation rejects bad magic
+let bad_magic = [0x00, 0x00, 0x00, 0x00]
+mut i = 4
+while i < 64 { push(bad_magic, 0); i = i + 1 }
+mut threw_magic = false
+try { parse_elf(bad_magic) } catch e { threw_magic = true; assert(contains(str(e), "magic"), "magic error message") }
+assert(threw_magic, "bad magic throws")
+
+-- 32-bit ELF rejected
+mut bad_class = []
+for b in bytes { push(bad_class, b) }
+bad_class[4] = 1                                 -- ELFCLASS32
+mut threw_class = false
+try { parse_elf(bad_class) } catch e { threw_class = true }
+assert(threw_class, "32-bit ELF rejected")
+
+-- Non-x86_64 rejected
+mut bad_machine = []
+for b in bytes { push(bad_machine, b) }
+bad_machine[18] = 0x28; bad_machine[19] = 0x00   -- EM_ARM (40)
+mut threw_machine = false
+try { parse_elf(bad_machine) } catch e { threw_machine = true; assert(contains(str(e), "x86_64"), "machine error message") }
+assert(threw_machine, "ARM ELF rejected")
+
+-- ── Process table basics ────────────────────────
+
+show "-- Phase 70: process table --"
+
+let table = process_table()
+let init = kern_process(1, 0, "init")
+table.register(init)
+assert_eq(table.count(), 1, "1 process registered")
+assert_eq(table.lookup(1).name, "init", "lookup by pid")
+assert_eq(table.lookup(99), null, "missing pid → null")
+
+let pid_a = table.alloc_pid()
+let pid_b = table.alloc_pid()
+assert(pid_b > pid_a, "pids monotonically increasing")
+
+let p_a = kern_process(pid_a, 1, "a")
+table.register(p_a)
+init.add_child(pid_a)
+assert(contains(init.children, pid_a), "child registered on parent")
+
+table.remove(pid_a)
+assert_eq(table.lookup(pid_a), null, "removed from table")
+
+-- ── Userspace fork / exec / wait / kill ──────────
+
+show "-- Phase 70: fork / exec / wait / kill --"
+
+let sim = userspace_sim()
+assert_eq(sim.current().pid, 1, "starts as init")
+
+-- init forks two children
+let child1 = sim.fork()
+let child2 = sim.fork()
+assert(child1 != child2, "distinct child pids")
+assert_eq(len(sim.current().children), 2, "init has 2 children")
+
+-- Switch to child1, exec a new image, exit 0
+sim.switch_to(child1)
+sim.exec("/bin/sh", [{"start": 0x401000, "end": 0x402000, "flags": REGION_FLAG_WRITE}])
+assert_eq(sim.current().image_path, "/bin/sh", "exec changed image_path")
+assert_eq(sim.current().name, "/bin/sh", "exec changed name")
+sim.exit(0)
+assert_eq(sim.current().state, STATE_ZOMBIE, "child1 is zombie")
+
+-- Back to init: waitpid should reap child1
+sim.switch_to(1)
+let z1 = sim.waitpid(child1)
+assert(z1 != null, "waitpid found child1")
+assert_eq(z1["pid"], child1, "pid matches")
+assert_eq(z1["exit_code"], 0, "exit code 0")
+assert_eq(sim.table.lookup(child1), null, "child1 removed from table after reap")
+assert_eq(len(sim.current().children), 1, "init now has 1 child")
+
+-- Kill child2 with SIGKILL; init reaps via waitpid(-1)
+sim.kill(child2, SIGKILL)
+let z2 = sim.waitpid(-1)
+assert(z2 != null, "waitpid(-1) reaped child2")
+assert_eq(z2["pid"], child2, "child2 reaped")
+assert_eq(z2["exit_code"], 128 + SIGKILL, "exit code reflects signal")
+
+-- waitpid with no children returns null
+assert_eq(sim.waitpid(-1), null, "no children → null")
+
+-- ── Orphan reparenting ──────────────────────────
+
+show "-- Phase 70: orphan reparenting --"
+
+let sim2 = userspace_sim()
+let parent_pid = sim2.fork()                     -- init forks the "parent"
+sim2.switch_to(parent_pid)
+let grandchild_a = sim2.fork()
+let grandchild_b = sim2.fork()
+assert_eq(len(sim2.current().children), 2, "parent has 2 grandchildren")
+
+-- Parent exits before grandchildren do
+sim2.exit(0)
+let parent_proc = sim2.table.lookup(parent_pid)
+assert_eq(parent_proc.state, STATE_ZOMBIE, "parent is zombie")
+let init = sim2.table.lookup(1)
+assert(contains(init.children, grandchild_a), "grandchild_a reparented to init")
+assert(contains(init.children, grandchild_b), "grandchild_b reparented to init")
+
+-- init can reap the parent zombie
+sim2.switch_to(1)
+let parent_z = sim2.waitpid(parent_pid)
+assert(parent_z != null, "init reaped parent zombie")
+
+-- ── Page-fault classifier ───────────────────────
+
+show "-- Phase 70: page-fault classifier --"
+
+assert_eq(classify_fault(0x00), CAUSE_NOT_PRESENT, "0x00 → not present")
+assert_eq(classify_fault(0x10), CAUSE_INSTRUCTION_FETCH, "0x10 → instruction fetch")
+assert_eq(classify_fault(0x08), CAUSE_RESERVED, "0x08 → reserved bit")
+assert_eq(classify_fault(0x04), CAUSE_USER_TO_KERNEL, "user access to kernel page")
+assert_eq(classify_fault(0x03), CAUSE_WRITE_RO, "write to read-only present page")
+
+-- ── Page-fault handler decision logic ───────────
+
+show "-- Phase 70: page-fault handler --"
+
+let model = fault_model()
+model.add_region(0x400000, 0x500000, REGION_FLAG_WRITE)
+model.add_region(0x600000, 0x700000, 0)              -- read-only
+
+assert(model.handle_fault(0x401234, 0x00), "lazy-mapped on first touch")
+assert(model.is_mapped(0x401234), "now mapped")
+assert_eq(model.faults_handled, 1, "one fault handled")
+
+-- Same page, second access: spurious, returns false
+assert(not model.handle_fault(0x401234, 0x00), "second access is spurious")
+assert_eq(model.faults_handled, 1, "still one fault handled")
+
+-- Address outside any region: throws
+mut threw_segv = false
+try { model.handle_fault(0x800000, 0x00) } catch e {
+    threw_segv = true
+    assert(contains(str(e), "segfault"), "segfault message")
+}
+assert(threw_segv, "out-of-region fault throws")
+
+-- Write to read-only region: throws (cause flag 0x02 + present 0x01)
+mut threw_ro = false
+try { model.handle_fault(0x600400, 0x03) } catch e {
+    threw_ro = true
+    assert(contains(str(e), "read-only"), "read-only error")
+}
+assert(threw_ro, "write to RO throws")
+
+-- Read from read-only region: ok (lazy-map a read-only page)
+assert(model.handle_fault(0x601000, 0x00), "RO read fault handled")
+
+-- ── Multiboot2 boot-info parser ─────────────────
+
+show "-- Phase 70: multiboot2 parser --"
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0
+}
+
+-- Build a fake boot-info blob with cmdline + framebuffer + mmap
+fn _emit_u32(buf, v) {
+    push(buf, v & 0xFF)
+    push(buf, (v >> 8) & 0xFF)
+    push(buf, (v >> 16) & 0xFF)
+    push(buf, (v >> 24) & 0xFF)
+}
+fn _emit_u64(buf, v) {
+    _emit_u32(buf, v & 0xFFFFFFFF)
+    _emit_u32(buf, int(v / 4294967296))
+}
+fn _pad8(buf) {
+    while len(buf) % 8 != 0 { push(buf, 0) }
+}
+
+mut blob = []
+_emit_u32(blob, 0)                                 -- placeholder for total_size
+_emit_u32(blob, 0)                                 -- reserved
+
+-- Cmdline tag
+let cmdline_text = "boot=live"
+let cmdline_size = 8 + len(cmdline_text) + 1
+_emit_u32(blob, MB2_TAG_CMDLINE)
+_emit_u32(blob, cmdline_size)
+mut ci = 0
+while ci < len(cmdline_text) { push(blob, _ord(char_at(cmdline_text, ci))); ci = ci + 1 }
+push(blob, 0)
+_pad8(blob)
+
+-- Framebuffer tag
+_emit_u32(blob, MB2_TAG_FRAMEBUFFER)
+_emit_u32(blob, 8 + 24)                            -- header + framebuffer struct (24 bytes core)
+_emit_u64(blob, 0xFD000000)                       -- addr
+_emit_u32(blob, 4096)                              -- pitch
+_emit_u32(blob, 1024)                              -- width
+_emit_u32(blob, 768)                               -- height
+push(blob, 32)                                     -- bpp
+push(blob, 1)                                      -- fb_type = direct RGB
+push(blob, 0); push(blob, 0)                        -- reserved
+_pad8(blob)
+
+-- Mmap tag with two entries
+let mmap_size = 8 + 8 + 24 * 2                     -- header + entry_size/version + 2 entries
+_emit_u32(blob, MB2_TAG_MMAP)
+_emit_u32(blob, mmap_size)
+_emit_u32(blob, 24)                                -- entry_size
+_emit_u32(blob, 0)                                 -- entry_version
+-- entry 1: 0..1 GiB, available
+_emit_u64(blob, 0)
+_emit_u64(blob, 0x40000000)
+_emit_u32(blob, 1)
+_emit_u32(blob, 0)
+-- entry 2: 1 GiB..1.5 GiB, reserved
+_emit_u64(blob, 0x40000000)
+_emit_u64(blob, 0x20000000)
+_emit_u32(blob, 2)
+_emit_u32(blob, 0)
+_pad8(blob)
+
+-- End tag
+_emit_u32(blob, MB2_TAG_END)
+_emit_u32(blob, 8)
+_pad8(blob)
+
+-- Patch total_size
+let total = len(blob)
+blob[0] = total & 0xFF
+blob[1] = (total >> 8) & 0xFF
+blob[2] = (total >> 16) & 0xFF
+blob[3] = (total >> 24) & 0xFF
+
+let info = parse_multiboot_blob(blob)
+assert_eq(info.cmdline, "boot=live", "cmdline parsed")
+assert(info.framebuffer != null, "framebuffer parsed")
+assert_eq(info.framebuffer["addr"], 0xFD000000, "fb addr")
+assert_eq(info.framebuffer["width"], 1024, "fb width")
+assert_eq(info.framebuffer["height"], 768, "fb height")
+assert_eq(info.framebuffer["bpp"], 32, "fb bpp")
+assert_eq(len(info.memory_map), 2, "two memory map entries")
+assert_eq(info.memory_map[0]["base_addr"], 0, "mmap[0] base")
+assert_eq(info.memory_map[0]["length"], 0x40000000, "mmap[0] length = 1 GiB")
+assert_eq(info.memory_map[0]["region_type"], 1, "mmap[0] available")
+assert_eq(info.memory_map[1]["base_addr"], 0x40000000, "mmap[1] base = 1 GiB")
+assert_eq(info.memory_map[1]["region_type"], 2, "mmap[1] reserved")
+
+-- ── Summary ─────────────────────────────────
+
+show ""
+show "Phase 70: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 70 test(s) failed" }

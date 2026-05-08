@@ -1,0 +1,366 @@
+-- Process model — Clarity-side mirror of kernel/sched/process.zig
+-- + the fork/exec/wait/kill scheduler extensions in scheduler.zig
+-- (Phase 70 task 7).
+--
+-- A KernProcess owns an address space + state + parent/child links.
+-- The ProcessTable indexes them by PID. Same semantics as the
+-- kernel side; pure-state simulation that the test suite drives.
+--
+-- Named *_model to avoid clobbering stdlib/process.clarity (the
+-- shell-command wrapper).
+
+let STATE_RUNNABLE = "runnable"
+let STATE_RUNNING = "running"
+let STATE_SLEEPING = "sleeping"
+let STATE_ZOMBIE = "zombie"
+
+let SIGKILL = 9
+let SIGTERM = 15
+
+class KernProcess {
+    fn init(pid, parent_pid, name) {
+        this.pid = pid
+        this.parent_pid = parent_pid
+        this.name = name
+        this.state = STATE_RUNNABLE
+        this.exit_code = 0
+        this.children = []
+        this.zombies = []
+        this.cwd = "/"
+        this.fd_table = {}
+        this.next_fd = 3
+        this.image_path = name
+        this.regions = []
+    }
+
+    fn add_child(child_pid) { push(this.children, child_pid) }
+
+    fn remove_child(child_pid) {
+        mut next = []
+        mut removed = false
+        for c in this.children {
+            if c == child_pid { removed = true } else { push(next, c) }
+        }
+        this.children = next
+        return removed
+    }
+
+    fn record_zombie(child) {
+        push(this.zombies, {"pid": child.pid, "exit_code": child.exit_code, "name": child.name})
+    }
+
+    fn reap_any() {
+        if len(this.zombies) == 0 { return null }
+        let z = this.zombies[0]
+        mut next = []
+        mut i = 1
+        while i < len(this.zombies) { push(next, this.zombies[i]); i = i + 1 }
+        this.zombies = next
+        return z
+    }
+
+    fn reap_pid(target_pid) {
+        mut idx = -1
+        mut i = 0
+        while i < len(this.zombies) {
+            if this.zombies[i]["pid"] == target_pid { idx = i; break }
+            i = i + 1
+        }
+        if idx < 0 { return null }
+        let z = this.zombies[idx]
+        mut next = []
+        mut j = 0
+        while j < len(this.zombies) {
+            if j != idx { push(next, this.zombies[j]) }
+            j = j + 1
+        }
+        this.zombies = next
+        return z
+    }
+}
+
+fn kern_process(pid, parent_pid, name) { return KernProcess(pid, parent_pid, name) }
+
+-- ── ProcessTable ───────────────────────────────
+
+class ProcessTable {
+    fn init() {
+        this.map = {}
+        this.next_pid = 2
+        this.init_pid = 1
+    }
+
+    fn alloc_pid() {
+        let pid = this.next_pid
+        this.next_pid = this.next_pid + 1
+        return pid
+    }
+
+    fn register(p) { this.map[str(p.pid)] = p; return p }
+
+    fn lookup(pid) {
+        let key = str(pid)
+        if has(this.map, key) { return this.map[key] }
+        return null
+    }
+
+    fn remove(pid) {
+        let key = str(pid)
+        mut next = {}
+        for kv in entries(this.map) { if kv[0] != key { next[kv[0]] = kv[1] } }
+        this.map = next
+    }
+
+    fn count() { return len(keys(this.map)) }
+
+    -- Reparent dying.children to init so init can reap them.
+    fn reparent_children(dying) {
+        let init = this.lookup(this.init_pid)
+        if init == null { return }
+        for child_pid in dying.children {
+            let child = this.lookup(child_pid)
+            if child != null {
+                child.parent_pid = this.init_pid
+                init.add_child(child_pid)
+            }
+        }
+        dying.children = []
+    }
+}
+
+fn process_table() { return ProcessTable() }
+
+-- ── Userspace machine simulation ──────────────
+
+-- A small enough simulation of fork/exec/waitpid/kill semantics
+-- for the test suite to drive: spawn an init, fork it twice, exit
+-- the children, watch waitpid + reaping, ensure orphan reparenting
+-- works when a parent exits before its children.
+class UserspaceSim {
+    fn init() {
+        this.table = process_table()
+        let init = kern_process(1, 0, "init")
+        this.table.register(init)
+        this.current_pid = 1
+    }
+
+    fn current() { return this.table.lookup(this.current_pid) }
+
+    fn fork() {
+        let parent = this.current()
+        let child_pid = this.table.alloc_pid()
+        let child = kern_process(child_pid, parent.pid, parent.name)
+        child.image_path = parent.image_path
+        for r in parent.regions { push(child.regions, r) }
+        this.table.register(child)
+        parent.add_child(child_pid)
+        return child_pid
+    }
+
+    fn exec(image_path, regions) {
+        let cur = this.current()
+        cur.image_path = image_path
+        cur.name = image_path
+        cur.regions = regions
+        return true
+    }
+
+    fn switch_to(pid) {
+        if this.table.lookup(pid) == null { return false }
+        this.current_pid = pid
+        return true
+    }
+
+    fn exit(code) {
+        let cur = this.current()
+        cur.state = STATE_ZOMBIE
+        cur.exit_code = code
+        this.table.reparent_children(cur)
+        let parent = this.table.lookup(cur.parent_pid)
+        if parent != null {
+            parent.remove_child(cur.pid)
+            parent.record_zombie(cur)
+        }
+    }
+
+    fn waitpid(target) {
+        let cur = this.current()
+        let z = if target <= 0 { cur.reap_any() } else { cur.reap_pid(target) }
+        if z == null { return null }
+        this.table.remove(z["pid"])
+        return z
+    }
+
+    fn kill(pid, sig) {
+        let target = this.table.lookup(pid)
+        if target == null { return false }
+        if sig == SIGKILL {
+            target.state = STATE_ZOMBIE
+            target.exit_code = 128 + sig
+            this.table.reparent_children(target)
+            let parent = this.table.lookup(target.parent_pid)
+            if parent != null {
+                parent.remove_child(target.pid)
+                parent.record_zombie(target)
+            }
+            return true
+        }
+        return true
+    }
+}
+
+fn userspace_sim() { return UserspaceSim() }
+
+-- ── Page-fault decision logic ──────────────────
+
+let CAUSE_NOT_PRESENT = "not_present"
+let CAUSE_WRITE_RO = "write_to_readonly"
+let CAUSE_USER_TO_KERNEL = "user_access_to_kernel"
+let CAUSE_RESERVED = "reserved_bit_set"
+let CAUSE_INSTRUCTION_FETCH = "instruction_fetch"
+
+fn classify_fault(error_code) {
+    if (error_code & 0x10) != 0 { return CAUSE_INSTRUCTION_FETCH }
+    if (error_code & 0x08) != 0 { return CAUSE_RESERVED }
+    if (error_code & 0x04) != 0 and (error_code & 0x01) == 0 { return CAUSE_USER_TO_KERNEL }
+    if (error_code & 0x02) != 0 and (error_code & 0x01) != 0 { return CAUSE_WRITE_RO }
+    return CAUSE_NOT_PRESENT
+}
+
+let PAGE_SIZE = 4096
+let REGION_FLAG_WRITE = 2
+
+class FaultModel {
+    fn init() {
+        this.regions = []
+        this.mapped_pages = {}
+        this.next_phys = 0x100000
+        this.faults_handled = 0
+    }
+
+    fn add_region(start, end, flags) {
+        push(this.regions, {"start": start, "end": end, "flags": flags})
+    }
+
+    fn _find_region(addr) {
+        for r in this.regions {
+            if addr >= r["start"] and addr < r["end"] { return r }
+        }
+        return null
+    }
+
+    fn handle_fault(addr, error_code) {
+        let cause = classify_fault(error_code)
+        let region = this._find_region(addr)
+        if region == null { throw "PageFault: address " + str(addr) + " not in any region (segfault)" }
+        if cause == CAUSE_WRITE_RO and (region["flags"] & REGION_FLAG_WRITE) == 0 {
+            throw "PageFault: write to read-only region at " + str(addr)
+        }
+        let aligned = addr - (addr % PAGE_SIZE)
+        if has(this.mapped_pages, str(aligned)) {
+            return false
+        }
+        let phys = this.next_phys
+        this.next_phys = this.next_phys + PAGE_SIZE
+        this.mapped_pages[str(aligned)] = phys
+        this.faults_handled = this.faults_handled + 1
+        return true
+    }
+
+    fn is_mapped(addr) {
+        let aligned = addr - (addr % PAGE_SIZE)
+        return has(this.mapped_pages, str(aligned))
+    }
+}
+
+fn fault_model() { return FaultModel() }
+
+-- ── Multiboot2 boot-info parser ───────────────
+
+let MB2_TAG_END = 0
+let MB2_TAG_CMDLINE = 1
+let MB2_TAG_MMAP = 6
+let MB2_TAG_FRAMEBUFFER = 8
+
+class MultibootBootInfo {
+    fn init() {
+        this.framebuffer = null
+        this.memory_map = []
+        this.cmdline = ""
+    }
+}
+
+fn parse_multiboot_blob(bytes) {
+    let info = MultibootBootInfo()
+    if len(bytes) < 8 { return info }
+    let total_size = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)
+    mut cursor = 8
+    while cursor < total_size {
+        if cursor + 8 > len(bytes) { break }
+        let tag_type = bytes[cursor] | (bytes[cursor + 1] << 8) | (bytes[cursor + 2] << 16) | (bytes[cursor + 3] << 24)
+        let tag_size = bytes[cursor + 4] | (bytes[cursor + 5] << 8) | (bytes[cursor + 6] << 16) | (bytes[cursor + 7] << 24)
+        if tag_type == MB2_TAG_END { break }
+        if tag_type == MB2_TAG_FRAMEBUFFER {
+            info.framebuffer = _parse_framebuffer(bytes, cursor + 8)
+        } elif tag_type == MB2_TAG_MMAP {
+            info.memory_map = _parse_mmap(bytes, cursor + 8, tag_size - 8)
+        } elif tag_type == MB2_TAG_CMDLINE {
+            info.cmdline = _parse_cstring(bytes, cursor + 8, tag_size - 8)
+        }
+        let aligned = (tag_size + 7) & 0xFFFFFFF8
+        cursor = cursor + aligned
+    }
+    return info
+}
+
+fn _u32_at(bytes, off) {
+    -- Multiplication instead of shift-or so the high byte doesn't
+    -- get sign-extended when JS converts the result to int32.
+    return bytes[off] + bytes[off + 1] * 256 + bytes[off + 2] * 65536 + bytes[off + 3] * 16777216
+}
+
+fn _u64_at(bytes, off) {
+    let lo = _u32_at(bytes, off)
+    let hi = _u32_at(bytes, off + 4)
+    return lo + (hi * 4294967296)
+}
+
+fn _parse_framebuffer(bytes, off) {
+    return {
+        "addr": _u64_at(bytes, off),
+        "pitch": _u32_at(bytes, off + 8),
+        "width": _u32_at(bytes, off + 12),
+        "height": _u32_at(bytes, off + 16),
+        "bpp": bytes[off + 20],
+        "fb_type": bytes[off + 21]
+    }
+}
+
+fn _parse_mmap(bytes, off, size) {
+    let entry_size = _u32_at(bytes, off)
+    let count = (size - 8) / entry_size
+    mut entries = []
+    mut i = 0
+    while i < count {
+        let entry_off = off + 8 + i * entry_size
+        push(entries, {
+            "base_addr": _u64_at(bytes, entry_off),
+            "length": _u64_at(bytes, entry_off + 8),
+            "region_type": _u32_at(bytes, entry_off + 16)
+        })
+        i = i + 1
+    }
+    return entries
+}
+
+fn _parse_cstring(bytes, off, max) {
+    mut s = ""
+    mut i = 0
+    while i < max {
+        let b = bytes[off + i]
+        if b == 0 { break }
+        s = s + from_char_code(b)
+        i = i + 1
+    }
+    return s
+}
