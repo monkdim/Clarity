@@ -1,0 +1,169 @@
+-- Dock — bottom-of-screen app launcher / window-switcher (Phase 62 task 3).
+--
+-- Pinned apps + currently-running apps appear as icons in a horizontal
+-- row at the bottom of the screen. Clicking a pinned-but-not-running
+-- icon launches its app; clicking a running one focuses (or minimises)
+-- its window. A small accent dot underneath each running icon marks
+-- it as live.
+--
+-- DockItem encapsulates one slot:
+--     {id, name, icon, launch_fn, running, focused, badge}
+--
+-- icon can be null — the dock will draw a name initial inside a
+-- coloured square if no real icon is supplied yet. (Phase 63 will
+-- ship real BMP icons.)
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, hline, circle
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font, theme_spacing
+
+class DockItem {
+    fn init(id, name, launch_fn) {
+        this.id = id
+        this.name = name
+        this.launch_fn = launch_fn
+        this.icon = null            -- optional Image
+        this.running = false
+        this.focused = false
+        this.badge = 0              -- e.g. unread mail count
+    }
+}
+
+class Dock < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "dock"
+        this.icon_size = 40
+        this.icon_gap = 8
+        this.padding = 8
+        this.items = []
+    }
+
+    fn add_item(item) { push(this.items, item); return item }
+    fn remove_item(id) {
+        mut out = []
+        for it in this.items {
+            if it.id != id { push(out, it) }
+        }
+        this.items = out
+    }
+    fn item(id) {
+        for it in this.items {
+            if it.id == id { return it }
+        }
+        return null
+    }
+
+    -- Mark an item as running / focused. Apps call this when their
+    -- main window opens / focuses.
+    fn mark_running(id, running) {
+        let it = this.item(id)
+        if it != null { it.running = running }
+    }
+    fn mark_focused(id, focused) {
+        for it in this.items { it.focused = false }
+        let it = this.item(id)
+        if it != null { it.focused = focused }
+    }
+    fn set_badge(id, badge) {
+        let it = this.item(id)
+        if it != null { it.badge = badge }
+    }
+
+    -- Compute the (x, y, w, h) rectangle for the icon at index `i`,
+    -- in screen coordinates.
+    fn _icon_rect(i) {
+        let r = this.screen_rect()
+        let n = len(this.items)
+        let total_w = n * this.icon_size + (n - 1) * this.icon_gap
+        let start_x = r[0] + (r[2] - total_w) / 2
+        let icon_x = start_x + i * (this.icon_size + this.icon_gap)
+        let icon_y = r[1] + (r[3] - this.icon_size) / 2
+        return [icon_x, icon_y, this.icon_size, this.icon_size]
+    }
+
+    fn _hit_test_item(sx, sy) {
+        mut i = 0
+        while i < len(this.items) {
+            let ir = this._icon_rect(i)
+            if sx >= ir[0] and sx < ir[0] + ir[2] and sy >= ir[1] and sy < ir[1] + ir[3] {
+                return i
+            }
+            i += 1
+        }
+        return -1
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "surface_elevated")
+        let fg = theme_color(t, "foreground")
+        let accent = theme_color(t, "accent")
+        let muted = theme_color(t, "foreground_muted")
+
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+        hline(fb, r[0], r[1], r[0] + r[2] - 1, theme_color(t, "border"))
+
+        mut i = 0
+        while i < len(this.items) {
+            let it = this.items[i]
+            let ir = this._icon_rect(i)
+            -- Icon bg square (or real icon when set)
+            if it.icon == null {
+                let icon_bg = if it.focused { accent } else { theme_color(t, "surface") }
+                fill_rect(fb, ir[0], ir[1], ir[2], ir[3], icon_bg)
+                rect(fb, ir[0], ir[1], ir[2], ir[3], theme_color(t, "border"))
+                -- First-letter glyph
+                let initial = if len(it.name) > 0 { substring(it.name, 0, 1) } else { "?" }
+                let m = measure_text(f, initial)
+                let tx = ir[0] + (ir[2] - m[0]) / 2
+                let ty = ir[1] + (ir[3] - m[1]) / 2
+                draw_text(fb, tx, ty, initial, f, fg)
+            } else {
+                -- Real icon — defer to Phase 63 once apps ship images
+                fill_rect(fb, ir[0], ir[1], ir[2], ir[3], theme_color(t, "surface"))
+            }
+            -- Running indicator: 4 px accent disc below the icon
+            if it.running {
+                let dot_y = ir[1] + ir[3] + 3
+                circle(fb, ir[0] + ir[2] / 2, dot_y, 2, accent)
+            }
+            -- Badge: number in a tiny pill at the icon's top-right
+            if it.badge > 0 {
+                let label = str(it.badge)
+                let bd = measure_text(f, label)
+                let bw = bd[0] + 6
+                let bh = bd[1] + 2
+                let bx = ir[0] + ir[2] - bw
+                let by = ir[1]
+                fill_rect(fb, bx, by, bw, bh, theme_color(t, "danger"))
+                draw_text(fb, bx + 3, by + 1, label, f, fg)
+            }
+            i += 1
+        }
+    }
+
+    fn _handle(event) {
+        let kind = type(event)
+        if kind != "MouseEvent" { return false }
+        if not event.is_press or event.button != 1 { return false }
+        let idx = this._hit_test_item(event.x, event.y)
+        if idx < 0 { return false }
+        let it = this.items[idx]
+        if it.running {
+            -- focus / cycle: handled by the caller via on_click
+            if this._click_handler != null { this._click_handler(it) }
+        } else {
+            if it.launch_fn != null { it.launch_fn() }
+            it.running = true
+            if this._click_handler != null { this._click_handler(it) }
+        }
+        return true
+    }
+}
+
+fn dock() { return Dock() }
+fn dock_item(id, name, launch_fn) { return DockItem(id, name, launch_fn) }
