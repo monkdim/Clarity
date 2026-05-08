@@ -66,11 +66,11 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Raw input layer** | Pending | `stdlib/input.clarity` — read from `/dev/input/event*` (Linux evdev) or IOKit (macOS) via FFI. Parse event structs: type, code, value, timestamp |
-| 2 | **Keyboard handling** | Pending | Keycode → character mapping (US layout + framework for others), modifier tracking (shift/ctrl/alt/super), key repeat. `KeyEvent` class: key, modifiers, is_press, is_release |
-| 3 | **Mouse/trackpad** | Pending | `MouseEvent` class: x, y, dx, dy, button, scroll_x, scroll_y, is_click, is_drag. Cursor position tracking, multi-button support |
-| 4 | **Touch input** | Pending | `TouchEvent` class: touch_id, x, y, pressure, phase (began/moved/ended/cancelled). Multi-touch tracking for gestures |
-| 5 | **Input event bus** | Pending | Central event dispatcher using Clarity channels. `on_key(fn)`, `on_mouse(fn)`, `on_touch(fn)`. Event bubbling (target → parent → root) and capture. Focus tracking |
+| 1 | **Raw input layer** | Done | `stdlib/input.clarity` — Linux evdev support: `InputDevice` opens `/dev/input/event*` non-blocking via libc FFI, `parse_event(s)` decodes the 24-byte `struct input_event`, `pack_event` builds them for tests/replay. macOS IOKit deferred to its own follow-up (different programming model entirely). |
+| 2 | **Keyboard handling** | Done | `stdlib/keymap.clarity` — full Linux KEY_* constants, US layout with Shift/CapsLock semantics (CapsLock toggles letters only, both at once cancel out), `Modifiers` state tracker, `KeyEvent` with `code` / `name` / `char` / `is_press` / `is_repeat` / modifier snapshot. |
+| 3 | **Mouse/trackpad** | Done | `stdlib/mouse.clarity` — `MouseEvent` (x/y/dx/dy/scroll/button/is_motion/is_press/is_release/is_scroll/is_click) and `MouseTracker` that accumulates EV_REL / button deltas between SYN_REPORTs into one frame's events. Optional bounds clamp the cursor to a window. |
+| 4 | **Touch input** | Done | `stdlib/touch.clarity` — `TouchEvent` (touch_id/x/y/pressure/phase) and a single-finger `TouchTracker` covering began/moved/ended/cancelled phases. Multi-touch slot tracking (ABS_MT_SLOT + ABS_MT_TRACKING_ID) is its own follow-up. |
+| 5 | **Input event bus** | Done | `stdlib/event_bus.clarity` — `InputBus` with `on_key` / `on_mouse` / `on_touch` registration, raw-event dispatch that drives the modifier tracker + mouse tracker + touch tracker internally, and the consume-on-`return true` pattern for stop-propagation. |
 
 ---
 

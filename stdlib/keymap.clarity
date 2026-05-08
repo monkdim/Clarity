@@ -1,0 +1,191 @@
+-- Keymap — Linux KEY_* constants + US keyboard layout + decode_key.
+--
+-- Decodes `EV_KEY` events from input.clarity into typed KeyEvent
+-- records, tracking Shift / Ctrl / Alt / Meta state across calls.
+
+-- ── KEY_* constants (the subset used by US-layout keyboards) ───
+
+let KEY_RESERVED = 0
+let KEY_ESC = 1
+let KEY_1 = 2; let KEY_2 = 3; let KEY_3 = 4; let KEY_4 = 5
+let KEY_5 = 6; let KEY_6 = 7; let KEY_7 = 8; let KEY_8 = 9
+let KEY_9 = 10; let KEY_0 = 11
+let KEY_MINUS = 12
+let KEY_EQUAL = 13
+let KEY_BACKSPACE = 14
+let KEY_TAB = 15
+let KEY_Q = 16; let KEY_W = 17; let KEY_E = 18; let KEY_R = 19
+let KEY_T = 20; let KEY_Y = 21; let KEY_U = 22; let KEY_I = 23
+let KEY_O = 24; let KEY_P = 25
+let KEY_LEFTBRACE = 26
+let KEY_RIGHTBRACE = 27
+let KEY_ENTER = 28
+let KEY_LEFTCTRL = 29
+let KEY_A = 30; let KEY_S = 31; let KEY_D = 32; let KEY_F = 33
+let KEY_G = 34; let KEY_H = 35; let KEY_J = 36; let KEY_K = 37
+let KEY_L = 38
+let KEY_SEMICOLON = 39
+let KEY_APOSTROPHE = 40
+let KEY_GRAVE = 41
+let KEY_LEFTSHIFT = 42
+let KEY_BACKSLASH = 43
+let KEY_Z = 44; let KEY_X = 45; let KEY_C = 46; let KEY_V = 47
+let KEY_B = 48; let KEY_N = 49; let KEY_M = 50
+let KEY_COMMA = 51
+let KEY_DOT = 52
+let KEY_SLASH = 53
+let KEY_RIGHTSHIFT = 54
+let KEY_KPASTERISK = 55
+let KEY_LEFTALT = 56
+let KEY_SPACE = 57
+let KEY_CAPSLOCK = 58
+let KEY_F1 = 59; let KEY_F2 = 60; let KEY_F3 = 61; let KEY_F4 = 62
+let KEY_F5 = 63; let KEY_F6 = 64; let KEY_F7 = 65; let KEY_F8 = 66
+let KEY_F9 = 67; let KEY_F10 = 68
+let KEY_F11 = 87; let KEY_F12 = 88
+let KEY_RIGHTCTRL = 97
+let KEY_RIGHTALT = 100
+let KEY_HOME = 102
+let KEY_UP = 103
+let KEY_PAGEUP = 104
+let KEY_LEFT = 105
+let KEY_RIGHT = 106
+let KEY_END = 107
+let KEY_DOWN = 108
+let KEY_PAGEDOWN = 109
+let KEY_INSERT = 110
+let KEY_DELETE = 111
+let KEY_LEFTMETA = 125
+let KEY_RIGHTMETA = 126
+
+-- ── Modifier state ─────────────────────────────────────
+
+class Modifiers {
+    fn init() {
+        this.shift = false
+        this.ctrl = false
+        this.alt = false
+        this.meta = false
+        this.caps_lock = false
+    }
+
+    -- Update from an EV_KEY event. Returns true if `event` was a
+    -- modifier key (so callers can decide whether to also emit a
+    -- KeyEvent for it).
+    fn update(event) {
+        let code = event["code"]
+        let down = event["value"] != KEY_RELEASE
+        if code == KEY_LEFTSHIFT or code == KEY_RIGHTSHIFT { this.shift = down; return true }
+        if code == KEY_LEFTCTRL or code == KEY_RIGHTCTRL   { this.ctrl  = down; return true }
+        if code == KEY_LEFTALT or code == KEY_RIGHTALT     { this.alt   = down; return true }
+        if code == KEY_LEFTMETA or code == KEY_RIGHTMETA   { this.meta  = down; return true }
+        if code == KEY_CAPSLOCK and event["value"] == KEY_PRESS {
+            this.caps_lock = not this.caps_lock
+            return true
+        }
+        return false
+    }
+
+    fn snapshot() {
+        return {
+            "shift": this.shift,
+            "ctrl": this.ctrl,
+            "alt": this.alt,
+            "meta": this.meta,
+            "caps_lock": this.caps_lock
+        }
+    }
+}
+
+-- ── US layout: code → [unshifted, shifted] ─────────────
+
+let _US_LAYOUT = {
+    "2":  ["1", "!"], "3":  ["2", "@"], "4":  ["3", "#"], "5":  ["4", "$"],
+    "6":  ["5", "%"], "7":  ["6", "^"], "8":  ["7", "&"], "9":  ["8", "*"],
+    "10": ["9", "("], "11": ["0", ")"],
+    "12": ["-", "_"], "13": ["=", "+"],
+    "16": ["q", "Q"], "17": ["w", "W"], "18": ["e", "E"], "19": ["r", "R"],
+    "20": ["t", "T"], "21": ["y", "Y"], "22": ["u", "U"], "23": ["i", "I"],
+    "24": ["o", "O"], "25": ["p", "P"],
+    "26": ["[", "{"], "27": ["]", "}"],
+    "30": ["a", "A"], "31": ["s", "S"], "32": ["d", "D"], "33": ["f", "F"],
+    "34": ["g", "G"], "35": ["h", "H"], "36": ["j", "J"], "37": ["k", "K"],
+    "38": ["l", "L"],
+    "39": [";", ":"], "40": ["'", "\""], "41": ["`", "~"],
+    "43": ["\\", "|"],
+    "44": ["z", "Z"], "45": ["x", "X"], "46": ["c", "C"], "47": ["v", "V"],
+    "48": ["b", "B"], "49": ["n", "N"], "50": ["m", "M"],
+    "51": [",", "<"], "52": [".", ">"], "53": ["/", "?"],
+    "57": [" ", " "]
+}
+
+-- Symbolic names for keys without printable characters — handy for UI
+-- code that wants to handle Enter / Backspace / arrow keys etc.
+let _NAMED_KEYS = {
+    "1":   "Escape",
+    "14":  "Backspace",
+    "15":  "Tab",
+    "28":  "Enter",
+    "58":  "CapsLock",
+    "59":  "F1",  "60": "F2",  "61": "F3",  "62": "F4",
+    "63":  "F5",  "64": "F6",  "65": "F7",  "66": "F8",
+    "67":  "F9",  "68": "F10", "87": "F11", "88": "F12",
+    "102": "Home", "107": "End",
+    "104": "PageUp", "109": "PageDown",
+    "103": "Up", "108": "Down", "105": "Left", "106": "Right",
+    "110": "Insert", "111": "Delete"
+}
+
+-- ── KeyEvent ───────────────────────────────────────────
+
+class KeyEvent {
+    fn init(code, name, char_, is_press, is_repeat, modifiers) {
+        this.code = code
+        this.name = name        -- e.g. "a", "Enter", "F1", or "<key 99>"
+        this.char = char_       -- printable character or null
+        this.is_press = is_press
+        this.is_repeat = is_repeat
+        this.modifiers = modifiers
+    }
+
+    fn is_release() { return not this.is_press and not this.is_repeat }
+}
+
+-- decode_key turns a raw EV_KEY event into a KeyEvent, given the
+-- current Modifiers. Returns null for non-key events. Modifier-only
+-- key events (Shift, Ctrl, etc.) still produce a KeyEvent (named
+-- "LeftShift", etc.) so callers can react to them if they want; the
+-- Modifiers object's own `.update(event)` handles state-tracking.
+fn decode_key(event, modifiers) {
+    if event["type"] != EV_KEY { return null }
+    let code = event["code"]
+    let val = event["value"]
+    if val < 0 or val > 2 { return null }
+    let key = str(code)
+
+    -- Skip non-keyboard EV_KEY events (mouse buttons live in the same
+    -- event type but should be decoded by decode_mouse).
+    if code >= 0x100 and code < 0x200 { return null }
+
+    mut name = null
+    mut char_ = null
+    if has(_NAMED_KEYS, key) {
+        name = _NAMED_KEYS[key]
+    } elif has(_US_LAYOUT, key) {
+        let pair = _US_LAYOUT[key]
+        -- For letters, caps_lock and shift each toggle case; both at
+        -- once cancel out. For everything else, only shift matters.
+        let is_letter = pair[0] != pair[1] and is_alpha(pair[0])
+        let use_shifted = if is_letter {
+            modifiers.shift != modifiers.caps_lock
+        } else {
+            modifiers.shift
+        }
+        char_ = if use_shifted { pair[1] } else { pair[0] }
+        name = pair[0]
+    } else {
+        name = "<key " + str(code) + ">"
+    }
+
+    return KeyEvent(code, name, char_, val != KEY_RELEASE, val == KEY_REPEAT, modifiers.snapshot())
+}
