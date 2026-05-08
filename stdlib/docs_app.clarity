@@ -1,0 +1,272 @@
+-- Documentation browser — Phase 69 task 3.
+--
+-- Offline docs viewer. Reads pre-built `entries` (one per Clarity
+-- declaration) from docgen, indexes them, and exposes a searchable
+-- + bookmarkable + browseable surface plus inline runnable examples.
+--
+--     let docs = docs_app()
+--     docs.load_from_dir("/path/to/stdlib")
+--     docs.search("button")          -- → list of matching entries
+--     docs.open(entry_id)            -- → set selected, increments visits
+--     docs.bookmark(entry_id, "..")  -- save with optional tag
+--     docs.run_example(entry_id, 0)  -- execute the first code block
+
+from "docgen.clarity" import generate_docs_entries
+
+class DocsApp {
+    fn init() {
+        this.entries = []           -- list of {id, name, kind, module, signature, summary, examples, params, returns}
+        this._next_id = 1
+        this.selected = null
+        this.bookmarks = []
+        this.history = []           -- stack of viewed entry IDs
+        this.search_results = []
+        this.last_query = ""
+        this.run_results = {}        -- entry_id -> [run_result]
+        this._sorted_index = []
+        this._runner = null
+    }
+
+    -- ── Loading ─────────────────────────────────
+
+    fn load_from_dir(dir) {
+        let r = exec_full("find '" + dir + "' -name '*.clarity' -type f 2>/dev/null | sort")
+        if r.exit_code != 0 { return 0 }
+        mut count = 0
+        for line in split(trim(r.stdout), "\n") {
+            let path = trim(line)
+            if len(path) == 0 { continue }
+            count = count + this._load_file(path)
+        }
+        this._reindex()
+        return count
+    }
+
+    fn load_file(path) {
+        let n = this._load_file(path)
+        this._reindex()
+        return n
+    }
+
+    fn _load_file(path) {
+        let module = _stem(path)
+        let source = read(path)
+        mut count = 0
+        try {
+            let raw = generate_docs_entries(source, path)
+            for entry in raw {
+                let normalised = this._normalise(entry, module)
+                if normalised != null { push(this.entries, normalised); count = count + 1 }
+            }
+        } catch e {
+            -- Tolerate partial failures: missing files, parse errors
+            -- in user-supplied files shouldn't take down the docs app.
+        }
+        return count
+    }
+
+    -- Some docgen entries may be missing fields; fill in safe
+    -- defaults and assign a stable id.
+    fn _normalise(entry, module) {
+        if not has(entry, "name") { return null }
+        let id = this._next_id
+        this._next_id = this._next_id + 1
+        return {
+            "id": id,
+            "name": entry["name"],
+            "kind": if has(entry, "kind") { entry["kind"] } else { "unknown" },
+            "module": module,
+            "signature": if has(entry, "signature") { entry["signature"] } else { entry["name"] },
+            "summary": if has(entry, "summary") { entry["summary"] } else { "" },
+            "description": if has(entry, "description") { entry["description"] } else { "" },
+            "examples": if has(entry, "examples") { entry["examples"] } else { [] },
+            "params": if has(entry, "params") { entry["params"] } else { [] },
+            "returns": if has(entry, "returns") { entry["returns"] } else { "" },
+            "visits": 0
+        }
+    }
+
+    fn _reindex() {
+        -- Cache a stably-sorted view by name for the alphabetised list.
+        mut copy = []
+        for e in this.entries { push(copy, e) }
+        mut i = 1
+        while i < len(copy) {
+            let cur = copy[i]
+            mut j = i - 1
+            while j >= 0 and copy[j]["name"] > cur["name"] {
+                copy[j + 1] = copy[j]
+                j = j - 1
+            }
+            copy[j + 1] = cur
+            i = i + 1
+        }
+        this._sorted_index = copy
+    }
+
+    -- ── Browsing ───────────────────────────────
+
+    fn list_alphabetical() { return this._sorted_index }
+
+    fn list_by_module(module) {
+        mut out = []
+        for e in this.entries { if e["module"] == module { push(out, e) } }
+        return out
+    }
+
+    fn modules() {
+        mut seen = {}
+        mut order = []
+        for e in this.entries {
+            if not has(seen, e["module"]) {
+                seen[e["module"]] = true
+                push(order, e["module"])
+            }
+        }
+        return order
+    }
+
+    fn open(id) {
+        let entry = this._find(id)
+        if entry == null { return null }
+        entry["visits"] = entry["visits"] + 1
+        this.selected = entry
+        push(this.history, id)
+        if len(this.history) > 100 {
+            mut trimmed = []
+            mut i = 1
+            while i < len(this.history) { push(trimmed, this.history[i]); i = i + 1 }
+            this.history = trimmed
+        }
+        return entry
+    }
+
+    fn back() {
+        if len(this.history) < 2 { return null }
+        -- Pop current, then peek at the new top
+        mut trimmed = []
+        mut i = 0
+        while i < len(this.history) - 1 { push(trimmed, this.history[i]); i = i + 1 }
+        this.history = trimmed
+        let id = this.history[len(this.history) - 1]
+        this.selected = this._find(id)
+        return this.selected
+    }
+
+    -- ── Search ─────────────────────────────────
+
+    fn search(query) {
+        this.last_query = query
+        let q = lower(trim(query))
+        mut results = []
+        if len(q) == 0 {
+            this.search_results = results
+            return results
+        }
+        for e in this.entries {
+            let name_score = if contains(lower(e["name"]), q) { 10 } else { 0 }
+            let summary_score = if contains(lower(e["summary"]), q) { 3 } else { 0 }
+            let module_score = if contains(lower(e["module"]), q) { 2 } else { 0 }
+            let total = name_score + summary_score + module_score
+            if total > 0 {
+                push(results, {"entry": e, "score": total})
+            }
+        }
+        -- Stable sort descending by score
+        mut i = 1
+        while i < len(results) {
+            let cur = results[i]
+            mut j = i - 1
+            while j >= 0 and results[j]["score"] < cur["score"] {
+                results[j + 1] = results[j]
+                j = j - 1
+            }
+            results[j + 1] = cur
+            i = i + 1
+        }
+        this.search_results = results
+        return results
+    }
+
+    -- ── Bookmarks ──────────────────────────────
+
+    fn bookmark(id, tag) {
+        let entry = this._find(id)
+        if entry == null { return false }
+        for b in this.bookmarks { if b["id"] == id { return false } }
+        push(this.bookmarks, {"id": id, "name": entry["name"], "module": entry["module"], "tag": tag ?? ""})
+        return true
+    }
+
+    fn unbookmark(id) {
+        mut next = []
+        mut removed = false
+        for b in this.bookmarks {
+            if b["id"] == id { removed = true } else { push(next, b) }
+        }
+        this.bookmarks = next
+        return removed
+    }
+
+    fn is_bookmarked(id) {
+        for b in this.bookmarks { if b["id"] == id { return true } }
+        return false
+    }
+
+    -- ── Inline example runner ─────────────────
+
+    -- Pluggable runner: accepts a fn(source, label) -> {output, exit_code}
+    -- so tests can inject a fake. Defaults to a real `clarity run`.
+    fn set_runner(runner) { this._runner = runner }
+
+    fn run_example(entry_id, example_index) {
+        let entry = this._find(entry_id)
+        if entry == null { return null }
+        if example_index < 0 or example_index >= len(entry["examples"]) { return null }
+        let source = entry["examples"][example_index]
+        let runner = if this._runner != null { this._runner } else { _default_runner }
+        let result = runner(source, entry["name"] + "#" + str(example_index))
+        if not has(this.run_results, entry_id) { this.run_results[entry_id] = [] }
+        push(this.run_results[entry_id], {"index": example_index, "result": result})
+        return result
+    }
+
+    -- ── Introspection ─────────────────────────
+
+    fn _find(id) {
+        for e in this.entries { if e["id"] == id { return e } }
+        return null
+    }
+
+    fn summary() {
+        return {
+            "entries": len(this.entries),
+            "modules": len(this.modules()),
+            "bookmarks": len(this.bookmarks),
+            "selected": if this.selected != null { this.selected["name"] } else { null },
+            "search_results": len(this.search_results),
+            "history_depth": len(this.history)
+        }
+    }
+}
+
+fn docs_app() { return DocsApp() }
+
+fn _stem(path) {
+    let parts = split(path, "/")
+    if len(parts) == 0 { return path }
+    let last = parts[len(parts) - 1]
+    let dot = index_of(last, ".")
+    if dot < 0 { return last }
+    return substring(last, 0, dot)
+}
+
+fn _default_runner(source, label) {
+    let tmp = "/tmp/_docs_example_" + label + ".clarity"
+    let safe_path = replace(tmp, "/", "_")
+    let path = "/tmp/" + replace(safe_path, "/_tmp_", "")
+    write(path, source)
+    let r = exec_full("clarity run '" + path + "' 2>&1")
+    exec_full("rm -f '" + path + "'")
+    return {"output": r.stdout, "exit_code": r.exit_code}
+}
