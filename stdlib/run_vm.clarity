@@ -1,0 +1,192 @@
+-- run_vm — QEMU launcher for the ClarityOS ISO (Phase 67 task 4).
+--
+-- Builds a QEMU command line from a small set of options and either
+-- prints it (so callers can review/script it) or actually launches
+-- it. The CI integration lives upstream of this — pipelines call
+-- run_vm.clarity with --headless --serial-stdio --boot-test, capture
+-- the serial output, grep for the "ClarityOS ready." line.
+--
+--     let vm = qemu_runner({
+--         "iso": "claritos.iso",
+--         "uefi": true,
+--         "memory_mb": 1024,
+--         "cores": 4,
+--         "headless": true,
+--         "serial": "stdio"
+--     })
+--     vm.cmd()                  -- → list of argv tokens
+--     vm.shell_command()        -- → string suitable for exec
+--     vm.run()                  -- launches QEMU
+
+let DEFAULT_MEM = 1024
+let DEFAULT_CORES = 2
+let DEFAULT_BIOS_BIN = "/usr/share/seabios/bios.bin"
+let DEFAULT_OVMF_CODE = "/usr/share/OVMF/OVMF_CODE.fd"
+let DEFAULT_OVMF_VARS = "/usr/share/OVMF/OVMF_VARS.fd"
+
+let _SUPPORTED_NETS = ["user", "none", "tap"]
+
+class QemuRunner {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.binary = if has(o, "binary") { o["binary"] } else { "qemu-system-x86_64" }
+        this.iso = if has(o, "iso") { o["iso"] } else { null }
+        this.kernel = if has(o, "kernel") { o["kernel"] } else { null }
+        this.cmdline = if has(o, "cmdline") { o["cmdline"] } else { "" }
+        this.disk_image = if has(o, "disk") { o["disk"] } else { null }
+        this.memory_mb = if has(o, "memory_mb") { o["memory_mb"] } else { DEFAULT_MEM }
+        this.cores = if has(o, "cores") { o["cores"] } else { DEFAULT_CORES }
+        this.uefi = if has(o, "uefi") { o["uefi"] } else { false }
+        this.ovmf_code = if has(o, "ovmf_code") { o["ovmf_code"] } else { DEFAULT_OVMF_CODE }
+        this.ovmf_vars = if has(o, "ovmf_vars") { o["ovmf_vars"] } else { DEFAULT_OVMF_VARS }
+        this.kvm = if has(o, "kvm") { o["kvm"] } else { false }
+        this.headless = if has(o, "headless") { o["headless"] } else { false }
+        this.serial = if has(o, "serial") { o["serial"] } else { null }   -- "stdio" / "file:..."
+        this.network = if has(o, "network") { o["network"] } else { "user" }
+        this.virtio_disk = if has(o, "virtio_disk") { o["virtio_disk"] } else { true }
+        this.snapshot = if has(o, "snapshot") { o["snapshot"] } else { false }
+        this.no_reboot = if has(o, "no_reboot") { o["no_reboot"] } else { true }
+        this.boot_test_marker = if has(o, "boot_test_marker") { o["boot_test_marker"] } else { null }
+        this.timeout_seconds = if has(o, "timeout_seconds") { o["timeout_seconds"] } else { 60 }
+        this.extra_args = if has(o, "extra") { o["extra"] } else { []  }
+    }
+
+    -- ── Validation ─────────────────────────────────
+
+    fn validate() {
+        mut errors = []
+        if this.iso == null and this.kernel == null {
+            push(errors, "must set iso or kernel")
+        }
+        if this.iso != null and this.kernel != null {
+            push(errors, "set exactly one of iso / kernel")
+        }
+        if this.memory_mb < 64 {
+            push(errors, "memory_mb must be >= 64")
+        }
+        if this.cores < 1 or this.cores > 64 {
+            push(errors, "cores must be 1..64")
+        }
+        if not contains(_SUPPORTED_NETS, this.network) {
+            push(errors, "network must be one of: " + join(_SUPPORTED_NETS, ", "))
+        }
+        if this.serial != null and not _serial_valid(this.serial) {
+            push(errors, "serial must be one of stdio / null / file:<path> / mon:stdio")
+        }
+        return errors
+    }
+
+    -- ── Command construction ───────────────────────
+
+    fn cmd() {
+        mut argv = [this.binary]
+        push(argv, "-cpu")
+        push(argv, if this.kvm { "host" } else { "qemu64,+sse,+sse2" })
+        push(argv, "-machine")
+        push(argv, "q35")
+        if this.kvm { push(argv, "-enable-kvm") }
+        push(argv, "-m"); push(argv, str(this.memory_mb))
+        push(argv, "-smp"); push(argv, str(this.cores))
+
+        if this.iso != null {
+            push(argv, "-cdrom"); push(argv, this.iso)
+            push(argv, "-boot"); push(argv, "d")
+        }
+        if this.kernel != null {
+            push(argv, "-kernel"); push(argv, this.kernel)
+            if len(this.cmdline) > 0 {
+                push(argv, "-append"); push(argv, this.cmdline)
+            }
+        }
+
+        if this.uefi {
+            push(argv, "-drive"); push(argv, "if=pflash,format=raw,readonly=on,file=" + this.ovmf_code)
+            push(argv, "-drive"); push(argv, "if=pflash,format=raw,file=" + this.ovmf_vars)
+        }
+
+        if this.disk_image != null {
+            if this.virtio_disk {
+                push(argv, "-drive")
+                push(argv, "if=virtio,format=qcow2,file=" + this.disk_image)
+            } else {
+                push(argv, "-drive")
+                push(argv, "if=ide,format=qcow2,file=" + this.disk_image)
+            }
+        }
+
+        if this.network == "user" {
+            push(argv, "-netdev"); push(argv, "user,id=net0")
+            push(argv, "-device"); push(argv, "virtio-net-pci,netdev=net0")
+        } elif this.network == "none" {
+            push(argv, "-nic"); push(argv, "none")
+        } elif this.network == "tap" {
+            push(argv, "-netdev"); push(argv, "tap,id=net0,ifname=tap0,script=no,downscript=no")
+            push(argv, "-device"); push(argv, "virtio-net-pci,netdev=net0")
+        }
+
+        if this.headless {
+            push(argv, "-display"); push(argv, "none")
+        }
+        if this.serial != null {
+            push(argv, "-serial"); push(argv, this.serial)
+        }
+        if this.no_reboot {
+            push(argv, "-no-reboot")
+            push(argv, "-no-shutdown")
+        }
+        if this.snapshot {
+            push(argv, "-snapshot")
+        }
+
+        for a in this.extra_args { push(argv, a) }
+        return argv
+    }
+
+    fn shell_command() {
+        let argv = this.cmd()
+        mut parts = []
+        for tok in argv { push(parts, _shell_quote(tok)) }
+        return join(parts, " ")
+    }
+
+    -- ── Execute ────────────────────────────────────
+
+    fn run() {
+        let errs = this.validate()
+        if len(errs) > 0 { throw "QemuRunnerError: " + join(errs, "; ") }
+        let cmdline = this.shell_command()
+        if this.boot_test_marker != null {
+            return this._boot_test(cmdline)
+        }
+        return exec_full(cmdline)
+    }
+
+    fn _boot_test(cmdline) {
+        -- Run with a timeout, capture stdout, return whether the
+        -- marker line ever appeared. Used by CI for "did the kernel
+        -- print 'ClarityOS ready.'" style smoke tests.
+        let timed = "timeout " + str(this.timeout_seconds) + "s " + cmdline
+        let r = exec_full(timed + " 2>&1")
+        let saw_marker = contains(r.stdout, this.boot_test_marker)
+        return {
+            "saw_marker": saw_marker,
+            "exit_code": r.exit_code,
+            "stdout": r.stdout,
+            "marker": this.boot_test_marker
+        }
+    }
+}
+
+-- ── Helpers ─────────────────────────────────────
+
+fn _serial_valid(s) {
+    if s == "stdio" or s == "null" or s == "mon:stdio" { return true }
+    return starts(s, "file:") or starts(s, "tcp:") or starts(s, "telnet:")
+}
+
+fn _shell_quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn qemu_runner(opts) { return QemuRunner(opts) }
