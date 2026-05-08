@@ -76,6 +76,8 @@ let STDLIB_FILES = [
     "audio.clarity", "notify.clarity",
     "wallpaper.clarity", "statusbar.clarity", "dock.clarity", "launcher.clarity",
     "lockscreen.clarity", "settings.clarity",
+    "app_calc.clarity", "app_viewer.clarity", "app_monitor.clarity",
+    "app_editor.clarity", "app_files.clarity", "app_terminal.clarity",
     "ffi.clarity",
     "build.clarity", "test_smoke.clarity",
     "runtime_spec.clarity", "runtime_gen.clarity",

@@ -1,0 +1,290 @@
+-- Calculator app — Phase 63 task 5.
+--
+-- Two layers:
+--   * `Calculator`        the pure-state math engine: feed it
+--                         keystrokes (digits, operators, '=' / 'C' /
+--                         '±'), read back .display.
+--   * `CalculatorApp`     a Widget that paints a display + 4×5 grid
+--                         of buttons and routes mouse / keyboard
+--                         events into the engine.
+--
+-- The engine alone is testable without ever drawing a pixel; the app
+-- adds the chrome.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font
+
+-- ── Engine ────────────────────────────────────────────
+
+class Calculator {
+    fn init() {
+        this.display = "0"
+        this.accumulator = 0.0
+        this.pending_op = null      -- "+" | "-" | "*" | "/" | null
+        this._fresh = true          -- true means next digit replaces display
+        this.history = []
+    }
+
+    fn input_digit(d) {
+        if this._fresh {
+            this.display = str(d)
+            this._fresh = false
+        } else {
+            if this.display == "0" {
+                this.display = str(d)
+            } else {
+                this.display = this.display + str(d)
+            }
+        }
+    }
+
+    fn input_dot() {
+        if this._fresh {
+            this.display = "0."
+            this._fresh = false
+            return null
+        }
+        if not contains(this.display, ".") {
+            this.display = this.display + "."
+        }
+    }
+
+    fn current_value() {
+        return float(this.display)
+    }
+
+    fn input_op(op) {
+        let v = this.current_value()
+        if this.pending_op != null and not this._fresh {
+            this.accumulator = _apply(this.pending_op, this.accumulator, v)
+            this.display = _format(this.accumulator)
+        } else {
+            this.accumulator = v
+        }
+        this.pending_op = op
+        this._fresh = true
+    }
+
+    fn equals() {
+        if this.pending_op == null { return null }
+        let v = this.current_value()
+        let result = _apply(this.pending_op, this.accumulator, v)
+        let entry = _format(this.accumulator) + " " + this.pending_op + " " + _format(v) + " = " + _format(result)
+        push(this.history, entry)
+        this.accumulator = result
+        this.display = _format(result)
+        this.pending_op = null
+        this._fresh = true
+    }
+
+    fn clear() {
+        this.display = "0"
+        this.accumulator = 0.0
+        this.pending_op = null
+        this._fresh = true
+    }
+
+    fn negate() {
+        if this.display == "0" { return null }
+        if starts(this.display, "-") {
+            this.display = substring(this.display, 1, len(this.display))
+        } else {
+            this.display = "-" + this.display
+        }
+    }
+
+    fn percent() {
+        let v = this.current_value() / 100.0
+        this.display = _format(v)
+        this._fresh = false
+    }
+}
+
+fn _apply(op, a, b) {
+    if op == "+" { return a + b }
+    if op == "-" { return a - b }
+    if op == "*" { return a * b }
+    if op == "/" {
+        if b == 0 { return 0 }
+        return a / b
+    }
+    return b
+}
+
+-- Trim trailing zeros after a decimal so "5.00" becomes "5".
+fn _format(v) {
+    let s = str(v)
+    if not contains(s, ".") { return s }
+    mut end = len(s)
+    while end > 0 and char_at(s, end - 1) == "0" {
+        end -= 1
+    }
+    if end > 0 and char_at(s, end - 1) == "." {
+        end -= 1
+    }
+    if end == 0 { return "0" }
+    return substring(s, 0, end)
+}
+
+-- ── App widget ────────────────────────────────────────
+
+let _BUTTONS = [
+    ["C", "±", "%", "/"],
+    ["7", "8", "9", "*"],
+    ["4", "5", "6", "-"],
+    ["1", "2", "3", "+"],
+    ["0", "0", ".", "="]      -- "0" spans two cells
+]
+
+class CalculatorApp < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "calculator"
+        this.focusable = true
+        this.engine = Calculator()
+        this.display_h = 80
+        this.gap = 4
+    }
+
+    fn _grid() { return _BUTTONS }
+
+    fn _button_rect(row, col) {
+        let r = this.screen_rect()
+        let cols = 4
+        let rows = len(this._grid())
+        let inner_y = r[1] + this.display_h + this.gap
+        let inner_h = r[3] - this.display_h - this.gap
+        let cw = (r[2] - this.gap * (cols + 1)) / cols
+        let rh = (inner_h - this.gap * (rows + 1)) / rows
+        let bx = r[0] + this.gap + col * (cw + this.gap)
+        let by = inner_y + this.gap + row * (rh + this.gap)
+        return [bx, by, cw, rh]
+    }
+
+    fn _hit_button(sx, sy) {
+        mut row = 0
+        let grid = this._grid()
+        while row < len(grid) {
+            let cells = grid[row]
+            mut col = 0
+            while col < len(cells) {
+                let br = this._button_rect(row, col)
+                if sx >= br[0] and sx < br[0] + br[2] and sy >= br[1] and sy < br[1] + br[3] {
+                    return [row, col]
+                }
+                col += 1
+            }
+            row += 1
+        }
+        return null
+    }
+
+    fn _press(label) {
+        if label == "C" { this.engine.clear(); return null }
+        if label == "±" { this.engine.negate(); return null }
+        if label == "%" { this.engine.percent(); return null }
+        if label == "=" { this.engine.equals(); return null }
+        if label == "+" or label == "-" or label == "*" or label == "/" {
+            this.engine.input_op(label)
+            return null
+        }
+        if label == "." { this.engine.input_dot(); return null }
+        -- Otherwise it's a digit
+        this.engine.input_digit(int(label))
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "background")
+        let surface = theme_color(t, "surface")
+        let surface_e = theme_color(t, "surface_elevated")
+        let fg = theme_color(t, "foreground")
+        let accent = theme_color(t, "accent")
+        let border = theme_color(t, "border")
+
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+
+        -- Display strip
+        fill_rect(fb, r[0] + this.gap, r[1] + this.gap, r[2] - this.gap * 2, this.display_h - this.gap * 2, surface)
+        let txt = this.engine.display
+        let m = measure_text(f, txt)
+        let tx = r[0] + r[2] - this.gap - 8 - m[0]
+        let ty = r[1] + (this.display_h - m[1]) / 2
+        draw_text(fb, tx, ty, txt, f, fg)
+
+        -- Buttons
+        let grid = this._grid()
+        mut row = 0
+        while row < len(grid) {
+            let cells = grid[row]
+            mut col = 0
+            while col < len(cells) {
+                let label = cells[col]
+                -- Skip the second "0" cell (we'll paint it as part of the first)
+                if row == len(grid) - 1 and col == 1 and label == "0" {
+                    col += 1
+                    continue
+                }
+                mut br = this._button_rect(row, col)
+                if row == len(grid) - 1 and col == 0 and label == "0" {
+                    let next = this._button_rect(row, 1)
+                    br = [br[0], br[1], next[0] + next[2] - br[0], br[3]]
+                }
+                let is_op = label == "+" or label == "-" or label == "*" or label == "/" or label == "="
+                let bgcol = if is_op { accent } else { surface_e }
+                fill_rect(fb, br[0], br[1], br[2], br[3], bgcol)
+                rect(fb, br[0], br[1], br[2], br[3], border)
+                let lm = measure_text(f, label)
+                draw_text(fb, br[0] + (br[2] - lm[0]) / 2, br[1] + (br[3] - lm[1]) / 2, label, f, fg)
+                col += 1
+            }
+            row += 1
+        }
+    }
+
+    fn _handle(event) {
+        let kind = type(event)
+        if kind == "MouseEvent" and event.is_press {
+            let hit = this._hit_button(event.x, event.y)
+            if hit != null {
+                let label = this._grid()[hit[0]][hit[1]]
+                this._press(label)
+                this.focus()
+                return true
+            }
+            return false
+        }
+        if kind == "KeyEvent" and event.is_press {
+            let n = event.name
+            if n == "Enter" { this.engine.equals(); return true }
+            if n == "Escape" { this.engine.clear(); return true }
+            if n == "Backspace" {
+                if len(this.engine.display) > 1 {
+                    this.engine.display = substring(this.engine.display, 0, len(this.engine.display) - 1)
+                } else {
+                    this.engine.display = "0"
+                    this.engine._fresh = true
+                }
+                return true
+            }
+            if event.char != null {
+                let c = event.char
+                if c == "+" or c == "-" or c == "*" or c == "/" {
+                    this.engine.input_op(c); return true
+                }
+                if c == "=" { this.engine.equals(); return true }
+                if c == "." { this.engine.input_dot(); return true }
+                if c >= "0" and c <= "9" {
+                    this.engine.input_digit(int(c)); return true
+                }
+            }
+        }
+        return false
+    }
+}
+
+fn calculator() { return CalculatorApp() }

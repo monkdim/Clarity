@@ -1,0 +1,374 @@
+-- Phase 63 — core app tests.
+-- Each app's pure-state engine is tested without ever painting a
+-- pixel or hitting the network. Calculator runs through arithmetic +
+-- chained ops. Viewer exercises load + transforms + filters with a
+-- BMP round-trip. Editor walks the TextBuffer through cursor moves +
+-- inserts + undo/redo + find. Files tests path utils + ls parsing.
+-- Monitor tests the /proc parsers. Terminal tests the VT100 parser
+-- end-to-end via feed().
+
+from "app_calc.clarity" import Calculator, calculator, _format
+from "app_viewer.clarity" import ImageViewer, image_viewer
+from "app_monitor.clarity" import parse_stat_text, parse_meminfo_text, parse_loadavg_text, parse_uptime_text, parse_status_text, cpu_percent_between
+from "app_editor.clarity" import TextBuffer, EditorApp, editor
+from "app_files.clarity" import FilesApp, FileEntry, files, parent_directory, breadcrumbs, _split_ls
+from "app_terminal.clarity" import Terminal, TerminalApp, terminal
+from "image.clarity" import image, save_bmp
+from "graphics.clarity" import RED, BLUE, BLACK
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+-- ── Calculator engine ─────────────────────────────────
+
+show "-- Apps: Calculator engine --"
+
+let c = Calculator()
+assert_eq(c.display, "0", "starts at 0")
+
+c.input_digit(7); c.input_digit(2)
+assert_eq(c.display, "72", "two-digit input")
+
+c.input_op("+"); c.input_digit(8); c.equals()
+assert_eq(c.display, "80", "72 + 8 = 80")
+
+c.clear()
+c.input_digit(2); c.input_op("*"); c.input_digit(3); c.input_op("+"); c.input_digit(4); c.equals()
+assert_eq(c.display, "10", "chained: 2 * 3 + 4 = 10 (left-to-right)")
+
+c.clear()
+c.input_digit(5); c.input_op("/"); c.input_digit(0); c.equals()
+assert_eq(c.display, "0", "divide by zero returns 0 (no exception)")
+
+c.clear()
+c.input_digit(1); c.input_dot(); c.input_digit(5)
+assert_eq(c.display, "1.5", "decimal entry")
+
+c.clear()
+c.input_digit(7); c.negate()
+assert_eq(c.display, "-7", "negate")
+c.negate()
+assert_eq(c.display, "7", "negate again")
+
+c.clear()
+c.input_digit(2); c.input_digit(0); c.percent()
+assert_eq(c.display, "0.2", "percent = / 100")
+
+assert_eq(_format(5.0), "5", "format trims trailing zero + decimal")
+assert_eq(_format(5.5), "5.5", "format keeps real fraction")
+assert_eq(_format(0.0), "0", "format zero")
+
+-- ── Calculator app routes keystrokes ──────────────────
+
+show "-- Apps: CalculatorApp keystroke routing --"
+
+let cap = calculator()
+cap._press("2"); cap._press("+"); cap._press("3"); cap._press("=")
+assert_eq(cap.engine.display, "5", "2 + 3 = 5 via _press")
+
+cap._press("C"); cap._press("9"); cap._press("±")
+assert_eq(cap.engine.display, "-9", "± via app")
+
+-- ── Image viewer transforms ──────────────────────────
+
+show "-- Apps: ImageViewer --"
+
+-- Build a 16×8 test image: top half RED, bottom half BLUE
+let img = image(16, 8)
+mut y = 0
+while y < 8 {
+    mut x = 0
+    while x < 16 {
+        img.put_pixel(x, y, if y < 4 { RED } else { BLUE })
+        x += 1
+    }
+    y += 1
+}
+let img_path = "/tmp/_clarity_app_viewer_test.bmp"
+save_bmp(img, img_path)
+
+let v = image_viewer()
+v.set_bounds(0, 0, 64, 32)
+v.open(img_path)
+assert(v.image != null, "image loaded")
+assert_eq(v.image.width, 16, "width preserved")
+assert_eq(v.image.height, 8, "height preserved")
+assert_eq(v.error_message, null, "no error")
+
+-- fit_to_window picks the smaller of x/y zoom
+v.fit_to_window()
+assert(v.zoom > 0, "zoom set after fit")
+
+v.actual_size()
+assert_eq(v.zoom, 1.0, "actual size = 1.0")
+v.zoom_in()
+assert(v.zoom > 1.0, "zoom in")
+let prev_zoom = v.zoom
+v.zoom_out(); v.zoom_out()
+assert(v.zoom < prev_zoom, "zoom out reduces")
+
+v.pan(10, -5)
+assert_eq(v.pan_x, 10, "pan x")
+assert_eq(v.pan_y, -5, "pan y")
+
+-- Grayscale: top-left was RED, after grayscale should be a gray
+v.grayscale()
+let p_after = v.image.get_pixel(0, 0)
+let r = (p_after >> 16) & 0xFF
+let g = (p_after >> 8) & 0xFF
+let b = p_after & 0xFF
+assert_eq(r, g, "grayscale: r == g")
+assert_eq(g, b, "grayscale: g == b")
+
+-- Undo restores the previous color
+v.undo()
+assert_eq(v.image.get_pixel(0, 0), RED, "undo restores")
+
+-- Brightness (+ raises components, clamped to 255)
+v.brightness(50)
+let p_b = v.image.get_pixel(0, 0)
+assert_eq((p_b >> 16) & 0xFF, 255, "red was 255 → still 255 after +50")
+
+v.undo()
+v.invert()
+let p_inv = v.image.get_pixel(0, 0)
+assert_eq((p_inv >> 16) & 0xFF, 0, "inverted red component is 0")
+
+exec("rm -f " + img_path)
+
+-- Rotation swaps width / height
+v.rotate_right()
+assert_eq(v.image.width, 8, "rotated width = old height")
+assert_eq(v.image.height, 16, "rotated height = old width")
+
+-- Loading a missing file sets error_message instead of throwing
+v.open("/tmp/_does_not_exist.bmp")
+assert(v.error_message != null, "missing file → error message")
+
+-- ── Monitor parsers ──────────────────────────────────
+
+show "-- Apps: SystemMonitor parsers --"
+
+let stat = parse_stat_text("cpu  100 0 50 200 10 0 0 0 0 0\ncpu0 100 0 50 200 10 0 0 0 0 0\n")
+assert_eq(stat["user"], 100, "stat user")
+assert_eq(stat["idle"], 200, "stat idle")
+assert_eq(stat["iowait"], 10, "stat iowait")
+assert_eq(stat["total"], 360, "stat total = sum")
+
+-- Make the next snapshot have some idle increase so percent is < 100
+let next = parse_stat_text("cpu  150 0 60 250 20 0 0 0 0 0\n")
+let pct = cpu_percent_between(stat, next)
+assert(pct > 0 and pct < 100, "cpu_percent between two snapshots is a sane percentage")
+
+let mem = parse_meminfo_text("MemTotal:       16000 kB\nMemFree:         8000 kB\nMemAvailable:   12000 kB\nBuffers:           0 kB\n")
+assert_eq(mem["MemTotal"], 16000 * 1024, "MemTotal converted to bytes")
+assert_eq(mem["MemAvailable"], 12000 * 1024, "MemAvailable converted")
+
+let load = parse_loadavg_text("0.50 0.75 1.00 1/100 1234")
+assert_eq(load[0], 0.5, "1-min load")
+assert_eq(load[1], 0.75, "5-min load")
+
+assert(parse_uptime_text("12345.67 8901.23") > 12345.0, "uptime parsed")
+
+let proc = parse_status_text("Name:   bash\nState:  S (sleeping)\nPid:    1234\nVmRSS:    4096 kB\nThreads:        1\n")
+assert_eq(proc["pid"], 1234, "pid")
+assert_eq(proc["name"], "bash", "name")
+assert_eq(proc["state"], "S", "state head only")
+assert_eq(proc["vm_rss_bytes"], 4096 * 1024, "vmrss bytes")
+
+-- ── Editor TextBuffer ────────────────────────────────
+
+show "-- Apps: Editor TextBuffer --"
+
+let tb = TextBuffer()
+tb.load("hello\nworld")
+assert_eq(len(tb.lines), 2, "two lines after load")
+assert_eq(tb.lines[0], "hello", "first line")
+assert_eq(tb.cursor_row, 0, "cursor at start")
+
+-- Move + insert
+tb.move_right(); tb.move_right()
+assert_eq(tb.cursor_col, 2, "moved right twice")
+tb.insert_char("X")
+assert_eq(tb.lines[0], "heXllo", "insert in middle")
+assert_eq(tb.cursor_col, 3, "cursor advanced")
+
+-- Newline splits the line
+tb.insert_newline()
+assert_eq(len(tb.lines), 3, "newline added a line")
+assert_eq(tb.lines[0], "heX", "left of cursor stays")
+assert_eq(tb.lines[1], "llo", "right of cursor moved down")
+assert_eq(tb.cursor_row, 1, "cursor moved to next line")
+assert_eq(tb.cursor_col, 0, "cursor at start of new line")
+
+-- Backspace at col 0 joins with previous line
+tb.delete_back()
+assert_eq(len(tb.lines), 2, "backspace joined lines")
+assert_eq(tb.lines[0], "heXllo", "rejoined")
+assert_eq(tb.cursor_row, 0, "cursor back to row 0")
+assert_eq(tb.cursor_col, 3, "cursor at the join point")
+
+-- Undo restores the newline
+tb.undo()
+assert_eq(len(tb.lines), 3, "undo brought back the split")
+
+-- Redo applies it again
+tb.redo()
+assert_eq(len(tb.lines), 2, "redo joined again")
+
+-- Delete forward at end of line joins with next
+tb.move_end()
+let prev_line_count = len(tb.lines)
+tb.delete_forward()
+assert(len(tb.lines) == prev_line_count or len(tb.lines) == prev_line_count - 1, "delete forward on a single-line buffer is a no-op or join")
+
+-- Find
+tb.load("alpha bravo charlie\ndelta")
+tb.cursor_row = 0; tb.cursor_col = 0
+let pos = tb.find("bravo")
+assert(pos != null, "found bravo")
+assert_eq(pos[0], 0, "in row 0")
+assert_eq(pos[1], 6, "at col 6")
+
+let miss = tb.find("missing")
+assert_eq(miss, null, "not found returns null")
+
+-- Replace
+tb.replace_at(0, 6, "bravo", "victor")
+assert_eq(tb.lines[0], "alpha victor charlie", "replace_at swapped the substring")
+
+-- ── Files path utilities ─────────────────────────────
+
+show "-- Apps: Files path utils --"
+
+assert_eq(parent_directory("/"), "/", "parent of root is root")
+assert_eq(parent_directory("/usr"), "/", "parent of /usr")
+assert_eq(parent_directory("/usr/bin"), "/usr", "parent of /usr/bin")
+assert_eq(parent_directory("/usr/bin/ls"), "/usr/bin", "deep parent")
+assert_eq(parent_directory("/usr/"), "/", "trailing slash trimmed")
+
+let cb = breadcrumbs("/usr/local/bin")
+assert_eq(cb[0], "/", "first crumb is root")
+assert_eq(cb[1], "/usr", "second is /usr")
+assert_eq(cb[2], "/usr/local", "third is /usr/local")
+assert_eq(cb[3], "/usr/local/bin", "fourth is full path")
+
+-- _split_ls collapses runs of spaces, and the 8th field is "the rest"
+-- so file/dir names with internal spaces survive intact.
+let parts = _split_ls("drwxr-xr-x  2 user user 4096 2024-01-15 14:30 hello world")
+assert_eq(parts[0], "drwxr-xr-x", "perms field")
+assert_eq(parts[7], "hello world", "name keeps internal spaces")
+
+-- ── Terminal parser ──────────────────────────────────
+
+show "-- Apps: Terminal VT100 parser --"
+
+-- ESC character — Clarity strings don't have \x escapes.
+let ESC = from_char_code(27)
+
+let term = Terminal(20, 5)
+assert_eq(term.cursor_row, 0, "starts at row 0")
+assert_eq(term.cursor_col, 0, "starts at col 0")
+
+term.feed("hello")
+assert_eq(term.cursor_col, 5, "cursor advanced")
+assert_eq(term.line_text(0), "hello               ", "first row has hello + spaces")
+
+term.feed("\r\n")
+assert_eq(term.cursor_row, 1, "newline moved to next row")
+assert_eq(term.cursor_col, 0, "carriage return")
+
+term.feed("world")
+assert_eq(term.line_text(1), "world               ", "second row has world")
+
+-- Backspace (BS is char 8; Clarity strings don't have \b)
+let BS = from_char_code(8)
+term.feed(BS + BS)
+assert_eq(term.cursor_col, 3, "backspace twice")
+
+-- CSI cursor positioning H — row 3 col 7 (1-based → 2, 6 zero-based)
+term.feed(ESC + "[3;7H")
+assert_eq(term.cursor_row, 2, "CSI H row (1-based to 0-based)")
+assert_eq(term.cursor_col, 6, "CSI H col")
+
+-- CSI A B C D
+term.feed(ESC + "[2A")
+assert_eq(term.cursor_row, 0, "cursor up 2")
+term.feed(ESC + "[3B")
+assert_eq(term.cursor_row, 3, "cursor down 3")
+term.feed(ESC + "[4C")
+assert_eq(term.cursor_col, 10, "cursor right")
+term.feed(ESC + "[2D")
+assert_eq(term.cursor_col, 8, "cursor left")
+
+-- SGR colors
+let term2 = Terminal(20, 3)
+term2.feed(ESC + "[31mR" + ESC + "[32mG" + ESC + "[0mZ")
+assert(term2.cell_at(0, 0).fg != term2.cell_at(0, 2).fg, "R has different fg from Z (reset)")
+assert(term2.cell_at(0, 0).fg != term2.cell_at(0, 1).fg, "R and G have different fgs")
+
+-- Bright colors (90-97)
+let term3 = Terminal(8, 1)
+term3.feed(ESC + "[91mX")
+let dim = Terminal(8, 1); dim.feed(ESC + "[31mX")
+assert(term3.cell_at(0, 0).fg != dim.cell_at(0, 0).fg, "bright red differs from regular red")
+
+-- Truecolor
+let term4 = Terminal(8, 1)
+term4.feed(ESC + "[38;2;128;200;50mX")
+let cell = term4.cell_at(0, 0)
+assert_eq((cell.fg >> 16) & 0xFF, 128, "truecolor red")
+assert_eq((cell.fg >> 8) & 0xFF, 200, "truecolor green")
+assert_eq(cell.fg & 0xFF, 50, "truecolor blue")
+
+-- xterm 256-color
+let term5 = Terminal(8, 1)
+term5.feed(ESC + "[38;5;1mX")
+let cell5 = term5.cell_at(0, 0)
+assert_eq(cell5.fg, 0xFFCD3131, "xterm 256 0-15 maps to ANSI palette")
+
+-- Erase in line — col 5 then erase-to-EOL
+let term6 = Terminal(10, 1)
+term6.feed("0123456789")
+term6.feed(ESC + "[1;5H")     -- row 1, col 5 (1-based → row 0, col 4)
+term6.feed(ESC + "[K")        -- erase from cursor to end of line
+-- col 4 onwards is wiped; cols 0..3 keep "0123"
+assert_eq(term6.line_text(0), "0123      ", "erase from cursor to EOL")
+
+-- Erase in display (mode 2 = whole screen). Use \r\n to reset col.
+let term7 = Terminal(5, 3)
+term7.feed("hi\r\nbye")
+term7.feed(ESC + "[2J")
+assert_eq(term7.line_text(0), "     ", "row 0 cleared")
+assert_eq(term7.line_text(1), "     ", "row 1 cleared")
+
+-- Scroll on overflow — use \r\n so the cursor returns to col 0 each line
+let term8 = Terminal(4, 2)
+term8.feed("a\r\nb\r\nc\r\nd")
+assert_eq(term8.line_text(0), "c   ", "first live line is c (a and b scrolled off)")
+assert_eq(term8.line_text(1), "d   ", "second live line is d")
+assert(len(term8._scrollback) > 0, "scrolled-off lines went to scrollback")
+
+-- TerminalApp wires it up
+let tapp = terminal(80, 24)
+tapp.feed("Hello")
+assert_eq(tapp.terminal.cursor_col, 5, "TerminalApp.feed delegates")
+
+-- ── Summary ────────────────────────────────────────────
+
+show ""
+show "Apps: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " app test(s) failed" }
