@@ -38,11 +38,11 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **FFI binding layer** | Pending | `stdlib/ffi.clarity` — `dlopen()`, `dlsym()`, `dlclose()` wrappers. Define C function signatures from Clarity: `let puts = ffi.bind("libc", "puts", ["string"], "int")` |
-| 2 | **Type marshalling** | Pending | Map Clarity types to C types: int, float, string (char*), bool, null (void), list (array pointer), map (struct pointer). Handle memory ownership (who frees?) |
-| 3 | **Pointer abstraction** | Pending | `Pointer` class — wrap raw addresses safely. `alloc(size)`, `free(ptr)`, `read_byte/write_byte`, `read_int/write_int`, `read_string/write_string`. No raw pointer arithmetic exposed |
-| 4 | **Struct definition** | Pending | Define C structs from Clarity: `let Point = ffi.struct("Point", [["x", "f64"], ["y", "f64"]])`. Auto-calculate offsets and padding |
-| 5 | **Callback support** | Pending | Pass Clarity functions as C callbacks. Trampoline mechanism: wrap a Clarity closure into a C function pointer |
+| 1 | **FFI binding layer** | Done | `stdlib/ffi.clarity` — Bun-backed `dlopen`/`dlsym`/`dlclose`. `let getpid = ffi.bind("libc", "getpid", [], "int")`. `Library` class for opening multiple symbols at once. `libc`/`libm` resolve to the platform-correct shared library. |
+| 2 | **Type marshalling** | Done | All FFI primitives (i8..i64, u8..u64, f32/f64, bool, ptr, char) plus auto-conversion of Clarity strings → null-terminated UTF-8 buffers for `cstring` args, and BigInt returns for u64/i64 → Number on the way back. Marshalling drills through Clarity Pointer/Callback wrappers and recomputes addresses on each call (TypedArray addresses move). |
+| 3 | **Pointer abstraction** | Done | `Pointer` class — `alloc(size)`, `cstring(s)`, `wrap_addr(addr)`, `read_*`/`write_*` for every primitive width, `read_string()` for NUL-terminated C strings, `free()`. Allocations use `Buffer.allocUnsafeSlow` to bypass the Node buffer pool, since pooled buffers can be relocated. Writes are restricted to memory we own. |
+| 4 | **Struct definition** | Done | `ffi.struct("Point", [["x","f64"],["y","f64"]])` builds a `StructDef` with natural-alignment offsets and trailing padding. `Point.new()` allocates an instance; `p.set(name, val)` / `p.get(name)`; `Point.from_ptr(addr)` wraps an existing struct returned from C. |
+| 5 | **Callback support** | Done | `ffi.callback(fn, arg_types, return_type)` wraps a Clarity function as a C function pointer via Bun's `JSCallback`. Tested with `qsort` from libc — sorts a 5-element int array using a Clarity comparator. `cb.close()` releases the trampoline. |
 
 ---
 

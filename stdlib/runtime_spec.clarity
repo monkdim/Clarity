@@ -10,7 +10,8 @@ let NODE_IMPORTS = [
     {module: "readline", names: ["createInterface"]},
     {module: "http", names: ["createServer"]},
     {module: "path", names: ["resolve", "dirname", "basename", "extname"], aliases: {"join": "pathJoin", "sep": "sep"}},
-    {module: "crypto", names: ["createHash", "randomUUID"]}
+    {module: "crypto", names: ["createHash", "randomUUID"]},
+    {module: "bun:ffi", names: ["dlopen", "FFIType", "CString", "JSCallback"], aliases: {"suffix": "ffiSuffix", "ptr": "bunPtr", "read": "bunRead"}}
 ]
 
 -- ── Section: I/O ──────────────────────────────────────────
@@ -280,6 +281,46 @@ let ERROR_FMT_SECTION = {
     ]
 }
 
+-- ── Section: FFI (Bun-backed C interop) ──────────────────
+
+let FFI_SECTION = {
+    label: "FFI: Bun-backed C interop",
+    preamble: "const $FFI_TYPES = {\n  void: FFIType.void,\n  bool: FFIType.bool,\n  int: FFIType.i32,\n  i8: FFIType.i8, i16: FFIType.i16, i32: FFIType.i32, i64: FFIType.i64,\n  u8: FFIType.u8, u16: FFIType.u16, u32: FFIType.u32, u64: FFIType.u64,\n  float: FFIType.f32, f32: FFIType.f32, f64: FFIType.f64, double: FFIType.f64,\n  ptr: FFIType.ptr, pointer: FFIType.ptr,\n  string: FFIType.cstring, cstring: FFIType.cstring,\n  char: FFIType.char,\n};\n\nfunction $ffi_type(name) {\n  if (!(name in $FFI_TYPES)) throw new Error(`FFIError: Unknown type '${name}'`);\n  return $FFI_TYPES[name];\n}\n\nfunction $ffi_resolve_lib(name) {\n  if (name.includes('/') || name.includes('.')) return name;\n  if (name === 'libc' || name === 'c') {\n    if (process.platform === 'darwin') return 'libSystem.dylib';\n    if (process.platform === 'linux') return 'libc.so.6';\n    if (process.platform === 'win32') return 'msvcrt.dll';\n  }\n  if (name === 'libm' || name === 'm') {\n    if (process.platform === 'darwin') return 'libSystem.dylib';\n    if (process.platform === 'linux') return 'libm.so.6';\n  }\n  return `${name}.${ffiSuffix}`;\n}\n\nfunction _ffi_addr(p) {\n  if (p === null || p === undefined) return 0;\n  if (typeof p === 'number' || typeof p === 'bigint') return p;\n  if (typeof p === 'object') {\n    if (p._buffer) return bunPtr(p._buffer);\n    if ('addr' in p) return p.addr;\n    if (p.properties && p.properties._handle) return _ffi_addr(p.properties._handle);\n  }\n  return p;\n}\n\nfunction _ffi_view(p) {\n  if (typeof p !== 'object' || !p._buffer) {\n    throw new Error('FFIError: cannot write through a pointer this runtime did not allocate');\n  }\n  return new DataView(p._buffer.buffer, p._buffer.byteOffset, p._buffer.byteLength);\n}",
+    fns: [
+        {name: "_ffi_open", params: "libname, symbols_spec", body: "const path = $ffi_resolve_lib(libname);\n  const symbols = {};\n  for (const sym of Object.keys(symbols_spec)) {\n    const spec = symbols_spec[sym];\n    symbols[sym] = {\n      args: (spec.args || []).map($ffi_type),\n      returns: $ffi_type(spec.returns || 'void'),\n    };\n  }\n  return dlopen(path, symbols);"},
+        {name: "_ffi_bind", params: "libname, sym_name, args, ret", body: "const handle = _ffi_open(libname, { [sym_name]: { args: args || [], returns: ret || 'void' } });\n  const fn = handle.symbols[sym_name];\n  if (!fn) throw new Error(`FFIError: Symbol '${sym_name}' not found in '${libname}'`);\n  return (...callArgs) => {\n    const result = fn(...callArgs);\n    if (typeof result === 'object' && result !== null && typeof result.toString === 'function' && ret === 'cstring') {\n      return result.toString();\n    }\n    return result;\n  };"},
+        {name: "_ffi_close", params: "handle", body: "if (handle && typeof handle.close === 'function') handle.close();"},
+        {name: "_ffi_alloc", params: "size", body: "const buffer = Buffer.allocUnsafeSlow(size).fill(0);\n  return { _buffer: buffer, size };"},
+        {name: "_ffi_alloc_cstring", params: "s", body: "const len = Buffer.byteLength(s, 'utf-8');\n  const buffer = Buffer.allocUnsafeSlow(len + 1).fill(0);\n  buffer.write(s, 0, 'utf-8');\n  return { _buffer: buffer, size: buffer.length };"},
+        {name: "_ffi_read_cstring", params: "p", body: "const addr = _ffi_addr(p);\n  if (!addr) return null;\n  return new CString(addr).toString();"},
+        {name: "_ffi_ptr_addr", params: "p", body: "return _ffi_addr(p);"},
+        {name: "_ffi_pointer_release", params: "p", body: "if (typeof p === 'object' && p !== null) p._buffer = null;"},
+        {name: "_ffi_read_u8",  params: "p, offset = 0", body: "return bunRead.u8(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_i8",  params: "p, offset = 0", body: "return bunRead.i8(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_u16", params: "p, offset = 0", body: "return bunRead.u16(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_i16", params: "p, offset = 0", body: "return bunRead.i16(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_u32", params: "p, offset = 0", body: "return bunRead.u32(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_i32", params: "p, offset = 0", body: "return bunRead.i32(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_i64", params: "p, offset = 0", body: "return Number(bunRead.i64(_ffi_addr(p), offset));"},
+        {name: "_ffi_read_u64", params: "p, offset = 0", body: "return Number(bunRead.u64(_ffi_addr(p), offset));"},
+        {name: "_ffi_read_f32", params: "p, offset = 0", body: "return bunRead.f32(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_f64", params: "p, offset = 0", body: "return bunRead.f64(_ffi_addr(p), offset);"},
+        {name: "_ffi_read_ptr", params: "p, offset = 0", body: "return bunRead.ptr(_ffi_addr(p), offset);"},
+        {name: "_ffi_write_u8",  params: "p, offset, val", body: "_ffi_view(p).setUint8(offset, val);"},
+        {name: "_ffi_write_i8",  params: "p, offset, val", body: "_ffi_view(p).setInt8(offset, val);"},
+        {name: "_ffi_write_u16", params: "p, offset, val", body: "_ffi_view(p).setUint16(offset, val, true);"},
+        {name: "_ffi_write_i16", params: "p, offset, val", body: "_ffi_view(p).setInt16(offset, val, true);"},
+        {name: "_ffi_write_u32", params: "p, offset, val", body: "_ffi_view(p).setUint32(offset, val, true);"},
+        {name: "_ffi_write_i32", params: "p, offset, val", body: "_ffi_view(p).setInt32(offset, val, true);"},
+        {name: "_ffi_write_i64", params: "p, offset, val", body: "_ffi_view(p).setBigInt64(offset, BigInt(val), true);"},
+        {name: "_ffi_write_u64", params: "p, offset, val", body: "_ffi_view(p).setBigUint64(offset, BigInt(val), true);"},
+        {name: "_ffi_write_f32", params: "p, offset, val", body: "_ffi_view(p).setFloat32(offset, val, true);"},
+        {name: "_ffi_write_f64", params: "p, offset, val", body: "_ffi_view(p).setFloat64(offset, val, true);"},
+        {name: "_ffi_callback", params: "fn, args, ret", body: "const cb = new JSCallback(fn, {\n    args: (args || []).map($ffi_type),\n    returns: $ffi_type(ret || 'void'),\n  });\n  return { addr: cb.ptr, _callback: cb };"},
+        {name: "_ffi_callback_close", params: "handle", body: "if (handle && handle._callback) {\n    handle._callback.close();\n    handle._callback = null;\n  }"}
+    ]
+}
+
 -- ── All sections in order ─────────────────────────────────
 
 let ALL_SECTIONS = [
@@ -301,7 +342,8 @@ let ALL_SECTIONS = [
     OS_MODULE_SECTION,
     DISPLAY_SECTION,
     SIGNALS_SECTION,
-    ERROR_FMT_SECTION
+    ERROR_FMT_SECTION,
+    FFI_SECTION
 ]
 
 -- ── Aliases (re-exports) ─────────────────────────────────
