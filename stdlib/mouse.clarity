@@ -1,0 +1,125 @@
+-- Mouse — relative-axis mouse / trackpad event tracking.
+--
+-- Linux evdev sends mouse motion as a stream of EV_REL records with
+-- REL_X / REL_Y deltas plus EV_KEY records for button transitions, and
+-- a single EV_SYN/SYN_REPORT marker at the end of each frame. We
+-- accumulate deltas between SYN_REPORTs into a single MouseEvent so
+-- the rest of the system doesn't have to think about evdev framing.
+
+class MouseEvent {
+    fn init() {
+        this.x = 0          -- absolute cursor position (set by tracker)
+        this.y = 0
+        this.dx = 0         -- relative motion this frame
+        this.dy = 0
+        this.scroll_x = 0
+        this.scroll_y = 0
+        this.button = 0     -- 0 = none, 1 = left, 2 = right, 3 = middle
+        this.is_press = false
+        this.is_release = false
+        this.is_motion = false
+        this.is_scroll = false
+    }
+
+    fn is_click() { return this.is_press }
+}
+
+-- MouseTracker batches a frame of evdev events into MouseEvents.
+-- Construct it with the framebuffer dimensions if you want clamping;
+-- otherwise it just tracks unbounded x/y.
+class MouseTracker {
+    fn init(width, height) {
+        this.x = if width != null { width / 2 } else { 0 }
+        this.y = if height != null { height / 2 } else { 0 }
+        this.width = width
+        this.height = height
+        -- Per-frame accumulators
+        this._dx = 0
+        this._dy = 0
+        this._sx = 0
+        this._sy = 0
+        this._button_events = []   -- [(button, is_press), ...]
+    }
+
+    -- Feed one raw evdev event. Returns a list of MouseEvents emitted
+    -- as a result (typically empty until SYN_REPORT, then 1+).
+    fn feed(event) {
+        let t = event["type"]
+        let code = event["code"]
+        let value = event["value"]
+
+        if t == 2 {     -- EV_REL
+            if code == 0 { this._dx += value }       -- REL_X
+            elif code == 1 { this._dy += value }     -- REL_Y
+            elif code == 8 { this._sy += value }     -- REL_WHEEL
+            elif code == 6 { this._sx += value }     -- REL_HWHEEL
+            return []
+        }
+
+        if t == 1 {     -- EV_KEY (mouse button)
+            mut btn = 0
+            if code == 272 { btn = 1 }       -- BTN_LEFT
+            elif code == 273 { btn = 2 }     -- BTN_RIGHT
+            elif code == 274 { btn = 3 }     -- BTN_MIDDLE
+            if btn != 0 {
+                push(this._button_events, [btn, value != 0])
+            }
+            return []
+        }
+
+        if t == 0 and code == 0 {     -- EV_SYN / SYN_REPORT
+            return this._flush()
+        }
+
+        return []
+    }
+
+    fn _flush() {
+        mut out = []
+
+        -- Update absolute position and clamp if we know the bounds.
+        this.x = this.x + this._dx
+        this.y = this.y + this._dy
+        if this.width != null {
+            if this.x < 0 { this.x = 0 }
+            if this.x >= this.width { this.x = this.width - 1 }
+        }
+        if this.height != null {
+            if this.y < 0 { this.y = 0 }
+            if this.y >= this.height { this.y = this.height - 1 }
+        }
+
+        -- Motion event
+        if this._dx != 0 or this._dy != 0 {
+            let m = MouseEvent()
+            m.x = this.x; m.y = this.y
+            m.dx = this._dx; m.dy = this._dy
+            m.is_motion = true
+            push(out, m)
+        }
+
+        -- Scroll event
+        if this._sx != 0 or this._sy != 0 {
+            let s = MouseEvent()
+            s.x = this.x; s.y = this.y
+            s.scroll_x = this._sx; s.scroll_y = this._sy
+            s.is_scroll = true
+            push(out, s)
+        }
+
+        -- Button transitions
+        for be in this._button_events {
+            let b = MouseEvent()
+            b.x = this.x; b.y = this.y
+            b.button = be[0]
+            b.is_press = be[1]
+            b.is_release = not be[1]
+            push(out, b)
+        }
+
+        this._dx = 0; this._dy = 0
+        this._sx = 0; this._sy = 0
+        this._button_events = []
+        return out
+    }
+}

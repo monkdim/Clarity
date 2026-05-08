@@ -1,0 +1,98 @@
+-- Touch — touchscreen event types.
+--
+-- Phase 58 task 4 — types and a single-touch tracker so the rest of
+-- the input pipeline has something to dispatch. Multi-touch slot
+-- tracking (`ABS_MT_SLOT` + `ABS_MT_TRACKING_ID`) is a follow-up; it's
+-- a non-trivial state machine and we'd rather have a well-tested
+-- single-finger path first than ship a half-working multi-touch one.
+
+let _PHASE_BEGAN = "began"
+let _PHASE_MOVED = "moved"
+let _PHASE_ENDED = "ended"
+let _PHASE_CANCELLED = "cancelled"
+
+class TouchEvent {
+    fn init(touch_id, x, y, pressure, phase) {
+        this.touch_id = touch_id
+        this.x = x
+        this.y = y
+        this.pressure = pressure
+        this.phase = phase   -- "began" | "moved" | "ended" | "cancelled"
+    }
+
+    fn is_began()     { return this.phase == _PHASE_BEGAN }
+    fn is_moved()     { return this.phase == _PHASE_MOVED }
+    fn is_ended()     { return this.phase == _PHASE_ENDED }
+    fn is_cancelled() { return this.phase == _PHASE_CANCELLED }
+}
+
+-- A single-finger tracker. Accumulates ABS_X / ABS_Y / ABS_PRESSURE /
+-- BTN_TOUCH transitions between SYN_REPORT markers, then emits a
+-- TouchEvent describing the most recent state.
+class TouchTracker {
+    fn init() {
+        this.x = 0
+        this.y = 0
+        this.pressure = 0
+        this._touching = false
+        this._frame_x = null
+        this._frame_y = null
+        this._frame_pressure = null
+        this._frame_touch_change = null    -- true=down, false=up, null=no change
+    }
+
+    fn feed(event) {
+        let t = event["type"]
+        let code = event["code"]
+        let value = event["value"]
+
+        if t == 3 {           -- EV_ABS
+            if code == 0 { this._frame_x = value }            -- ABS_X
+            elif code == 1 { this._frame_y = value }          -- ABS_Y
+            elif code == 24 { this._frame_pressure = value }  -- ABS_PRESSURE
+            return []
+        }
+
+        if t == 1 and code == 330 {     -- EV_KEY / BTN_TOUCH
+            this._frame_touch_change = value != 0
+            return []
+        }
+
+        if t == 0 and code == 0 {       -- SYN_REPORT
+            return this._flush()
+        }
+
+        return []
+    }
+
+    fn _flush() {
+        if this._frame_x != null { this.x = this._frame_x }
+        if this._frame_y != null { this.y = this._frame_y }
+        if this._frame_pressure != null { this.pressure = this._frame_pressure }
+
+        mut phase = null
+        if this._frame_touch_change == true and not this._touching {
+            this._touching = true
+            phase = _PHASE_BEGAN
+        } elif this._frame_touch_change == false and this._touching {
+            this._touching = false
+            phase = _PHASE_ENDED
+        } elif this._touching and (this._frame_x != null or this._frame_y != null or this._frame_pressure != null) {
+            phase = _PHASE_MOVED
+        }
+
+        this._frame_x = null
+        this._frame_y = null
+        this._frame_pressure = null
+        this._frame_touch_change = null
+
+        if phase == null { return [] }
+        return [TouchEvent(0, this.x, this.y, this.pressure, phase)]
+    }
+
+    fn cancel() {
+        if not this._touching { return [] }
+        this._touching = false
+        return [TouchEvent(0, this.x, this.y, this.pressure, _PHASE_CANCELLED)]
+    }
+}

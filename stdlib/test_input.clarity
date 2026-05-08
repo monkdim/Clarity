@@ -1,0 +1,278 @@
+-- Input tests — Phase 58. Exercises raw evdev parsing, KeyEvent
+-- decoding (with modifiers), MouseTracker frame batching, TouchTracker
+-- single-finger phases, and the InputBus dispatcher.
+--
+-- We never open /dev/input/event* in CI: tests build synthetic event
+-- buffers and feed them through the parsers/trackers/bus directly.
+
+from "input.clarity" import parse_event, parse_events, pack_event, INPUT_EVENT_SIZE, EV_SYN, EV_KEY, EV_REL, EV_ABS, REL_X, REL_Y, REL_WHEEL, BTN_LEFT, BTN_RIGHT, ABS_X, ABS_Y, KEY_PRESS, KEY_RELEASE, KEY_REPEAT
+from "keymap.clarity" import Modifiers, KeyEvent, decode_key, KEY_A, KEY_LEFTSHIFT, KEY_CAPSLOCK, KEY_ENTER, KEY_LEFTCTRL, KEY_F1, KEY_UP, KEY_1, KEY_SPACE
+from "mouse.clarity" import MouseEvent, MouseTracker
+from "touch.clarity" import TouchEvent, TouchTracker
+from "event_bus.clarity" import InputBus
+from "ffi.clarity" import alloc
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+-- Helper: build a list of raw event maps to feed into trackers/bus.
+fn raw(t, code, value) {
+    return {"time_sec": 0, "time_usec": 0, "type": t, "code": code, "value": value}
+}
+
+-- ── Raw struct parsing ─────────────────────────────────
+
+show "-- Input: parse_event roundtrip --"
+
+assert_eq(INPUT_EVENT_SIZE, 24, "input_event size matches kernel layout")
+
+let buf = alloc(INPUT_EVENT_SIZE * 3)
+pack_event(buf, 0,                       1700000000, 123, EV_KEY, KEY_A, KEY_PRESS)
+pack_event(buf, INPUT_EVENT_SIZE,        1700000000, 124, EV_REL, REL_X, -3)
+pack_event(buf, INPUT_EVENT_SIZE * 2,    1700000000, 125, EV_SYN, 0, 0)
+
+let events = parse_events(buf, INPUT_EVENT_SIZE * 3)
+assert_eq(len(events), 3, "parsed three events")
+assert_eq(events[0]["type"], EV_KEY, "ev0 type")
+assert_eq(events[0]["code"], KEY_A, "ev0 code = KEY_A")
+assert_eq(events[0]["value"], KEY_PRESS, "ev0 value = press")
+assert_eq(events[0]["time_sec"], 1700000000, "ev0 timestamp seconds")
+assert_eq(events[0]["time_usec"], 123, "ev0 timestamp usec")
+assert_eq(events[1]["type"], EV_REL, "ev1 type")
+assert_eq(events[1]["value"], -3, "ev1 negative delta survives")
+assert_eq(events[2]["type"], EV_SYN, "ev2 sync")
+
+-- A short read (e.g. 47 of 48 bytes) drops the trailing partial event
+let trimmed = parse_events(buf, INPUT_EVENT_SIZE * 2 + 4)
+assert_eq(len(trimmed), 2, "partial trailing event is dropped")
+
+-- ── Modifiers ──────────────────────────────────────────
+
+show "-- Keymap: Modifiers tracking --"
+
+let mods = Modifiers()
+assert(not mods.shift, "shift starts off")
+assert(not mods.caps_lock, "caps starts off")
+
+assert(mods.update(raw(EV_KEY, KEY_LEFTSHIFT, KEY_PRESS)), "shift down is a modifier event")
+assert(mods.shift, "shift now true after press")
+assert(mods.update(raw(EV_KEY, KEY_LEFTSHIFT, KEY_RELEASE)), "shift up is a modifier event")
+assert(not mods.shift, "shift back to false")
+
+mods.update(raw(EV_KEY, KEY_CAPSLOCK, KEY_PRESS))
+assert(mods.caps_lock, "caps_lock toggles on")
+mods.update(raw(EV_KEY, KEY_CAPSLOCK, KEY_PRESS))
+assert(not mods.caps_lock, "caps_lock toggles off again")
+
+-- An ordinary key isn't a modifier event
+assert(not mods.update(raw(EV_KEY, KEY_A, KEY_PRESS)), "letter is not a modifier")
+
+-- ── decode_key ─────────────────────────────────────────
+
+show "-- Keymap: decode_key US layout --"
+
+let mods2 = Modifiers()
+
+let press_a = decode_key(raw(EV_KEY, KEY_A, KEY_PRESS), mods2)
+assert(press_a != null, "letter A press decodes")
+assert_eq(press_a.code, KEY_A, "code")
+assert_eq(press_a.char, "a", "lowercase by default")
+assert_eq(press_a.name, "a", "name lowercase")
+assert(press_a.is_press, "is_press")
+assert(not press_a.is_repeat, "not a repeat")
+
+mods2.shift = true
+let shifted_a = decode_key(raw(EV_KEY, KEY_A, KEY_PRESS), mods2)
+assert_eq(shifted_a.char, "A", "shift produces uppercase")
+
+mods2.shift = false
+mods2.caps_lock = true
+let caps_a = decode_key(raw(EV_KEY, KEY_A, KEY_PRESS), mods2)
+assert_eq(caps_a.char, "A", "caps_lock alone is uppercase")
+
+mods2.shift = true
+mods2.caps_lock = true
+let both_a = decode_key(raw(EV_KEY, KEY_A, KEY_PRESS), mods2)
+assert_eq(both_a.char, "a", "shift + caps_lock cancels")
+
+mods2.shift = false; mods2.caps_lock = false
+
+-- Digits: shift toggles to symbol; caps does nothing
+let shifted_1 = decode_key(raw(EV_KEY, KEY_1, KEY_PRESS), Modifiers())
+assert_eq(shifted_1.char, "1", "1 unshifted")
+let mods_shift = Modifiers(); mods_shift.shift = true
+assert_eq(decode_key(raw(EV_KEY, KEY_1, KEY_PRESS), mods_shift).char, "!", "shift+1 = !")
+let mods_caps = Modifiers(); mods_caps.caps_lock = true
+assert_eq(decode_key(raw(EV_KEY, KEY_1, KEY_PRESS), mods_caps).char, "1", "caps doesn't shift digits")
+
+-- Named keys
+let enter = decode_key(raw(EV_KEY, KEY_ENTER, KEY_PRESS), Modifiers())
+assert_eq(enter.name, "Enter", "Enter name")
+assert_eq(enter.char, null, "Enter has no char")
+
+let f1 = decode_key(raw(EV_KEY, KEY_F1, KEY_PRESS), Modifiers())
+assert_eq(f1.name, "F1", "F1 named")
+
+let up = decode_key(raw(EV_KEY, KEY_UP, KEY_PRESS), Modifiers())
+assert_eq(up.name, "Up", "arrow named")
+
+-- Repeat events
+let rep = decode_key(raw(EV_KEY, KEY_A, KEY_REPEAT), Modifiers())
+assert(rep.is_press, "repeat counts as 'down' in is_press")
+assert(rep.is_repeat, "is_repeat true")
+
+-- Mouse-button EV_KEY shouldn't decode as a key
+assert_eq(decode_key(raw(EV_KEY, BTN_LEFT, KEY_PRESS), Modifiers()), null, "BTN_LEFT not decoded by decode_key")
+
+-- ── MouseTracker frame batching ────────────────────────
+
+show "-- Mouse: tracker batches between SYN_REPORTs --"
+
+let mt = MouseTracker(800, 600)
+assert_eq(mt.x, 400, "starts centred horizontally")
+assert_eq(mt.y, 300, "starts centred vertically")
+
+assert_eq(len(mt.feed(raw(EV_REL, REL_X, 10))), 0, "REL alone is buffered")
+assert_eq(len(mt.feed(raw(EV_REL, REL_Y, -5))), 0, "still buffered")
+let frame = mt.feed(raw(EV_SYN, 0, 0))
+assert_eq(len(frame), 1, "SYN flushes one motion event")
+assert_eq(frame[0].dx, 10, "accumulated dx")
+assert_eq(frame[0].dy, -5, "accumulated dy")
+assert_eq(frame[0].x, 410, "absolute x updated")
+assert_eq(frame[0].y, 295, "absolute y updated")
+assert(frame[0].is_motion, "is_motion")
+
+-- Click frame: motion + button down
+mt.feed(raw(EV_REL, REL_X, 5))
+mt.feed(raw(EV_KEY, BTN_LEFT, 1))
+let click_frame = mt.feed(raw(EV_SYN, 0, 0))
+assert_eq(len(click_frame), 2, "motion + click in one frame")
+assert(click_frame[0].is_motion, "first event is motion")
+assert(click_frame[1].is_press, "second event is button press")
+assert_eq(click_frame[1].button, 1, "left button")
+
+-- Scroll frame
+mt.feed(raw(EV_REL, REL_WHEEL, 3))
+let scroll_frame = mt.feed(raw(EV_SYN, 0, 0))
+assert_eq(len(scroll_frame), 1, "scroll-only frame")
+assert(scroll_frame[0].is_scroll, "is_scroll")
+assert_eq(scroll_frame[0].scroll_y, 3, "wheel value")
+
+-- Edge clamping
+let mt2 = MouseTracker(100, 100)
+mt2.feed(raw(EV_REL, REL_X, -1000))
+mt2.feed(raw(EV_REL, REL_Y, -1000))
+mt2.feed(raw(EV_SYN, 0, 0))
+assert_eq(mt2.x, 0, "clamped to left edge")
+assert_eq(mt2.y, 0, "clamped to top edge")
+
+-- ── TouchTracker single-finger phases ──────────────────
+
+show "-- Touch: tracker phases --"
+
+let tt = TouchTracker()
+tt.feed(raw(EV_KEY, 330, 1))    -- BTN_TOUCH down
+tt.feed(raw(EV_ABS, ABS_X, 100))
+tt.feed(raw(EV_ABS, ABS_Y, 200))
+let began_frame = tt.feed(raw(EV_SYN, 0, 0))
+assert_eq(len(began_frame), 1, "began event")
+assert_eq(began_frame[0].phase, "began", "phase=began")
+assert_eq(began_frame[0].x, 100, "x")
+assert_eq(began_frame[0].y, 200, "y")
+assert(began_frame[0].is_began(), "is_began helper")
+
+tt.feed(raw(EV_ABS, ABS_X, 110))
+let moved_frame = tt.feed(raw(EV_SYN, 0, 0))
+assert_eq(len(moved_frame), 1, "moved event")
+assert_eq(moved_frame[0].phase, "moved", "phase=moved")
+assert_eq(moved_frame[0].x, 110, "moved x")
+
+tt.feed(raw(EV_KEY, 330, 0))
+let ended = tt.feed(raw(EV_SYN, 0, 0))
+assert_eq(len(ended), 1, "ended event")
+assert_eq(ended[0].phase, "ended", "phase=ended")
+
+let cancelled = tt.cancel()
+assert_eq(len(cancelled), 0, "cancel after ended is a no-op")
+
+-- ── InputBus dispatch ──────────────────────────────────
+
+show "-- InputBus: registration + dispatch --"
+
+let bus = InputBus()
+bus.set_bounds(800, 600)
+
+mut keys_seen = []
+mut mouse_seen = []
+mut touches_seen = []
+bus.on_key(fn(ke) { push(keys_seen, ke); return false })
+bus.on_mouse(fn(me) { push(mouse_seen, me); return false })
+bus.on_touch(fn(te) { push(touches_seen, te); return false })
+
+-- Type "Hi"
+bus.dispatch_raw(raw(EV_KEY, KEY_LEFTSHIFT, KEY_PRESS))
+bus.dispatch_raw(raw(EV_KEY, 35, KEY_PRESS))    -- 'H'
+bus.dispatch_raw(raw(EV_KEY, 35, KEY_RELEASE))
+bus.dispatch_raw(raw(EV_KEY, KEY_LEFTSHIFT, KEY_RELEASE))
+bus.dispatch_raw(raw(EV_KEY, 23, KEY_PRESS))    -- 'I'
+
+-- shift-down, H-press, H-release, shift-up, i-press = 5 KeyEvents
+assert_eq(len(keys_seen), 5, "every key transition (incl. modifiers) is dispatched")
+-- The first event is the LeftShift press
+assert(keys_seen[0].name == "h" or keys_seen[0].name == "<key " + str(KEY_LEFTSHIFT) + ">", "first key is shift")
+-- Find the H press
+mut h_seen = false
+for ke in keys_seen {
+    if ke.is_press and ke.char == "H" { h_seen = true }
+}
+assert(h_seen, "shifted H was dispatched")
+mut i_seen = false
+for ke in keys_seen {
+    if ke.is_press and ke.char == "i" { i_seen = true }
+}
+assert(i_seen, "lowercase i was dispatched")
+
+-- Mouse motion + click via the bus
+bus.dispatch_raw(raw(EV_REL, REL_X, 7))
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 1))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(len(mouse_seen), 2, "bus emitted motion + click")
+assert(mouse_seen[0].is_motion, "bus motion")
+assert(mouse_seen[1].is_press, "bus click")
+
+-- Touch via the bus
+bus.dispatch_raw(raw(EV_KEY, 330, 1))
+bus.dispatch_raw(raw(EV_ABS, ABS_X, 50))
+bus.dispatch_raw(raw(EV_ABS, ABS_Y, 80))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(len(touches_seen), 1, "bus emitted touch began")
+assert_eq(touches_seen[0].phase, "began", "bus touch phase")
+
+-- Consume pattern: a listener that returns true blocks later listeners
+let bus2 = InputBus()
+mut a_calls = 0
+mut b_calls = 0
+bus2.on_key(fn(ke) { a_calls += 1; return true })
+bus2.on_key(fn(ke) { b_calls += 1; return false })
+bus2.dispatch_raw(raw(EV_KEY, KEY_SPACE, KEY_PRESS))
+assert_eq(a_calls, 1, "first listener ran")
+assert_eq(b_calls, 0, "second listener was blocked by consume")
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Input: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " input test(s) failed" }

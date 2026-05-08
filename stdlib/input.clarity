@@ -1,0 +1,157 @@
+-- Input — keyboard, mouse, touch event reading (Linux evdev).
+--
+-- On Linux, kernel input devices appear as files under /dev/input/event*.
+-- Each read returns one or more `struct input_event` records (24 bytes
+-- on 64-bit systems) with type/code/value tuples plus a timestamp:
+--
+--     struct input_event {
+--         struct timeval time;   // 16 bytes (seconds + microseconds)
+--         __u16 type;            //  2 bytes
+--         __u16 code;            //  2 bytes
+--         __s32 value;           //  4 bytes
+--     };
+--
+-- This module wraps that into something Clarity-shaped: open a device,
+-- read raw InputEvents off it, and run them through `decode_key` /
+-- `decode_mouse` / `decode_touch` to produce typed events with the
+-- modifier state already folded in.
+--
+-- macOS will need its own IOKit-backed implementation; for now opening
+-- a device on a non-Linux platform raises an error.
+
+from "ffi.clarity" import bind, alloc, Pointer
+
+-- ── evdev event-type constants ─────────────────────────
+
+let EV_SYN = 0
+let EV_KEY = 1
+let EV_REL = 2
+let EV_ABS = 3
+let EV_MSC = 4
+let EV_LED = 17
+
+let SYN_REPORT = 0
+let SYN_DROPPED = 3
+
+-- ── Relative axes (mouse) ──────────────────────────────
+
+let REL_X = 0
+let REL_Y = 1
+let REL_HWHEEL = 6
+let REL_WHEEL = 8
+
+-- ── Absolute axes (touchscreen, joystick) ─────────────
+
+let ABS_X = 0
+let ABS_Y = 1
+let ABS_PRESSURE = 24
+let ABS_MT_SLOT = 47
+let ABS_MT_POSITION_X = 53
+let ABS_MT_POSITION_Y = 54
+let ABS_MT_TRACKING_ID = 57
+
+-- ── Key codes (a useful subset; full table in keymap.clarity) ──
+
+let BTN_LEFT = 272      -- 0x110
+let BTN_RIGHT = 273     -- 0x111
+let BTN_MIDDLE = 274    -- 0x112
+let BTN_TOUCH = 330     -- 0x14a
+
+-- Event "value" semantics for EV_KEY:
+let KEY_RELEASE = 0
+let KEY_PRESS = 1
+let KEY_REPEAT = 2
+
+-- ── struct input_event size ────────────────────────────
+
+let INPUT_EVENT_SIZE = 24
+
+-- ── Raw parsing ────────────────────────────────────────
+
+-- Decode one input_event out of a Pointer at the given byte offset.
+-- Returns a map: {time_sec, time_usec, type, code, value}.
+fn parse_event(buf, offset) {
+    return {
+        "time_sec":  buf.read_i64(offset),
+        "time_usec": buf.read_i64(offset + 8),
+        "type":      buf.read_u16(offset + 16),
+        "code":      buf.read_u16(offset + 18),
+        "value":     buf.read_i32(offset + 20)
+    }
+}
+
+-- Parse an entire buffer's worth of events. `bytes_read` says how many
+-- bytes the read() syscall returned.
+fn parse_events(buf, bytes_read) {
+    mut out = []
+    mut o = 0
+    while o + INPUT_EVENT_SIZE <= bytes_read {
+        push(out, parse_event(buf, o))
+        o += INPUT_EVENT_SIZE
+    }
+    return out
+}
+
+-- Build a 24-byte input_event in a buffer at `offset`. Useful for tests
+-- and for replaying recorded inputs.
+fn pack_event(buf, offset, sec, usec, type_, code, value) {
+    buf.write_i64(offset, sec)
+    buf.write_i64(offset + 8, usec)
+    buf.write_u16(offset + 16, type_)
+    buf.write_u16(offset + 18, code)
+    buf.write_i32(offset + 20, value)
+}
+
+-- ── InputDevice — wraps a /dev/input/event* file descriptor ───
+
+let _O_RDONLY = 0
+let _O_NONBLOCK = 2048   -- Linux; differs on other Unixes
+let _ENOENT = 2
+
+class InputDevice {
+    fn init(path) {
+        if not _is_linux() {
+            throw "InputError: InputDevice only supports Linux for now (got platform '" + _platform() + "')"
+        }
+        let open_fn = bind("libc", "open", ["string", "int"], "int")
+        let fd = open_fn(path, _O_RDONLY | _O_NONBLOCK)
+        if fd < 0 {
+            throw "InputError: failed to open " + path + " (errno: open returned " + str(fd) + ")"
+        }
+        this.path = path
+        this.fd = fd
+        this._read = bind("libc", "read", ["int", "ptr", "u64"], "i64")
+        this._close = bind("libc", "close", ["int"], "int")
+        this._buf = alloc(INPUT_EVENT_SIZE * 64)
+    }
+
+    -- Pull whatever events are pending. Returns a list of event maps.
+    -- With O_NONBLOCK, returns an empty list when nothing's queued.
+    fn poll() {
+        let n = this._read(this.fd, this._buf, INPUT_EVENT_SIZE * 64)
+        if n <= 0 { return [] }
+        return parse_events(this._buf, n)
+    }
+
+    fn close() {
+        if this.fd >= 0 {
+            this._close(this.fd)
+            this.fd = -1
+        }
+    }
+}
+
+-- ── Platform detection ─────────────────────────────────
+
+fn _platform() {
+    let result = exec_full("uname -s 2>/dev/null")
+    return trim(result.stdout)
+}
+
+fn _is_linux() {
+    return _platform() == "Linux"
+}
+
+-- Re-exported for callers that want to gate behaviour themselves.
+fn platform() { return _platform() }
+fn is_linux() { return _is_linux() }
