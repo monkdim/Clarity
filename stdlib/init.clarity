@@ -1,0 +1,206 @@
+-- Init — service-management daemon (Phase 61 task 1).
+--
+-- A `Service` describes how to start/stop a userspace process plus
+-- what it depends on. A `ServiceManager` resolves dependencies into a
+-- topological order, starts services in that order, and watches them
+-- per the configured restart policy.
+--
+--     let init = ServiceManager()
+--     init.register(Service("logger",  fn() { ... start ... }, {}))
+--     init.register(Service("network", fn() { ... }, {"deps": ["logger"]}))
+--     init.start_all()
+--     ...
+--     init.stop("network")
+--     init.list()      -- ["logger", "network"]
+--
+-- Services are described declaratively; this module isn't an actual
+-- PID-1 init replacement. It tracks state, runs handlers, and offers
+-- a CLI surface (clarity-ctl-style) that callers can wire up.
+
+class Service {
+    fn init(name, start_fn, opts) {
+        this.name = name
+        this.start_fn = start_fn        -- () -> any (returned value is the "handle")
+        let o = opts ?? {}
+        this.stop_fn = if has(o, "stop") { o["stop"] } else { null }
+        this.health_fn = if has(o, "health") { o["health"] } else { null }
+        this.deps = if has(o, "deps") { o["deps"] } else { []  }
+        this.restart = if has(o, "restart") { o["restart"] } else { "always" }
+        -- "always" | "on_failure" | "never"
+        this.state = "stopped"          -- stopped | starting | running | failed | stopping
+        this.handle = null
+        this.start_count = 0
+        this.last_error = null
+    }
+}
+
+class ServiceManager {
+    fn init() {
+        this._services = {}             -- name -> Service
+        this._listeners = []            -- list of fn(event_map)
+    }
+
+    fn register(service) {
+        this._services[service.name] = service
+        this._emit({"event": "registered", "service": service.name})
+    }
+
+    fn unregister(name) {
+        if not has(this._services, name) { return null }
+        if this._services[name].state == "running" {
+            throw "InitError: cannot unregister '" + name + "' while running"
+        }
+        mut out = {}
+        for k in keys(this._services) {
+            if k != name { out[k] = this._services[k] }
+        }
+        this._services = out
+    }
+
+    fn list() { return this._topo_order() }
+    fn status(name) {
+        if not has(this._services, name) { return null }
+        return this._services[name].state
+    }
+
+    fn on_event(handler) { push(this._listeners, handler) }
+
+    -- ── Dependency resolution ─────────────────────────
+
+    -- Topological sort using Kahn's algorithm. Throws on cycles.
+    fn _topo_order() {
+        let names = keys(this._services)
+        mut indeg = {}
+        for n in names { indeg[n] = 0 }
+        for n in names {
+            for d in this._services[n].deps {
+                if has(this._services, d) {
+                    indeg[n] = indeg[n] + 1
+                }
+            }
+        }
+        mut queue = []
+        for n in names {
+            if indeg[n] == 0 { push(queue, n) }
+        }
+        mut order = []
+        while len(queue) > 0 {
+            let n = queue[0]
+            mut new_q = []
+            mut i = 1
+            while i < len(queue) { push(new_q, queue[i]); i += 1 }
+            queue = new_q
+            push(order, n)
+            for m in keys(this._services) {
+                let svc = this._services[m]
+                for d in svc.deps {
+                    if d == n {
+                        indeg[m] = indeg[m] - 1
+                        if indeg[m] == 0 { push(queue, m) }
+                    }
+                }
+            }
+        }
+        if len(order) != len(names) {
+            throw "InitError: dependency cycle detected"
+        }
+        return order
+    }
+
+    -- ── Start / stop ──────────────────────────────────
+
+    fn start(name) {
+        if not has(this._services, name) {
+            throw "InitError: '" + name + "' not registered"
+        }
+        let svc = this._services[name]
+        if svc.state == "running" or svc.state == "starting" { return null }
+
+        -- Make sure dependencies are running first
+        for dep in svc.deps {
+            if has(this._services, dep) and this._services[dep].state != "running" {
+                this.start(dep)
+            }
+        }
+
+        svc.state = "starting"
+        this._emit({"event": "starting", "service": name})
+        try {
+            svc.handle = svc.start_fn()
+            svc.state = "running"
+            svc.start_count = svc.start_count + 1
+            svc.last_error = null
+            this._emit({"event": "running", "service": name})
+        } catch e {
+            svc.state = "failed"
+            svc.last_error = str(e)
+            this._emit({"event": "failed", "service": name, "error": svc.last_error})
+            if svc.restart == "always" or svc.restart == "on_failure" {
+                this._emit({"event": "restart_pending", "service": name})
+            }
+            throw e
+        }
+    }
+
+    fn stop(name) {
+        if not has(this._services, name) {
+            throw "InitError: '" + name + "' not registered"
+        }
+        let svc = this._services[name]
+        if svc.state != "running" { return null }
+        svc.state = "stopping"
+        this._emit({"event": "stopping", "service": name})
+        if svc.stop_fn != null {
+            try { svc.stop_fn(svc.handle) } catch e { }
+        }
+        svc.handle = null
+        svc.state = "stopped"
+        this._emit({"event": "stopped", "service": name})
+    }
+
+    fn start_all() {
+        for n in this._topo_order() { this.start(n) }
+    }
+
+    fn stop_all() {
+        let order = this._topo_order()
+        mut i = len(order) - 1
+        while i >= 0 { this.stop(order[i]); i -= 1 }
+    }
+
+    -- ── Health / watchdog ─────────────────────────────
+
+    -- Run health checks on every running service. Returns a list of
+    -- {service, ok, error?} maps. Services that report unhealthy and
+    -- have restart policy != "never" are restarted in place.
+    fn tick() {
+        mut report = []
+        for n in keys(this._services) {
+            let svc = this._services[n]
+            if svc.state != "running" { continue }
+            if svc.health_fn == null {
+                push(report, {"service": n, "ok": true})
+                continue
+            }
+            mut ok = true
+            mut err = null
+            try {
+                ok = svc.health_fn(svc.handle) == true
+            } catch e {
+                ok = false
+                err = str(e)
+            }
+            push(report, {"service": n, "ok": ok, "error": err})
+            if not ok and svc.restart != "never" {
+                this._emit({"event": "watchdog_restart", "service": n})
+                this.stop(n)
+                try { this.start(n) } catch e2 { }
+            }
+        }
+        return report
+    }
+
+    fn _emit(ev) {
+        for l in this._listeners { l(ev) }
+    }
+}
