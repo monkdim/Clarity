@@ -36,6 +36,7 @@ import { show as $show, ask as $ask, read, write, append, exists, lines,
   fetch, serve, compose, tap, $set, error as $error,
   display, repr, truthy as $truthy, ClarityEnum as $ClarityEnum,
   ClarityInstance as $ClarityInstance,
+  _ffi_open, _ffi_bind, _ffi_close,
   formatClarityError, clarityMain
 } from "./runtime.js";
 
@@ -418,7 +419,7 @@ class JSEmitter {
 
     fn expr_StringLiteral(node) {
         let s = node.value
-        if contains(s, "{") and contains(s, "}") {
+        if this._has_interpolation(s) {
             -- Convert Clarity string interpolation to JS template literals
             let result = this._convert_interpolation(s)
             return "`" + result + "`"
@@ -426,6 +427,32 @@ class JSEmitter {
         -- Escape and use regular string
         let escaped = replace(replace(s, "\\", "\\\\"), "\"", "\\\"")
         return "\"" + escaped + "\""
+    }
+
+    fn _has_interpolation(s) {
+        -- True iff there is a Clarity {name} pattern outside any ${...}
+        -- range. Embedded JS template-literal syntax shouldn't trigger
+        -- backtick wrapping.
+        mut i = 0
+        while i < len(s) {
+            let ch = char_at(s, i)
+            if ch == "$" and i + 1 < len(s) and char_at(s, i + 1) == "{" {
+                mut depth = 1
+                mut j = i + 2
+                while j < len(s) and depth > 0 {
+                    let jch = char_at(s, j)
+                    if jch == "{" { depth += 1 }
+                    elif jch == "}" { depth -= 1 }
+                    j += 1
+                }
+                i = j
+            } elif ch == "{" and i + 1 < len(s) and (is_alpha(char_at(s, i + 1)) or char_at(s, i + 1) == "_") {
+                return true
+            } else {
+                i += 1
+            }
+        }
+        return false
     }
 
     fn expr_ListLiteral(node) {
@@ -680,8 +707,20 @@ class JSEmitter {
         mut i = 0
         while i < len(s) {
             let ch = char_at(s, i)
-            if ch == "{" {
-                -- Find matching close brace
+            if ch == "$" and i + 1 < len(s) and char_at(s, i + 1) == "{" {
+                -- Literal ${...} from source — escape the $ so the
+                -- surrounding JS template literal doesn't evaluate it.
+                mut depth = 1
+                mut j = i + 2
+                while j < len(s) and depth > 0 {
+                    let jch = char_at(s, j)
+                    if jch == "{" { depth += 1 }
+                    elif jch == "}" { depth -= 1 }
+                    j += 1
+                }
+                push(result, "\\" + substring(s, i, j))
+                i = j
+            } elif ch == "{" {
                 mut depth = 1
                 mut j = i + 1
                 while j < len(s) and depth > 0 {
@@ -691,7 +730,15 @@ class JSEmitter {
                     j += 1
                 }
                 let expr = substring(s, i + 1, j - 1)
-                push(result, "${" + this._safe_name(expr) + "}")
+                -- Only treat as Clarity interpolation if content starts
+                -- with a letter or underscore. Anything else (numbers,
+                -- spaces, JS literals like { args: 1 }) stays literal,
+                -- with inner backticks escaped for the surrounding template.
+                if len(expr) > 0 and (is_alpha(char_at(expr, 0)) or char_at(expr, 0) == "_") {
+                    push(result, "${" + this._safe_name(expr) + "}")
+                } else {
+                    push(result, "{" + replace(expr, "`", "\\`") + "}")
+                }
                 i = j
             } elif ch == "`" {
                 push(result, "\\`")

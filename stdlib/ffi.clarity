@@ -1,0 +1,71 @@
+-- FFI — Foreign Function Interface for Clarity.
+--
+-- Wraps Bun's bun:ffi to call C/Zig/Rust shared libraries directly.
+-- Phase 56 task 1: binding layer + library handles. Type marshalling,
+-- pointers, structs, and callbacks land in subsequent tasks.
+--
+-- Example:
+--     from "ffi.clarity" import bind
+--     let getpid = bind("libc", "getpid", [], "int")
+--     show getpid()
+--
+-- Type names accepted by args/returns:
+--     void, bool, int, i8/i16/i32/i64, u8/u16/u32/u64,
+--     float (= f32), f32, f64 (= double),
+--     ptr (= pointer), string (= cstring), char
+--
+-- Library names: "libc" / "libm" resolve to the platform-correct shared
+-- library (libSystem.dylib on macOS, libc.so.6 / libm.so.6 on Linux,
+-- msvcrt.dll on Windows). Anything else is loaded as-is, with the
+-- platform's shared-library suffix appended when no path/extension is
+-- present.
+
+-- Bind a single symbol from a library.
+-- Returns a callable function: passing args calls the C function.
+fn bind(libname, sym_name, arg_types, return_type) {
+    return _ffi_bind(libname, sym_name, arg_types ?? [], return_type ?? "void")
+}
+
+-- Open a library with multiple symbols at once. Returns a Library.
+-- Example:
+--     let libc = ffi.open("libc", {
+--         getpid: {args: [], returns: "int"},
+--         getuid: {args: [], returns: "int"}
+--     })
+--     show libc.call("getpid")
+fn open(libname, symbols_spec) {
+    return Library(libname, symbols_spec)
+}
+
+class Library {
+    fn init(libname, symbols_spec) {
+        this.libname = libname
+        this.spec = symbols_spec
+        this._handle = _ffi_open(libname, symbols_spec)
+        this._symbols = this._handle.symbols
+    }
+
+    -- Call a bound symbol by name with the given args list.
+    fn call(name, args) {
+        let sym = this._symbols[name]
+        if sym == null {
+            throw "FFIError: '" + name + "' not bound on this Library"
+        }
+        return sym(...(args ?? []))
+    }
+
+    -- Get a callable wrapper for a bound symbol — handy for repeated calls.
+    fn get(name) {
+        let sym = this._symbols[name]
+        if sym == null {
+            throw "FFIError: '" + name + "' not bound on this Library"
+        }
+        return sym
+    }
+
+    fn close() {
+        _ffi_close(this._handle)
+        this._handle = null
+        this._symbols = null
+    }
+}

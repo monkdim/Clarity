@@ -10,6 +10,7 @@ import { createInterface } from 'readline';
 import { createServer } from 'http';
 import { resolve, dirname, basename, extname, join as pathJoin, sep } from 'path';
 import { createHash, randomUUID } from 'crypto';
+import { dlopen, FFIType, suffix as ffiSuffix } from 'bun:ffi';
 
 // ── I/O ──────────────────────────────────────────────────
 
@@ -425,4 +426,75 @@ export function clarityMain(fn) {
     console.error(formatClarityError(err));
     process.exit(1);
   }
+}
+
+// ── FFI: Bun-backed C interop ────────────────────────────
+// Maps Clarity type strings to Bun's FFIType enum.
+const $FFI_TYPES = {
+  void: FFIType.void,
+  bool: FFIType.bool,
+  int: FFIType.i32,
+  i8: FFIType.i8, i16: FFIType.i16, i32: FFIType.i32, i64: FFIType.i64,
+  u8: FFIType.u8, u16: FFIType.u16, u32: FFIType.u32, u64: FFIType.u64,
+  float: FFIType.f32, f32: FFIType.f32, f64: FFIType.f64, double: FFIType.f64,
+  ptr: FFIType.ptr, pointer: FFIType.ptr,
+  string: FFIType.cstring, cstring: FFIType.cstring,
+  char: FFIType.char,
+};
+
+function $ffi_type(name) {
+  if (!(name in $FFI_TYPES)) {
+    throw new Error(`FFIError: Unknown type '${name}'`);
+  }
+  return $FFI_TYPES[name];
+}
+
+// Resolve a library name to a path Bun's dlopen can load. "libc" and a few
+// well-known names are mapped to the platform-correct shared library.
+function $ffi_resolve_lib(name) {
+  if (name.includes('/') || name.includes('.')) return name;
+  if (name === 'libc' || name === 'c') {
+    if (process.platform === 'darwin') return 'libSystem.dylib';
+    if (process.platform === 'linux') return 'libc.so.6';
+    if (process.platform === 'win32') return 'msvcrt.dll';
+  }
+  if (name === 'libm' || name === 'm') {
+    if (process.platform === 'darwin') return 'libSystem.dylib';
+    if (process.platform === 'linux') return 'libm.so.6';
+  }
+  return `${name}.${ffiSuffix}`;
+}
+
+// Open a shared library. Returns a handle ({ symbols, close }).
+export function _ffi_open(libname, symbols_spec) {
+  const path = $ffi_resolve_lib(libname);
+  const symbols = {};
+  for (const sym of Object.keys(symbols_spec)) {
+    const spec = symbols_spec[sym];
+    symbols[sym] = {
+      args: (spec.args || []).map($ffi_type),
+      returns: $ffi_type(spec.returns || 'void'),
+    };
+  }
+  return dlopen(path, symbols);
+}
+
+// Bind a single symbol from a library and return a Clarity-callable function.
+// args and ret are arrays/strings of Clarity type names.
+export function _ffi_bind(libname, sym_name, args, ret) {
+  const handle = _ffi_open(libname, { [sym_name]: { args: args || [], returns: ret || 'void' } });
+  const fn = handle.symbols[sym_name];
+  if (!fn) throw new Error(`FFIError: Symbol '${sym_name}' not found in '${libname}'`);
+  return (...callArgs) => {
+    const result = fn(...callArgs);
+    // Bun returns a CString for cstring returns; convert to a plain string.
+    if (typeof result === 'object' && result !== null && typeof result.toString === 'function' && ret === 'cstring') {
+      return result.toString();
+    }
+    return result;
+  };
+}
+
+export function _ffi_close(handle) {
+  if (handle && typeof handle.close === 'function') handle.close();
 }

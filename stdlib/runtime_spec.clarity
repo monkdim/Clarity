@@ -10,7 +10,8 @@ let NODE_IMPORTS = [
     {module: "readline", names: ["createInterface"]},
     {module: "http", names: ["createServer"]},
     {module: "path", names: ["resolve", "dirname", "basename", "extname"], aliases: {"join": "pathJoin", "sep": "sep"}},
-    {module: "crypto", names: ["createHash", "randomUUID"]}
+    {module: "crypto", names: ["createHash", "randomUUID"]},
+    {module: "bun:ffi", names: ["dlopen", "FFIType"], aliases: {"suffix": "ffiSuffix"}}
 ]
 
 -- ── Section: I/O ──────────────────────────────────────────
@@ -280,6 +281,18 @@ let ERROR_FMT_SECTION = {
     ]
 }
 
+-- ── Section: FFI (Bun-backed C interop) ──────────────────
+
+let FFI_SECTION = {
+    label: "FFI: Bun-backed C interop",
+    preamble: "const $FFI_TYPES = {\n  void: FFIType.void,\n  bool: FFIType.bool,\n  int: FFIType.i32,\n  i8: FFIType.i8, i16: FFIType.i16, i32: FFIType.i32, i64: FFIType.i64,\n  u8: FFIType.u8, u16: FFIType.u16, u32: FFIType.u32, u64: FFIType.u64,\n  float: FFIType.f32, f32: FFIType.f32, f64: FFIType.f64, double: FFIType.f64,\n  ptr: FFIType.ptr, pointer: FFIType.ptr,\n  string: FFIType.cstring, cstring: FFIType.cstring,\n  char: FFIType.char,\n};\n\nfunction $ffi_type(name) {\n  if (!(name in $FFI_TYPES)) throw new Error(`FFIError: Unknown type '${name}'`);\n  return $FFI_TYPES[name];\n}\n\nfunction $ffi_resolve_lib(name) {\n  if (name.includes('/') || name.includes('.')) return name;\n  if (name === 'libc' || name === 'c') {\n    if (process.platform === 'darwin') return 'libSystem.dylib';\n    if (process.platform === 'linux') return 'libc.so.6';\n    if (process.platform === 'win32') return 'msvcrt.dll';\n  }\n  if (name === 'libm' || name === 'm') {\n    if (process.platform === 'darwin') return 'libSystem.dylib';\n    if (process.platform === 'linux') return 'libm.so.6';\n  }\n  return `${name}.${ffiSuffix}`;\n}",
+    fns: [
+        {name: "_ffi_open", params: "libname, symbols_spec", body: "const path = $ffi_resolve_lib(libname);\n  const symbols = {};\n  for (const sym of Object.keys(symbols_spec)) {\n    const spec = symbols_spec[sym];\n    symbols[sym] = {\n      args: (spec.args || []).map($ffi_type),\n      returns: $ffi_type(spec.returns || 'void'),\n    };\n  }\n  return dlopen(path, symbols);"},
+        {name: "_ffi_bind", params: "libname, sym_name, args, ret", body: "const handle = _ffi_open(libname, { [sym_name]: { args: args || [], returns: ret || 'void' } });\n  const fn = handle.symbols[sym_name];\n  if (!fn) throw new Error(`FFIError: Symbol '${sym_name}' not found in '${libname}'`);\n  return (...callArgs) => {\n    const result = fn(...callArgs);\n    if (typeof result === 'object' && result !== null && typeof result.toString === 'function' && ret === 'cstring') {\n      return result.toString();\n    }\n    return result;\n  };"},
+        {name: "_ffi_close", params: "handle", body: "if (handle && typeof handle.close === 'function') handle.close();"}
+    ]
+}
+
 -- ── All sections in order ─────────────────────────────────
 
 let ALL_SECTIONS = [
@@ -301,7 +314,8 @@ let ALL_SECTIONS = [
     OS_MODULE_SECTION,
     DISPLAY_SECTION,
     SIGNALS_SECTION,
-    ERROR_FMT_SECTION
+    ERROR_FMT_SECTION,
+    FFI_SECTION
 ]
 
 -- ── Aliases (re-exports) ─────────────────────────────────
