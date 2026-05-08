@@ -1,0 +1,176 @@
+-- Notify — desktop notifications (Phase 61 task 6).
+--
+-- Apps create `Notification`s with title/body/urgency/actions and send
+-- them through a `NotificationCenter`. The center keeps an active
+-- queue + a history, and publishes IPC events so the desktop shell
+-- (Phase 62) can paint banners and update the notification panel.
+--
+-- IPC topics:
+--   "notification.new"        payload = notification map
+--   "notification.dismissed"  payload = {"id": int}
+--   "notification.action"     payload = {"id": int, "action": str}
+--
+-- Urgency:
+--   "low"     informational, can be dropped under load
+--   "normal"  default
+--   "critical" stays until dismissed; suppress do-not-disturb
+--
+-- Actions are optional [{id, label, callback}] entries; if a user
+-- triggers one, we call the callback locally and publish an IPC event.
+
+from "ipc.clarity" import bus
+
+mut _NEXT_ID = 1
+
+fn _next_id() {
+    let id = _NEXT_ID
+    _NEXT_ID += 1
+    return id
+}
+
+class Notification {
+    fn init(title, body) {
+        this.id = _next_id()
+        this.title = title ?? ""
+        this.body = body ?? ""
+        this.urgency = "normal"     -- "low" | "normal" | "critical"
+        this.icon = null            -- optional path or named icon
+        this.timeout_ms = 5000      -- 0 = sticky (until dismissed)
+        this.actions = []           -- [{id, label, callback}]
+        this.app_name = null
+        this.created_at = time()
+    }
+
+    fn add_action(action_id, label, callback) {
+        push(this.actions, {"id": action_id, "label": label, "callback": callback})
+    }
+
+    fn to_map() {
+        mut action_summaries = []
+        for a in this.actions {
+            push(action_summaries, {"id": a["id"], "label": a["label"]})
+        }
+        return {
+            "id": this.id,
+            "title": this.title,
+            "body": this.body,
+            "urgency": this.urgency,
+            "icon": this.icon,
+            "timeout_ms": this.timeout_ms,
+            "actions": action_summaries,
+            "app_name": this.app_name,
+            "created_at": this.created_at
+        }
+    }
+}
+
+fn notification(title, body) { return Notification(title, body) }
+
+class NotificationCenter {
+    fn init(ipc_bus) {
+        this.bus = ipc_bus ?? bus()
+        this.active = []           -- currently visible
+        this.history = []          -- past notifications (most recent first)
+        this.history_limit = 100
+        this.do_not_disturb = false
+    }
+
+    -- Send a notification. Returns its id. The notification is added
+    -- to `active` and a "notification.new" event is published so the
+    -- desktop shell can render a banner.
+    fn send(notif) {
+        if this.do_not_disturb and notif.urgency != "critical" {
+            -- Silently swallow non-critical notifications in DND mode,
+            -- but still log them in history.
+            this._add_history(notif)
+            return notif.id
+        }
+        push(this.active, notif)
+        this._add_history(notif)
+        this.bus.publish("notification.new", notif.to_map())
+        return notif.id
+    }
+
+    -- Dismiss a notification by id. Removes from active and publishes
+    -- an event. Returns true if it was active, false if not found.
+    fn dismiss(id) {
+        mut found = null
+        mut new_active = []
+        for n in this.active {
+            if n.id == id { found = n } else { push(new_active, n) }
+        }
+        if found == null { return false }
+        this.active = new_active
+        this.bus.publish("notification.dismissed", {"id": id})
+        return true
+    }
+
+    fn dismiss_all() {
+        for n in this.active {
+            this.bus.publish("notification.dismissed", {"id": n.id})
+        }
+        this.active = []
+    }
+
+    -- Trigger an action on a notification. Calls the action's callback
+    -- locally and publishes an event so other listeners can react.
+    fn trigger_action(id, action_id) {
+        for n in this.active {
+            if n.id == id {
+                for a in n.actions {
+                    if a["id"] == action_id {
+                        if a["callback"] != null { a["callback"]() }
+                        this.bus.publish("notification.action", {"id": id, "action": action_id})
+                        this.dismiss(id)
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    fn count() { return len(this.active) }
+    fn list_active() { return this.active }
+
+    fn set_do_not_disturb(on) { this.do_not_disturb = on }
+
+    fn _add_history(notif) {
+        mut new_history = [notif]
+        for h in this.history { push(new_history, h) }
+        if len(new_history) > this.history_limit {
+            mut trimmed = []
+            mut i = 0
+            while i < this.history_limit {
+                push(trimmed, new_history[i])
+                i += 1
+            }
+            new_history = trimmed
+        }
+        this.history = new_history
+    }
+}
+
+fn register_notify_service(b) {
+    let svc = b ?? bus()
+    let center = NotificationCenter(svc)
+    svc.register("notify.send", fn(req) {
+        let n = Notification(req["title"], req["body"])
+        if has(req, "urgency") { n.urgency = req["urgency"] }
+        if has(req, "icon") { n.icon = req["icon"] }
+        if has(req, "timeout_ms") { n.timeout_ms = req["timeout_ms"] }
+        if has(req, "app_name") { n.app_name = req["app_name"] }
+        return center.send(n)
+    })
+    svc.register("notify.dismiss", fn(req) { return center.dismiss(req["id"]) })
+    svc.register("notify.list_active", fn(req) {
+        mut out = []
+        for n in center.list_active() { push(out, n.to_map()) }
+        return out
+    })
+    svc.register("notify.dnd", fn(req) {
+        center.set_do_not_disturb(req["on"] == true)
+        return true
+    })
+    return center
+}
