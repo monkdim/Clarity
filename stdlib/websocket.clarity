@@ -1,0 +1,275 @@
+-- WebSocket client (Phase 68 task 3).
+--
+-- Pure-state frame parser + builder for RFC 6455 WebSockets. The
+-- transport (the post-handshake TCP socket) is supplied by the
+-- caller; tests inject a FakeTransport that records sent bytes and
+-- replays canned frame sequences. The handshake itself is split out
+-- into client_handshake() (build the HTTP upgrade request) and
+-- parse_handshake_response() (validate the 101 reply).
+--
+--     let frame = build_text_frame("hello", true)   -- masked client→server
+--     let parsed = parse_frame(server_bytes)        -- {opcode, payload, fin}
+--
+-- Opcodes:
+--   0x0  continuation
+--   0x1  text
+--   0x2  binary
+--   0x8  close
+--   0x9  ping
+--   0xA  pong
+
+let OPCODE_CONT = 0x0
+let OPCODE_TEXT = 0x1
+let OPCODE_BINARY = 0x2
+let OPCODE_CLOSE = 0x8
+let OPCODE_PING = 0x9
+let OPCODE_PONG = 0xA
+
+let WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+-- ── Handshake ──────────────────────────────
+
+fn client_handshake(host, path, key) {
+    -- key: a base64-encoded 16-byte client nonce; tests pass a
+    -- known value so we can assert the request bytes verbatim.
+    let actual_key = key ?? "dGhlIHNhbXBsZSBub25jZQ=="
+    mut lines = []
+    push(lines, "GET " + path + " HTTP/1.1")
+    push(lines, "Host: " + host)
+    push(lines, "Upgrade: websocket")
+    push(lines, "Connection: Upgrade")
+    push(lines, "Sec-WebSocket-Key: " + actual_key)
+    push(lines, "Sec-WebSocket-Version: 13")
+    push(lines, "")
+    push(lines, "")
+    return join(lines, "\r\n")
+}
+
+fn parse_handshake_response(text) {
+    let lines = split(text, "\r\n")
+    if len(lines) == 0 { return {"ok": false, "error": "empty response"} }
+    let status = lines[0]
+    if not contains(status, " 101 ") { return {"ok": false, "error": "expected 101: " + status} }
+    mut headers = {}
+    mut found_upgrade = false
+    mut accept_key = null
+    mut i = 1
+    while i < len(lines) {
+        let line = lines[i]
+        if len(line) == 0 { break }
+        let colon = index_of(line, ":")
+        if colon < 0 { i = i + 1; continue }
+        let name = lower(trim(substring(line, 0, colon)))
+        let value = trim(substring(line, colon + 1, len(line)))
+        headers[name] = value
+        if name == "upgrade" and lower(value) == "websocket" { found_upgrade = true }
+        if name == "sec-websocket-accept" { accept_key = value }
+        i = i + 1
+    }
+    if not found_upgrade { return {"ok": false, "error": "missing Upgrade: websocket"} }
+    return {"ok": true, "headers": headers, "accept": accept_key}
+}
+
+-- ── Frame parse / build ────────────────────
+
+-- Parse one frame from `bytes` (a list of integers 0..255). Returns
+-- {opcode, fin, payload, mask, consumed} where `consumed` is the
+-- number of bytes the frame occupied. Returns null if the buffer
+-- doesn't yet contain a complete frame.
+fn parse_frame(bytes) {
+    if len(bytes) < 2 { return null }
+    let b0 = bytes[0]
+    let b1 = bytes[1]
+    let fin = (b0 & 0x80) != 0
+    let opcode = b0 & 0x0F
+    let masked = (b1 & 0x80) != 0
+    let len_field = b1 & 0x7F
+    mut payload_len = len_field
+    mut header_size = 2
+    if len_field == 126 {
+        if len(bytes) < 4 { return null }
+        payload_len = (bytes[2] << 8) | bytes[3]
+        header_size = 4
+    } elif len_field == 127 {
+        if len(bytes) < 10 { return null }
+        -- 8-byte length; we cap at 32-bit since Clarity ints are 53-bit safe
+        mut total = 0
+        mut i = 2
+        while i < 10 {
+            total = (total * 256) + bytes[i]
+            i = i + 1
+        }
+        payload_len = total
+        header_size = 10
+    }
+    mut mask = null
+    if masked {
+        if len(bytes) < header_size + 4 { return null }
+        mask = [bytes[header_size], bytes[header_size + 1], bytes[header_size + 2], bytes[header_size + 3]]
+        header_size = header_size + 4
+    }
+    if len(bytes) < header_size + payload_len { return null }
+    mut payload = []
+    mut k = 0
+    while k < payload_len {
+        let raw = bytes[header_size + k]
+        let unmasked = if masked { raw ^ mask[k % 4] } else { raw }
+        push(payload, unmasked)
+        k = k + 1
+    }
+    return {
+        "fin": fin,
+        "opcode": opcode,
+        "masked": masked,
+        "mask": mask,
+        "payload": payload,
+        "consumed": header_size + payload_len
+    }
+}
+
+fn build_frame(opcode, payload, masked) {
+    -- payload: list of bytes
+    mut bytes = []
+    push(bytes, 0x80 | (opcode & 0x0F))     -- FIN=1
+    let n = len(payload)
+    let mask_bit = if masked { 0x80 } else { 0 }
+    if n < 126 {
+        push(bytes, mask_bit | n)
+    } elif n <= 0xFFFF {
+        push(bytes, mask_bit | 126)
+        push(bytes, (n >> 8) & 0xFF)
+        push(bytes, n & 0xFF)
+    } else {
+        push(bytes, mask_bit | 127)
+        mut shift = 56
+        while shift >= 0 { push(bytes, (n >> shift) & 0xFF); shift = shift - 8 }
+    }
+    if masked {
+        let mk = [0x12, 0x34, 0x56, 0x78]
+        for m in mk { push(bytes, m) }
+        mut i = 0
+        while i < n { push(bytes, payload[i] ^ mk[i % 4]); i = i + 1 }
+    } else {
+        for p in payload { push(bytes, p) }
+    }
+    return bytes
+}
+
+fn build_text_frame(text, masked) {
+    return build_frame(OPCODE_TEXT, _string_to_bytes(text), masked)
+}
+
+fn build_close_frame(code, reason) {
+    mut bytes = [(code >> 8) & 0xFF, code & 0xFF]
+    if reason != null {
+        for b in _string_to_bytes(reason) { push(bytes, b) }
+    }
+    return build_frame(OPCODE_CLOSE, bytes, true)
+}
+
+fn build_ping_frame() { return build_frame(OPCODE_PING, [], true) }
+fn build_pong_frame(payload) { return build_frame(OPCODE_PONG, payload, true) }
+
+-- ── Higher-level client ──────────────────
+
+class WebSocket {
+    fn init(transport) {
+        this.transport = transport
+        this.state = "closed"      -- closed | connecting | open | closing
+        this.received_text = []     -- queue of text payloads
+        this.errors = []
+        this._buffer = []           -- byte accumulator for partial frames
+    }
+
+    fn open(host, path, key) {
+        this.transport.send(client_handshake(host, path, key))
+        let resp = this.transport.recv_line()
+        let parsed = parse_handshake_response(resp)
+        if not parsed["ok"] {
+            push(this.errors, parsed["error"])
+            return false
+        }
+        this.state = "open"
+        return true
+    }
+
+    -- Hand a list of received bytes to the parser. Pulls out as
+    -- many complete frames as the buffer contains, dispatches them,
+    -- and leaves any partial-frame bytes in the buffer for the next
+    -- call.
+    fn feed(bytes) {
+        for b in bytes { push(this._buffer, b) }
+        mut events = []
+        while true {
+            let frame = parse_frame(this._buffer)
+            if frame == null { break }
+            mut next = []
+            mut i = frame["consumed"]
+            while i < len(this._buffer) { push(next, this._buffer[i]); i = i + 1 }
+            this._buffer = next
+            push(events, this._handle_frame(frame))
+        }
+        return events
+    }
+
+    fn _handle_frame(frame) {
+        let op = frame["opcode"]
+        if op == OPCODE_TEXT {
+            let text = _bytes_to_string(frame["payload"])
+            push(this.received_text, text)
+            return {"kind": "text", "text": text, "fin": frame["fin"]}
+        }
+        if op == OPCODE_PING {
+            -- Respond with a PONG carrying the same payload
+            this.transport.send_bytes(build_pong_frame(frame["payload"]))
+            return {"kind": "ping", "payload": frame["payload"]}
+        }
+        if op == OPCODE_PONG { return {"kind": "pong", "payload": frame["payload"]} }
+        if op == OPCODE_CLOSE {
+            this.state = "closing"
+            return {"kind": "close", "payload": frame["payload"]}
+        }
+        if op == OPCODE_BINARY {
+            return {"kind": "binary", "payload": frame["payload"], "fin": frame["fin"]}
+        }
+        return {"kind": "unknown", "opcode": op}
+    }
+
+    fn send_text(text) {
+        this.transport.send_bytes(build_text_frame(text, true))
+    }
+
+    fn close(code, reason) {
+        this.transport.send_bytes(build_close_frame(code ?? 1000, reason))
+        this.state = "closing"
+    }
+}
+
+fn websocket(transport) { return WebSocket(transport) }
+
+-- ── Byte helpers ───────────────────────
+
+fn _string_to_bytes(s) {
+    mut out = []
+    mut i = 0
+    while i < len(s) {
+        push(out, _ord_char(char_at(s, i)))
+        i = i + 1
+    }
+    return out
+}
+
+fn _bytes_to_string(bytes) {
+    mut out = ""
+    for b in bytes { out = out + from_char_code(b) }
+    return out
+}
+
+fn _ord_char(c) {
+    mut i = 0
+    while i < 256 {
+        if from_char_code(i) == c { return i }
+        i = i + 1
+    }
+    return 63    -- "?"
+}

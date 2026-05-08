@@ -1,0 +1,294 @@
+-- CSS layout subset for the ClarityOS browser (Phase 68 task 1).
+--
+-- Block-and-inline flow model: every node gets a Box with a
+-- (x, y, width, height) rect. Block boxes stack vertically and fill
+-- their parent's content width. Inline boxes flow horizontally and
+-- wrap when they hit the parent's right edge. Padding + margin +
+-- borders supported per side.
+--
+-- Property defaults come from a tiny built-in stylesheet keyed by
+-- tag name. Inline `style="..."` attributes override per-node.
+-- External + <style> stylesheets are deferred — a follow-up phase.
+--
+--     let dom = parse_html("<h1>Hello</h1><p>world</p>")
+--     let layout = layout_document(dom, 800)
+--     layout.boxes[0].rect    -- {x: 0, y: 0, w: 800, h: ...}
+--
+-- Box has:
+--   node       -> source HtmlNode
+--   role       -> "block" | "inline" | "text" | "void"
+--   rect       -> {x, y, w, h}
+--   style      -> resolved property map
+--   children   -> list of Box
+--   text_runs  -> for inline boxes only: list of {text, x, y, w, h}
+
+from "html_parser.clarity" import HtmlNode, TYPE_DOCUMENT, TYPE_ELEMENT, TYPE_TEXT
+
+-- ── Default style table ─────────────────────────
+
+let _DEFAULTS = {
+    "h1": {"font_size": 32, "margin_top": 16, "margin_bottom": 12, "bold": true, "block": true},
+    "h2": {"font_size": 24, "margin_top": 14, "margin_bottom": 10, "bold": true, "block": true},
+    "h3": {"font_size": 18, "margin_top": 12, "margin_bottom": 8, "bold": true, "block": true},
+    "h4": {"font_size": 16, "margin_top": 10, "margin_bottom": 8, "bold": true, "block": true},
+    "h5": {"font_size": 14, "margin_top": 8, "margin_bottom": 6, "bold": true, "block": true},
+    "h6": {"font_size": 12, "margin_top": 6, "margin_bottom": 6, "bold": true, "block": true},
+    "p":  {"font_size": 14, "margin_top": 8,  "margin_bottom": 8, "block": true},
+    "div": {"font_size": 14, "block": true},
+    "section": {"font_size": 14, "block": true, "margin_top": 8, "margin_bottom": 8},
+    "ul": {"font_size": 14, "block": true, "padding_left": 24, "margin_top": 6, "margin_bottom": 6},
+    "ol": {"font_size": 14, "block": true, "padding_left": 24, "margin_top": 6, "margin_bottom": 6},
+    "li": {"font_size": 14, "block": true},
+    "blockquote": {"font_size": 14, "block": true, "padding_left": 16, "margin_top": 8, "margin_bottom": 8, "italic": true},
+    "pre": {"font_size": 13, "block": true, "padding_top": 8, "padding_bottom": 8, "padding_left": 12, "padding_right": 12, "monospace": true},
+    "form": {"font_size": 14, "block": true, "margin_top": 8, "margin_bottom": 8},
+    "button": {"font_size": 14, "padding_top": 4, "padding_bottom": 4, "padding_left": 8, "padding_right": 8},
+    "input": {"font_size": 14, "padding_top": 4, "padding_bottom": 4, "padding_left": 6, "padding_right": 6},
+    "a": {"font_size": 14, "underline": true, "color": "#1a73e8"},
+    "strong": {"font_size": 14, "bold": true},
+    "b": {"font_size": 14, "bold": true},
+    "em": {"font_size": 14, "italic": true},
+    "i": {"font_size": 14, "italic": true},
+    "code": {"font_size": 13, "monospace": true},
+    "br": {"block": true, "height": 14},
+    "hr": {"block": true, "height": 1, "margin_top": 8, "margin_bottom": 8}
+}
+
+let _DEFAULT_STYLE = {
+    "font_size": 14,
+    "font_family": "default",
+    "color": "#222",
+    "block": false,
+    "bold": false,
+    "italic": false,
+    "underline": false,
+    "monospace": false,
+    "padding_top": 0, "padding_right": 0, "padding_bottom": 0, "padding_left": 0,
+    "margin_top": 0, "margin_right": 0, "margin_bottom": 0, "margin_left": 0
+}
+
+fn _merge(a, b) {
+    mut out = {}
+    for kv in entries(a) { out[kv[0]] = kv[1] }
+    for kv in entries(b) { out[kv[0]] = kv[1] }
+    return out
+}
+
+fn _resolve_style(node) {
+    if node.node_type != TYPE_ELEMENT { return _DEFAULT_STYLE }
+    mut s = _DEFAULT_STYLE
+    if has(_DEFAULTS, node.tag) { s = _merge(s, _DEFAULTS[node.tag]) }
+    -- Inline style="prop:val;prop2:val" overrides
+    if has(node.attrs, "style") {
+        let inline = _parse_inline_style(node.attrs["style"])
+        s = _merge(s, inline)
+    }
+    return s
+}
+
+fn _parse_inline_style(text) {
+    mut out = {}
+    let pairs = split(text, ";")
+    for pair in pairs {
+        let p = trim(pair)
+        if not contains(p, ":") { continue }
+        let colon = index_of(p, ":")
+        let key = trim(substring(p, 0, colon))
+        let val = trim(substring(p, colon + 1, len(p)))
+        if key == "font-size" { out["font_size"] = _strip_px(val) }
+        elif key == "color" { out["color"] = val }
+        elif key == "font-weight" {
+            if val == "bold" or val == "700" or val == "800" or val == "900" { out["bold"] = true }
+        }
+        elif key == "font-style" and val == "italic" { out["italic"] = true }
+        elif key == "text-decoration" {
+            if contains(val, "underline") { out["underline"] = true }
+        }
+        elif key == "padding" { _set_box(out, "padding", _strip_px(val)) }
+        elif key == "margin"  { _set_box(out, "margin",  _strip_px(val)) }
+        elif key == "padding-top" { out["padding_top"] = _strip_px(val) }
+        elif key == "padding-right" { out["padding_right"] = _strip_px(val) }
+        elif key == "padding-bottom" { out["padding_bottom"] = _strip_px(val) }
+        elif key == "padding-left" { out["padding_left"] = _strip_px(val) }
+        elif key == "margin-top" { out["margin_top"] = _strip_px(val) }
+        elif key == "margin-right" { out["margin_right"] = _strip_px(val) }
+        elif key == "margin-bottom" { out["margin_bottom"] = _strip_px(val) }
+        elif key == "margin-left" { out["margin_left"] = _strip_px(val) }
+        elif key == "display" {
+            if val == "block" { out["block"] = true }
+            elif val == "inline" { out["block"] = false }
+        }
+    }
+    return out
+}
+
+fn _set_box(out, prefix, val) {
+    out[prefix + "_top"] = val
+    out[prefix + "_right"] = val
+    out[prefix + "_bottom"] = val
+    out[prefix + "_left"] = val
+}
+
+fn _strip_px(s) {
+    let t = trim(s)
+    if ends(t, "px") { return int(substring(t, 0, len(t) - 2)) }
+    if ends(t, "em") {
+        -- assume 1em = 14px (the default font_size)
+        let n = substring(t, 0, len(t) - 2)
+        return int(n) * 14
+    }
+    return int(t)
+}
+
+-- ── Box ─────────────────────────────────────────
+
+class Box {
+    fn init(node, role, style) {
+        this.node = node
+        this.role = role
+        this.style = style
+        this.rect = {"x": 0, "y": 0, "w": 0, "h": 0}
+        this.children = []
+        this.text_runs = []
+    }
+
+    fn append(child) { push(this.children, child); return child }
+
+    -- Recursive flatten of all boxes in this subtree (DFS).
+    fn flatten() {
+        mut out = [this]
+        for c in this.children {
+            for b in c.flatten() { push(out, b) }
+        }
+        return out
+    }
+}
+
+fn _build_box(node) {
+    if node.node_type == TYPE_TEXT {
+        let style = _DEFAULT_STYLE
+        let b = Box(node, "text", style)
+        return b
+    }
+    let style = _resolve_style(node)
+    -- Document root, html, and body always lay out as blocks.
+    let is_root_block = node.node_type == TYPE_DOCUMENT or node.tag == "html" or node.tag == "body"
+    mut role = if has(style, "block") and style["block"] { "block" } else { "inline" }
+    if is_root_block { role = "block" }
+    -- Void elements (br, hr, img, input) are leaf blocks.
+    let final_role = if contains(["br", "hr", "img", "input"], node.tag) { "void" } else { role }
+    let b = Box(node, final_role, style)
+    if final_role == "void" { return b }
+    for c in node.children {
+        b.append(_build_box(c))
+    }
+    return b
+}
+
+-- ── Layout pass ────────────────────────────────
+
+class LayoutEngine {
+    fn init(viewport_width, font_size) {
+        this.viewport_width = viewport_width
+        this.font_size = font_size ?? 14
+        -- approximate per-character width for the embedded 8x8 font;
+        -- callers can swap for a real metric pass once font.clarity
+        -- exposes one through this layer.
+        this.char_w = 8
+    }
+
+    fn layout(box) {
+        box.rect["x"] = 0
+        box.rect["y"] = 0
+        box.rect["w"] = this.viewport_width
+        let final_h = this._layout_block(box, 0, 0, this.viewport_width)
+        box.rect["h"] = final_h
+        return box
+    }
+
+    -- Lay out the block `box` whose top-left is (x, y) and content
+    -- width is `width`. Returns the final height the block occupied.
+    fn _layout_block(box, x, y, width) {
+        box.rect["x"] = x
+        box.rect["y"] = y
+        box.rect["w"] = width
+
+        let style = box.style
+        let pad_top = if has(style, "padding_top") { style["padding_top"] } else { 0 }
+        let pad_left = if has(style, "padding_left") { style["padding_left"] } else { 0 }
+        let pad_right = if has(style, "padding_right") { style["padding_right"] } else { 0 }
+        let pad_bottom = if has(style, "padding_bottom") { style["padding_bottom"] } else { 0 }
+
+        let content_x = x + pad_left
+        let content_w = width - pad_left - pad_right
+        mut cursor_y = y + pad_top
+
+        if box.role == "void" {
+            let h = if has(style, "height") { style["height"] } else { this.font_size }
+            box.rect["h"] = h
+            return h
+        }
+
+        -- Group consecutive inline children into "line boxes".
+        mut i = 0
+        while i < len(box.children) {
+            let child = box.children[i]
+            if child.role == "block" or child.role == "void" {
+                let m_top = if has(child.style, "margin_top") { child.style["margin_top"] } else { 0 }
+                let m_bottom = if has(child.style, "margin_bottom") { child.style["margin_bottom"] } else { 0 }
+                cursor_y = cursor_y + m_top
+                let h = this._layout_block(child, content_x, cursor_y, content_w)
+                cursor_y = cursor_y + h + m_bottom
+                i = i + 1
+            } else {
+                -- collect a run of inline siblings
+                mut run = []
+                while i < len(box.children) {
+                    let c = box.children[i]
+                    if c.role == "block" or c.role == "void" { break }
+                    push(run, c)
+                    i = i + 1
+                }
+                cursor_y = this._layout_inline_run(run, content_x, cursor_y, content_w)
+            }
+        }
+        let total_h = cursor_y - y + pad_bottom
+        box.rect["h"] = total_h
+        return total_h
+    }
+
+    -- Place inline children left-to-right, wrapping when they hit the
+    -- right edge. Mutates each inline box's rect + text_runs.
+    fn _layout_inline_run(boxes, x, y, width) {
+        mut cursor_x = x
+        mut line_top = y
+        let line_h = this.font_size + 4
+        for b in boxes {
+            let raw = b.node.text()
+            let words = if len(raw) == 0 { [] } else { split(raw, " ") }
+            mut word_runs = []
+            for word in words {
+                if len(word) == 0 { continue }
+                let w_pixels = len(word) * this.char_w
+                if cursor_x + w_pixels > x + width and cursor_x > x {
+                    line_top = line_top + line_h
+                    cursor_x = x
+                }
+                push(word_runs, {"text": word, "x": cursor_x, "y": line_top, "w": w_pixels, "h": line_h})
+                cursor_x = cursor_x + w_pixels + this.char_w     -- one space between words
+            }
+            b.text_runs = word_runs
+            b.rect["x"] = if len(word_runs) > 0 { word_runs[0]["x"] } else { cursor_x }
+            b.rect["y"] = if len(word_runs) > 0 { word_runs[0]["y"] } else { line_top }
+            b.rect["w"] = cursor_x - b.rect["x"]
+            b.rect["h"] = line_h
+        }
+        return line_top + line_h
+    }
+}
+
+fn layout_document(doc, viewport_width) {
+    let root = _build_box(doc)
+    let engine = LayoutEngine(viewport_width, 14)
+    return engine.layout(root)
+}

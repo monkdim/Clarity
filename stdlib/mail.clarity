@@ -1,0 +1,251 @@
+-- Mail app — Phase 68 task 2.
+--
+-- Multi-account mailbox state machine. Each account owns an IMAP
+-- transport (read) + SMTP transport (send). MailApp aggregates
+-- them, exposes an inbox / sent / drafts API, and owns the
+-- drafts queue.
+--
+-- The transport plumbing lives in imap.clarity / smtp.clarity. The
+-- app surface here is what the UI binds to.
+
+from "imap.clarity" import ImapClient, imap_client
+from "smtp.clarity" import SmtpClient, smtp_client, message, SmtpMessage
+
+class MailAccount {
+    fn init(name, address) {
+        this.name = name
+        this.address = address
+        this.imap = null            -- ImapClient
+        this.smtp = null            -- SmtpClient
+        this.connected = false
+        this.inbox = []             -- list of {seq, from, subject, date, body, read, flagged}
+        this.sent = []
+        this.drafts = []
+        this.folders = ["INBOX", "Sent", "Drafts"]
+        this.errors = []
+    }
+
+    fn attach_imap(transport) { this.imap = imap_client(transport) }
+    fn attach_smtp(transport, opts) { this.smtp = smtp_client(transport, opts) }
+}
+
+fn mail_account(name, address) { return MailAccount(name, address) }
+
+-- ── App ─────────────────────────────────────────
+
+let FOLDER_INBOX = "inbox"
+let FOLDER_SENT = "sent"
+let FOLDER_DRAFTS = "drafts"
+
+class MailApp {
+    fn init() {
+        this.accounts = []
+        this._next_msg_id = 1
+        this.active_account = null
+        this.active_folder = FOLDER_INBOX
+        this.selected_msg_id = null
+        this.compose = null         -- in-progress draft
+    }
+
+    fn add_account(account) {
+        push(this.accounts, account)
+        if this.active_account == null { this.active_account = account.name }
+        return account
+    }
+
+    fn _find_account(name) {
+        for a in this.accounts { if a.name == name { return a } }
+        return null
+    }
+
+    fn account() { return this._find_account(this.active_account) }
+
+    fn switch_account(name) {
+        if this._find_account(name) == null { return false }
+        this.active_account = name
+        return true
+    }
+
+    fn switch_folder(folder) {
+        if folder != FOLDER_INBOX and folder != FOLDER_SENT and folder != FOLDER_DRAFTS { return false }
+        this.active_folder = folder
+        return true
+    }
+
+    fn _current_folder_list() {
+        let acct = this.account()
+        if acct == null { return [] }
+        if this.active_folder == FOLDER_INBOX { return acct.inbox }
+        if this.active_folder == FOLDER_SENT { return acct.sent }
+        return acct.drafts
+    }
+
+    fn list_messages() { return this._current_folder_list() }
+
+    fn select_message(id) {
+        for m in this._current_folder_list() {
+            if m["id"] == id {
+                this.selected_msg_id = id
+                m["read"] = true
+                return m
+            }
+        }
+        return null
+    }
+
+    fn _alloc_id() {
+        let id = this._next_msg_id
+        this._next_msg_id = this._next_msg_id + 1
+        return id
+    }
+
+    -- ── Sync (IMAP read) ──────────────────────────
+
+    -- Pulls a list of envelopes off IMAP; the test harness can call
+    -- this with a fake transport. After this call, account.inbox is
+    -- populated with the envelopes returned by the server.
+    fn sync_inbox() {
+        let acct = this.account()
+        if acct == null { throw "MailError: no active account" }
+        if acct.imap == null { throw "MailError: account has no imap transport" }
+        if not acct.imap.read_greeting() { return false }
+        if not acct.imap.login(acct.address, "") { return false }
+        let info = acct.imap.select("INBOX")
+        if info == null { return false }
+        let ids = acct.imap.search("ALL")
+        let envelopes = if len(ids) > 0 { acct.imap.fetch_envelope(join(_int_strs(ids), ",")) } else { [] }
+        mut next = []
+        for env in envelopes {
+            push(next, {
+                "id": this._alloc_id(),
+                "seq": env["seq"],
+                "from": "",
+                "subject": "",
+                "date": "",
+                "body": "",
+                "read": false,
+                "flagged": false
+            })
+        }
+        acct.inbox = next
+        acct.connected = true
+        return true
+    }
+
+    -- ── Compose + send (SMTP) ────────────────────
+
+    fn start_compose(to, subject, body) {
+        this.compose = {
+            "to": if to == null { [] } else { (if type(to) == "list" { to } else { [to] }) },
+            "cc": [],
+            "bcc": [],
+            "subject": subject ?? "",
+            "body": body ?? ""
+        }
+        return this.compose
+    }
+
+    fn cancel_compose() { this.compose = null }
+
+    fn save_draft() {
+        if this.compose == null { return false }
+        let acct = this.account()
+        if acct == null { return false }
+        let entry = {
+            "id": this._alloc_id(),
+            "to": this.compose["to"],
+            "subject": this.compose["subject"],
+            "body": this.compose["body"],
+            "saved_at": time()
+        }
+        push(acct.drafts, entry)
+        this.compose = null
+        return entry
+    }
+
+    fn send_compose() {
+        if this.compose == null { return false }
+        let acct = this.account()
+        if acct == null { return false }
+        if acct.smtp == null { throw "MailError: account has no smtp transport" }
+        let msg = message(acct.address, this.compose["to"], this.compose["subject"], this.compose["body"])
+        for c in this.compose["cc"] { msg.add_cc(c) }
+        for b in this.compose["bcc"] { msg.add_bcc(b) }
+        if not acct.smtp.read_greeting() { return false }
+        if not acct.smtp.ehlo() { return false }
+        if acct.smtp.use_starttls and acct.smtp._has_capability("STARTTLS") {
+            acct.smtp.starttls()
+        }
+        if acct.smtp.username != null and acct.smtp.password != null {
+            acct.smtp.auth_login()
+        }
+        let ok = acct.smtp.send(msg)
+        if ok {
+            push(acct.sent, {
+                "id": this._alloc_id(),
+                "to": this.compose["to"],
+                "subject": this.compose["subject"],
+                "body": this.compose["body"],
+                "sent_at": time()
+            })
+            this.compose = null
+        }
+        return ok
+    }
+
+    -- ── Local mutations ──────────────────────────
+
+    fn mark_read(id, value) {
+        for m in this._current_folder_list() {
+            if m["id"] == id { m["read"] = value; return true }
+        }
+        return false
+    }
+
+    fn flag(id, value) {
+        for m in this._current_folder_list() {
+            if m["id"] == id { m["flagged"] = value; return true }
+        }
+        return false
+    }
+
+    fn delete_message(id) {
+        let acct = this.account()
+        if acct == null { return false }
+        mut next = []
+        for m in this._current_folder_list() {
+            if m["id"] != id { push(next, m) }
+        }
+        if this.active_folder == FOLDER_INBOX { acct.inbox = next }
+        elif this.active_folder == FOLDER_SENT { acct.sent = next }
+        else { acct.drafts = next }
+        return true
+    }
+
+    fn unread_count() {
+        mut n = 0
+        for m in this._current_folder_list() {
+            if not m["read"] { n = n + 1 }
+        }
+        return n
+    }
+
+    fn summary() {
+        return {
+            "account": this.active_account,
+            "folder": this.active_folder,
+            "messages": len(this._current_folder_list()),
+            "unread": this.unread_count(),
+            "drafts": if this.account() != null { len(this.account().drafts) } else { 0 },
+            "composing": this.compose != null
+        }
+    }
+}
+
+fn mail_app() { return MailApp() }
+
+fn _int_strs(ints) {
+    mut out = []
+    for i in ints { push(out, str(i)) }
+    return out
+}

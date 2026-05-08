@@ -1,0 +1,299 @@
+-- Browser app — Phase 68 task 1.
+--
+-- A purpose-built ClarityOS browser. Fetches HTTP/HTTPS via the
+-- existing net.clarity client, parses HTML with html_parser.clarity,
+-- lays out with css_layout.clarity, and tracks the things every
+-- browser needs: tabs, history (per-tab, with back/forward), and
+-- bookmarks.
+--
+-- This module is the engine + state machine. The widget tree the
+-- desktop mounts ride on top — paint is just a walk over the
+-- LayoutBox tree we get from css_layout.layout_document().
+--
+--     let b = browser()
+--     let tab = b.new_tab("https://clarity-lang.org")
+--     b.bookmark(tab, "Clarity homepage")
+--     b.go_back(tab)
+--     b.search("clarity language")           -- DuckDuckGo by default
+
+from "html_parser.clarity" import parse_html
+from "css_layout.clarity" import layout_document
+
+let DEFAULT_HOMEPAGE = "about:blank"
+let DEFAULT_USER_AGENT = "Clarity/1.0 (ClarityOS)"
+let DEFAULT_SEARCH_PATTERN = "https://duckduckgo.com/?q={q}"
+
+class Tab {
+    fn init(id, url) {
+        this.id = id
+        this.url = url
+        this.title = url
+        this.history = [url]      -- URLs visited in order
+        this.history_pos = 0       -- index into history (== length-1 = current)
+        this.dom = null
+        this.layout = null
+        this.status = "idle"        -- "idle" | "loading" | "loaded" | "error"
+        this.error = null
+        this.headers = {}
+        this.body = ""
+        this.scroll_y = 0
+    }
+
+    fn current_url() {
+        if this.history_pos < len(this.history) { return this.history[this.history_pos] }
+        return this.url
+    }
+}
+
+fn tab(id, url) { return Tab(id, url) }
+
+class Browser {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.tabs = []
+        this._next_tab_id = 1
+        this.active_tab_id = null
+        this.bookmarks = []
+        this.user_agent = if has(o, "user_agent") { o["user_agent"] } else { DEFAULT_USER_AGENT }
+        this.homepage = if has(o, "homepage") { o["homepage"] } else { DEFAULT_HOMEPAGE }
+        this.search_pattern = if has(o, "search_pattern") { o["search_pattern"] } else { DEFAULT_SEARCH_PATTERN }
+        this.viewport_width = if has(o, "viewport_width") { o["viewport_width"] } else { 800 }
+        -- pluggable fetcher: fn(url, headers) -> {status, headers, body}
+        -- defaults to a real HTTP client when running on a host;
+        -- the tests inject a fake fetcher to drive the state machine
+        -- without going to the network.
+        this._fetcher = if has(o, "fetcher") { o["fetcher"] } else { null }
+    }
+
+    -- ── Tabs ─────────────────────────────────────
+
+    fn new_tab(url) {
+        let initial = url ?? this.homepage
+        let t = tab(this._next_tab_id, initial)
+        this._next_tab_id = this._next_tab_id + 1
+        push(this.tabs, t)
+        if this.active_tab_id == null { this.active_tab_id = t.id }
+        if initial != "about:blank" { this.load(t, initial) }
+        return t
+    }
+
+    fn close_tab(tab_id) {
+        mut next = []
+        for t in this.tabs { if t.id != tab_id { push(next, t) } }
+        this.tabs = next
+        if this.active_tab_id == tab_id {
+            this.active_tab_id = if len(this.tabs) > 0 { this.tabs[0].id } else { null }
+        }
+    }
+
+    fn select_tab(tab_id) {
+        if this._find_tab(tab_id) != null {
+            this.active_tab_id = tab_id
+            return true
+        }
+        return false
+    }
+
+    fn active_tab() {
+        if this.active_tab_id == null { return null }
+        return this._find_tab(this.active_tab_id)
+    }
+
+    fn _find_tab(tab_id) {
+        for t in this.tabs { if t.id == tab_id { return t } }
+        return null
+    }
+
+    -- ── Fetch + render ────────────────────────────
+
+    fn _fetch(url, headers) {
+        if this._fetcher != null { return (this._fetcher)(url, headers) }
+        -- Real backend (host runtime only): defer to net.clarity
+        from "net.clarity" import http_get
+        return http_get(url, headers)
+    }
+
+    fn load(t, url) {
+        let normalized = this._normalize_url(url)
+        t.status = "loading"
+        t.error = null
+        let headers = {"User-Agent": this.user_agent}
+        try {
+            let resp = this._fetch(normalized, headers)
+            t.headers = if has(resp, "headers") { resp["headers"] } else { {} }
+            let status = if has(resp, "status") { resp["status"] } else { 200 }
+            t.body = if has(resp, "body") { resp["body"] } else { "" }
+            if status >= 400 {
+                t.status = "error"
+                t.error = "HTTP " + str(status)
+                return false
+            }
+            t.dom = parse_html(t.body)
+            let title_node = t.dom.first("title")
+            if title_node != null {
+                let txt = trim(title_node.text())
+                if len(txt) > 0 { t.title = txt }
+            } else {
+                t.title = normalized
+            }
+            t.layout = layout_document(t.dom, this.viewport_width)
+            t.status = "loaded"
+        } catch e {
+            t.status = "error"
+            t.error = str(e)
+            return false
+        }
+        -- Push onto history (truncate any forward stack first)
+        if t.history_pos < len(t.history) - 1 {
+            mut trimmed = []
+            mut i = 0
+            while i <= t.history_pos { push(trimmed, t.history[i]); i = i + 1 }
+            t.history = trimmed
+        }
+        if len(t.history) == 0 or t.history[len(t.history) - 1] != normalized {
+            push(t.history, normalized)
+            t.history_pos = len(t.history) - 1
+        }
+        t.url = normalized
+        return true
+    }
+
+    fn reload(t) { return this.load(t, t.url) }
+
+    fn go_back(t) {
+        if t.history_pos <= 0 { return false }
+        t.history_pos = t.history_pos - 1
+        let target = t.history[t.history_pos]
+        return this._reload_no_push(t, target)
+    }
+
+    fn go_forward(t) {
+        if t.history_pos >= len(t.history) - 1 { return false }
+        t.history_pos = t.history_pos + 1
+        let target = t.history[t.history_pos]
+        return this._reload_no_push(t, target)
+    }
+
+    fn _reload_no_push(t, url) {
+        t.status = "loading"
+        let headers = {"User-Agent": this.user_agent}
+        try {
+            let resp = this._fetch(url, headers)
+            t.body = if has(resp, "body") { resp["body"] } else { "" }
+            t.dom = parse_html(t.body)
+            t.layout = layout_document(t.dom, this.viewport_width)
+            t.url = url
+            t.status = "loaded"
+            return true
+        } catch e {
+            t.status = "error"
+            t.error = str(e)
+            return false
+        }
+    }
+
+    -- ── URL / search ──────────────────────────────
+
+    fn _normalize_url(input) {
+        let s = trim(input)
+        if len(s) == 0 { return this.homepage }
+        if starts(s, "http://") or starts(s, "https://") or starts(s, "about:") or starts(s, "file://") {
+            return s
+        }
+        -- bare domain or path: assume https
+        if contains(s, ".") and not contains(s, " ") { return "https://" + s }
+        -- fall back to a search query
+        return replace(this.search_pattern, "{q}", _url_encode(s))
+    }
+
+    fn search(query) {
+        let url = replace(this.search_pattern, "{q}", _url_encode(query))
+        let t = this.active_tab()
+        if t == null { t = this.new_tab(url); return t }
+        this.load(t, url)
+        return t
+    }
+
+    -- ── Bookmarks ─────────────────────────────────
+
+    fn bookmark(t, label) {
+        let entry = {"url": t.url, "title": label ?? t.title}
+        for existing in this.bookmarks {
+            if existing["url"] == entry["url"] { return false }
+        }
+        push(this.bookmarks, entry)
+        return true
+    }
+
+    fn unbookmark(url) {
+        mut next = []
+        mut removed = false
+        for b in this.bookmarks {
+            if b["url"] == url { removed = true } else { push(next, b) }
+        }
+        this.bookmarks = next
+        return removed
+    }
+
+    fn is_bookmarked(url) {
+        for b in this.bookmarks { if b["url"] == url { return true } }
+        return false
+    }
+
+    -- ── Introspection ─────────────────────────────
+
+    fn tab_count() { return len(this.tabs) }
+
+    fn summary() {
+        return {
+            "tabs": len(this.tabs),
+            "active": this.active_tab_id,
+            "bookmarks": len(this.bookmarks)
+        }
+    }
+}
+
+-- ── URL helpers ────────────────────────────
+
+fn _url_encode(s) {
+    mut out = ""
+    mut i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c == " " { out = out + "+" }
+        elif _is_unreserved(c) { out = out + c }
+        else { out = out + "%" + _hex2(_char_code(c)) }
+        i = i + 1
+    }
+    return out
+}
+
+fn _is_unreserved(c) {
+    if len(c) == 0 { return false }
+    let code = _char_code(c)
+    if code >= 65 and code <= 90 { return true }    -- A-Z
+    if code >= 97 and code <= 122 { return true }   -- a-z
+    if code >= 48 and code <= 57 { return true }    -- 0-9
+    if c == "-" or c == "_" or c == "." or c == "~" { return true }
+    return false
+}
+
+fn _char_code(c) {
+    -- Round-trip via from_char_code: Clarity strings index returns
+    -- a single-char string, so we map known printable codes.
+    mut i = 32
+    while i < 128 {
+        if from_char_code(i) == c { return i }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _hex2(n) {
+    let h = "0123456789ABCDEF"
+    let hi = (n >> 4) & 0xF
+    let lo = n & 0xF
+    return char_at(h, hi) + char_at(h, lo)
+}
+
+fn browser(opts) { return Browser(opts) }

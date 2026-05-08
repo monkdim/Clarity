@@ -1,0 +1,255 @@
+-- SMTP client (Phase 68 task 2).
+--
+-- ESMTP submission: HELO/EHLO, optional STARTTLS, AUTH PLAIN /
+-- AUTH LOGIN, MAIL FROM, RCPT TO, DATA, QUIT. Single-message send +
+-- batch send through the same transport. As with imap.clarity, the
+-- transport is pluggable; tests inject a FakeTransport.
+--
+-- Build a Message with `message(...)` and hand it to client.send().
+
+let _CRLF = "\r\n"
+
+class SmtpMessage {
+    fn init(from_addr, to_addrs, subject, body) {
+        this.from_addr = from_addr
+        this.to_addrs = to_addrs
+        this.cc = []
+        this.bcc = []
+        this.subject = subject ?? ""
+        this.body = body ?? ""
+        this.headers = {}
+        this.content_type = "text/plain; charset=utf-8"
+    }
+
+    fn add_cc(addr) { push(this.cc, addr) }
+    fn add_bcc(addr) { push(this.bcc, addr) }
+    fn set_header(name, value) { this.headers[name] = value }
+
+    fn _all_recipients() {
+        mut out = []
+        for r in this.to_addrs { push(out, r) }
+        for r in this.cc { push(out, r) }
+        for r in this.bcc { push(out, r) }
+        return out
+    }
+
+    -- Render as RFC 822 wire format. BCC headers are NOT emitted
+    -- (that's the whole point of BCC — they go in RCPT TO instead).
+    fn render() {
+        mut lines = []
+        push(lines, "From: " + this.from_addr)
+        if len(this.to_addrs) > 0 { push(lines, "To: " + join(this.to_addrs, ", ")) }
+        if len(this.cc) > 0 { push(lines, "Cc: " + join(this.cc, ", ")) }
+        push(lines, "Subject: " + this.subject)
+        push(lines, "MIME-Version: 1.0")
+        push(lines, "Content-Type: " + this.content_type)
+        for kv in entries(this.headers) {
+            push(lines, kv[0] + ": " + kv[1])
+        }
+        push(lines, "")
+        push(lines, this.body)
+        return join(lines, _CRLF)
+    }
+}
+
+fn message(from_addr, to_addrs, subject, body) {
+    return SmtpMessage(from_addr, to_addrs, subject, body)
+}
+
+-- ── Client ──────────────────────────────────────
+
+class SmtpClient {
+    fn init(transport, opts) {
+        let o = opts ?? {}
+        this.transport = transport
+        this.helo_domain = if has(o, "helo") { o["helo"] } else { "claritos.local" }
+        this.username = if has(o, "username") { o["username"] } else { null }
+        this.password = if has(o, "password") { o["password"] } else { null }
+        this.use_starttls = if has(o, "starttls") { o["starttls"] } else { true }
+        this.state = "disconnected"           -- disconnected | greeted | helo | tls | auth | ready | done
+        this.capabilities = []
+        this.log = []
+        this.errors = []
+    }
+
+    fn _send(line) {
+        push(this.log, ["S", line])
+        this.transport.send(line + _CRLF)
+    }
+
+    fn _recv() {
+        let line = this.transport.recv_line()
+        let stripped = if ends(line, _CRLF) { substring(line, 0, len(line) - 2) } else { line }
+        push(this.log, ["R", stripped])
+        return stripped
+    }
+
+    -- Read a multi-line SMTP response. Lines look like
+    -- "250-STARTTLS" or "250 OK"; the dash means continuation.
+    fn _recv_response() {
+        mut lines = []
+        while true {
+            let line = this._recv()
+            push(lines, line)
+            if len(line) < 4 { break }
+            let sep = char_at(line, 3)
+            if sep == " " { break }
+        }
+        let first = lines[0]
+        let code = if len(first) >= 3 { int(substring(first, 0, 3)) } else { 0 }
+        return {"code": code, "lines": lines}
+    }
+
+    fn read_greeting() {
+        let r = this._recv_response()
+        if r["code"] != 220 {
+            this.errors = ["bad greeting: " + str(r["code"])]
+            return false
+        }
+        this.state = "greeted"
+        return true
+    }
+
+    fn ehlo() {
+        this._send("EHLO " + this.helo_domain)
+        let r = this._recv_response()
+        if r["code"] != 250 {
+            this.errors = ["EHLO failed: " + str(r["code"])]
+            return false
+        }
+        mut caps = []
+        for line in r["lines"] {
+            if len(line) > 4 {
+                push(caps, substring(line, 4, len(line)))
+            }
+        }
+        this.capabilities = caps
+        this.state = "helo"
+        return true
+    }
+
+    fn _has_capability(name) {
+        for c in this.capabilities {
+            if starts(c, name) { return true }
+        }
+        return false
+    }
+
+    fn starttls() {
+        if not this._has_capability("STARTTLS") { return false }
+        this._send("STARTTLS")
+        let r = this._recv_response()
+        if r["code"] != 220 { return false }
+        -- Real implementation: upgrade transport to TLS here.
+        if this.transport != null and has_method(this.transport, "upgrade_tls") {
+            this.transport.upgrade_tls()
+        }
+        this.state = "tls"
+        return this.ehlo()    -- re-issue EHLO over the encrypted channel
+    }
+
+    fn auth_login() {
+        if this.username == null or this.password == null { return false }
+        if not this._has_capability("AUTH") { return false }
+        this._send("AUTH LOGIN")
+        let r1 = this._recv_response()
+        if r1["code"] != 334 { return false }
+        this._send(_b64encode(this.username))
+        let r2 = this._recv_response()
+        if r2["code"] != 334 { return false }
+        this._send(_b64encode(this.password))
+        let r3 = this._recv_response()
+        if r3["code"] != 235 {
+            push(this.errors, "auth failed: " + str(r3["code"]))
+            return false
+        }
+        this.state = "auth"
+        return true
+    }
+
+    fn send(msg) {
+        this._send("MAIL FROM:<" + msg.from_addr + ">")
+        let r1 = this._recv_response()
+        if r1["code"] != 250 {
+            push(this.errors, "MAIL FROM rejected: " + str(r1["code"]))
+            return false
+        }
+        for rcpt in msg._all_recipients() {
+            this._send("RCPT TO:<" + rcpt + ">")
+            let r = this._recv_response()
+            if r["code"] != 250 and r["code"] != 251 {
+                push(this.errors, "RCPT TO " + rcpt + " rejected: " + str(r["code"]))
+                return false
+            }
+        }
+        this._send("DATA")
+        let r2 = this._recv_response()
+        if r2["code"] != 354 { return false }
+        let body = msg.render()
+        let dotted = _dot_stuff(body)
+        this._send(dotted)
+        this._send(".")
+        let r3 = this._recv_response()
+        if r3["code"] != 250 {
+            push(this.errors, "DATA rejected: " + str(r3["code"]))
+            return false
+        }
+        this.state = "ready"
+        return true
+    }
+
+    fn quit() {
+        this._send("QUIT")
+        this._recv_response()
+        this.state = "done"
+    }
+}
+
+fn smtp_client(transport, opts) { return SmtpClient(transport, opts) }
+
+-- ── Helpers ───────────────────────────────
+
+fn _dot_stuff(body) {
+    -- Lines starting with "." get a "." prepended (RFC 5321 §4.5.2).
+    let lines = split(body, _CRLF)
+    mut out = []
+    for line in lines {
+        if starts(line, ".") { push(out, "." + line) }
+        else { push(out, line) }
+    }
+    return join(out, _CRLF)
+}
+
+let _B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+fn _b64encode(s) {
+    mut out = ""
+    mut i = 0
+    let n = len(s)
+    while i < n {
+        let c1 = _ord(char_at(s, i))
+        let c2 = if i + 1 < n { _ord(char_at(s, i + 1)) } else { 0 }
+        let c3 = if i + 2 < n { _ord(char_at(s, i + 2)) } else { 0 }
+        let triple = (c1 << 16) | (c2 << 8) | c3
+        out = out + char_at(_B64_ALPHABET, (triple >> 18) & 0x3F)
+        out = out + char_at(_B64_ALPHABET, (triple >> 12) & 0x3F)
+        out = out + (if i + 1 < n { char_at(_B64_ALPHABET, (triple >> 6) & 0x3F) } else { "=" })
+        out = out + (if i + 2 < n { char_at(_B64_ALPHABET, triple & 0x3F) } else { "=" })
+        i = i + 3
+    }
+    return out
+}
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 {
+        if from_char_code(i) == c { return i }
+        i = i + 1
+    }
+    return 0
+}
+
+fn has_method(obj, name) {
+    if obj == null { return false }
+    return has(obj, name)
+}

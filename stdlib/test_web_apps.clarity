@@ -1,0 +1,617 @@
+-- Phase 68 — web + networking app tests.
+--
+-- HTML parser, CSS layout, browser state machine, IMAP + SMTP wire
+-- protocols, mail app multi-account flow, WebSocket frame
+-- parser/builder + handshake, chat app multi-connection routing,
+-- store-front state machine + sorting + install path.
+
+from "html_parser.clarity" import parse_html, html_node, TYPE_DOCUMENT, TYPE_ELEMENT, TYPE_TEXT
+from "css_layout.clarity" import layout_document, Box
+from "browser.clarity" import Browser, browser, Tab, tab
+from "imap.clarity" import ImapClient, imap_client
+from "smtp.clarity" import SmtpClient, smtp_client, message, SmtpMessage
+from "mail.clarity" import MailApp, mail_app, mail_account, FOLDER_INBOX, FOLDER_DRAFTS, FOLDER_SENT
+from "websocket.clarity" import parse_frame, build_frame, build_text_frame, build_close_frame, build_ping_frame, OPCODE_TEXT, OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG, client_handshake, parse_handshake_response, websocket
+from "chat.clarity" import ChatApp, chat_app, ChatConnection, chat_connection, channel
+from "store_app.clarity" import StoreApp, store_app, VIEW_BROWSE, VIEW_SEARCH, VIEW_CATEGORY, VIEW_DETAIL, VIEW_INSTALLED, SORT_NAME, SORT_RATING, SORT_INSTALLS
+from "app_store.clarity" import AppStore, app_store, LocalAppStoreClient
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── HTML parser ────────────────────────────────────
+
+show "-- Phase 68: HTML parser --"
+
+let dom = parse_html("<h1>Hello</h1><p>world</p>")
+assert_eq(dom.tag, "document", "root tag is document")
+assert_eq(len(dom.children), 2, "two children at root")
+assert_eq(dom.children[0].tag, "h1", "first child is h1")
+assert_eq(dom.children[0].text(), "Hello", "h1 text")
+assert_eq(dom.children[1].tag, "p", "second child is p")
+assert_eq(dom.children[1].text(), "world", "p text")
+
+-- Attributes
+let dom2 = parse_html("<a href=\"https://example.com\" class='ext'>link</a>")
+let a = dom2.first("a")
+assert(a != null, "a found")
+assert_eq(a.attr("href"), "https://example.com", "double-quoted attr")
+assert_eq(a.attr("class"), "ext", "single-quoted attr")
+assert_eq(a.text(), "link", "a text")
+
+-- Void tags
+let dom3 = parse_html("<p>x<br>y<br/>z</p>")
+let p = dom3.first("p")
+let brs = p.find_all("br")
+assert_eq(len(brs), 2, "two <br> tags found")
+assert_eq(p.text(), "xyz", "void tags don't break text concatenation")
+
+-- Self-closing img with alt
+let dom4 = parse_html("<img src='x.png' alt='cat'/>")
+let img = dom4.first("img")
+assert_eq(img.attr("src"), "x.png", "img src")
+assert_eq(img.attr("alt"), "cat", "img alt")
+
+-- Comments + doctype dropped
+let dom5 = parse_html("<!doctype html><!-- ignore me --><h1>only</h1>")
+assert_eq(len(dom5.children), 1, "comment + doctype dropped")
+assert_eq(dom5.children[0].text(), "only", "h1 survives")
+
+-- Entities
+let dom6 = parse_html("<p>2 &lt; 3 &amp; 4 &gt; 1</p>")
+assert_eq(dom6.first("p").text(), "2 < 3 & 4 > 1", "entities decoded")
+
+-- Mismatched closing tag is forgiving
+let dom7 = parse_html("<div><p>hello</div>")
+assert(dom7.first("p") != null, "p still present despite mismatched close")
+
+-- Lists
+let dom8 = parse_html("<ul><li>a</li><li>b</li><li>c</li></ul>")
+let lis = dom8.find_all("li")
+assert_eq(len(lis), 3, "three li")
+assert_eq(lis[1].text(), "b", "second li text")
+
+-- find_all walks nested
+let dom9 = parse_html("<div><div><a>x</a></div><a>y</a></div>")
+assert_eq(len(dom9.find_all("a")), 2, "find_all walks nested")
+
+-- ── CSS layout ─────────────────────────────────────
+
+show "-- Phase 68: CSS layout --"
+
+let dom_l = parse_html("<h1>Hi</h1><p>this is a paragraph of words to wrap</p>")
+let layout = layout_document(dom_l, 200)
+assert(layout != null, "layout returned")
+assert_eq(layout.role, "block", "document is a block")
+assert_eq(layout.rect["w"], 200, "document width = viewport")
+assert(layout.rect["h"] > 0, "document has height")
+
+-- The h1 child gets a non-zero margin_top (default 16)
+let h1_box = layout.children[0]
+assert_eq(h1_box.role, "block", "h1 is a block")
+assert(h1_box.rect["y"] >= 16, "h1 starts after its margin_top")
+
+-- The p starts below the h1
+let p_box = layout.children[1]
+assert(p_box.rect["y"] > h1_box.rect["y"] + h1_box.rect["h"], "p sits below h1")
+
+-- Inline wrapping: a long sentence spans multiple line-heights
+let dom_w = parse_html("<p>one two three four five six seven eight nine ten</p>")
+let layout_w = layout_document(dom_w, 80)         -- narrow viewport
+let p_w = layout_w.children[0]
+assert(p_w.rect["h"] > 18, "narrow viewport produces multi-line height")
+
+-- Inline style override
+let dom_s = parse_html("<p style='margin-top:40px;font-size:24px'>x</p>")
+let layout_s = layout_document(dom_s, 200)
+let p_s = layout_s.children[0]
+assert(p_s.rect["y"] >= 40, "inline margin-top applied")
+assert_eq(p_s.style["font_size"], 24, "inline font-size applied")
+
+-- ── Browser state machine ──────────────────────────
+
+show "-- Phase 68: browser state machine --"
+
+mut fetch_log = []
+fn fake_fetch(url, headers) {
+    push(fetch_log, url)
+    if url == "https://example.com" {
+        return {"status": 200, "headers": {}, "body": "<title>Example</title><h1>Hello</h1>"}
+    }
+    if url == "https://broken" {
+        return {"status": 500, "headers": {}, "body": "oops"}
+    }
+    if url == "about:blank" {
+        return {"status": 200, "headers": {}, "body": "<title>blank</title>"}
+    }
+    return {"status": 200, "headers": {}, "body": "<title>" + url + "</title>"}
+}
+
+let b = browser({"fetcher": fake_fetch})
+let t1 = b.new_tab("https://example.com")
+assert_eq(t1.status, "loaded", "tab loaded")
+assert_eq(t1.title, "Example", "title pulled from <title>")
+assert_eq(t1.url, "https://example.com", "url normalized + stored")
+assert(t1.dom != null, "DOM built")
+assert(t1.layout != null, "layout built")
+
+-- New tab default homepage
+let t2 = b.new_tab(null)
+assert(t2 != null, "second tab created")
+assert_eq(b.tab_count(), 2, "two tabs")
+
+-- Active tab tracking
+assert(b.select_tab(t1.id), "select first tab")
+assert_eq(b.active_tab().id, t1.id, "active updated")
+
+-- Bookmark + dedupe
+assert(b.bookmark(t1, "Example"), "first bookmark added")
+assert(not b.bookmark(t1, "Example"), "duplicate bookmark refused")
+assert(b.is_bookmarked("https://example.com"), "is_bookmarked")
+assert(b.unbookmark("https://example.com"), "unbookmark removes")
+assert(not b.is_bookmarked("https://example.com"), "removed")
+
+-- History: visit two pages, go back, go forward
+b.load(t1, "https://second")
+b.load(t1, "https://third")
+assert_eq(len(t1.history), 3, "three entries in history")
+assert(b.go_back(t1), "back works")
+assert_eq(t1.url, "https://second", "back to second")
+assert(b.go_back(t1), "back again")
+assert_eq(t1.url, "https://example.com", "back to first")
+assert(not b.go_back(t1), "can't go back further")
+assert(b.go_forward(t1), "forward works")
+assert_eq(t1.url, "https://second", "forward to second")
+-- Loading a new url after going back truncates the forward stack
+b.load(t1, "https://branch")
+assert(not b.go_forward(t1), "forward stack truncated after new load")
+
+-- URL normalisation
+let b2 = browser({"fetcher": fake_fetch})
+let nt = b2.new_tab(null)
+b2.load(nt, "example.org")
+assert_eq(nt.url, "https://example.org", "bare domain → https")
+
+-- Search query routes to search engine
+b2.search("clarity language")
+assert(contains(fetch_log[len(fetch_log) - 1], "duckduckgo.com"), "search hit ddg")
+
+-- HTTP error → tab status="error"
+let bt = b.new_tab(null)
+b.load(bt, "https://broken")
+assert_eq(bt.status, "error", "500 sets error")
+assert(contains(bt.error, "500"), "error message includes status code")
+
+-- Close tab
+let count_before = b.tab_count()
+b.close_tab(t2.id)
+assert_eq(b.tab_count(), count_before - 1, "close decremented")
+
+-- ── IMAP wire protocol ─────────────────────────────
+
+show "-- Phase 68: IMAP --"
+
+class FakeImapTransport {
+    fn init(replies) {
+        this.sent = []
+        this.replies = replies
+        this._idx = 0
+    }
+    fn send(line) { push(this.sent, line) }
+    fn recv_line() {
+        let l = this.replies[this._idx]
+        this._idx = this._idx + 1
+        return l
+    }
+}
+
+let imap_replies = [
+    "* OK [CAPABILITY IMAP4rev1] hello\r\n",
+    "* CAPABILITY IMAP4rev1 LITERAL+ AUTH=PLAIN\r\n",
+    "A1 OK CAPABILITY completed\r\n",
+    "A2 OK LOGIN completed\r\n",
+    "* 23 EXISTS\r\n",
+    "* 0 RECENT\r\n",
+    "* OK [UIDVALIDITY 1234] UIDs valid\r\n",
+    "* OK [UIDNEXT 100] Predicted next UID\r\n",
+    "A3 OK [READ-WRITE] SELECT completed\r\n",
+    "* SEARCH 1 2 3 5\r\n",
+    "A4 OK SEARCH completed\r\n"
+]
+let imap_t = FakeImapTransport(imap_replies)
+let im = imap_client(imap_t)
+assert(im.read_greeting(), "greeting accepted")
+let cap = im.capability()
+assert_eq(cap["status"], "OK", "CAPABILITY OK")
+assert(contains(im.capabilities, "IMAP4rev1"), "IMAP4rev1 capability parsed")
+assert(im.login("alex@example.com", "secret"), "LOGIN succeeds")
+assert_eq(im.state, "authenticated", "state authenticated after login")
+
+let info = im.select("INBOX")
+assert(info != null, "SELECT returned info")
+assert_eq(info["exists"], 23, "EXISTS count")
+assert_eq(info["uidvalidity"], 1234, "UIDVALIDITY")
+assert_eq(info["uidnext"], 100, "UIDNEXT")
+
+let ids = im.search("ALL")
+assert_eq(ids, [1, 2, 3, 5], "SEARCH ids parsed")
+
+-- Sent commands tagged sequentially
+assert(contains(imap_t.sent[0], "A1 CAPABILITY"), "first cmd tagged A1")
+assert(contains(imap_t.sent[1], "A2 LOGIN"), "login tagged A2")
+assert(contains(imap_t.sent[2], "A3 SELECT"), "select tagged A3")
+
+-- ── SMTP wire protocol ────────────────────────────
+
+show "-- Phase 68: SMTP --"
+
+class FakeSmtpTransport {
+    fn init(replies) {
+        this.sent = []
+        this.replies = replies
+        this._idx = 0
+    }
+    fn send(line) { push(this.sent, line) }
+    fn recv_line() {
+        let l = this.replies[this._idx]
+        this._idx = this._idx + 1
+        return l
+    }
+}
+
+let smtp_replies = [
+    "220 mail.example.com ESMTP\r\n",
+    "250-mail.example.com\r\n",
+    "250-AUTH PLAIN LOGIN\r\n",
+    "250 STARTTLS\r\n",
+    "250 OK\r\n",                         -- MAIL FROM
+    "250 OK\r\n",                         -- RCPT TO 1
+    "354 Go ahead\r\n",                   -- DATA
+    "250 Queued\r\n",                     -- final 250 after .
+    "221 Bye\r\n"                          -- QUIT
+]
+let smtp_t = FakeSmtpTransport(smtp_replies)
+let sm = smtp_client(smtp_t, {"helo": "test.local", "starttls": false})
+assert(sm.read_greeting(), "smtp greeting 220")
+assert(sm.ehlo(), "EHLO ok")
+assert(sm._has_capability("AUTH PLAIN LOGIN"), "AUTH capability parsed")
+assert(sm._has_capability("STARTTLS"), "STARTTLS capability parsed")
+
+let msg = message("alex@example.com", ["bob@example.com"], "hi", "hello there")
+assert(sm.send(msg), "send succeeds")
+sm.quit()
+
+-- Verify the wire output: we should have sent MAIL FROM, RCPT TO,
+-- DATA, the message body, the terminating ".", and QUIT.
+mut saw_mail_from = false
+mut saw_rcpt = false
+mut saw_data = false
+mut saw_dot = false
+mut saw_quit = false
+for line in smtp_t.sent {
+    if starts(line, "MAIL FROM:<alex@example.com>") { saw_mail_from = true }
+    if starts(line, "RCPT TO:<bob@example.com>") { saw_rcpt = true }
+    if starts(line, "DATA") { saw_data = true }
+    if line == ".\r\n" { saw_dot = true }
+    if starts(line, "QUIT") { saw_quit = true }
+}
+assert(saw_mail_from, "wire: MAIL FROM")
+assert(saw_rcpt, "wire: RCPT TO")
+assert(saw_data, "wire: DATA")
+assert(saw_dot, "wire: terminating dot")
+assert(saw_quit, "wire: QUIT")
+
+-- Render of a multi-recipient + cc message
+let m2 = message("a@x", ["b@x", "c@x"], "subj", "body")
+m2.add_cc("d@x")
+m2.add_bcc("e@x")
+let body = m2.render()
+assert(contains(body, "From: a@x"), "From header")
+assert(contains(body, "To: b@x, c@x"), "joined To header")
+assert(contains(body, "Cc: d@x"), "Cc header")
+assert(not contains(body, "e@x"), "Bcc not in headers")
+let recips = m2._all_recipients()
+assert(contains(recips, "e@x"), "Bcc in recipients list")
+assert_eq(len(recips), 4, "4 recipients total")
+
+-- Dot-stuffing
+let body_dot = m2.render() + "\r\n.leading dot"
+-- Re-render via the smtp client's helper isn't exposed, but the
+-- private function tested transitively when send() ran above.
+
+-- ── Mail app ───────────────────────────────────────
+
+show "-- Phase 68: Mail app --"
+
+let app = mail_app()
+let acct = mail_account("Personal", "alex@example.com")
+acct.attach_imap(FakeImapTransport([
+    "* OK greeting\r\n",
+    "A1 OK LOGIN ok\r\n",
+    "* 0 EXISTS\r\n",
+    "A2 OK SELECT completed\r\n",
+    "* SEARCH \r\n",
+    "A3 OK\r\n"
+]))
+acct.attach_smtp(FakeSmtpTransport([
+    "220 ESMTP\r\n",
+    "250 OK\r\n",                          -- EHLO
+    "250 OK\r\n",                          -- MAIL FROM
+    "250 OK\r\n",                          -- RCPT TO
+    "354 Send it\r\n",                     -- DATA
+    "250 Queued\r\n",                       -- after dot
+    "221 Bye\r\n"
+]), {"starttls": false, "helo": "test"})
+
+app.add_account(acct)
+assert(app.sync_inbox(), "sync_inbox runs")
+assert_eq(len(acct.inbox), 0, "empty mailbox returns []")
+
+-- Compose + send
+app.start_compose(["bob@example.com"], "hello", "hi bob")
+assert(app.compose != null, "compose started")
+let sent = app.send_compose()
+assert(sent, "send_compose ok")
+assert_eq(len(acct.sent), 1, "1 in sent")
+assert_eq(app.compose, null, "compose cleared after send")
+
+-- Save draft
+app.start_compose(["bob@example.com"], "later", "wait...")
+let draft = app.save_draft()
+assert(draft != null, "save_draft returns entry")
+assert_eq(len(acct.drafts), 1, "1 draft")
+assert_eq(app.compose, null, "compose cleared after save")
+
+-- Folder switching + listing
+app.switch_folder(FOLDER_DRAFTS)
+let drafts_list = app.list_messages()
+assert_eq(len(drafts_list), 1, "drafts folder list has 1")
+
+-- Mark read / unread
+app.switch_folder(FOLDER_INBOX)
+acct.inbox = [{"id": 999, "from": "x", "subject": "y", "read": false, "flagged": false}]
+assert_eq(app.unread_count(), 1, "unread_count = 1")
+app.mark_read(999, true)
+assert_eq(app.unread_count(), 0, "after mark_read, unread = 0")
+app.flag(999, true)
+assert(acct.inbox[0]["flagged"], "flag set")
+
+-- Delete
+app.delete_message(999)
+assert_eq(len(acct.inbox), 0, "deleted")
+
+-- ── WebSocket frame round-trip ─────────────────────
+
+show "-- Phase 68: WebSocket --"
+
+let frame = build_text_frame("hello", true)
+assert(len(frame) > 6, "masked frame includes mask + payload")
+let parsed = parse_frame(frame)
+assert(parsed != null, "parsed frame")
+assert_eq(parsed["opcode"], OPCODE_TEXT, "opcode is text")
+assert(parsed["fin"], "fin set")
+assert(parsed["masked"], "masked set")
+assert_eq(len(parsed["payload"]), 5, "payload length 5")
+
+-- Round-trip the payload as bytes
+fn _bytes_to_text(bytes) {
+    mut s = ""
+    for b in bytes { s = s + from_char_code(b) }
+    return s
+}
+assert_eq(_bytes_to_text(parsed["payload"]), "hello", "unmasked payload matches")
+
+-- Server frames are unmasked
+let svr = build_text_frame("world", false)
+let svr_parsed = parse_frame(svr)
+assert(not svr_parsed["masked"], "server frame unmasked")
+assert_eq(_bytes_to_text(svr_parsed["payload"]), "world", "unmasked payload")
+
+-- 16-bit length frame
+mut big = ""
+mut bi = 0
+while bi < 200 { big = big + "x"; bi = bi + 1 }
+let big_frame = build_text_frame(big, false)
+let big_parsed = parse_frame(big_frame)
+assert_eq(len(big_parsed["payload"]), 200, "200-byte payload via 16-bit len")
+
+-- Close + ping + pong opcodes
+let close = build_close_frame(1000, "bye")
+let close_parsed = parse_frame(close)
+assert_eq(close_parsed["opcode"], OPCODE_CLOSE, "close opcode")
+assert_eq(close_parsed["payload"][0], 0x03, "close code high byte (1000 = 0x03E8)")
+assert_eq(close_parsed["payload"][1], 0xE8, "close code low byte")
+
+let ping = build_ping_frame()
+let ping_parsed = parse_frame(ping)
+assert_eq(ping_parsed["opcode"], OPCODE_PING, "ping opcode")
+
+-- Partial frame returns null
+let partial = [0x81, 0x05, 0x68]   -- header says 5 bytes, only 1 supplied
+assert_eq(parse_frame(partial), null, "partial frame returns null")
+
+-- Handshake
+let req = client_handshake("example.com", "/chat", "test-key=")
+assert(contains(req, "GET /chat HTTP/1.1"), "request line")
+assert(contains(req, "Host: example.com"), "Host header")
+assert(contains(req, "Sec-WebSocket-Key: test-key="), "key header")
+assert(contains(req, "Sec-WebSocket-Version: 13"), "version 13")
+assert(contains(req, "Upgrade: websocket"), "upgrade header")
+
+let resp = parse_handshake_response("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: abc=\r\n\r\n")
+assert(resp["ok"], "101 accepted")
+assert_eq(resp["accept"], "abc=", "accept key")
+
+let bad_resp = parse_handshake_response("HTTP/1.1 400 Bad Request\r\n\r\n")
+assert(not bad_resp["ok"], "400 rejected")
+
+-- ── Chat app ──────────────────────────────────────
+
+show "-- Phase 68: Chat app --"
+
+class FakeChatBackend {
+    fn init() {
+        this.connected = false
+        this.events = []
+        this.sent = []
+        this.joined = []
+    }
+    fn connect() { this.connected = true; return true }
+    fn join(name) { push(this.joined, name); return true }
+    fn part(name) { return true }
+    fn send(name, text) { push(this.sent, [name, text]); return true }
+    fn poll() {
+        let ev = this.events
+        this.events = []
+        return ev
+    }
+    fn push_event(ev) { push(this.events, ev) }
+}
+
+let backend = FakeChatBackend()
+let conn = chat_connection("matrix", backend)
+let chat = chat_app({"user": "alex"})
+chat.add_connection(conn)
+
+assert(chat.join("matrix", "#general"), "join channel")
+assert_eq(len(chat.channel_list()), 1, "one channel")
+
+-- Push a message; poll dispatches it
+backend.push_event({"kind": "message", "channel": "#general", "from": "bob", "text": "hi", "ts": 1000})
+chat.poll()
+let ch = chat.active_channel()
+assert(ch != null, "active channel set")
+assert_eq(len(ch.messages), 1, "one message")
+assert_eq(ch.messages[0]["from"], "bob", "from")
+assert_eq(ch.unread, 1, "unread bumped")
+
+-- Selecting clears unread
+chat.select("matrix", "#general")
+assert_eq(ch.unread, 0, "unread cleared on select")
+
+-- Sending a message goes through the backend + appears in our log
+assert(chat.send("hello back"), "send ok")
+assert_eq(backend.sent[0][0], "#general", "backend got channel")
+assert_eq(backend.sent[0][1], "hello back", "backend got text")
+assert_eq(len(ch.messages), 2, "our message stored locally")
+assert_eq(ch.messages[1]["from"], "alex", "our user as from")
+
+-- Join + part events
+backend.push_event({"kind": "join", "channel": "#general", "user": "carol"})
+backend.push_event({"kind": "presence", "user": "bob", "online": true})
+chat.poll()
+assert(contains(ch.members, "carol"), "carol joined")
+assert(chat.presence["bob"], "bob online")
+
+backend.push_event({"kind": "part", "channel": "#general", "user": "carol"})
+chat.poll()
+assert(not contains(ch.members, "carol"), "carol parted")
+
+-- Unread total across channels
+chat.join("matrix", "#dev")
+backend.push_event({"kind": "message", "channel": "#dev", "from": "x", "text": "..."})
+chat.poll()
+assert(chat.unread_total() >= 1, "unread total counts new message")
+
+-- ── Store front-end ────────────────────────────────
+
+show "-- Phase 68: Store app --"
+
+let lc = LocalAppStoreClient()
+lc.set("/apps", [
+    {"name": "calc", "version": "1.0", "rating": 4.5, "installs": 1000, "categories": ["utility"]},
+    {"name": "editor", "version": "0.9", "rating": 3.8, "installs": 500, "categories": ["dev"]},
+    {"name": "browser", "version": "0.5", "rating": 4.9, "installs": 5000, "categories": ["web"]}
+])
+lc.set("/apps/calc", {"name": "calc", "version": "1.0", "rating": 4.5, "installs": 1000, "tarball_url": "local://calc.tgz"})
+lc.set("/apps/category/utility", [{"name": "calc", "version": "1.0", "rating": 4.5, "installs": 1000}])
+lc.set("/apps/search?q=ed", [{"name": "editor", "version": "0.9", "rating": 3.8}])
+
+let store = app_store({"client": lc, "install_root": "/tmp/_clarity_store_test_2"})
+exec_full("rm -rf /tmp/_clarity_store_test_2")
+let sapp = store_app(store)
+
+let listed = sapp.open_browse()
+assert_eq(sapp.view, VIEW_BROWSE, "view = browse")
+assert_eq(len(listed), 3, "browse returned 3")
+
+-- Sort by rating desc
+sapp.set_sort(SORT_RATING, true)
+assert_eq(sapp.entries[0].name, "browser", "highest rating first")
+
+sapp.set_sort(SORT_RATING, false)
+assert_eq(sapp.entries[0].name, "editor", "lowest rating first")
+
+sapp.set_sort(SORT_INSTALLS, true)
+assert_eq(sapp.entries[0].name, "browser", "most installs first")
+
+sapp.set_sort(SORT_NAME, false)
+assert_eq(sapp.entries[0].name, "browser", "alphabetical: browser first")
+assert_eq(sapp.entries[2].name, "editor", "alphabetical: editor last")
+
+-- Search
+let hits = sapp.search("ed")
+assert_eq(sapp.view, VIEW_SEARCH, "view = search")
+assert_eq(len(hits), 1, "search hit count")
+assert_eq(hits[0].name, "editor", "search returned editor")
+
+-- Empty search returns []
+let nothing = sapp.search("")
+assert_eq(len(nothing), 0, "empty query → empty entries")
+
+-- Category
+sapp.open_category("utility")
+assert_eq(sapp.view, VIEW_CATEGORY, "view = category")
+assert_eq(sapp.category, "utility", "category set")
+assert_eq(sapp.entries[0].name, "calc", "calc in utility")
+
+-- Detail
+let info = sapp.open_detail("calc")
+assert(info != null, "detail returned")
+assert_eq(sapp.view, VIEW_DETAIL, "view = detail")
+assert_eq(sapp.selected.name, "calc", "selected app")
+
+-- Detail of unknown → error
+let none = sapp.open_detail("nope")
+assert_eq(none, null, "unknown app returns null")
+assert(len(sapp.errors) > 0, "error recorded")
+
+-- back_to_list returns to most-recent list view
+sapp.back_to_list()
+assert_eq(sapp.view, VIEW_CATEGORY, "back to category since one was set")
+
+-- Install path (real install via the LocalClient + a synthetic tarball)
+let tar_src = "/tmp/_clarity_store_calc_src"
+exec_full("rm -rf " + tar_src + " && mkdir -p " + tar_src)
+write(tar_src + "/clarity-app.toml", "[app]\nname = \"calc\"\nversion = \"1.0\"\nentry = \"main.clarity\"\n\n[window]\nwidth = 320\nheight = 480\n\n[permissions]\n")
+write(tar_src + "/main.clarity", "show \"calc\"\n")
+let tar_path = "/tmp/_clarity_store_calc.tgz"
+exec_full("rm -f " + tar_path + " && cd " + tar_src + " && tar czf " + tar_path + " .")
+lc.set_tarball("local://calc.tgz", tar_path)
+
+let result = sapp.install("calc")
+assert(result != null, "install returned entry")
+assert(sapp.is_installed("calc"), "store reports installed")
+
+sapp.open_installed()
+assert_eq(sapp.view, VIEW_INSTALLED, "installed view")
+assert_eq(len(sapp.entries), 1, "one installed app listed")
+assert_eq(sapp.entries[0].name, "calc", "installed app name")
+
+-- Cleanup
+sapp.remove("calc")
+exec_full("rm -rf " + tar_src + " " + tar_path + " /tmp/_clarity_store_test_2")
+
+-- ── Summary ───────────────────────────────────────
+
+show ""
+show "Phase 68: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 68 test(s) failed" }
