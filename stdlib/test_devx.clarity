@@ -1,0 +1,421 @@
+-- Phase 69 — developer-experience tests.
+--
+-- IDE (project tree, buffers, debugger, output, git pane), UI
+-- builder (palette, mutations, hit-testing, code generation),
+-- docs browser (load + index + search + bookmarks + history +
+-- runner), playground (source state, gallery, snippets, share).
+
+from "ide.clarity" import Ide, ide, project_tree, ide_buffer, debugger_state, output_panel, git_pane, CHANNEL_BUILD, CHANNEL_RUN, DEBUGGER_IDLE, DEBUGGER_RUNNING, DEBUGGER_PAUSED, DEBUGGER_DONE
+from "ui_builder.clarity" import UiBuilder, ui_builder, palette
+from "docs_app.clarity" import DocsApp, docs_app
+from "playground_app.clarity" import PlaygroundApp, playground_app
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Project tree ────────────────────────────────
+
+show "-- Phase 69: project tree --"
+
+let scratch = "/tmp/_clarity_devx_scratch"
+exec_full("rm -rf " + scratch + " && mkdir -p " + scratch + "/src && mkdir -p " + scratch + "/tests")
+write(scratch + "/main.clarity", "show \"hi\"\n")
+write(scratch + "/src/util.clarity", "fn add(a, b) { return a + b }\n")
+write(scratch + "/tests/t.clarity", "show \"ok\"\n")
+
+let tree = project_tree(scratch)
+tree.refresh()
+assert_eq(tree.root.path, scratch, "root path")
+assert(tree.root.expanded, "root expanded by default")
+
+-- visible() before expanding any subdir
+let v1 = tree.visible()
+assert(len(v1) >= 4, "root + 3 entries visible")
+
+-- Expand src/
+tree.expand(scratch + "/src")
+let v2 = tree.visible()
+mut found_util = false
+for n in v2 { if n["path"] == scratch + "/src/util.clarity" { found_util = true } }
+assert(found_util, "expanded src/ shows util.clarity")
+
+-- Collapse src
+tree.collapse(scratch + "/src")
+let v3 = tree.visible()
+mut still_visible = false
+for n in v3 { if n["path"] == scratch + "/src/util.clarity" { still_visible = true } }
+assert(not still_visible, "collapse hides children")
+
+-- ── IDE buffers + tabs ──────────────────────────
+
+show "-- Phase 69: IDE buffers --"
+
+let id = ide(scratch)
+let b1 = id.open(scratch + "/main.clarity")
+assert_eq(id.active_tab, 0, "first open → active 0")
+assert_eq(len(id.tabs), 1, "one tab")
+assert(contains(b1.buffer.to_text(), "hi"), "buffer loaded from disk")
+
+let b2 = id.open(scratch + "/src/util.clarity")
+assert_eq(id.active_tab, 1, "second open → active 1")
+assert_eq(len(id.tabs), 2, "two tabs")
+
+-- Re-opening switches focus, no duplicate
+id.open(scratch + "/main.clarity")
+assert_eq(id.active_tab, 0, "re-open switches focus")
+assert_eq(len(id.tabs), 2, "no duplicate tab")
+
+-- Mark dirty + save_all
+b2.mark_dirty()
+assert_eq(id.dirty_count(), 1, "1 dirty")
+let saved = id.save_all()
+assert_eq(saved, 1, "save_all wrote 1 buffer")
+assert_eq(id.dirty_count(), 0, "no dirty after save")
+
+-- Close
+id.close(scratch + "/main.clarity")
+assert_eq(len(id.tabs), 1, "1 tab after close")
+
+-- ── LSP integration ────────────────────────────
+
+show "-- Phase 69: LSP --"
+
+mut lsp_calls = 0
+fn fake_lsp(source, path) {
+    lsp_calls = lsp_calls + 1
+    if contains(source, "BUG") {
+        return [{"line": 1, "column": 1, "severity": "error", "message": "BUG marker"}]
+    }
+    return []
+}
+
+id.register_lsp("clarity", fake_lsp)
+let active = id.active_buffer()
+active.buffer.load("show 1\n")
+let diags = id.check_active()
+assert_eq(len(diags), 0, "clean source: no diagnostics")
+
+active.buffer.load("show \"BUG\"\n")
+let diags2 = id.check_active()
+assert_eq(len(diags2), 1, "BUG marker detected")
+assert_eq(lsp_calls, 2, "LSP called twice")
+assert_eq(active.diagnostics, diags2, "diagnostics stored on buffer")
+
+-- ── Debugger state machine ─────────────────────
+
+show "-- Phase 69: debugger --"
+
+let dbg = id.debugger
+assert_eq(dbg.state, DEBUGGER_IDLE, "starts idle")
+
+assert(dbg.add_breakpoint(scratch + "/src/util.clarity", 1), "add bp")
+assert(not dbg.add_breakpoint(scratch + "/src/util.clarity", 1), "duplicate bp refused")
+assert_eq(len(dbg.breakpoints), 1, "1 breakpoint")
+assert(not dbg.toggle_breakpoint(scratch + "/src/util.clarity", 1), "toggle off → returns false (no longer set)")
+assert_eq(len(dbg.breakpoints), 0, "0 after toggle off")
+
+dbg.add_breakpoint(scratch + "/src/util.clarity", 5)
+dbg.add_watch("a + b")
+dbg.add_watch("a + b")
+assert_eq(len(dbg.watches), 1, "duplicate watch refused")
+dbg.add_watch("result")
+assert_eq(len(dbg.watches), 2, "2 watches")
+
+dbg.start(scratch + "/src/util.clarity", 1)
+assert_eq(dbg.state, DEBUGGER_RUNNING, "running after start")
+dbg.pause(5)
+assert_eq(dbg.state, DEBUGGER_PAUSED, "paused")
+assert_eq(dbg.current["line"], 5, "paused at line 5")
+assert(dbg.step(), "step ok")
+assert_eq(dbg.current["line"], 6, "advanced to line 6")
+dbg.resume()
+assert_eq(dbg.state, DEBUGGER_RUNNING, "resumed")
+dbg.stop()
+assert_eq(dbg.state, DEBUGGER_DONE, "done")
+
+-- step blocked when not paused
+assert(not dbg.step(), "step blocked when not paused")
+
+-- ── Output panel ──────────────────────────────
+
+show "-- Phase 69: output panel --"
+
+id.log(CHANNEL_BUILD, "compiling...")
+id.log(CHANNEL_BUILD, "done")
+id.log(CHANNEL_RUN, "starting")
+assert_eq(len(id.output.lines(CHANNEL_BUILD)), 2, "2 build lines")
+assert_eq(len(id.output.lines(CHANNEL_RUN)), 1, "1 run line")
+id.output.clear(CHANNEL_BUILD)
+assert_eq(len(id.output.lines(CHANNEL_BUILD)), 0, "build cleared")
+assert_eq(len(id.output.lines(CHANNEL_RUN)), 1, "run untouched")
+
+-- run_in_terminal
+id.run_in_terminal("echo hello-from-ide")
+let run_lines = id.output.lines(CHANNEL_RUN)
+mut saw_echo = false
+for entry in run_lines { if contains(entry["text"], "hello-from-ide") { saw_echo = true } }
+assert(saw_echo, "echo output captured")
+
+exec_full("rm -rf " + scratch)
+
+-- ── UI builder ────────────────────────────────
+
+show "-- Phase 69: UI builder --"
+
+let pal = palette()
+assert(len(pal) > 5, "palette has multiple widgets")
+mut kinds_in_palette = []
+for entry in pal { push(kinds_in_palette, entry["kind"]) }
+assert(contains(kinds_in_palette, "Label"), "Label in palette")
+assert(contains(kinds_in_palette, "Button"), "Button in palette")
+assert(contains(kinds_in_palette, "WidgetRoot"), "WidgetRoot in palette")
+
+let b = ui_builder()
+let root = b.add(null, "WidgetRoot", {"width": 480, "height": 320})
+let title = b.add(root, "Label", {"text": "Hi", "x": 20, "y": 20, "w": 200, "h": 30})
+let go_btn = b.add(root, "Button", {"text": "Go", "x": 240, "y": 100, "w": 80, "h": 32})
+assert_eq(b.root_id, root, "root_id set")
+assert_eq(len(b.nodes[root].children), 2, "root has 2 children")
+
+-- Move + resize + property
+b.move_node(title, 40, 24)
+assert_eq(b.nodes[title].x, 40, "moved")
+assert(b.resize_node(go_btn, 100, 40), "resize ok")
+assert(not b.resize_node(go_btn, 0, 10), "resize refused for 0 width")
+b.set_property(title, "text", "Hello")
+assert_eq(b.nodes[title].props["text"], "Hello", "prop set")
+
+-- Hit testing
+let hit = b.hit_test(50, 30)
+assert_eq(hit, title, "hit-test on label")
+let hit2 = b.hit_test(280, 120)
+assert_eq(hit2, go_btn, "hit-test on button")
+let miss = b.hit_test(450, 250)
+assert_eq(miss, root, "hit-test in empty area returns root")
+let nope = b.hit_test(600, 600)
+assert_eq(nope, null, "hit-test outside returns null")
+
+-- Adding an unknown widget kind throws
+mut threw = false
+try { b.add(root, "FooBar", {}) } catch e { threw = true }
+assert(threw, "unknown kind throws")
+
+-- Remove
+let extra = b.add(root, "Checkbox", {"label_text": "x"})
+assert_eq(len(b.nodes[root].children), 3, "3 children")
+b.remove(extra)
+assert_eq(len(b.nodes[root].children), 2, "back to 2")
+assert(not has(b.nodes, extra), "removed from nodes")
+
+-- Can't remove root
+assert(not b.remove(root), "remove root refused")
+
+-- to_dict
+let dict = b.to_dict()
+assert_eq(dict["kind"], "WidgetRoot", "dict root kind")
+assert_eq(len(dict["children"]), 2, "dict has 2 children")
+
+-- Generate
+let code = b.generate("Demo")
+assert(contains(code, "fn build_demo()"), "generated function")
+assert(contains(code, "let widget1 = WidgetRoot(480, 320)"), "WidgetRoot ctor")
+assert(contains(code, "Label(\"Hello\")"), "Label ctor with prop")
+assert(contains(code, "Button(\"Go\")"), "Button ctor")
+assert(contains(code, "set_bounds(40, 24, 200, 30)"), "label bounds")
+assert(contains(code, ".add("), "child attached via .add")
+assert(contains(code, "from \"widgets.clarity\""), "widgets import")
+assert(contains(code, "from \"ui.clarity\""), "ui import")
+
+-- Rename
+assert(b.rename(title, "title_label"), "rename ok")
+assert(not b.rename(title, "1bad"), "invalid identifier rejected")
+assert(not b.rename(title, "has space"), "space in identifier rejected")
+let code2 = b.generate("Demo")
+assert(contains(code2, "let title_label"), "rename appears in generated code")
+
+-- Selection + history
+b.select(title)
+assert_eq(b.selected, title, "selected")
+assert(b.select(null), "select null clears")
+assert(b.select(99999) == false, "unknown id cannot be selected")
+assert(len(b.history) > 0, "snapshots taken")
+
+-- ── Docs browser ──────────────────────────────
+
+show "-- Phase 69: docs browser --"
+
+let docs_dir = "/tmp/_clarity_docs_scratch"
+exec_full("rm -rf " + docs_dir + " && mkdir -p " + docs_dir)
+write(docs_dir + "/strings.clarity",
+  "-- Trim leading + trailing whitespace.\n" +
+  "fn my_trim(s) {\n" +
+  "    return trim(s)\n" +
+  "}\n" +
+  "\n" +
+  "-- Convert to upper-case.\n" +
+  "fn my_upper(s) {\n" +
+  "    return upper(s)\n" +
+  "}\n")
+write(docs_dir + "/numbers.clarity",
+  "-- Add two numbers.\n" +
+  "fn add(a, b) {\n" +
+  "    return a + b\n" +
+  "}\n")
+
+let docs = docs_app()
+let count = docs.load_from_dir(docs_dir)
+assert(count >= 3, "loaded at least 3 entries")
+assert(contains(docs.modules(), "strings"), "strings module present")
+assert(contains(docs.modules(), "numbers"), "numbers module present")
+
+let alpha = docs.list_alphabetical()
+assert(len(alpha) >= 3, "alphabetical view has entries")
+mut prev = ""
+mut sorted_ok = true
+for e in alpha {
+    if e["name"] < prev { sorted_ok = false }
+    prev = e["name"]
+}
+assert(sorted_ok, "alphabetical view actually sorted")
+
+-- Search
+let hits = docs.search("trim")
+assert(len(hits) > 0, "search found at least one hit")
+let top = hits[0]["entry"]
+assert_eq(top["name"], "my_trim", "trim search top hit is my_trim")
+
+-- Empty query
+let empty = docs.search("")
+assert_eq(len(empty), 0, "empty query → empty results")
+
+-- Open + history
+let opened = docs.open(top["id"])
+assert(opened != null, "open returned entry")
+assert_eq(docs.selected["id"], top["id"], "selected updated")
+assert_eq(opened["visits"], 1, "visits bumped")
+
+mut upper_id = null
+for e in docs.entries { if e["name"] == "my_upper" { upper_id = e["id"]; break } }
+assert(upper_id != null, "found upper id")
+docs.open(upper_id)
+let backed = docs.back()
+assert(backed != null, "back returned entry")
+assert_eq(backed["name"], "my_trim", "back to my_trim")
+
+-- Bookmarks
+assert(docs.bookmark(top["id"], "favourite"), "bookmark added")
+assert(not docs.bookmark(top["id"], null), "duplicate bookmark refused")
+assert(docs.is_bookmarked(top["id"]), "is_bookmarked")
+assert(docs.unbookmark(top["id"]), "unbookmark ok")
+assert(not docs.is_bookmarked(top["id"]), "not bookmarked after unbookmark")
+
+-- list_by_module
+let strings_entries = docs.list_by_module("strings")
+assert(len(strings_entries) >= 2, "strings module has 2+ entries")
+
+-- run_example with injected runner
+mut runner_calls = 0
+docs.set_runner(fn(source, label) {
+    runner_calls = runner_calls + 1
+    return {"output": "ran:" + label, "exit_code": 0}
+})
+
+-- Inject a synthetic example into one entry to exercise the runner
+docs.entries[0]["examples"] = ["show 1"]
+let result = docs.run_example(docs.entries[0]["id"], 0)
+assert(result != null, "run_example returned result")
+assert_eq(result["exit_code"], 0, "exit 0")
+assert_eq(runner_calls, 1, "runner called once")
+
+-- Out-of-range example
+let oob = docs.run_example(docs.entries[0]["id"], 99)
+assert_eq(oob, null, "out-of-range example returns null")
+
+exec_full("rm -rf " + docs_dir)
+
+-- ── Playground app ────────────────────────────
+
+show "-- Phase 69: playground --"
+
+let pg = playground_app()
+assert(contains(pg.source(), "Hello from Clarity"), "default source loaded")
+
+-- Categories + gallery
+let cats = pg.categories()
+assert(contains(cats, "basics"), "basics category")
+assert(contains(cats, "language"), "language category")
+
+let basics = pg.examples_by_category("basics")
+assert(len(basics) >= 2, "basics has multiple examples")
+
+let example = pg.load_example("fizzbuzz")
+assert(example != null, "fizzbuzz loaded")
+assert(contains(pg.source(), "FizzBuzz"), "source updated to fizzbuzz")
+
+-- Run with injected runner
+mut last_source = null
+pg.set_runner(fn(source) {
+    last_source = source
+    return {"output": "ok\n", "exit_code": 0}
+})
+let r = pg.run()
+assert_eq(r["exit_code"], 0, "run exit 0")
+assert(contains(last_source, "FizzBuzz"), "runner saw current source")
+assert(pg.last_run != null, "last_run captured")
+assert_eq(len(pg.history), 1, "history grew")
+
+-- Snippets
+exec_full("rm -rf " + env("HOME", "/tmp") + "/.clarity-os/playground/snippets")
+pg.set_source("show 1\n")
+let snippet = pg.save_snippet("first", "First snippet")
+assert_eq(snippet["id"], "first", "snippet id")
+assert_eq(len(pg.snippets), 1, "1 snippet")
+
+-- Save with same id replaces
+pg.set_source("show 2\n")
+pg.save_snippet("first", "First snippet (updated)")
+assert_eq(len(pg.snippets), 1, "still 1 snippet (replaced)")
+assert_eq(pg.snippets[0]["title"], "First snippet (updated)", "title updated")
+
+-- Save with null id auto-allocates
+pg.set_source("show 3\n")
+pg.save_snippet(null, "Anon")
+assert_eq(len(pg.snippets), 2, "2 snippets")
+assert(starts(pg.snippets[1]["id"], "snippet-"), "auto-allocated id")
+
+-- Load snippet restores source
+pg.set_source("garbage\n")
+pg.load_snippet("first")
+assert(contains(pg.source(), "show 2"), "load_snippet restored source")
+
+-- Delete
+assert(pg.delete_snippet("first"), "delete_snippet ok")
+assert_eq(len(pg.snippets), 1, "1 left")
+assert(not pg.delete_snippet("not-real"), "delete unknown is false")
+
+-- Share is deterministic for the same source
+pg.set_source("show 1")
+let s1 = pg.share()
+let s2 = pg.share()
+assert_eq(s1["id"], s2["id"], "share id is deterministic")
+assert(contains(s1["url"], "playground.clarity-lang.org"), "share url shape")
+
+pg.set_source("show 2")
+let s3 = pg.share()
+assert(s1["id"] != s3["id"], "different source → different share id")
+
+exec_full("rm -rf " + env("HOME", "/tmp") + "/.clarity-os/playground/snippets")
+
+-- ── Summary ──────────────────────────────────
+
+show ""
+show "Phase 69: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 69 test(s) failed" }
