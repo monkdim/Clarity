@@ -69,3 +69,256 @@ class Library {
         this._symbols = null
     }
 }
+
+-- ── Memory & marshalling ─────────────────────────────────
+--
+-- A Pointer wraps a foreign address. Use alloc() / cstring() for buffers
+-- this runtime owns (the memory stays alive until the Pointer is dropped),
+-- or wrap_addr() for addresses that came back from a C call.
+--
+-- Reads work through any Pointer; writes are restricted to memory we
+-- allocated, so accidentally clobbering a C-returned pointer's contents
+-- raises FFIError instead of silently corrupting unrelated memory.
+
+class Pointer {
+    fn init(handle) {
+        -- handle is a {addr, _buffer, size} object from the runtime.
+        this._handle = handle
+    }
+
+    fn addr() { return _ffi_ptr_addr(this._handle) }
+    fn size() { return this._handle.size }
+
+    fn read_u8(offset)  { return _ffi_read_u8(this._handle, offset ?? 0) }
+    fn read_i8(offset)  { return _ffi_read_i8(this._handle, offset ?? 0) }
+    fn read_u16(offset) { return _ffi_read_u16(this._handle, offset ?? 0) }
+    fn read_i16(offset) { return _ffi_read_i16(this._handle, offset ?? 0) }
+    fn read_u32(offset) { return _ffi_read_u32(this._handle, offset ?? 0) }
+    fn read_i32(offset) { return _ffi_read_i32(this._handle, offset ?? 0) }
+    fn read_u64(offset) { return _ffi_read_u64(this._handle, offset ?? 0) }
+    fn read_i64(offset) { return _ffi_read_i64(this._handle, offset ?? 0) }
+    fn read_f32(offset) { return _ffi_read_f32(this._handle, offset ?? 0) }
+    fn read_f64(offset) { return _ffi_read_f64(this._handle, offset ?? 0) }
+    fn read_ptr(offset) { return _ffi_read_ptr(this._handle, offset ?? 0) }
+
+    fn read_byte(offset) { return this.read_u8(offset) }
+    fn read_int(offset)  { return this.read_i32(offset) }
+    fn read_long(offset) { return this.read_i64(offset) }
+    fn read_float(offset)  { return this.read_f32(offset) }
+    fn read_double(offset) { return this.read_f64(offset) }
+
+    -- Read a NUL-terminated C string starting at this pointer (offset 0).
+    fn read_string() { return _ffi_read_cstring(this._handle) }
+
+    fn write_u8(offset, val)  { _ffi_write_u8(this._handle, offset, val) }
+    fn write_i8(offset, val)  { _ffi_write_i8(this._handle, offset, val) }
+    fn write_u16(offset, val) { _ffi_write_u16(this._handle, offset, val) }
+    fn write_i16(offset, val) { _ffi_write_i16(this._handle, offset, val) }
+    fn write_u32(offset, val) { _ffi_write_u32(this._handle, offset, val) }
+    fn write_i32(offset, val) { _ffi_write_i32(this._handle, offset, val) }
+    fn write_u64(offset, val) { _ffi_write_u64(this._handle, offset, val) }
+    fn write_i64(offset, val) { _ffi_write_i64(this._handle, offset, val) }
+    fn write_f32(offset, val) { _ffi_write_f32(this._handle, offset, val) }
+    fn write_f64(offset, val) { _ffi_write_f64(this._handle, offset, val) }
+
+    fn write_byte(offset, val) { this.write_u8(offset, val) }
+    fn write_int(offset, val)  { this.write_i32(offset, val) }
+    fn write_long(offset, val) { this.write_i64(offset, val) }
+    fn write_float(offset, val)  { this.write_f32(offset, val) }
+    fn write_double(offset, val) { this.write_f64(offset, val) }
+
+    -- Drop the JS-side buffer reference so GC can reclaim it.
+    fn free() {
+        _ffi_pointer_release(this._handle)
+    }
+}
+
+-- Allocate `size` bytes of zero-initialised memory. The Pointer owns the
+-- buffer; once it's dropped (or .free() is called) the memory is GC'd.
+fn alloc(size) { return Pointer(_ffi_alloc(size)) }
+
+-- Allocate a NUL-terminated C string from a Clarity string. Returned
+-- Pointer can be passed wherever a `string`/`cstring` arg is expected, or
+-- to a `ptr` arg if you need to keep the buffer around.
+fn cstring(s) { return Pointer(_ffi_alloc_cstring(s)) }
+
+-- Wrap a numeric/foreign address in a Pointer for reading. Writes will
+-- error since we don't own the underlying memory.
+fn wrap_addr(addr) {
+    return Pointer({addr: addr, _buffer: null, size: null})
+}
+
+-- Convenience: read a NUL-terminated C string from any address (numeric
+-- or wrapped Pointer).
+fn read_cstring(addr_or_pointer) {
+    return _ffi_read_cstring(addr_or_pointer)
+}
+
+-- ── Structs ──────────────────────────────────────────────
+--
+-- Define a C struct layout. Field offsets and total size are computed
+-- using natural alignment (each field is aligned to its own size, and
+-- total size is rounded up to the largest field's alignment) — this
+-- matches the System V / Itanium ABI used on Linux and macOS for plain
+-- (non-packed) structs.
+--
+--     let Point = ffi.struct("Point", [
+--         ["x", "f64"],
+--         ["y", "f64"]
+--     ])
+--     let p = Point.new()
+--     p.set("x", 3.14)
+--     p.set("y", 2.71)
+--     show p.get("x")
+--     -- Pass to C as a pointer arg:
+--     some_c_fn(p.addr())
+
+let _FFI_TYPE_SIZE = {
+    "bool": 1,
+    "i8": 1, "u8": 1, "char": 1,
+    "i16": 2, "u16": 2,
+    "i32": 4, "u32": 4, "int": 4, "f32": 4, "float": 4,
+    "i64": 8, "u64": 8, "f64": 8, "double": 8,
+    "ptr": 8, "pointer": 8, "string": 8, "cstring": 8
+}
+
+class StructDef {
+    fn init(name, fields) {
+        this.name = name
+        this.fields = fields
+        this.offsets = {}
+        this.field_types = {}
+
+        mut offset = 0
+        mut max_align = 1
+        for f in fields {
+            let fname = f[0]
+            let ftype = f[1]
+            let size = _FFI_TYPE_SIZE[ftype]
+            if size == null {
+                throw "FFIError: unknown field type '" + ftype + "' in struct " + name
+            }
+            if size > max_align { max_align = size }
+            let rem = offset % size
+            if rem != 0 { offset += size - rem }
+            this.offsets[fname] = offset
+            this.field_types[fname] = ftype
+            offset += size
+        }
+        let trail = offset % max_align
+        if trail != 0 { offset += max_align - trail }
+        this.size = offset
+        this.alignment = max_align
+    }
+
+    fn new() { return StructInstance(this, null) }
+
+    -- Wrap an existing struct pointer (e.g. one returned from C).
+    fn from_ptr(addr_or_pointer) {
+        return StructInstance(this, addr_or_pointer)
+    }
+}
+
+class StructInstance {
+    fn init(struct_def, src) {
+        this.def = struct_def
+        if src == null {
+            this.ptr = alloc(struct_def.size)
+        } elif type(src) == "Pointer" {
+            this.ptr = src
+        } else {
+            this.ptr = wrap_addr(src)
+        }
+    }
+
+    fn addr() { return this.ptr.addr() }
+    fn size() { return this.def.size }
+
+    fn get(name) {
+        let offset = this.def.offsets[name]
+        if offset == null {
+            throw "FFIError: no field '" + name + "' on " + this.def.name
+        }
+        let t = this.def.field_types[name]
+        return this._read(t, offset)
+    }
+
+    fn set(name, value) {
+        let offset = this.def.offsets[name]
+        if offset == null {
+            throw "FFIError: no field '" + name + "' on " + this.def.name
+        }
+        let t = this.def.field_types[name]
+        this._write(t, offset, value)
+    }
+
+    fn _read(t, offset) {
+        if t == "bool" { return this.ptr.read_u8(offset) != 0 }
+        if t == "i8"   { return this.ptr.read_i8(offset) }
+        if t == "u8" or t == "char" { return this.ptr.read_u8(offset) }
+        if t == "i16"  { return this.ptr.read_i16(offset) }
+        if t == "u16"  { return this.ptr.read_u16(offset) }
+        if t == "i32" or t == "int" { return this.ptr.read_i32(offset) }
+        if t == "u32"  { return this.ptr.read_u32(offset) }
+        if t == "i64"  { return this.ptr.read_i64(offset) }
+        if t == "u64"  { return this.ptr.read_u64(offset) }
+        if t == "f32" or t == "float"  { return this.ptr.read_f32(offset) }
+        if t == "f64" or t == "double" { return this.ptr.read_f64(offset) }
+        if t == "ptr" or t == "pointer" { return this.ptr.read_ptr(offset) }
+        if t == "string" or t == "cstring" {
+            return _ffi_read_cstring(this.ptr.read_ptr(offset))
+        }
+        throw "FFIError: unsupported read type '" + t + "'"
+    }
+
+    fn _write(t, offset, value) {
+        if t == "bool" { this.ptr.write_u8(offset, if value { 1 } else { 0 }) }
+        elif t == "i8" { this.ptr.write_i8(offset, value) }
+        elif t == "u8" or t == "char" { this.ptr.write_u8(offset, value) }
+        elif t == "i16" { this.ptr.write_i16(offset, value) }
+        elif t == "u16" { this.ptr.write_u16(offset, value) }
+        elif t == "i32" or t == "int" { this.ptr.write_i32(offset, value) }
+        elif t == "u32" { this.ptr.write_u32(offset, value) }
+        elif t == "i64" { this.ptr.write_i64(offset, value) }
+        elif t == "u64" { this.ptr.write_u64(offset, value) }
+        elif t == "f32" or t == "float" { this.ptr.write_f32(offset, value) }
+        elif t == "f64" or t == "double" { this.ptr.write_f64(offset, value) }
+        elif t == "ptr" or t == "pointer" { this.ptr.write_i64(offset, value) }
+        else { throw "FFIError: unsupported write type '" + t + "'" }
+    }
+}
+
+fn struct(name, fields) {
+    return StructDef(name, fields)
+}
+
+-- ── Callbacks ────────────────────────────────────────────
+--
+-- Wrap a Clarity function as a C function pointer (a trampoline). Useful
+-- for libraries that take callbacks like qsort, GLib, libuv, etc.
+--
+--     let cmp = ffi.callback(fn(a, b) {
+--         return _ffi_read_i32(a, 0) - _ffi_read_i32(b, 0)
+--     }, ["ptr", "ptr"], "i32")
+--     qsort(buf, n, 4, cmp.addr())
+--     cmp.close()
+--
+-- The Callback owns the underlying JSCallback; close() releases it. Don't
+-- forget to call close(), or the callback (and its captured closure) leak.
+
+class Callback {
+    fn init(handle) {
+        this._handle = handle
+    }
+
+    fn addr() { return this._handle.addr }
+
+    fn close() {
+        _ffi_callback_close(this._handle)
+        this._handle = null
+    }
+}
+
+fn callback(fn_value, arg_types, return_type) {
+    return Callback(_ffi_callback(fn_value, arg_types ?? [], return_type ?? "void"))
+}

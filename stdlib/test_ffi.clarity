@@ -2,7 +2,7 @@
 -- Calls a few well-known libc functions to confirm dlopen, type
 -- marshalling for the simple primitives, and the Library wrapper.
 
-from "ffi.clarity" import bind, open, Library
+from "ffi.clarity" import bind, open, Library, Pointer, alloc, cstring, wrap_addr, read_cstring, struct, StructDef, StructInstance, callback, Callback
 
 mut PASSED = 0
 mut FAILED = 0
@@ -69,6 +69,189 @@ let getpid_fn = libc.get("getpid")
 assert_eq(getpid_fn(), pid, "Library.get('getpid')() matches")
 
 libc.close()
+
+-- ── alloc + read/write primitives ───────────────────────
+
+show "-- FFI: Pointer alloc + read/write --"
+
+let buf = alloc(32)
+assert(type(buf) == "Pointer", "alloc returns a Pointer")
+assert_eq(buf.size(), 32, "alloc size matches")
+
+buf.write_i32(0, 42)
+buf.write_i32(4, -100)
+assert_eq(buf.read_i32(0), 42, "i32 roundtrip positive")
+assert_eq(buf.read_i32(4), -100, "i32 roundtrip negative")
+
+buf.write_u8(8, 255)
+buf.write_u8(9, 0)
+assert_eq(buf.read_u8(8), 255, "u8 max roundtrip")
+assert_eq(buf.read_u8(9), 0, "u8 zero roundtrip")
+
+buf.write_f64(16, 3.14159)
+let f = buf.read_f64(16)
+assert(f > 3.14 and f < 3.142, "f64 roundtrip")
+
+-- read_byte/read_int aliases
+buf.write_byte(0, 7)
+assert_eq(buf.read_byte(0), 7, "byte alias")
+
+-- Writing through a Pointer we don't own should error
+let foreign = wrap_addr(buf.addr())
+mut threw = false
+try {
+    foreign.write_i32(0, 999)
+} catch e {
+    threw = true
+}
+assert(threw, "write through non-owned Pointer throws")
+
+-- ── cstring round-trip via libc:strlen ──────────────────
+
+show "-- FFI: cstring + strlen --"
+
+let strlen = bind("libc", "strlen", ["string"], "u64")
+assert_eq(strlen("hello"), 5, "strlen('hello')")
+assert_eq(strlen(""), 0, "strlen('')")
+assert_eq(strlen("a longer string"), 15, "strlen of longer")
+
+-- ── Reading a cstring returned by C (getenv) ────────────
+
+show "-- FFI: getenv + read_cstring --"
+
+let getenv_fn = bind("libc", "getenv", ["string"], "ptr")
+let home_addr = getenv_fn("HOME")
+let home = read_cstring(home_addr)
+assert(home != null and len(home) > 0, "HOME is set and non-empty")
+assert(starts(home, "/") or starts(home, "C:"), "HOME looks like a path")
+
+-- A missing variable returns a null pointer; read_cstring should give null
+let missing = getenv_fn("ZZZ_DEFINITELY_DOES_NOT_EXIST_ZZZ")
+let missing_str = read_cstring(missing)
+assert(missing_str == null, "missing env var reads as null")
+
+-- ── alloc cstring + pass as ptr ─────────────────────────
+
+show "-- FFI: alloc cstring buffer --"
+
+let greeting = cstring("hi there")
+assert(type(greeting) == "Pointer", "cstring returns a Pointer")
+-- 8 chars + 1 null terminator
+assert_eq(greeting.size(), 9, "cstring buffer includes terminator")
+-- First byte is 'h' (104)
+assert_eq(greeting.read_byte(0), 104, "first byte is 'h'")
+-- Last byte is null terminator
+assert_eq(greeting.read_byte(8), 0, "trailing null terminator")
+-- Reading the whole thing as a C string round-trips
+assert_eq(greeting.read_string(), "hi there", "cstring read_string roundtrip")
+
+-- ── Struct: simple homogeneous fields ───────────────────
+
+show "-- FFI: struct Point (two f64) --"
+
+let Point = struct("Point", [
+    ["x", "f64"],
+    ["y", "f64"]
+])
+assert_eq(Point.size, 16, "Point size = 2 * f64")
+assert_eq(Point.alignment, 8, "Point alignment = 8")
+assert_eq(Point.offsets["x"], 0, "x at offset 0")
+assert_eq(Point.offsets["y"], 8, "y at offset 8")
+
+let p = Point.new()
+p.set("x", 3.14)
+p.set("y", 2.71)
+let xv = p.get("x")
+let yv = p.get("y")
+assert(xv > 3.13 and xv < 3.15, "Point.x roundtrip")
+assert(yv > 2.70 and yv < 2.72, "Point.y roundtrip")
+
+-- ── Struct: mixed types with padding ────────────────────
+
+show "-- FFI: struct mixed types --"
+
+-- Layout: i8 (1), pad (3), i32 (4), i8 (1), pad (7), f64 (8) = 24 bytes
+let Mixed = struct("Mixed", [
+    ["flag", "i8"],
+    ["count", "i32"],
+    ["mode", "i8"],
+    ["value", "f64"]
+])
+assert_eq(Mixed.offsets["flag"], 0, "flag at 0")
+assert_eq(Mixed.offsets["count"], 4, "count at 4 (after 3 bytes pad)")
+assert_eq(Mixed.offsets["mode"], 8, "mode at 8")
+assert_eq(Mixed.offsets["value"], 16, "value at 16 (after 7 bytes pad)")
+assert_eq(Mixed.size, 24, "total size 24 (rounded to 8-alignment)")
+
+let m = Mixed.new()
+m.set("flag", -1)
+m.set("count", 12345)
+m.set("mode", 7)
+m.set("value", 1.5)
+assert_eq(m.get("flag"), -1, "i8 negative roundtrip")
+assert_eq(m.get("count"), 12345, "i32 roundtrip")
+assert_eq(m.get("mode"), 7, "i8 positive roundtrip")
+assert_eq(m.get("value"), 1.5, "f64 roundtrip")
+
+-- Wrap an existing pointer as a struct
+let m2 = Mixed.from_ptr(m.ptr)
+assert_eq(m2.get("count"), 12345, "from_ptr reads same memory")
+
+-- Bool field
+let Flags = struct("Flags", [["enabled", "bool"], ["visible", "bool"]])
+let f = Flags.new()
+f.set("enabled", true)
+f.set("visible", false)
+assert(f.get("enabled") == true, "bool true roundtrip")
+assert(f.get("visible") == false, "bool false roundtrip")
+
+-- Unknown field name should throw
+mut threw_field = false
+try { f.get("nope") } catch e { threw_field = true }
+assert(threw_field, "unknown field throws")
+
+-- Unknown type should throw at struct() time
+mut threw_type_def = false
+try {
+    struct("Bad", [["x", "not-a-type"]])
+} catch e {
+    threw_type_def = true
+}
+assert(threw_type_def, "unknown field type throws")
+
+-- ── Callback: qsort with a Clarity comparator ──────────
+
+show "-- FFI: callback (qsort) --"
+
+let qsort = bind("libc", "qsort", ["ptr", "u64", "u64", "ptr"], "void")
+
+mut compare_calls = 0
+let cmp = callback(fn(a, b) {
+    compare_calls += 1
+    return _ffi_read_i32(a, 0) - _ffi_read_i32(b, 0)
+}, ["ptr", "ptr"], "i32")
+
+assert(type(cmp) == "Callback", "callback returns a Callback")
+assert(cmp.addr() != null, "callback has a non-null addr")
+
+-- Build [5, 2, 4, 1, 3] in a 5*4 = 20-byte buffer
+let arr = alloc(20)
+arr.write_i32(0, 5)
+arr.write_i32(4, 2)
+arr.write_i32(8, 4)
+arr.write_i32(12, 1)
+arr.write_i32(16, 3)
+
+qsort(arr, 5, 4, cmp.addr())
+
+assert_eq(arr.read_i32(0),  1, "qsort[0] = 1")
+assert_eq(arr.read_i32(4),  2, "qsort[1] = 2")
+assert_eq(arr.read_i32(8),  3, "qsort[2] = 3")
+assert_eq(arr.read_i32(12), 4, "qsort[3] = 4")
+assert_eq(arr.read_i32(16), 5, "qsort[4] = 5")
+assert(compare_calls > 0, "comparator was actually invoked")
+
+cmp.close()
 
 -- ── Errors ──────────────────────────────────────────────
 

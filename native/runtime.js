@@ -10,7 +10,7 @@ import { createInterface } from 'readline';
 import { createServer } from 'http';
 import { resolve, dirname, basename, extname, join as pathJoin, sep } from 'path';
 import { createHash, randomUUID } from 'crypto';
-import { dlopen, FFIType, suffix as ffiSuffix } from 'bun:ffi';
+import { dlopen, FFIType, suffix as ffiSuffix, ptr as bunPtr, read as bunRead, CString, JSCallback } from 'bun:ffi';
 
 // ── I/O ──────────────────────────────────────────────────
 
@@ -485,16 +485,151 @@ export function _ffi_bind(libname, sym_name, args, ret) {
   const handle = _ffi_open(libname, { [sym_name]: { args: args || [], returns: ret || 'void' } });
   const fn = handle.symbols[sym_name];
   if (!fn) throw new Error(`FFIError: Symbol '${sym_name}' not found in '${libname}'`);
+  const argTypes = (args || []).slice();
   return (...callArgs) => {
-    const result = fn(...callArgs);
-    // Bun returns a CString for cstring returns; convert to a plain string.
+    // Marshal arguments: JS strings → null-terminated UTF-8 buffers for
+    // cstring/string params; Pointer wrappers → their numeric addr; pass
+    // primitives through unchanged.
+    const marshalled = callArgs.map((a, i) => {
+      const t = argTypes[i];
+      if ((t === 'string' || t === 'cstring') && typeof a === 'string') {
+        const bytes = new TextEncoder().encode(a);
+        const buf = new Uint8Array(bytes.length + 1);
+        buf.set(bytes);
+        return buf;
+      }
+      if (a !== null && typeof a === 'object') {
+        return _ffi_addr(a);
+      }
+      return a;
+    });
+    const result = fn(...marshalled);
     if (typeof result === 'object' && result !== null && typeof result.toString === 'function' && ret === 'cstring') {
       return result.toString();
     }
+    // Bun returns u64/i64 as BigInt; coerce to Number so it interops with
+    // the rest of Clarity's numeric stack.
+    if (typeof result === 'bigint') return Number(result);
     return result;
   };
 }
 
 export function _ffi_close(handle) {
   if (handle && typeof handle.close === 'function') handle.close();
+}
+
+// ── FFI: Pointer & memory marshalling ────────────────────
+// Pointer handles are JS objects: { addr, _buffer, size }.
+// _buffer is non-null when this runtime allocated the memory and holds it
+// alive against GC. addr is a numeric (or BigInt) address suitable for
+// passing across the FFI boundary.
+
+// Resolve any kind of "pointer-like" thing to a raw numeric address.
+// For runtime-allocated buffers we ALWAYS recompute via bunPtr(buffer)
+// because the JS engine moves TypedArrays during GC; caching the
+// address gives back stale memory when read later.
+function _ffi_addr(p) {
+  if (p === null || p === undefined) return 0;
+  if (typeof p === 'number' || typeof p === 'bigint') return p;
+  if (typeof p === 'object') {
+    if (p._buffer) return bunPtr(p._buffer);
+    if ('addr' in p) return p.addr;
+    // Clarity Pointer / Callback / StructInstance wrap the handle in
+    // properties._handle (Clarity instance shape).
+    if (p.properties && p.properties._handle) return _ffi_addr(p.properties._handle);
+  }
+  return p;
+}
+
+// Allocations use Buffer.allocUnsafeSlow (not Uint8Array, not Buffer.alloc):
+// - JavaScriptCore moves TypedArrays during GC, silently invalidating any
+//   address captured via bunPtr().
+// - Buffer.alloc uses an internal pool for small (< 4KB) allocations
+//   that can be relocated/reused, with the same problem.
+// allocUnsafeSlow always returns a standalone, non-pooled buffer that
+// stays at one address. We zero-fill ourselves since "unsafe" means
+// "don't pre-fill".
+export function _ffi_alloc(size) {
+  const buffer = Buffer.allocUnsafeSlow(size).fill(0);
+  return { _buffer: buffer, size };
+}
+
+export function _ffi_alloc_cstring(s) {
+  const len = Buffer.byteLength(s, 'utf-8');
+  const buffer = Buffer.allocUnsafeSlow(len + 1).fill(0);
+  buffer.write(s, 0, 'utf-8');
+  return { _buffer: buffer, size: buffer.length };
+}
+
+export function _ffi_read_cstring(p) {
+  const addr = _ffi_addr(p);
+  if (!addr) return null;
+  return new CString(addr).toString();
+}
+
+export function _ffi_ptr_addr(p) { return _ffi_addr(p); }
+
+// Reads. For runtime-owned buffers we read through the underlying DataView
+// so writes go through the same view (Bun's read.* sometimes can't see
+// modifications made via JS DataView writes on the same Uint8Array).
+function _ffi_read_view(p) {
+  if (typeof p === 'object' && p !== null && p._buffer) {
+    return new DataView(p._buffer.buffer, p._buffer.byteOffset, p._buffer.byteLength);
+  }
+  return null;
+}
+
+export function _ffi_read_u8(p, offset = 0)  { const v = _ffi_read_view(p); return v ? v.getUint8(offset) : bunRead.u8(_ffi_addr(p), offset); }
+export function _ffi_read_i8(p, offset = 0)  { const v = _ffi_read_view(p); return v ? v.getInt8(offset)  : bunRead.i8(_ffi_addr(p), offset); }
+export function _ffi_read_u16(p, offset = 0) { const v = _ffi_read_view(p); return v ? v.getUint16(offset, true) : bunRead.u16(_ffi_addr(p), offset); }
+export function _ffi_read_i16(p, offset = 0) { const v = _ffi_read_view(p); return v ? v.getInt16(offset, true)  : bunRead.i16(_ffi_addr(p), offset); }
+export function _ffi_read_u32(p, offset = 0) { const v = _ffi_read_view(p); return v ? v.getUint32(offset, true) : bunRead.u32(_ffi_addr(p), offset); }
+export function _ffi_read_i32(p, offset = 0) { const v = _ffi_read_view(p); return v ? v.getInt32(offset, true)  : bunRead.i32(_ffi_addr(p), offset); }
+export function _ffi_read_i64(p, offset = 0) { const v = _ffi_read_view(p); return v ? Number(v.getBigInt64(offset, true))  : Number(bunRead.i64(_ffi_addr(p), offset)); }
+export function _ffi_read_u64(p, offset = 0) { const v = _ffi_read_view(p); return v ? Number(v.getBigUint64(offset, true)) : Number(bunRead.u64(_ffi_addr(p), offset)); }
+export function _ffi_read_f32(p, offset = 0) { const v = _ffi_read_view(p); return v ? v.getFloat32(offset, true) : bunRead.f32(_ffi_addr(p), offset); }
+export function _ffi_read_f64(p, offset = 0) { const v = _ffi_read_view(p); return v ? v.getFloat64(offset, true) : bunRead.f64(_ffi_addr(p), offset); }
+export function _ffi_read_ptr(p, offset = 0) { return bunRead.ptr(_ffi_addr(p), offset); }
+
+function _ffi_view(p) {
+  if (typeof p !== 'object' || !p._buffer) {
+    throw new Error('FFIError: cannot write through a pointer this runtime did not allocate');
+  }
+  return new DataView(p._buffer.buffer, p._buffer.byteOffset, p._buffer.byteLength);
+}
+
+export function _ffi_write_u8(p, offset, val)  { _ffi_view(p).setUint8(offset, val); }
+export function _ffi_write_i8(p, offset, val)  { _ffi_view(p).setInt8(offset, val); }
+export function _ffi_write_u16(p, offset, val) { _ffi_view(p).setUint16(offset, val, true); }
+export function _ffi_write_i16(p, offset, val) { _ffi_view(p).setInt16(offset, val, true); }
+export function _ffi_write_u32(p, offset, val) { _ffi_view(p).setUint32(offset, val, true); }
+export function _ffi_write_i32(p, offset, val) { _ffi_view(p).setInt32(offset, val, true); }
+export function _ffi_write_i64(p, offset, val) { _ffi_view(p).setBigInt64(offset, BigInt(val), true); }
+export function _ffi_write_u64(p, offset, val) { _ffi_view(p).setBigUint64(offset, BigInt(val), true); }
+export function _ffi_write_f32(p, offset, val) { _ffi_view(p).setFloat32(offset, val, true); }
+export function _ffi_write_f64(p, offset, val) { _ffi_view(p).setFloat64(offset, val, true); }
+
+// Drop the JS-side buffer reference. The OS-level memory is reclaimed by GC.
+// For pointers we didn't allocate (no _buffer), this is a no-op.
+export function _ffi_pointer_release(p) {
+  if (typeof p === 'object' && p !== null) p._buffer = null;
+}
+
+// Wrap a Clarity function as a C callback. The returned handle has an
+// `addr` field suitable for passing to a `ptr` parameter, and a `_callback`
+// reference that owns the underlying JSCallback (kept alive against GC
+// for the lifetime of the handle).
+export function _ffi_callback(fn, args, ret) {
+  const cb = new JSCallback(fn, {
+    args: (args || []).map($ffi_type),
+    returns: $ffi_type(ret || 'void'),
+  });
+  return { addr: cb.ptr, _callback: cb };
+}
+
+export function _ffi_callback_close(handle) {
+  if (handle && handle._callback) {
+    handle._callback.close();
+    handle._callback = null;
+  }
 }
