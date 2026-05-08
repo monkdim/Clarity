@@ -1,0 +1,195 @@
+-- Draw — 2D drawing primitives that operate on a Framebuffer.
+--
+-- All functions take the target framebuffer as their first argument so
+-- they compose cleanly with anything that exposes put_pixel / fill_rect:
+--
+--     from "graphics.clarity" import framebuffer, RED
+--     from "draw.clarity" import line, circle, polygon
+--
+--     let fb = framebuffer(400, 300)
+--     line(fb, 0, 0, 399, 299, RED)
+--     circle(fb, 200, 150, 50, RED)
+--
+-- Algorithms are the textbook integer-only ones (Bresenham for lines,
+-- midpoint for circles) — no anti-aliasing yet; that lands as a follow-up
+-- once we have a font and can compare against ground-truth output.
+
+-- ── Line: Bresenham's algorithm ──────────────────────────
+
+fn line(fb, x0, y0, x1, y1, color) {
+    mut x = x0
+    mut y = y0
+    let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 }
+    let dy = if y1 > y0 { y1 - y0 } else { y0 - y1 }
+    let sx = if x0 < x1 { 1 } else { -1 }
+    let sy = if y0 < y1 { 1 } else { -1 }
+    let nd = -dy
+    mut err = dx + nd
+    mut done = false
+    while not done {
+        fb.put_pixel(x, y, color)
+        if x == x1 and y == y1 {
+            done = true
+        } else {
+            let e2 = 2 * err
+            if e2 >= nd {
+                err += nd
+                x += sx
+            }
+            if e2 <= dx {
+                err += dx
+                y += sy
+            }
+        }
+    }
+}
+
+-- Horizontal/vertical lines optimise to a single fill_rect when the
+-- caller knows they're axis-aligned — handy inside other primitives.
+fn hline(fb, x0, y, x1, color) {
+    let xa = if x0 < x1 { x0 } else { x1 }
+    let xb = if x0 < x1 { x1 } else { x0 }
+    fb.fill_rect(xa, y, xb - xa + 1, 1, color)
+}
+
+fn vline(fb, x, y0, y1, color) {
+    let ya = if y0 < y1 { y0 } else { y1 }
+    let yb = if y0 < y1 { y1 } else { y0 }
+    fb.fill_rect(x, ya, 1, yb - ya + 1, color)
+}
+
+-- ── Rectangle outline (alias on Framebuffer.stroke_rect) ──
+
+fn rect(fb, x, y, w, h, color) {
+    fb.stroke_rect(x, y, w, h, color)
+}
+
+fn fill_rect(fb, x, y, w, h, color) {
+    fb.fill_rect(x, y, w, h, color)
+}
+
+-- ── Circle: midpoint algorithm (outline) ─────────────────
+
+fn circle_outline(fb, cx, cy, r, color) {
+    if r < 0 { return null }
+    mut x = r
+    mut y = 0
+    mut err = 0
+    while x >= y {
+        fb.put_pixel(cx + x, cy + y, color)
+        fb.put_pixel(cx + y, cy + x, color)
+        fb.put_pixel(cx - y, cy + x, color)
+        fb.put_pixel(cx - x, cy + y, color)
+        fb.put_pixel(cx - x, cy - y, color)
+        fb.put_pixel(cx - y, cy - x, color)
+        fb.put_pixel(cx + y, cy - x, color)
+        fb.put_pixel(cx + x, cy - y, color)
+        y += 1
+        if err <= 0 {
+            err += 2 * y + 1
+        }
+        if err > 0 {
+            x -= 1
+            err -= 2 * x + 1
+        }
+    }
+}
+
+-- ── Circle: filled (horizontal scanlines) ───────────────
+
+fn circle(fb, cx, cy, r, color) {
+    if r < 0 { return null }
+    let r2 = r * r
+    mut dy = 0 - r
+    while dy <= r {
+        -- floor(sqrt(r^2 - dy^2)) using integer search avoids a math import
+        mut dx = 0
+        while (dx + 1) * (dx + 1) + dy * dy <= r2 {
+            dx += 1
+        }
+        hline(fb, cx - dx, cy + dy, cx + dx, color)
+        dy += 1
+    }
+}
+
+-- ── Rounded rectangle (filled) ──────────────────────────
+
+fn rounded_rect(fb, x, y, w, h, radius, color) {
+    let r = if radius * 2 > w { w / 2 } else { radius }
+    let r2 = if r * 2 > h { h / 2 } else { r }
+    if r2 <= 0 {
+        fb.fill_rect(x, y, w, h, color)
+        return null
+    }
+    -- Centre rectangle (full height, between the two arc columns)
+    fb.fill_rect(x + r2, y, w - 2 * r2, h, color)
+    -- Left/right rectangles (between the two arc rows)
+    fb.fill_rect(x, y + r2, r2, h - 2 * r2, color)
+    fb.fill_rect(x + w - r2, y + r2, r2, h - 2 * r2, color)
+    -- Four corner quadrants drawn as filled circle scanlines
+    mut dy = 0 - r2
+    while dy <= 0 {
+        mut dx = 0
+        while (dx + 1) * (dx + 1) + dy * dy <= r2 * r2 {
+            dx += 1
+        }
+        let row_top = y + r2 + dy
+        let row_bot = y + h - 1 - r2 - dy
+        hline(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color)
+        hline(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color)
+        dy += 1
+    }
+}
+
+-- ── Arc: angular slice of a circle outline ──────────────
+-- Angles are in degrees, 0° = +X axis, 90° = +Y (down).
+
+fn arc(fb, cx, cy, r, start_deg, end_deg, color) {
+    if r < 0 { return null }
+    -- Normalise so we sweep CCW from start to end
+    mut s = start_deg % 360
+    mut e = end_deg % 360
+    if s < 0 { s += 360 }
+    if e < 0 { e += 360 }
+    if e < s { e += 360 }
+    -- Sample enough steps that adjacent points are always within 1 pixel
+    let steps = if r * 6 < 32 { 32 } else { r * 6 }
+    let span = e - s
+    mut i = 0
+    while i <= steps {
+        let frac = (i * 1.0) / steps
+        let theta = (s + span * frac) * 3.14159265358979 / 180.0
+        let dx = round(cos(theta) * r)
+        let dy = round(sin(theta) * r)
+        fb.put_pixel(cx + dx, cy + dy, color)
+        i += 1
+    }
+}
+
+-- ── Polygon: connect points with straight segments ──────
+-- `points` is a list of [x, y] pairs.
+
+fn polygon(fb, points, color) {
+    let n = len(points)
+    if n < 2 { return null }
+    mut i = 0
+    while i < n {
+        let a = points[i]
+        let b = points[(i + 1) % n]
+        line(fb, a[0], a[1], b[0], b[1], color)
+        i += 1
+    }
+}
+
+-- Open polyline (no closing segment).
+fn polyline(fb, points, color) {
+    let n = len(points)
+    if n < 2 { return null }
+    mut i = 0
+    while i < n - 1 {
+        let a = points[i]
+        let b = points[i + 1]
+        line(fb, a[0], a[1], b[0], b[1], color)
+        i += 1
+    }
+}

@@ -1,0 +1,208 @@
+-- Image — load and manipulate raster images.
+--
+-- An Image is a tagged Framebuffer-shaped grid of 32-bit BGRA pixels.
+-- It composes cleanly with the rest of Phase 57: blit accepts anything
+-- that exposes width/height/get_pixel/put_pixel, so an Image can be
+-- drawn into a Framebuffer and vice versa.
+--
+-- This module ships:
+--
+--   load_bmp(path)     — read a 24- or 32-bit Windows BMP from disk
+--   save_bmp(img, p)   — write `img` out as a 32-bit BMP
+--   from_framebuffer   — wrap a Framebuffer as an Image (shares memory)
+--   Image methods      — crop, resize (nearest-neighbour), rotate_90
+--
+-- PNG / JPEG decoders live in their own (larger) follow-up: they need
+-- DEFLATE / DCT support that's worth its own module.
+
+from "ffi.clarity" import alloc, Pointer
+from "graphics.clarity" import Framebuffer, framebuffer
+
+class Image {
+    fn init(width, height) {
+        this.width = width
+        this.height = height
+        this.stride = width * 4
+        this.size = this.stride * height
+        this.buffer = alloc(this.size)
+    }
+
+    fn _offset(x, y) { return y * this.stride + x * 4 }
+
+    fn put_pixel(x, y, color) {
+        if x < 0 or x >= this.width or y < 0 or y >= this.height { return null }
+        this.buffer.write_u32(this._offset(x, y), color)
+    }
+
+    fn get_pixel(x, y) {
+        if x < 0 or x >= this.width or y < 0 or y >= this.height { return 0 }
+        return this.buffer.read_u32(this._offset(x, y))
+    }
+
+    -- Return a new Image cropped to (x, y, w, h). The crop region is
+    -- clipped to the source image; out-of-range crops produce an
+    -- entirely empty image of the requested size.
+    fn crop(x0, y0, w, h) {
+        let out = Image(w, h)
+        mut yy = 0
+        while yy < h {
+            mut xx = 0
+            while xx < w {
+                out.put_pixel(xx, yy, this.get_pixel(x0 + xx, y0 + yy))
+                xx += 1
+            }
+            yy += 1
+        }
+        return out
+    }
+
+    -- Nearest-neighbour resize. Fast and pixel-honest.
+    fn resize(new_w, new_h) {
+        let out = Image(new_w, new_h)
+        if new_w <= 0 or new_h <= 0 { return out }
+        mut yy = 0
+        while yy < new_h {
+            -- Floor explicitly: Clarity / yields a float when the divide
+            -- isn't exact, and put_pixel/get_pixel need integer offsets.
+            let src_y = int((yy * this.height) / new_h)
+            mut xx = 0
+            while xx < new_w {
+                let src_x = int((xx * this.width) / new_w)
+                out.put_pixel(xx, yy, this.get_pixel(src_x, src_y))
+                xx += 1
+            }
+            yy += 1
+        }
+        return out
+    }
+
+    fn rotate_90() {
+        let out = Image(this.height, this.width)
+        mut y = 0
+        while y < this.height {
+            mut x = 0
+            while x < this.width {
+                out.put_pixel(this.height - 1 - y, x, this.get_pixel(x, y))
+                x += 1
+            }
+            y += 1
+        }
+        return out
+    }
+
+    -- Save as 32-bit BMP. Same on-disk format as Framebuffer.save_bmp.
+    fn save_bmp(path) {
+        save_bmp(this, path)
+    }
+}
+
+-- ── Construction helpers ────────────────────────────────
+
+fn image(width, height) { return Image(width, height) }
+
+fn from_framebuffer(fb) {
+    let img = Image(fb.width, fb.height)
+    _ffi_copy(img.buffer._handle, 0, fb.buffer._handle, 0, fb.size)
+    return img
+}
+
+fn to_framebuffer(img) {
+    let fb = framebuffer(img.width, img.height)
+    _ffi_copy(fb.buffer._handle, 0, img.buffer._handle, 0, img.size)
+    return fb
+}
+
+-- ── BMP loader ──────────────────────────────────────────
+--
+-- Supports the two flavours that come out of common tools:
+--   * 24-bit BGR (3 bytes/pixel, rows padded to 4-byte multiples)
+--   * 32-bit BGRA (4 bytes/pixel, no padding)
+-- Top-down (negative-height) and bottom-up (positive-height) layouts
+-- are both handled.
+
+fn load_bmp(path) {
+    let h = _ffi_read_buffer(path)
+    let p = Pointer(h)
+    if h.size < 54 {
+        throw "ImageError: " + path + " is too small to be a BMP"
+    }
+    if p.read_u8(0) != 0x42 or p.read_u8(1) != 0x4D {
+        throw "ImageError: " + path + " is not a BMP (magic mismatch)"
+    }
+    let pixel_offset = p.read_u32(10)
+    let width = p.read_i32(18)
+    let raw_height = p.read_i32(22)
+    let bpp = p.read_u16(28)
+    let compression = p.read_u32(30)
+    if compression != 0 and compression != 3 {
+        throw "ImageError: " + path + " uses unsupported compression " + str(compression)
+    }
+    if bpp != 24 and bpp != 32 {
+        throw "ImageError: " + path + " has unsupported bpp " + str(bpp)
+    }
+    let bytes_per_pixel = bpp / 8
+    let raw_row_bytes = width * bytes_per_pixel
+    mut row_pad = 0
+    if bpp == 24 {
+        let rem = raw_row_bytes % 4
+        if rem != 0 { row_pad = 4 - rem }
+    }
+    let stride = raw_row_bytes + row_pad
+    let top_down = raw_height < 0
+    let height = if top_down { 0 - raw_height } else { raw_height }
+
+    let img = Image(width, height)
+    mut y = 0
+    while y < height {
+        let file_row = if top_down { y } else { height - 1 - y }
+        let row_offset = pixel_offset + file_row * stride
+        mut x = 0
+        while x < width {
+            let off = row_offset + x * bytes_per_pixel
+            let b = p.read_u8(off)
+            let g = p.read_u8(off + 1)
+            let r = p.read_u8(off + 2)
+            let a = if bpp == 32 { p.read_u8(off + 3) } else { 255 }
+            let color = a * 16777216 + r * 65536 + g * 256 + b
+            img.put_pixel(x, y, color)
+            x += 1
+        }
+        y += 1
+    }
+    return img
+}
+
+-- ── BMP writer (32-bit, BGRA) ──────────────────────────
+
+fn save_bmp(img, path) {
+    let pixel_bytes = img.size
+    let file_size = 14 + 40 + pixel_bytes
+    let header = alloc(54 + pixel_bytes)
+
+    header.write_u8(0, 0x42)
+    header.write_u8(1, 0x4D)
+    header.write_u32(2, file_size)
+    header.write_u32(6, 0)
+    header.write_u32(10, 54)
+
+    header.write_u32(14, 40)
+    header.write_i32(18, img.width)
+    header.write_i32(22, img.height)
+    header.write_u16(26, 1)
+    header.write_u16(28, 32)
+    header.write_u32(30, 0)
+    header.write_u32(34, pixel_bytes)
+    header.write_i32(38, 2835)
+    header.write_i32(42, 2835)
+    header.write_u32(46, 0)
+    header.write_u32(50, 0)
+
+    mut y = 0
+    while y < img.height {
+        let src_offset = y * img.stride
+        let dst_offset = 54 + (img.height - 1 - y) * img.stride
+        _ffi_copy(header._handle, dst_offset, img.buffer._handle, src_offset, img.stride)
+        y += 1
+    }
+    _ffi_write_buffer(header._handle, path)
+}
