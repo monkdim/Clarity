@@ -1,0 +1,359 @@
+-- Window / Compositor / Chrome / WindowManager / Workspace tests.
+-- Phase 59 lands all five tasks; this exercises each one against a
+-- screen-sized Framebuffer without ever touching real input devices.
+
+from "graphics.clarity" import framebuffer, BLACK, WHITE, RED, GREEN, BLUE
+from "window.clarity" import Window, window
+from "compositor.clarity" import Compositor, compositor, _intersect_rect, _coalesce, _bounding
+from "chrome.clarity" import DEFAULT_THEME, theme, decorate, drop_shadow
+from "window_manager.clarity" import WindowManager, window_manager
+from "workspace.clarity" import Workspace, WorkspaceManager, workspace_manager
+from "event_bus.clarity" import InputBus
+from "input.clarity" import EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y, BTN_LEFT, KEY_PRESS, KEY_RELEASE
+from "keymap.clarity" import KEY_LEFTALT, KEY_TAB
+from "font.clarity" import builtin_font
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+fn raw(t, code, value) {
+    return {"time_sec": 0, "time_usec": 0, "type": t, "code": code, "value": value}
+}
+
+-- ── Window basics ───────────────────────────────────────
+
+show "-- Window: geometry & hit-testing --"
+
+let w1 = window("Hello", 100, 50, 200, 150)
+assert_eq(w1.title, "Hello", "title")
+assert_eq(w1.x, 100, "x")
+assert_eq(w1.width, 200, "width")
+assert_eq(w1.framebuffer.width, 200, "framebuffer matches outer width")
+
+-- Outside / inside contains
+assert(not w1.contains(99, 49), "outside top-left")
+assert(w1.contains(100, 50), "inside top-left edge")
+assert(w1.contains(299, 199), "inside bottom-right edge")
+assert(not w1.contains(300, 200), "outside bottom-right")
+
+-- Hit-test zones (default chrome: title=24, border=1, resize=12)
+assert_eq(w1.hit_test(150, 60), "title", "title bar zone")
+assert_eq(w1.hit_test(290, 190), "resize", "resize handle zone")
+assert_eq(w1.hit_test(150, 100), "content", "content zone")
+assert_eq(w1.hit_test(50, 50), null, "outside is null")
+
+-- Borderless windows have no title zone
+let w_bare = window("Bare", 0, 0, 100, 100)
+w_bare.title_h = 0
+assert_eq(w_bare.hit_test(50, 5), "content", "borderless top is content")
+
+-- ── Move / resize ──────────────────────────────────────
+
+show "-- Window: move / resize --"
+
+w1.move(0, 0)
+assert_eq(w1.x, 0, "moved x")
+w1.resize(64, 48)
+assert_eq(w1.width, 64, "resized width")
+assert_eq(w1.framebuffer.width, 64, "framebuffer reallocated")
+w1.resize(0, 0)    -- clamps to 1
+assert_eq(w1.width, 1, "minimum width clamp")
+
+-- ── Maximize / restore ─────────────────────────────────
+
+show "-- Window: maximize / restore --"
+
+let mw = window("M", 50, 50, 100, 100)
+mw.maximize(800, 600)
+assert(mw.maximized, "maximized")
+assert_eq(mw.x, 0, "maximized x")
+assert_eq(mw.width, 800, "maximized width")
+mw.unmaximize()
+assert(not mw.maximized, "unmaximized")
+assert_eq(mw.x, 50, "restored x")
+assert_eq(mw.width, 100, "restored width")
+
+-- ── Compositor: rect helpers ───────────────────────────
+
+show "-- Compositor: rect helpers --"
+
+assert_eq(_intersect_rect([0, 0, 10, 10], [5, 5, 10, 10]), [5, 5, 5, 5], "intersect overlapping")
+assert_eq(_intersect_rect([0, 0, 10, 10], [20, 20, 5, 5]), null, "no intersection")
+assert_eq(_bounding([0, 0, 5, 5], [10, 10, 5, 5]), [0, 0, 15, 15], "bounding")
+
+let merged = _coalesce([[0, 0, 10, 10], [5, 5, 10, 10], [100, 100, 5, 5]])
+assert_eq(len(merged), 2, "two distinct groups remain after coalesce")
+
+-- ── Compositor: window stacking + window_at ────────────
+
+show "-- Compositor: stacking & hit-test --"
+
+let cmp = compositor(800, 600)
+let a = window("A", 100, 100, 200, 150)
+let b = window("B", 150, 150, 200, 150)
+cmp.add(a)
+cmp.add(b)
+assert_eq(len(cmp.windows), 2, "two windows added")
+assert_eq(cmp.top_window(), b, "B is on top after add")
+-- Overlap region: B is on top, so pick B
+assert_eq(cmp.window_at(170, 170), b, "overlap picks top")
+-- Only A's region
+assert_eq(cmp.window_at(110, 110), a, "non-overlap picks A")
+-- Outside
+assert_eq(cmp.window_at(0, 0), null, "outside both")
+
+-- focus(a) lifts A to the top
+cmp.focus(a)
+assert_eq(cmp.top_window(), a, "A on top after focus")
+assert(a.focused, "A focused")
+assert(not b.focused, "B blurred")
+assert_eq(cmp.window_at(170, 170), a, "focused A on top wins hit-test")
+
+-- ── Compositor: render dirty regions ──────────────────
+
+show "-- Compositor: render & dirty rects --"
+
+let small_cmp = compositor(64, 48)
+small_cmp.set_background(BLACK)
+let win = window("X", 8, 8, 16, 16)
+-- Fill the window's entire framebuffer with RED
+win.framebuffer.clear(RED)
+small_cmp.add(win)
+small_cmp.render_full()
+
+-- Background outside the window stayed BLACK
+assert_eq(small_cmp.screen.get_pixel(0, 0), BLACK, "bg unchanged")
+-- Window region copied through
+assert_eq(small_cmp.screen.get_pixel(8, 8), RED, "window top-left composited")
+assert_eq(small_cmp.screen.get_pixel(23, 23), RED, "window bottom-right composited")
+assert_eq(small_cmp.screen.get_pixel(24, 24), BLACK, "outside stays bg")
+
+-- After a clean render, no dirty rects → next render is a no-op
+assert_eq(small_cmp.render(), 0, "idle render does no work")
+
+-- Re-paint a sub-region: only that area gets touched. Change the
+-- window's framebuffer and request a partial redraw.
+win.framebuffer.fill_rect(0, 0, 4, 4, GREEN)
+small_cmp.paint([8, 8, 4, 4])
+assert(small_cmp.render() > 0, "partial render touches at least one window")
+assert_eq(small_cmp.screen.get_pixel(8, 8), GREEN, "partial redraw shows new colour")
+assert_eq(small_cmp.screen.get_pixel(15, 8), RED, "untouched region still has old colour")
+
+-- ── Chrome: decorate sets pixels ───────────────────────
+
+show "-- Chrome: decorate --"
+
+let dwin = window("Decorated", 0, 0, 80, 60)
+dwin.focus()
+decorate(dwin, null, builtin_font())
+-- The 1-pixel border should be set on all four edges
+assert_eq(dwin.framebuffer.get_pixel(0, 0), DEFAULT_THEME["border"], "top-left corner border")
+assert_eq(dwin.framebuffer.get_pixel(79, 59), DEFAULT_THEME["border"], "bottom-right corner border")
+-- Title bar background fills the top
+assert_eq(dwin.framebuffer.get_pixel(40, 5), DEFAULT_THEME["title_bg"], "title bar bg")
+-- Accent stripe under the title bar (only when focused)
+assert_eq(dwin.framebuffer.get_pixel(40, 23), DEFAULT_THEME["accent"], "accent stripe")
+-- Close button is a red disc near the top-left
+assert_eq(dwin.framebuffer.get_pixel(8 + 6, (dwin.title_h - 12) / 2 + 6), DEFAULT_THEME["close_bg"], "close button core pixel")
+
+-- Theme override merges with defaults
+let custom = theme({"accent": 0xFFFF00FF})
+assert_eq(custom["accent"], 0xFFFF00FF, "override applied")
+assert_eq(custom["title_bg"], DEFAULT_THEME["title_bg"], "untouched key kept")
+
+-- ── WindowManager: drag to move ────────────────────────
+
+show "-- WindowManager: drag to move --"
+
+let mc = compositor(800, 600)
+let mwin = window("M", 100, 100, 200, 150)
+let wm = window_manager(mc)
+wm.add(mwin)
+
+let bus = InputBus()
+bus.set_bounds(800, 600)
+wm.attach_to_bus(bus)
+
+-- Drag the title bar from (110, 110) to (160, 130)  → window moves +50, +20
+bus.dispatch_raw(raw(EV_REL, REL_X, 110))   -- mouse cursor starts at (510, 320)... wait
+-- Actually the bus's mouse starts at (400, 300). Let's move it directly.
+-- A simpler approach: build mouse events that already encode the right
+-- absolute positions. We'll simulate by feeding a sequence of frames.
+
+-- Reset mouse to (110, 110)
+bus.mouse.x = 110
+bus.mouse.y = 110
+
+-- Press left button at (110, 110) — that's inside the title bar of mwin
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 1))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert(wm.is_dragging(), "drag started")
+assert_eq(wm.drag_mode(), "move", "drag mode = move")
+assert_eq(wm.drag_target(), mwin, "drag target = mwin")
+
+-- Move the cursor by (+50, +20)
+bus.dispatch_raw(raw(EV_REL, REL_X, 50))
+bus.dispatch_raw(raw(EV_REL, REL_Y, 20))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(mwin.x, 150, "window moved with cursor x")
+assert_eq(mwin.y, 120, "window moved with cursor y")
+
+-- Release mouse — drag ends, snap may fire (we're not near an edge)
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 0))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert(not wm.is_dragging(), "drag released")
+assert_eq(mwin.x, 150, "no snap mid-screen")
+
+-- Drag near the left edge → snap to 0 on release.
+-- mwin is currently at (150, 120). Press inside its title bar.
+bus.mouse.x = 200; bus.mouse.y = 130
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 1))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+-- Drag the cursor far left so the window's x ends up within snap_threshold (12) of 0
+bus.dispatch_raw(raw(EV_REL, REL_X, -145))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+-- After motion: dx=-145 → mwin.x = 150 + (-145) = 5 (within snap_threshold of 0)
+assert_eq(mwin.x, 5, "window followed cursor")
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 0))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(mwin.x, 0, "snapped to left edge on release")
+
+-- ── WindowManager: drag to resize ──────────────────────
+
+show "-- WindowManager: drag to resize --"
+
+let rwin = window("R", 50, 50, 200, 200)
+wm.add(rwin)
+bus.mouse.x = 50 + 200 - 4    -- inside the bottom-right resize handle
+bus.mouse.y = 50 + 200 - 4
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 1))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(wm.drag_mode(), "resize", "drag mode = resize")
+bus.dispatch_raw(raw(EV_REL, REL_X, 30))
+bus.dispatch_raw(raw(EV_REL, REL_Y, 40))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(rwin.width, 230, "resized width")
+assert_eq(rwin.height, 240, "resized height")
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 0))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+
+-- Resize floor: dragging tiny dimensions clamps to min_window_w/h
+bus.mouse.x = 50 + rwin.width - 4
+bus.mouse.y = 50 + rwin.height - 4
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 1))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+bus.dispatch_raw(raw(EV_REL, REL_X, -1000))
+bus.dispatch_raw(raw(EV_REL, REL_Y, -1000))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+assert_eq(rwin.width, wm.min_window_w, "clamped to min width")
+assert_eq(rwin.height, wm.min_window_h, "clamped to min height")
+bus.dispatch_raw(raw(EV_KEY, BTN_LEFT, 0))
+bus.dispatch_raw(raw(EV_SYN, 0, 0))
+
+-- ── WindowManager: Alt-Tab ─────────────────────────────
+
+show "-- WindowManager: Alt-Tab focus cycle --"
+
+let cmp2 = compositor(800, 600)
+let wm2 = window_manager(cmp2)
+let bus2 = InputBus()
+wm2.attach_to_bus(bus2)
+let aw = window("A", 0, 0, 100, 100)
+let bw = window("B", 100, 0, 100, 100)
+let cw = window("C", 200, 0, 100, 100)
+wm2.add(aw); wm2.add(bw); wm2.add(cw)
+assert_eq(cmp2.top_window(), cw, "C added last is on top")
+
+-- Alt-Tab walks back to the previous most-recent window.
+-- With [aw, bw, cw], one Alt-Tab focuses B (now [aw, cw, bw]).
+bus2.dispatch_raw(raw(EV_KEY, KEY_LEFTALT, KEY_PRESS))
+bus2.dispatch_raw(raw(EV_KEY, KEY_TAB, KEY_PRESS))
+assert_eq(cmp2.top_window(), bw, "Alt-Tab focused B")
+-- A second Alt-Tab focuses the new second-from-top, which is C.
+bus2.dispatch_raw(raw(EV_KEY, KEY_TAB, KEY_PRESS))
+assert_eq(cmp2.top_window(), cw, "Alt-Tab again focuses C (next most-recent)")
+
+-- ── Workspace: switch between virtual desktops ────────
+
+show "-- Workspace: switch & move_window --"
+
+let cmp3 = compositor(400, 300)
+let wsm = workspace_manager(cmp3, 3)
+assert_eq(wsm.count(), 3, "three workspaces")
+
+let pa = window("Pad-A", 0, 0, 50, 50)
+let pb = window("Pad-B", 60, 0, 50, 50)
+let pc = window("Pad-C", 0, 60, 50, 50)
+wsm.add_window_to(0, pa)
+wsm.add_window_to(1, pb)
+wsm.add_window_to(2, pc)
+
+assert_eq(len(cmp3.windows), 1, "only ws0's window mounted initially")
+assert_eq(cmp3.windows[0], pa, "pa is the mounted one")
+
+wsm.switch_to(1)
+assert_eq(len(cmp3.windows), 1, "ws1 has one window")
+assert_eq(cmp3.windows[0], pb, "pb mounted")
+
+wsm.next()
+assert_eq(wsm.active_index, 2, "next() advances")
+wsm.next()
+assert_eq(wsm.active_index, 0, "next() wraps")
+wsm.prev()
+assert_eq(wsm.active_index, 2, "prev() wraps")
+
+-- Move a window between workspaces
+wsm.switch_to(0)
+wsm.move_window(pb, 0)
+assert(wsm.workspaces[0].contains(pb), "pb in ws0 after move")
+assert(not wsm.workspaces[1].contains(pb), "pb removed from ws1")
+assert_eq(len(cmp3.windows), 2, "ws0 now has 2 mounted windows")
+
+-- ── Workspace: slide animation ─────────────────────────
+
+show "-- Workspace: slide animation --"
+
+let cmp4 = compositor(200, 100)
+let wsm2 = workspace_manager(cmp4, 2)
+let s1 = window("S1", 50, 25, 50, 50)
+wsm2.add_window_to(0, s1)
+let s2 = window("S2", 0, 0, 30, 30)
+wsm2.add_window_to(1, s2)
+
+let anim = wsm2.begin_slide(1)
+assert(anim != null, "animation started")
+anim.step(0.5)
+assert(not anim.done(), "animation mid-flight")
+-- s1 has been visually offset (negative x because direction = +1)
+assert(s1.x < 50, "s1 slid left during animation")
+
+anim.step(0.6)    -- pushes progress past 1.0 → commits
+assert(anim.done(), "animation finished after 1.1 progress")
+assert_eq(wsm2.active_index, 1, "switched to ws1")
+assert_eq(s1.x, 50, "s1 restored to its original position")
+assert_eq(cmp4.windows[0], s2, "ws1 windows mounted after commit")
+
+-- Skipping with finish() also commits cleanly
+let anim2 = wsm2.begin_slide(0)
+anim2.finish()
+assert(anim2.done(), "finish() marks done")
+assert_eq(wsm2.active_index, 0, "finish() applied the switch")
+
+-- ── Summary ────────────────────────────────────────────
+
+show ""
+show "Window: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " window test(s) failed" }

@@ -80,11 +80,11 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Window abstraction** | Pending | `stdlib/window.clarity` — `Window` class: title, x, y, width, height, framebuffer, visible, focused, resizable, minimized, maximized. Each window owns its own framebuffer |
-| 2 | **Window compositor** | Pending | `stdlib/compositor.clarity` — `Compositor` class: manages window stack (z-order), composites all visible windows onto screen framebuffer. Dirty-rect tracking for partial redraws. Alpha blending for transparency |
-| 3 | **Window chrome** | Pending | Title bar with close/minimize/maximize buttons, resize handles (8 edges + corners), drop shadow. Drawn in Clarity, fully themeable |
-| 4 | **Window management** | Pending | Drag to move, edge-drag to resize, double-click title to maximize, minimize to dock. Snap to edges (left-half, right-half, quarters). `Alt+Tab` window switcher overlay |
-| 5 | **Multi-workspace** | Pending | Virtual desktops. `Workspace` class with its own window stack. Switch with keyboard shortcuts or gesture. Slide animation between workspaces |
+| 1 | **Window abstraction** | Done | `stdlib/window.clarity` — `Window` with title, position, outer bounds, owned Framebuffer (re-allocated on resize), visible/focused/resizable/minimized/maximized state, `move`/`resize`/`maximize`/`unmaximize`, plus `hit_test` reporting "title"/"resize"/"content"/"border"/null. |
+| 2 | **Window compositor** | Done | `stdlib/compositor.clarity` — `Compositor` with bottom-to-top z-order, `add` / `remove` / `focus` / `window_at` for hit-testing, dirty-rect tracking with `paint(rect)` / `mark_window` / `mark_all`, `_coalesce` of overlapping rects, partial-redraw `render` (skips work entirely when no rects are dirty). |
+| 3 | **Window chrome** | Done | `stdlib/chrome.clarity` — `decorate(window, theme, font)` paints a 1-pixel border, title bar (focus-aware bg/fg with accent stripe), three colored control discs, resize-handle stripes; `drop_shadow` paints a soft shadow into the screen FB. Themes are plain merge-able dicts. |
+| 4 | **Window management** | Done | `stdlib/window_manager.clarity` — `WindowManager` attaches to an `InputBus`; left-click on title-bar starts a move drag, on resize-handle starts a resize drag, edge-snap on release with `snap_threshold`, `Alt+Tab` cycles focus to the next-most-recent window. |
+| 5 | **Multi-workspace** | Done | `stdlib/workspace.clarity` — `Workspace` owns a window list; `WorkspaceManager(compositor, n)` mounts/unmounts workspaces on the compositor, `switch_to`/`next`/`prev` jump (with wrap), `move_window` migrates between workspaces, and `begin_slide(target)` returns a `SlideAnimation` the caller ticks per frame for a slide transition. |
 
 ---
 

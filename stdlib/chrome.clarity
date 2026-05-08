@@ -1,0 +1,143 @@
+-- Chrome — window decorations: title bar, control buttons, resize
+-- handle, and 1-pixel borders. Drawn directly into a Window's
+-- framebuffer; the Compositor blits the whole thing as one block.
+--
+-- Themes are plain dicts so apps can override individual colours
+-- without subclassing — pass theme = merge(DEFAULT_THEME, {accent: ...})
+-- or build one from scratch.
+
+from "graphics.clarity" import rgb, rgba, BLACK, WHITE
+from "draw.clarity" import line, fill_rect, hline, vline
+from "font.clarity" import builtin_font, draw_text, measure_text
+
+let DEFAULT_THEME = {
+    "title_bg":         0xFF2A2A2A,
+    "title_bg_blurred": 0xFF1A1A1A,
+    "title_fg":         0xFFE6E6E6,
+    "title_fg_blurred": 0xFF888888,
+    "border":           0xFF3A3A3A,
+    "accent":           0xFF4A90E2,
+    "shadow":           0x66000000,
+    "close_bg":         0xFFE74C3C,
+    "minimize_bg":      0xFFF1C40F,
+    "maximize_bg":      0xFF2ECC71,
+    "button_dim":       0xFF555555,
+    "content_bg":       0xFF1E1E1E
+}
+
+-- ── Theme helpers ───────────────────────────────────────
+
+fn theme(overrides) {
+    if overrides == null { return DEFAULT_THEME }
+    return merge(DEFAULT_THEME, overrides)
+}
+
+-- ── Decoration ──────────────────────────────────────────
+
+-- Paint chrome into `window.framebuffer`. Apps should call this once
+-- after their content draws (or before, if they want chrome to win),
+-- because chrome reaches into the title-bar / border bands which sit
+-- outside `window.content_rect()`.
+fn decorate(window, t, font) {
+    let th = if t == null { DEFAULT_THEME } else { t }
+    let fnt = if font == null { builtin_font() } else { font }
+    let fb = window.framebuffer
+    let w = window.width
+    let h = window.height
+
+    -- 1-pixel outer border
+    let border = th["border"]
+    hline(fb, 0, 0, w - 1, border)
+    hline(fb, 0, h - 1, w - 1, border)
+    vline(fb, 0, 0, h - 1, border)
+    vline(fb, w - 1, 0, h - 1, border)
+
+    -- Title bar
+    if window.title_h > 0 {
+        let bg = if window.focused { th["title_bg"] } else { th["title_bg_blurred"] }
+        fill_rect(fb, 1, 1, w - 2, window.title_h - 1, bg)
+
+        -- A 1-pixel accent stripe under the title bar marks focus
+        if window.focused {
+            hline(fb, 1, window.title_h - 1, w - 2, th["accent"])
+        }
+
+        -- Window title text, vertically centred
+        let fg = if window.focused { th["title_fg"] } else { th["title_fg_blurred"] }
+        let dims = measure_text(fnt, window.title)
+        let text_x = 8 + 18 * 3 + 4    -- past the three control buttons
+        let text_y = (window.title_h - dims[1]) / 2
+        if text_y < 0 { text_y = 0 }
+        draw_text(fb, text_x, text_y, window.title, fnt, fg)
+
+        -- Three control buttons on the left, like macOS but more
+        -- traditional ordering: close (red), minimize (yellow), maximize (green)
+        let by = (window.title_h - 12) / 2
+        _circle_button(fb, 8, by, 6, th["close_bg"], window.focused, th["button_dim"])
+        _circle_button(fb, 8 + 18, by, 6, th["minimize_bg"], window.focused, th["button_dim"])
+        _circle_button(fb, 8 + 36, by, 6, th["maximize_bg"], window.focused, th["button_dim"])
+    }
+
+    -- Resize handle (3 diagonal stripes in the bottom-right corner)
+    if window.resizable {
+        let s = window.resize_h
+        let stripe = th["title_fg_blurred"]
+        mut i = 0
+        while i < 3 {
+            let off = i * 4 + 2
+            line(fb, w - 1 - off, h - 2, w - 2, h - 1 - off, stripe)
+            i += 1
+        }
+    }
+}
+
+-- Filled disc with `radius` pixels around (cx + radius, cy + radius).
+-- Drawn manually so we don't drag in `draw.circle` for chrome (cheap
+-- enough to inline; chrome redraws happen on focus changes only).
+fn _circle_button(fb, x, y, radius, color, focused, dim) {
+    let c = if focused { color } else { dim }
+    let r2 = radius * radius
+    mut dy = 0 - radius
+    while dy <= radius {
+        mut dx = 0 - radius
+        while dx <= radius {
+            if dx * dx + dy * dy <= r2 {
+                fb.put_pixel(x + radius + dx, y + radius + dy, c)
+            }
+            dx += 1
+        }
+        dy += 1
+    }
+}
+
+-- Draw a soft drop shadow underneath a window's outer rect, into the
+-- screen framebuffer. Called by the compositor *before* blitting the
+-- window so the shadow sits behind it.
+fn drop_shadow(screen, window, t, depth) {
+    let th = if t == null { DEFAULT_THEME } else { t }
+    let d = if depth == null { 8 } else { depth }
+    let shadow = th["shadow"]
+    let r = (shadow >> 16) & 0xFF
+    let g = (shadow >> 8) & 0xFF
+    let b = shadow & 0xFF
+    let a_max = (shadow >> 24) & 0xFF
+    mut layer = 0
+    while layer < d {
+        let frac = (d - layer) * 1.0 / (d + 1)
+        let a = int(a_max * frac)
+        let color = a * 16777216 + r * 65536 + g * 256 + b
+        let off = layer + 1
+        fill_rect(screen,
+            window.x - off,
+            window.y + window.height,
+            window.width + off * 2,
+            1, color)
+        fill_rect(screen,
+            window.x + window.width,
+            window.y - off + 1,
+            1,
+            window.height + off,
+            color)
+        layer += 1
+    }
+}
