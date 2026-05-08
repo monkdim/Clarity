@@ -181,7 +181,7 @@ class TypeChecker {
     fn check_destructure_let(node) {
         this.infer(node.value)
         for target in node.targets {
-            let name = target
+            mut name = target
             if type(target) != "string" {
                 try { name = target.name } catch e { name = str(target) }
             }
@@ -264,7 +264,7 @@ class TypeChecker {
     fn check_for(node) {
         this.infer(node.iterable)
         this.push_scope()
-        let name = node.variable
+        mut name = node.variable
         if type(name) != "string" {
             try { name = node.variable.name } catch e { name = str(node.variable) }
         }
@@ -454,7 +454,7 @@ class TypeChecker {
 
     fn infer(node) {
         if node == null { return "null" }
-        let nt = null
+        mut nt = null
         try { nt = node.node_type } catch e { return "any" }
         if nt == null { return "any" }
 

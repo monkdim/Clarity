@@ -1536,14 +1536,17 @@ class Interpreter {
     }
 
     fn _interpolate_string(text, env, line) {
-        -- Walk through text, find {expr} patterns, evaluate them
+        -- Walk through text, find {expr} patterns, evaluate them.
+        -- Only treat {X} as interpolation when X starts with a letter or
+        -- underscore (matches the transpiler's heuristic). Anything else is
+        -- a literal brace, so source like "if true { 1 } else { 2 }" is
+        -- preserved verbatim.
         mut result = ""
         mut i = 0
         let text_len = len(text)
         while i < text_len {
             let ch = text[i]
-            if ch == "{" {
-                -- Find matching }
+            if ch == "{" and i + 1 < text_len and (is_alpha(text[i + 1]) or text[i + 1] == "_") {
                 mut j = i + 1
                 mut depth = 1
                 while j < text_len and depth > 0 {
