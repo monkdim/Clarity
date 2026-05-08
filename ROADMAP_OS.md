@@ -108,12 +108,12 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Init system** | Pending | `system/init.clarity` — PID 1 (in userspace). Service definitions (name, command, dependencies, restart policy). Dependency-ordered startup. Watchdog restarts. `clarity-ctl start/stop/status/list` |
-| 2 | **IPC / message bus** | Pending | `stdlib/ipc.clarity` — Unix domain sockets + Clarity channels for cross-process communication. Named services register on the bus. Request/response and publish/subscribe patterns. Serialization via Clarity's JSON |
-| 3 | **Storage service** | Pending | `system/storage.clarity` — mount/unmount filesystems, volume detection, disk usage, auto-mount USB/external drives. Notify apps on mount/eject |
-| 4 | **Network service** | Pending | `system/network.clarity` — WiFi scanning/connecting (via wpa_supplicant FFI), DHCP client, DNS resolver, connection status, firewall rules. Exposes connection state on IPC bus |
-| 5 | **Audio service** | Pending | `system/audio.clarity` — ALSA/PulseAudio/PipeWire FFI bindings. Mixer (per-app volume), playback/capture streams, device enumeration. WAV/PCM playback, audio routing |
-| 6 | **Notification service** | Pending | `system/notify.clarity` — apps send notifications (title, body, icon, actions, urgency). Notification center queues and displays them. Dismiss/action callbacks via IPC |
+| 1 | **Init system** | Done | `stdlib/init.clarity` — `Service` (start/stop/health functions, deps list, restart policy) + `ServiceManager` (Kahn's-algorithm topological sort, dep-ordered start_all, reverse-order stop_all, cycle detection, watchdog `tick()` that restarts unhealthy services per their policy, event listener channel). |
+| 2 | **IPC / message bus** | Done | `stdlib/ipc.clarity` — `Bus` with `register`/`call`/`try_call` (request/response), `subscribe`/`publish` (pub-sub with consume-on-`return true`), `unregister`/`unsubscribe`, `set_intercept` for test/log hooks. In-process today; same API will get a Unix-domain-socket transport in a follow-up. |
+| 3 | **Storage service** | Done | `stdlib/storage.clarity` — `mounts()` parses `/proc/mounts`, `disk_usage(path)` calls libc `statvfs` via FFI, `mount`/`umount` syscalls (need root), `StorageWatcher` diffs snapshots and publishes `storage.mounted` / `storage.unmounted` IPC events. |
+| 4 | **Network service** | Done | `stdlib/network.clarity` — `interfaces()` enumerates `/sys/class/net/*`, `interface_info(name)` returns operstate / carrier / MAC / MTU / speed / counters, `interface_stats(name)` parses `/proc/net/dev`, `dns_resolvers()` parses `/etc/resolv.conf`. WiFi association / DHCP / firewall deferred to a dedicated phase. |
+| 5 | **Audio service** | Done | `stdlib/audio.clarity` — `play_wav(path)` shells out to `paplay`/`aplay`/`afplay`/`ffplay` (whichever is available), `master_volume` / `set_master_volume` / `mute` / `unmute` via `amixer`. Real ALSA/PulseAudio/PipeWire FFI streaming is a separate phase. |
+| 6 | **Notification service** | Done | `stdlib/notify.clarity` — `Notification` (title/body/urgency/icon/timeout/actions/app_name) + `NotificationCenter` with active queue, history, do-not-disturb mode (critical urgency bypasses), and full IPC plumbing: `notification.new` / `notification.dismissed` / `notification.action` events. |
 
 ---
 

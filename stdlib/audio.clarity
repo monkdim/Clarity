@@ -1,0 +1,98 @@
+-- Audio — minimal sound output (Phase 61 task 5).
+--
+-- Real ALSA / PulseAudio / PipeWire FFI bindings are their own
+-- project (a PCM stream API with mixer, capture, and per-app volume
+-- is a non-trivial amount of code). For ClarityOS's first cut we
+-- shell out to the system's stock player so apps can at least make
+-- a notification chime or play a UI sound.
+--
+-- play_wav(path) tries paplay (PulseAudio/PipeWire), then aplay
+-- (ALSA), then afplay (macOS) in that order. Returns true on
+-- success, false otherwise.
+--
+-- TODO once the FFI layer is happy:
+--   * snd_pcm_open / snd_pcm_writei (ALSA) for direct streaming
+--   * mixer for per-app volume control
+--   * capture stream for microphones
+
+from "ipc.clarity" import bus
+
+fn _which(cmd) {
+    let r = exec_full("command -v " + cmd + " 2>/dev/null")
+    return len(trim(r.stdout)) > 0
+}
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+-- Returns the first available player command name, or null if none.
+fn available_player() {
+    if _which("paplay") { return "paplay" }
+    if _which("aplay") { return "aplay" }
+    if _which("afplay") { return "afplay" }     -- macOS
+    if _which("ffplay") { return "ffplay" }
+    return null
+}
+
+fn play_wav(path) {
+    if not exists(path) { return false }
+    let player = available_player()
+    if player == null { return false }
+    -- ffplay needs a -nodisp / -autoexit pair; everything else just
+    -- takes the file path.
+    mut cmd = player + " " + _quote(path) + " >/dev/null 2>&1"
+    if player == "ffplay" {
+        cmd = "ffplay -nodisp -autoexit " + _quote(path) + " >/dev/null 2>&1"
+    }
+    let r = exec_full(cmd)
+    return r.exit_code == 0
+}
+
+-- Volume control via amixer (the most widely-available CLI mixer).
+-- Returns null when amixer isn't installed.
+fn master_volume() {
+    if not _which("amixer") { return null }
+    let r = exec_full("amixer get Master 2>/dev/null")
+    -- Parse a line like "Front Left: Playback 65536 [85%] [on]"
+    let m = r.stdout
+    let percent_idx = index_of(m, "[")
+    if percent_idx < 0 { return null }
+    let close_idx = index_of(substring(m, percent_idx + 1, len(m)), "]")
+    if close_idx < 0 { return null }
+    let token = substring(m, percent_idx + 1, percent_idx + 1 + close_idx)
+    if not ends(token, "%") { return null }
+    return int(substring(token, 0, len(token) - 1))
+}
+
+fn set_master_volume(percent) {
+    if not _which("amixer") { return false }
+    if percent < 0 { percent = 0 }
+    if percent > 100 { percent = 100 }
+    let r = exec_full("amixer set Master " + str(percent) + "% >/dev/null 2>&1")
+    return r.exit_code == 0
+}
+
+fn mute() {
+    if not _which("amixer") { return false }
+    let r = exec_full("amixer set Master mute >/dev/null 2>&1")
+    return r.exit_code == 0
+}
+
+fn unmute() {
+    if not _which("amixer") { return false }
+    let r = exec_full("amixer set Master unmute >/dev/null 2>&1")
+    return r.exit_code == 0
+}
+
+-- ── IPC service registration ──────────────────────────
+
+fn register_audio_service(b) {
+    let svc = b ?? bus()
+    svc.register("audio.play_wav", fn(req) { return play_wav(req["path"]) })
+    svc.register("audio.master_volume", fn(req) { return master_volume() })
+    svc.register("audio.set_volume", fn(req) { return set_master_volume(req["percent"]) })
+    svc.register("audio.mute", fn(req) { return mute() })
+    svc.register("audio.unmute", fn(req) { return unmute() })
+}

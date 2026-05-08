@@ -1,0 +1,299 @@
+-- Phase 61 — system services tests.
+-- Exercises Bus, ServiceManager, parsers for /proc/mounts, /proc/net/dev,
+-- /etc/resolv.conf, the audio shim's selection logic, and the
+-- NotificationCenter queue + IPC events.
+--
+-- We stay away from real syscalls / real audio devices so the tests
+-- run anywhere — every parser has a "parse this text" entry point
+-- separate from the "read it from the live filesystem" wrapper.
+
+from "ipc.clarity" import Bus, bus
+from "init.clarity" import Service, ServiceManager
+from "storage.clarity" import parse_mounts_text, _has_mountpoint
+from "network.clarity" import parse_dev_text, parse_resolv_text
+from "audio.clarity" import available_player
+from "notify.clarity" import Notification, NotificationCenter, notification
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+-- ── IPC: Bus register/call/try_call ────────────────────
+
+show "-- IPC: services --"
+
+let b = Bus()
+b.register("echo", fn(req) { return req })
+assert(b.has_service("echo"), "registered")
+assert_eq(b.call("echo", "hi"), "hi", "call returns handler result")
+
+mut threw = false
+try { b.call("missing", null) } catch e { threw = true }
+assert(threw, "call on missing service throws")
+assert_eq(b.try_call("missing", null), null, "try_call returns null when missing")
+
+-- Re-registering replaces the handler
+b.register("echo", fn(req) { return "v2:" + str(req) })
+assert_eq(b.call("echo", "x"), "v2:x", "re-register replaces handler")
+
+b.unregister("echo")
+assert(not b.has_service("echo"), "unregister removes")
+
+-- Intercept fires for every call (logging / test-side recording)
+mut log = []
+b.register("ping", fn(req) { return "pong" })
+b.set_intercept(fn(name, req) { push(log, [name, req]) })
+b.call("ping", 1); b.call("ping", 2)
+assert_eq(len(log), 2, "intercept saw 2 calls")
+assert_eq(log[0][0], "ping", "intercept saw service name")
+
+-- ── IPC: pub/sub ──────────────────────────────────────
+
+show "-- IPC: pub/sub --"
+
+let b2 = Bus()
+mut hits_a = []
+mut hits_b = []
+b2.subscribe("topic", fn(m) { push(hits_a, m); return false })
+b2.subscribe("topic", fn(m) { push(hits_b, m); return false })
+
+let count = b2.publish("topic", "hello")
+assert_eq(count, 2, "two subscribers ran")
+assert_eq(hits_a, ["hello"], "first sub saw message")
+assert_eq(hits_b, ["hello"], "second sub saw message")
+
+-- Consume pattern: returning true stops further dispatch
+let b3 = Bus()
+mut stage1 = 0
+mut stage2 = 0
+b3.subscribe("t", fn(m) { stage1 += 1; return true })
+b3.subscribe("t", fn(m) { stage2 += 1; return false })
+b3.publish("t", null)
+assert_eq(stage1, 1, "first sub ran")
+assert_eq(stage2, 0, "second sub blocked by consume")
+
+-- Publishing to a topic with no subscribers is fine
+assert_eq(b3.publish("nobody", null), 0, "no-op when no subs")
+
+-- ── Init: dependency-ordered start/stop ───────────────
+
+show "-- Init: topo order --"
+
+fn _index_of_in(list, val) {
+    mut i = 0
+    while i < len(list) {
+        if list[i] == val { return i }
+        i += 1
+    }
+    return -1
+}
+
+let mgr = ServiceManager()
+mut started = []
+mut stopped = []
+
+fn make_svc(name, deps) {
+    return Service(name, fn() { push(started, name); return name }, {
+        "stop": fn(h) { push(stopped, name) },
+        "deps": deps
+    })
+}
+
+mgr.register(make_svc("a", []))
+mgr.register(make_svc("b", ["a"]))
+mgr.register(make_svc("c", ["a", "b"]))
+mgr.register(make_svc("d", ["c"]))
+
+let order = mgr.list()
+assert_eq(order[0], "a", "a comes first")
+assert(_index_of_in(order, "b") > _index_of_in(order, "a"), "b after a")
+assert(_index_of_in(order, "c") > _index_of_in(order, "b"), "c after b")
+assert_eq(order[3], "d", "d last")
+
+mgr.start_all()
+assert_eq(started, ["a", "b", "c", "d"], "started in dep order")
+assert_eq(mgr.status("a"), "running", "a running")
+assert_eq(mgr.status("d"), "running", "d running")
+
+mgr.stop_all()
+-- Reverse order on stop
+assert_eq(stopped, ["d", "c", "b", "a"], "stopped in reverse order")
+assert_eq(mgr.status("a"), "stopped", "a stopped")
+
+-- Cycles are rejected
+let cy = ServiceManager()
+cy.register(make_svc("x", ["y"]))
+cy.register(make_svc("y", ["x"]))
+mut cycle_threw = false
+try { cy.list() } catch e { cycle_threw = true }
+assert(cycle_threw, "cycle detected and rejected")
+
+-- ── Init: watchdog tick restarts unhealthy services ───
+
+show "-- Init: watchdog --"
+
+let wd = ServiceManager()
+mut healthy_after = 0
+let unstable = Service("unstable", fn() { return "running" }, {
+    "stop": fn(h) { return null },
+    "health": fn(h) {
+        healthy_after += 1
+        return healthy_after > 1   -- first health check fails, then it's "fixed"
+    },
+    "restart": "on_failure"
+})
+wd.register(unstable)
+wd.start("unstable")
+assert_eq(wd.status("unstable"), "running", "started")
+
+let report = wd.tick()
+-- The first tick saw an unhealthy report and restarted
+assert_eq(wd.status("unstable"), "running", "restarted after watchdog")
+assert(unstable.start_count >= 2, "start_count incremented on restart")
+
+-- ── Storage: parse /proc/mounts text ──────────────────
+
+show "-- Storage: parse_mounts --"
+
+let sample = "rootfs / rootfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec 0 0\n/dev/sda1 /home ext4 rw,relatime 0 0\n"
+let parsed = parse_mounts_text(sample)
+assert_eq(len(parsed), 3, "three mounts parsed")
+assert_eq(parsed[0]["device"], "rootfs", "device 0")
+assert_eq(parsed[0]["mountpoint"], "/", "mountpoint 0")
+assert_eq(parsed[2]["fstype"], "ext4", "fstype 2")
+assert_eq(parsed[2]["options"], "rw,relatime", "options 2")
+assert(_has_mountpoint(parsed, "/home"), "_has_mountpoint hit")
+assert(not _has_mountpoint(parsed, "/nope"), "_has_mountpoint miss")
+
+-- ── Network: parse /proc/net/dev ──────────────────────
+
+show "-- Network: parse_dev --"
+
+let dev_sample = "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 12345     100    0    0    0     0          0         0    12345     100    0    0    0     0       0          0\n  eth0:  9999      88    1    2    0     0          0         0     8888      77    3    4    0     0       0          0\n"
+let dev = parse_dev_text(dev_sample)
+assert(has(dev, "lo"), "lo present")
+assert(has(dev, "eth0"), "eth0 present")
+assert_eq(dev["lo"]["rx_bytes"], 12345, "lo rx_bytes")
+assert_eq(dev["eth0"]["tx_bytes"], 8888, "eth0 tx_bytes")
+assert_eq(dev["eth0"]["rx_errors"], 1, "eth0 rx_errors")
+
+-- ── Network: parse /etc/resolv.conf ───────────────────
+
+show "-- Network: parse_resolv --"
+
+let resolv = "# this is a comment\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch example.com\n"
+let dns = parse_resolv_text(resolv)
+assert_eq(len(dns), 2, "two nameservers parsed")
+assert_eq(dns[0], "1.1.1.1", "first ns")
+assert_eq(dns[1], "8.8.8.8", "second ns")
+
+-- ── Audio: available_player returns null or a known name ──
+
+show "-- Audio: available_player --"
+
+let p = available_player()
+-- On CI runners we generally won't have any of these installed, so
+-- accept null. If we do have one, it must be one of the four known.
+let ok = p == null or p == "paplay" or p == "aplay" or p == "afplay" or p == "ffplay"
+assert(ok, "available_player returns null or a known command")
+
+-- ── Notify: Notification + Center ─────────────────────
+
+show "-- Notify: Notification --"
+
+let n = notification("Title", "Body text")
+assert_eq(n.title, "Title", "title set")
+assert_eq(n.body, "Body text", "body set")
+assert_eq(n.urgency, "normal", "default urgency")
+assert(n.id > 0, "id assigned")
+
+mut action_fired = 0
+n.add_action("ok", "OK", fn() { action_fired += 1 })
+assert_eq(len(n.actions), 1, "action recorded")
+
+let m = n.to_map()
+assert_eq(m["title"], "Title", "to_map title")
+assert_eq(len(m["actions"]), 1, "to_map actions summary")
+assert_eq(m["actions"][0]["id"], "ok", "action id")
+assert_eq(m["actions"][0]["label"], "OK", "action label")
+-- Callbacks aren't included in the IPC-friendly map (not serialisable)
+let action0 = m["actions"][0]
+assert(not has(action0, "callback"), "callback stripped from map")
+
+show "-- Notify: NotificationCenter --"
+
+let bus_local = Bus()
+let center = NotificationCenter(bus_local)
+mut new_events = []
+mut dismissed_events = []
+mut action_events = []
+bus_local.subscribe("notification.new", fn(p) { push(new_events, p); return false })
+bus_local.subscribe("notification.dismissed", fn(p) { push(dismissed_events, p); return false })
+bus_local.subscribe("notification.action", fn(p) { push(action_events, p); return false })
+
+let na = notification("A", "first")
+let nb = notification("B", "second")
+center.send(na)
+center.send(nb)
+assert_eq(center.count(), 2, "two active")
+assert_eq(len(new_events), 2, "two new events published")
+
+-- Dismiss one
+let did = center.dismiss(na.id)
+assert(did, "dismiss returned true")
+assert_eq(center.count(), 1, "one active after dismiss")
+assert_eq(len(dismissed_events), 1, "dismissed event published")
+assert_eq(dismissed_events[0]["id"], na.id, "dismissed payload id")
+assert(not center.dismiss(99999), "dismiss unknown returns false")
+
+-- Action triggers callback + event + auto-dismiss
+let nc = notification("C", "with action")
+mut nc_action_fired = 0
+nc.add_action("apply", "Apply", fn() { nc_action_fired += 1 })
+center.send(nc)
+let triggered = center.trigger_action(nc.id, "apply")
+assert(triggered, "trigger_action returned true")
+assert_eq(nc_action_fired, 1, "action callback ran")
+assert_eq(len(action_events), 1, "action event published")
+assert_eq(action_events[0]["action"], "apply", "action id in event")
+-- Triggering an action auto-dismisses the notification
+assert_eq(center.count(), 1, "auto-dismissed after action")
+
+-- DND: critical bypasses, others go to history only
+center.set_do_not_disturb(true)
+let baseline_active = center.count()
+let baseline_new = len(new_events)
+let n_low = notification("low", "skip me")
+n_low.urgency = "low"
+center.send(n_low)
+assert_eq(center.count(), baseline_active, "DND swallowed low-urgency")
+assert_eq(len(new_events), baseline_new, "no new event for swallowed")
+
+let n_crit = notification("crit", "show me")
+n_crit.urgency = "critical"
+center.send(n_crit)
+assert_eq(center.count(), baseline_active + 1, "critical bypassed DND")
+assert_eq(len(new_events), baseline_new + 1, "critical published")
+
+center.set_do_not_disturb(false)
+
+-- History keeps every send (including DND-swallowed)
+assert(len(center.history) >= 4, "history grew")
+
+-- ── Summary ────────────────────────────────────────────
+
+show ""
+show "Services: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " service test(s) failed" }

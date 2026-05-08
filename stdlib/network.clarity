@@ -1,0 +1,140 @@
+-- Network — interface enumeration + per-interface stats (Phase 61 task 4).
+--
+-- Reads from procfs / sysfs rather than wiring up rtnetlink — that
+-- keeps this module portable across Linux distros without a dedicated
+-- C library and avoids a hard dep on iproute2.
+--
+--   /sys/class/net/<iface>/operstate         "up" | "down" | "unknown"
+--   /sys/class/net/<iface>/address           MAC address
+--   /sys/class/net/<iface>/mtu
+--   /proc/net/dev                            rx/tx byte/packet counters
+--   /etc/resolv.conf                         DNS resolvers
+--
+-- WiFi association / DHCP / firewall live in their own follow-up — they
+-- need wpa_supplicant / udhcpc / iptables wiring respectively.
+--
+-- Exposed via IPC (registered through register_network_service):
+--   network.list_interfaces
+--   network.interface(name)
+--   network.dns_resolvers
+
+from "ipc.clarity" import bus
+
+-- ── Interface enumeration ─────────────────────────────
+
+fn interfaces() {
+    if not exists("/sys/class/net") { return [] }
+    let result = exec_full("ls /sys/class/net 2>/dev/null")
+    let names = split(trim(result.stdout), "\n")
+    mut out = []
+    for n in names {
+        let nm = trim(n)
+        if len(nm) > 0 { push(out, nm) }
+    }
+    return out
+}
+
+fn _read_or(path, default_) {
+    if not exists(path) { return default_ }
+    return trim(read(path))
+}
+
+fn _read_int_or(path, default_) {
+    let s = _read_or(path, null)
+    if s == null { return default_ }
+    return int(s)
+}
+
+fn interface_info(name) {
+    let base = "/sys/class/net/" + name
+    if not exists(base) { return null }
+    let stats = interface_stats(name)
+    return {
+        "name": name,
+        "operstate": _read_or(base + "/operstate", "unknown"),
+        "carrier": _read_int_or(base + "/carrier", 0) == 1,
+        "mac": _read_or(base + "/address", ""),
+        "mtu": _read_int_or(base + "/mtu", 0),
+        "speed_mbps": _read_int_or(base + "/speed", 0),
+        "rx_bytes": stats["rx_bytes"],
+        "tx_bytes": stats["tx_bytes"],
+        "rx_packets": stats["rx_packets"],
+        "tx_packets": stats["tx_packets"]
+    }
+}
+
+-- ── /proc/net/dev ─────────────────────────────────────
+
+fn parse_dev_text(text) {
+    mut out = {}
+    let lines = split(text, "\n")
+    -- Skip the two header lines, then each remaining line is:
+    --   <iface>: rx_bytes rx_packets ... 16 columns
+    mut i = 2
+    while i < len(lines) {
+        let line = trim(lines[i])
+        let colon = index_of(line, ":")
+        if colon > 0 {
+            let name = trim(substring(line, 0, colon))
+            let rest = trim(substring(line, colon + 1, len(line)))
+            mut nums = []
+            for tok in split(rest, " ") {
+                let t = trim(tok)
+                if len(t) > 0 { push(nums, int(t)) }
+            }
+            if len(nums) >= 16 {
+                out[name] = {
+                    "rx_bytes":   nums[0],
+                    "rx_packets": nums[1],
+                    "rx_errors":  nums[2],
+                    "rx_dropped": nums[3],
+                    "tx_bytes":   nums[8],
+                    "tx_packets": nums[9],
+                    "tx_errors":  nums[10],
+                    "tx_dropped": nums[11]
+                }
+            }
+        }
+        i += 1
+    }
+    return out
+}
+
+fn interface_stats(name) {
+    if not exists("/proc/net/dev") {
+        return {"rx_bytes": 0, "rx_packets": 0, "tx_bytes": 0, "tx_packets": 0,
+                "rx_errors": 0, "rx_dropped": 0, "tx_errors": 0, "tx_dropped": 0}
+    }
+    let all = parse_dev_text(read("/proc/net/dev"))
+    if has(all, name) { return all[name] }
+    return {"rx_bytes": 0, "rx_packets": 0, "tx_bytes": 0, "tx_packets": 0,
+            "rx_errors": 0, "rx_dropped": 0, "tx_errors": 0, "tx_dropped": 0}
+}
+
+-- ── DNS resolvers ─────────────────────────────────────
+
+fn parse_resolv_text(text) {
+    mut out = []
+    for line in split(text, "\n") {
+        let s = trim(line)
+        if starts(s, "nameserver") {
+            let rest = trim(substring(s, 10, len(s)))
+            if len(rest) > 0 { push(out, rest) }
+        }
+    }
+    return out
+}
+
+fn dns_resolvers() {
+    if not exists("/etc/resolv.conf") { return [] }
+    return parse_resolv_text(read("/etc/resolv.conf"))
+}
+
+-- ── IPC service registration ──────────────────────────
+
+fn register_network_service(b) {
+    let svc = b ?? bus()
+    svc.register("network.list_interfaces", fn(req) { return interfaces() })
+    svc.register("network.interface", fn(req) { return interface_info(req["name"]) })
+    svc.register("network.dns_resolvers", fn(req) { return dns_resolvers() })
+}
