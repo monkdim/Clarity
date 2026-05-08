@@ -409,7 +409,9 @@ class Compiler {
         let jump_end = this.code.emit(OP_JUMP, 0)
         this.code.patch_jump(jump_false)
 
-        if has(node, "elif_clauses") and node.elif_clauses != null and len(node.elif_clauses) > 0 {
+        mut has_elifs = false
+        try { has_elifs = node.elif_clauses != null and len(node.elif_clauses) > 0 } catch e {}
+        if has_elifs {
             mut ei = 0
             mut elif_end_jumps = []
             while ei < len(node.elif_clauses) {
@@ -556,24 +558,27 @@ class Compiler {
         let line = node.line ?? 0
         let name_idx = this.code.add_const(node.name)
         -- Build enum as map: {member_name: member_value, ...}
-        this.code.emit(OP_CONST, name_idx, line)
         mut i = 0
         while i < len(node.members) {
             let member = node.members[i]
             let mem_name = if type(member) == "list" { member[0] } else { member }
             let mem_name_idx = this.code.add_const(mem_name)
             this.code.emit(OP_CONST, mem_name_idx, line)
+            -- Parser stores members as [name, value-or-null]; only compile
+            -- the value when explicitly provided, otherwise default to the
+            -- index.
+            mut explicit_value = null
             if type(member) == "list" and len(member) > 1 {
-                this.compile_node(member[1])
+                explicit_value = member[1]
+            }
+            if explicit_value != null {
+                this.compile_node(explicit_value)
             } else {
                 this.code.emit(OP_CONST, this.code.add_const(i), line)
             }
             i += 1
         }
         this.code.emit(OP_MAKE_MAP, len(node.members), line)
-        -- Store as {__enum__: name, members: map}
-        this.code.emit(OP_SWAP, 0, line)
-        this.code.emit(OP_POP, 0, line)
         this.code.emit(OP_STORE_NEW, name_idx, line)
     }
 
@@ -595,7 +600,7 @@ class Compiler {
 
     fn compile_MatchStatement(node) {
         let line = node.line ?? 0
-        this.compile_node(node.value)
+        this.compile_node(node.subject)
         -- Compile as chain of compare-and-jump
         mut end_jumps = []
         mut i = 0
@@ -603,8 +608,12 @@ class Compiler {
             let arm = node.arms[i]
             let pattern = arm[0]
             let body = arm[1]
-            -- Check if this is the default/wildcard arm
-            let is_default = (type(pattern) == "map" and has(pattern, "node_type") and pattern.node_type == "Identifier" and pattern.name == "_")
+            mut is_default = false
+            try {
+                if pattern.node_type == "Identifier" and pattern.name == "_" {
+                    is_default = true
+                }
+            } catch e {}
             if is_default {
                 this.code.emit(OP_POP, 0, line)
                 this.compile_block(body)
@@ -623,8 +632,18 @@ class Compiler {
             }
             i += 1
         }
-        -- Pop the match value if no arm matched
-        this.code.emit(OP_POP, 0, line)
+        -- Default arm (else block on the match itself)
+        mut has_default = false
+        try { has_default = node.default != null } catch e {}
+        if has_default {
+            this.code.emit(OP_POP, 0, line)
+            this.compile_block(node.default)
+            let jump_end = this.code.emit(OP_JUMP, 0)
+            push(end_jumps, jump_end)
+        } else {
+            -- Pop the subject value if no arm matched
+            this.code.emit(OP_POP, 0, line)
+        }
         -- Patch all end jumps
         mut ji = 0
         while ji < len(end_jumps) {
@@ -845,17 +864,20 @@ class Compiler {
 
     fn compile_PipeExpression(node) {
         let line = node.line ?? 0
-        this.compile_node(node.value)
         if node.function.node_type == "CallExpression" {
+            -- callee first, then value (becomes first arg), then explicit args
             this.compile_node(node.function.callee)
+            this.compile_node(node.value)
             mut i = 0
             while i < len(node.function.arguments) {
                 this.compile_node(node.function.arguments[i])
                 i += 1
             }
-            this.code.emit(OP_PIPE, len(node.function.arguments) + 1, line)
+            this.code.emit(OP_CALL, len(node.function.arguments) + 1, line)
         } else {
+            -- fn |> form: callee first, then value as the single arg
             this.compile_node(node.function)
+            this.compile_node(node.value)
             this.code.emit(OP_CALL, 1, line)
         }
     }
@@ -1014,6 +1036,7 @@ class VMFrame {
         this.ip = 0
         this.locals = {}
         this.base_pointer = base_pointer ?? 0
+        this.closure = null
     }
 }
 
@@ -1022,6 +1045,10 @@ class VMFunction {
         this.code = code
         this.params = params
         this.name = name ?? "<fn>"
+        -- Captured locals from the enclosing frame at definition time.
+        -- Set by OP_MAKE_FN; consumed by OP_LOAD when a name is missing
+        -- from the current frame.
+        this.closure = null
     }
 
     fn to_string() {
@@ -1063,13 +1090,22 @@ class VMInstance {
         }
         let method = this.klass.find_method(name)
         if method != null {
-            return method
+            return VMBoundMethod(this, method)
         }
         return null
     }
 
     fn to_string() {
         return "<{this.klass.name} instance>"
+    }
+}
+
+-- A method retrieved off a VMInstance, with `this` already captured.
+-- _call_fn detects this and routes to _call_method so `this` is in scope.
+class VMBoundMethod {
+    fn init(instance, method) {
+        this.instance = instance
+        this.method = method
     }
 }
 
@@ -1250,6 +1286,9 @@ class VM {
         if t == "VMFunction" {
             return this._call_vm_fn(f, call_args)
         }
+        if t == "VMBoundMethod" {
+            return this._call_method(f.instance, f.method, call_args)
+        }
         if t == "VMClass" {
             return this._instantiate_class(f, call_args)
         }
@@ -1291,6 +1330,7 @@ class VM {
 
     fn _call_vm_fn(f, call_args) {
         let frame = VMFrame(f.code, len(this.stack))
+        frame.closure = f.closure
         let params = if type(f.params) == "list" { f.params } else { [] }
         mut i = 0
         while i < len(params) {
@@ -1375,10 +1415,14 @@ class VM {
                 let name = code.constants[operand]
                 if has(frame.locals, name) {
                     push(this.stack, frame.locals[name])
+                } elif frame.closure != null and has(frame.closure, name) {
+                    push(this.stack, frame.closure[name])
                 } elif has(this.globals, name) {
                     push(this.stack, this.globals[name])
                 } else {
-                    -- Walk up frames for closure variables
+                    -- Walk up frames for dynamic-scope fallback (e.g.
+                    -- methods that need access to defining scope when no
+                    -- explicit closure was captured).
                     mut found = false
                     mut fi = len(this.frames) - 2
                     while fi >= 0 {
@@ -1397,7 +1441,7 @@ class VM {
             }
             elif op == OP_STORE {
                 let name = code.constants[operand]
-                let value = this.stack[len(this.stack) - 1]
+                let value = pop(this.stack)
                 -- Check current frame first, then walk up
                 if has(frame.locals, name) {
                     frame.locals[name] = value
@@ -1528,6 +1572,10 @@ class VM {
                     }
                 }
                 let vm_fn = VMFunction(fn_code, params, fn_code.name)
+                -- Capture the enclosing frame's locals as the closure env.
+                -- Snapshot by reference: a closure that mutates its captured
+                -- variable still sees later writes (matches lexical scope).
+                vm_fn.closure = frame.locals
                 push(this.stack, vm_fn)
             }
             elif op == OP_CALL {
@@ -1735,10 +1783,23 @@ class VM {
                 push(this.stack, result)
             }
 
-            -- Throw
+            -- Throw: hand off to the nearest active try handler if there is
+            -- one on this frame; otherwise propagate up.
             elif op == OP_THROW {
                 let err_val = pop(this.stack)
-                throw this._display(err_val)
+                if len(this.try_stack) > 0 {
+                    let handler = this.try_stack[len(this.try_stack) - 1]
+                    if handler["frame_idx"] == len(this.frames) - 1 {
+                        pop(this.try_stack)
+                        while len(this.stack) > handler["stack_depth"] {
+                            pop(this.stack)
+                        }
+                        push(this.stack, err_val)
+                        frame.ip = handler["catch_ip"]
+                        continue
+                    }
+                }
+                throw err_val
             }
 
             -- Class creation
@@ -1796,7 +1857,7 @@ class VM {
         if value == null { return false }
         let t = type(value)
         if t == "bool" { return value }
-        if t == "number" { return value != 0 }
+        if t == "int" or t == "float" or t == "number" { return value != 0 }
         if t == "string" { return len(value) > 0 }
         if t == "list" { return len(value) > 0 }
         if t == "map" { return len(keys(value)) > 0 }
