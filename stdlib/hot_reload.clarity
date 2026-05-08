@@ -1,0 +1,240 @@
+-- Hot reload — file watcher + state-preservation glue
+-- (Phase 64 task 5).
+--
+-- The runtime can't yet swap a loaded Clarity module out from under
+-- a live process, but it can give every part of that swap mechanism
+-- except the import: detect the change, snapshot state, hand control
+-- back to the app, then dispatch a reload event for instrumentation.
+--
+-- FileWatcher polls a directory of `.clarity` files (or a custom
+-- extension) and reports which files were added / modified / removed
+-- between polls. mtime resolution is one second, so changes within
+-- the same second of the previous scan are coalesced.
+--
+-- StateBox is the per-reload survival cache. Widgets stuff their
+-- "important" state under string keys before a rebuild, and read it
+-- back when the new tree initialises. The framework never inspects
+-- the values — it's the app's job to pick what to preserve.
+--
+-- HotReloader wires the two together. The caller supplies a
+-- `rebuild_fn(state_box, prev_app)` that builds (or re-builds) the
+-- widget tree using the StateBox to carry over scroll positions,
+-- text input contents, selected items, etc. tick() polls the
+-- watcher and, if anything changed, calls rebuild_fn again.
+--
+--     let r = hot_reloader("./apps/calc", fn(state, prev) {
+--         let app = build_calc()
+--         if state.has("display") { app.engine.display = state.get("display", "0") }
+--         return app
+--     })
+--     r.build_initial()
+--     loop {
+--         r.tick()
+--         sleep(0.1)
+--     }
+
+-- ── File watcher ─────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _walk_files(dir, ext) {
+    let suffix = if ext != null and len(ext) > 0 { ext } else { "" }
+    let pattern = if len(suffix) > 0 {
+        "*" + suffix
+    } else {
+        "*"
+    }
+    let cmd = "find " + _quote(dir) + " -type f -name " + _quote(pattern) + " 2>/dev/null"
+    let result = exec_full(cmd)
+    if result.exit_code != 0 { return [] }
+    let lines = split(trim(result.stdout), "\n")
+    mut out = []
+    for l in lines {
+        let t = trim(l)
+        if len(t) > 0 { push(out, t) }
+    }
+    return out
+}
+
+fn _mtime(path) {
+    let cmd = "stat -c%Y " + _quote(path) + " 2>/dev/null || stat -f%m " + _quote(path) + " 2>/dev/null"
+    let result = exec_full(cmd)
+    let s = trim(result.stdout)
+    if len(s) == 0 { return 0 }
+    return int(s)
+}
+
+fn _file_size(path) {
+    let cmd = "stat -c%s " + _quote(path) + " 2>/dev/null || stat -f%z " + _quote(path) + " 2>/dev/null"
+    let result = exec_full(cmd)
+    let s = trim(result.stdout)
+    if len(s) == 0 { return 0 }
+    return int(s)
+}
+
+class FileWatcher {
+    fn init(dir, ext) {
+        this.dir = dir
+        this.ext = ext ?? ".clarity"
+        this._snapshot = this._scan()
+    }
+
+    fn _scan() {
+        mut snap = {}
+        let files = _walk_files(this.dir, this.ext)
+        for f in files {
+            -- Combine mtime + size so that a same-second edit that
+            -- changes the file size still registers as a change.
+            snap[f] = str(_mtime(f)) + ":" + str(_file_size(f))
+        }
+        return snap
+    }
+
+    -- Treat an explicit map as the new state instead of running the
+    -- find. Used for tests; pass a {path: stamp} map.
+    fn _set_snapshot_for_test(snap) { this._snapshot = snap }
+
+    -- Polls the directory. Returns a list of {path, kind} where
+    -- kind is "added" | "modified" | "removed".
+    fn poll() {
+        let now = this._scan()
+        return this._diff(now)
+    }
+
+    fn poll_with(now) { return this._diff(now) }
+
+    fn _diff(now) {
+        mut changed = []
+        for kv in entries(now) {
+            let p = kv[0]
+            let stamp = kv[1]
+            if not has(this._snapshot, p) {
+                push(changed, {"path": p, "kind": "added"})
+            } elif this._snapshot[p] != stamp {
+                push(changed, {"path": p, "kind": "modified"})
+            }
+        }
+        for kv in entries(this._snapshot) {
+            if not has(now, kv[0]) {
+                push(changed, {"path": kv[0], "kind": "removed"})
+            }
+        }
+        this._snapshot = now
+        return changed
+    }
+}
+
+fn file_watcher(dir, ...rest) {
+    let ext = if len(rest) > 0 { rest[0] } else { ".clarity" }
+    return FileWatcher(dir, ext)
+}
+
+-- ── State preservation ───────────────────────────────
+
+class StateBox {
+    fn init() { this.values = {} }
+
+    fn put(key, val) { this.values[key] = val }
+    fn get(key, default_val) {
+        if has(this.values, key) { return this.values[key] }
+        return default_val
+    }
+    fn has(key) { return has(this.values, key) }
+    fn remove(key) {
+        mut next = {}
+        for kv in entries(this.values) {
+            if kv[0] != key { next[kv[0]] = kv[1] }
+        }
+        this.values = next
+    }
+    fn clear() { this.values = {} }
+    fn keys() { return keys(this.values) }
+    fn size() { return len(keys(this.values)) }
+}
+
+fn state_box() { return StateBox() }
+
+-- ── HotReloader ──────────────────────────────────────
+
+class HotReloader {
+    fn init(dir, rebuild_fn, opts) {
+        let o = opts ?? {}
+        let ext = if has(o, "ext") { o["ext"] } else { ".clarity" }
+        this.watcher = FileWatcher(dir, ext)
+        this.rebuild_fn = rebuild_fn
+        this.state = StateBox()
+        this.listeners = []
+        this.reload_count = 0
+        this.last_changes = []
+        this.app = null
+        this.error = null
+    }
+
+    fn on(handler) { push(this.listeners, handler) }
+
+    fn _emit(ev) { for l in this.listeners { l(ev) } }
+
+    fn build_initial() {
+        try {
+            this.app = (this.rebuild_fn)(this.state, null)
+            this.error = null
+            this._emit({"event": "built", "count": 0})
+        } catch e {
+            this.error = str(e)
+            this._emit({"event": "error", "message": this.error})
+        }
+        return this.app
+    }
+
+    -- Force a reload regardless of file changes; wires up the same
+    -- emit/state path. Useful for "always rebuild on this signal"
+    -- callers and for tests.
+    fn force_reload() {
+        return this._reload([])
+    }
+
+    fn tick() {
+        let changes = this.watcher.poll()
+        if len(changes) == 0 {
+            this.last_changes = []
+            return changes
+        }
+        this._reload(changes)
+        return changes
+    }
+
+    -- Drive the watcher with a synthetic snapshot. Lets tests stage
+    -- an "edit" without writing real files.
+    fn tick_with_snapshot(now) {
+        let changes = this.watcher.poll_with(now)
+        if len(changes) == 0 {
+            this.last_changes = []
+            return changes
+        }
+        this._reload(changes)
+        return changes
+    }
+
+    fn _reload(changes) {
+        this.last_changes = changes
+        this._emit({"event": "before_reload", "changes": changes})
+        try {
+            this.app = (this.rebuild_fn)(this.state, this.app)
+            this.reload_count = this.reload_count + 1
+            this.error = null
+            this._emit({"event": "after_reload", "changes": changes, "count": this.reload_count})
+        } catch e {
+            this.error = str(e)
+            this._emit({"event": "error", "message": this.error, "changes": changes})
+        }
+        return changes
+    }
+}
+
+fn hot_reloader(dir, rebuild_fn, ...rest) {
+    let opts = if len(rest) > 0 { rest[0] } else { {} }
+    return HotReloader(dir, rebuild_fn, opts)
+}
