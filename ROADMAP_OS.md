@@ -94,11 +94,11 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Widget base** | Pending | `stdlib/ui.clarity` — `Widget` class: bounds, parent, children, visible, enabled, style. `draw(fb)` and `handle_event(event)` virtual methods. Widget tree with recursive layout/draw |
-| 2 | **Layout engine** | Pending | `stdlib/layout.clarity` — `FlexLayout` (row/column, justify, align, gap, wrap), `GridLayout` (rows/columns, spans), `StackLayout` (absolute positioning). Constraint-based sizing (min/max/preferred) |
-| 3 | **Core widgets** | Pending | Label, Button, TextInput, TextArea, Checkbox, RadioButton, Slider, ProgressBar, Spinner, Toggle, Dropdown/Select, ScrollView, ListView, TreeView, TabBar, ToolTip |
-| 4 | **Theming** | Pending | `stdlib/theme.clarity` — `Theme` class: colors (background, foreground, accent, selection, border), fonts (sans, mono, sizes), spacing scale, corner radii, shadows. Light + Dark themes built-in. CSS-like style inheritance |
-| 5 | **Accessibility** | Pending | Semantic widget roles, keyboard navigation (Tab/Shift+Tab), focus rings, screen reader labels, high-contrast mode, reduced-motion option |
+| 1 | **Widget base** | Done | `stdlib/ui.clarity` — `Widget` (bounds, parent, children, visible/enabled/focused/focusable, role, theme inheritance, layout), `WidgetRoot` (bus integration, hit-test, focus chain, render). `_setup_widget()` factored out so subclasses inherit field defaults via the `class X < Widget` chain. |
+| 2 | **Layout engine** | Done | `stdlib/layout.clarity` — `FlexLayout` (row/column, justify start/center/end/space_between/space_around, align start/center/end/stretch, gap, padding), `GridLayout` (rows × cols + gap + padding), `StackLayout` (absolute). Honours each child's `preferred_size()`. |
+| 3 | **Core widgets** | Done | `stdlib/widgets.clarity` — `Label`, `Button` (mouse + Enter/Space activation), `Checkbox`, `ProgressBar`, `Slider` (drag + arrow keys + Home/End), `TextInput` (typing + arrow/Home/End/Backspace/Delete), `ScrollView` (wheel + keyboard, with thumb), `ListView` (click + arrow keys). Dropdown/RadioButton/Toggle/Tabs/TreeView/Tooltip deferred. |
+| 4 | **Theming** | Done | `stdlib/theme.clarity` — `dark()`, `light()`, `high_contrast()` themes as plain mergeable dicts. Themes include colors, font, spacing scale, corner radius, border width, shadow alpha, transition timing. Walked up the widget tree so a subtree can override its parent's theme. |
+| 5 | **Accessibility** | Done | Every widget has a `role` field (button / checkbox / textbox / slider / progressbar / listbox / scrollview / label) for screen readers. Tab / Shift+Tab walk a `tab_index`-sorted focus chain; visible focus rings drawn via `theme.focus_ring`; high-contrast theme ships built-in. Keyboard equivalents on every interactive widget. |
 
 ---
 
