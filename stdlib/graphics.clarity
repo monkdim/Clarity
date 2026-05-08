@@ -1,0 +1,162 @@
+-- Graphics — software framebuffer + 2D drawing primitives.
+--
+-- A Framebuffer holds an in-memory image as 32-bit BGRA pixels (alpha
+-- in the high byte). The buffer is FFI-backed (Buffer.allocUnsafeSlow)
+-- so it can be passed to a platform-specific blit later (Phase 57.5+:
+-- Linux DRM, macOS IOSurface). For now we operate purely in-process and
+-- can write the image out as a 32-bit BMP for visual verification.
+--
+-- Color packing:
+--     0xAARRGGBB
+-- Use rgb(r, g, b) / rgba(r, g, b, a) to build colors and named
+-- constants (BLACK, WHITE, RED, GREEN, BLUE, ...) for common cases.
+--
+-- Coordinate system:
+--     (0, 0) is the top-left pixel; x grows right, y grows down.
+
+from "ffi.clarity" import alloc, Pointer
+
+-- ── Color helpers ────────────────────────────────────────
+
+-- Use multiplication instead of left-shift here: in JS (which Clarity
+-- transpiles to) << is a 32-bit signed operation, so `255 << 24` is the
+-- negative number -16777216. Pack with multiplication to keep colors as
+-- unsigned 32-bit values that match what read_u32 returns.
+
+fn rgba(r, g, b, a) {
+    return a * 16777216 + r * 65536 + g * 256 + b
+}
+
+fn rgb(r, g, b) {
+    return rgba(r, g, b, 255)
+}
+
+let BLACK   = rgb(0, 0, 0)
+let WHITE   = rgb(255, 255, 255)
+let RED     = rgb(255, 0, 0)
+let GREEN   = rgb(0, 255, 0)
+let BLUE    = rgb(0, 0, 255)
+let YELLOW  = rgb(255, 255, 0)
+let CYAN    = rgb(0, 255, 255)
+let MAGENTA = rgb(255, 0, 255)
+let GRAY    = rgb(128, 128, 128)
+let TRANSPARENT = rgba(0, 0, 0, 0)
+
+fn red_of(color)   { return (color >> 16) & 0xFF }
+fn green_of(color) { return (color >> 8) & 0xFF }
+fn blue_of(color)  { return color & 0xFF }
+fn alpha_of(color) { return (color >> 24) & 0xFF }
+
+-- ── Framebuffer ──────────────────────────────────────────
+
+class Framebuffer {
+    fn init(width, height) {
+        this.width = width
+        this.height = height
+        this.stride = width * 4
+        this.size = this.stride * height
+        this.buffer = alloc(this.size)
+    }
+
+    fn _offset(x, y) { return y * this.stride + x * 4 }
+
+    fn put_pixel(x, y, color) {
+        if x < 0 or x >= this.width or y < 0 or y >= this.height {
+            return null
+        }
+        this.buffer.write_u32(this._offset(x, y), color)
+    }
+
+    fn get_pixel(x, y) {
+        if x < 0 or x >= this.width or y < 0 or y >= this.height {
+            return 0
+        }
+        return this.buffer.read_u32(this._offset(x, y))
+    }
+
+    -- Fill the entire framebuffer with one color.
+    fn clear(color) {
+        _ffi_fill_u32(this.buffer._handle, 0, this.width * this.height, color)
+    }
+
+    -- Fill a rectangular region. Coordinates are clipped to the buffer.
+    fn fill_rect(x0, y0, w, h, color) {
+        let x_start = if x0 < 0 { 0 } else { x0 }
+        let y_start = if y0 < 0 { 0 } else { y0 }
+        let x_end = if x0 + w > this.width { this.width } else { x0 + w }
+        let y_end = if y0 + h > this.height { this.height } else { y0 + h }
+        if x_end <= x_start or y_end <= y_start { return null }
+        let row_count = x_end - x_start
+        mut y = y_start
+        while y < y_end {
+            _ffi_fill_u32(this.buffer._handle, this._offset(x_start, y), row_count, color)
+            y += 1
+        }
+    }
+
+    -- Draw the outline of a rectangle (1px wide).
+    fn stroke_rect(x0, y0, w, h, color) {
+        if w <= 0 or h <= 0 { return null }
+        this.fill_rect(x0, y0, w, 1, color)
+        this.fill_rect(x0, y0 + h - 1, w, 1, color)
+        this.fill_rect(x0, y0, 1, h, color)
+        this.fill_rect(x0 + w - 1, y0, 1, h, color)
+    }
+
+    -- Copy a rectangular region from `src` into this framebuffer.
+    fn blit(src, src_x, src_y, dst_x, dst_y, w, h) {
+        mut row = 0
+        while row < h {
+            mut col = 0
+            while col < w {
+                let c = src.get_pixel(src_x + col, src_y + row)
+                this.put_pixel(dst_x + col, dst_y + row, c)
+                col += 1
+            }
+            row += 1
+        }
+    }
+
+    -- Save as a 32-bit BGRA Windows BMP. Compatible with most viewers.
+    fn save_bmp(path) {
+        let pixel_bytes = this.size
+        let file_size = 14 + 40 + pixel_bytes
+        let header = alloc(54 + pixel_bytes)
+
+        -- BITMAPFILEHEADER (14 bytes)
+        header.write_u8(0, 0x42)            -- 'B'
+        header.write_u8(1, 0x4D)            -- 'M'
+        header.write_u32(2, file_size)
+        header.write_u32(6, 0)              -- reserved
+        header.write_u32(10, 54)            -- pixel data offset
+
+        -- BITMAPINFOHEADER (40 bytes)
+        header.write_u32(14, 40)            -- header size
+        header.write_i32(18, this.width)
+        header.write_i32(22, this.height)   -- positive == bottom-up rows
+        header.write_u16(26, 1)             -- planes
+        header.write_u16(28, 32)            -- bits per pixel
+        header.write_u32(30, 0)             -- compression: BI_RGB
+        header.write_u32(34, pixel_bytes)
+        header.write_i32(38, 2835)          -- 72 DPI horiz
+        header.write_i32(42, 2835)          -- 72 DPI vert
+        header.write_u32(46, 0)             -- colors used
+        header.write_u32(50, 0)             -- important colors
+
+        -- Copy framebuffer rows BOTTOM-UP into the BMP body. Our framebuffer
+        -- is stored top-down in memory, BMP wants bottom-up.
+        mut y = 0
+        while y < this.height {
+            let src_offset = y * this.stride
+            let dst_offset = 54 + (this.height - 1 - y) * this.stride
+            _ffi_copy(header._handle, dst_offset, this.buffer._handle, src_offset, this.stride)
+            y += 1
+        }
+
+        _ffi_write_buffer(header._handle, path)
+    }
+}
+
+fn framebuffer(width, height) {
+    return Framebuffer(width, height)
+}
