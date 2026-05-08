@@ -1,0 +1,230 @@
+-- Compositor — manages a stack of Windows and composites them onto a
+-- screen-level Framebuffer.
+--
+-- Z-order: windows is a list ordered bottom-to-top. add() appends to
+-- the top, focus(w) moves a window to the top, remove() drops it.
+--
+-- Dirty-rect tracking: paint(rect) adds a rectangle to the dirty list
+-- so the next render() only redraws that region instead of the full
+-- screen. mark_window(w) is a convenience for "this whole window
+-- changed". A frame with no dirty rects skips composition entirely,
+-- which is what you want for an idle desktop.
+
+from "graphics.clarity" import Framebuffer, framebuffer
+
+class Compositor {
+    fn init(width, height) {
+        this.width = width
+        this.height = height
+        this.screen = framebuffer(width, height)
+        this.background = 0xFF1E1E1E    -- dark grey
+        this.windows = []               -- bottom-to-top z-order
+        this._dirty = []                -- list of [x, y, w, h] rectangles
+        this._all_dirty = true          -- force a full repaint on first render
+    }
+
+    -- ── Window management ──────────────────────────────
+
+    fn add(window) {
+        push(this.windows, window)
+        this.mark_window(window)
+    }
+
+    fn remove(window) {
+        mut out = []
+        for w in this.windows {
+            if w != window { push(out, w) }
+        }
+        this.windows = out
+        this.mark_window(window)
+    }
+
+    -- Move `window` to the top of the z-order. Marks the window dirty
+    -- so the next render reflects the new ordering.
+    fn focus(window) {
+        mut others = []
+        mut found = false
+        for w in this.windows {
+            if w == window { found = true } else { push(others, w) }
+        }
+        if not found { return null }
+        for w in this.windows {
+            if w != window and w.focused { w.blur() }
+        }
+        window.focus()
+        push(others, window)
+        this.windows = others
+        this.mark_window(window)
+    }
+
+    fn top_window() {
+        if len(this.windows) == 0 { return null }
+        return this.windows[len(this.windows) - 1]
+    }
+
+    -- Hit-test: top-most window containing (px, py), or null.
+    fn window_at(px, py) {
+        mut i = len(this.windows) - 1
+        while i >= 0 {
+            let w = this.windows[i]
+            if w.visible and not w.minimized and w.contains(px, py) {
+                return w
+            }
+            i -= 1
+        }
+        return null
+    }
+
+    -- ── Background ─────────────────────────────────────
+
+    fn set_background(color) {
+        this.background = color
+        this._all_dirty = true
+    }
+
+    -- ── Dirty regions ──────────────────────────────────
+
+    fn paint(rect) {
+        push(this._dirty, rect)
+    }
+
+    fn mark_window(window) {
+        this.paint([window.x, window.y, window.width, window.height])
+    }
+
+    fn mark_all() {
+        this._all_dirty = true
+        this._dirty = []
+    }
+
+    -- ── Compositing ────────────────────────────────────
+
+    -- Render dirty regions (or the whole screen on first call / after
+    -- mark_all). Returns the number of windows that were touched.
+    fn render() {
+        if not this._all_dirty and len(this._dirty) == 0 {
+            return 0
+        }
+        let regions = if this._all_dirty {
+            [[0, 0, this.width, this.height]]
+        } else {
+            _coalesce(this._dirty)
+        }
+
+        mut touched = 0
+        for region in regions {
+            this._fill_region(region, this.background)
+            for w in this.windows {
+                if not w.visible or w.minimized { continue }
+                if _intersect_rect(region, [w.x, w.y, w.width, w.height]) != null {
+                    this._blit_window(w, region)
+                    touched += 1
+                }
+            }
+        }
+        this._dirty = []
+        this._all_dirty = false
+        return touched
+    }
+
+    -- Force a full re-render regardless of dirty state.
+    fn render_full() {
+        this._all_dirty = true
+        return this.render()
+    }
+
+    -- ── Internal helpers ───────────────────────────────
+
+    fn _fill_region(rect, color) {
+        let x = if rect[0] < 0 { 0 } else { rect[0] }
+        let y = if rect[1] < 0 { 0 } else { rect[1] }
+        let r = rect[0] + rect[2]
+        let b = rect[1] + rect[3]
+        let xe = if r > this.width { this.width } else { r }
+        let ye = if b > this.height { this.height } else { b }
+        if xe <= x or ye <= y { return null }
+        this.screen.fill_rect(x, y, xe - x, ye - y, color)
+    }
+
+    -- Blit the region of `window` that intersects `clip` (a screen-space
+    -- rectangle). Source pixels are taken from window.framebuffer at
+    -- window-local coordinates.
+    fn _blit_window(window, clip) {
+        let win_rect = [window.x, window.y, window.width, window.height]
+        let inter = _intersect_rect(win_rect, clip)
+        if inter == null { return null }
+        let dx = inter[0]
+        let dy = inter[1]
+        let w = inter[2]
+        let h = inter[3]
+        let sx = dx - window.x
+        let sy = dy - window.y
+        this.screen.blit(window.framebuffer, sx, sy, dx, dy, w, h)
+    }
+}
+
+-- ── Pure-data rectangle helpers (also handy for tests) ───
+
+-- Intersect two [x, y, w, h] rects. Returns the intersected rect or
+-- null when they don't overlap.
+fn _intersect_rect(a, b) {
+    let ax = a[0]; let ay = a[1]; let aw = a[2]; let ah = a[3]
+    let bx = b[0]; let by = b[1]; let bw = b[2]; let bh = b[3]
+    let x = if ax > bx { ax } else { bx }
+    let y = if ay > by { ay } else { by }
+    let xe = if ax + aw < bx + bw { ax + aw } else { bx + bw }
+    let ye = if ay + ah < by + bh { ay + ah } else { by + bh }
+    if xe <= x or ye <= y { return null }
+    return [x, y, xe - x, ye - y]
+}
+
+-- Merge any rects that overlap each other into single bounding rects.
+-- Cheap O(n^2) pass — n is the number of dirty regions per frame which
+-- in practice is small (one per window change).
+fn _coalesce(rects) {
+    mut working = []
+    for r in rects { push(working, r) }
+    mut changed = true
+    while changed {
+        changed = false
+        mut next_pass = []
+        mut consumed = []
+        mut i = 0
+        while i < len(working) {
+            push(consumed, false)
+            i += 1
+        }
+        let n = len(working)
+        mut a = 0
+        while a < n {
+            if not consumed[a] {
+                mut merged = working[a]
+                mut b = a + 1
+                while b < n {
+                    if not consumed[b] and _intersect_rect(merged, working[b]) != null {
+                        merged = _bounding(merged, working[b])
+                        consumed[b] = true
+                        changed = true
+                    }
+                    b += 1
+                }
+                push(next_pass, merged)
+            }
+            a += 1
+        }
+        working = next_pass
+    }
+    return working
+}
+
+fn _bounding(a, b) {
+    let x = if a[0] < b[0] { a[0] } else { b[0] }
+    let y = if a[1] < b[1] { a[1] } else { b[1] }
+    let xe = if a[0] + a[2] > b[0] + b[2] { a[0] + a[2] } else { b[0] + b[2] }
+    let ye = if a[1] + a[3] > b[1] + b[3] { a[1] + a[3] } else { b[1] + b[3] }
+    return [x, y, xe - x, ye - y]
+}
+
+fn compositor(width, height) {
+    return Compositor(width, height)
+}

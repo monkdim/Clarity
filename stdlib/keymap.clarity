@@ -3,6 +3,8 @@
 -- Decodes `EV_KEY` events from input.clarity into typed KeyEvent
 -- records, tracking Shift / Ctrl / Alt / Meta state across calls.
 
+from "input.clarity" import KEY_PRESS, KEY_RELEASE, KEY_REPEAT, EV_KEY
+
 -- ── KEY_* constants (the subset used by US-layout keyboards) ───
 
 let KEY_RESERVED = 0
