@@ -1,0 +1,158 @@
+-- Storage — filesystem mounts + disk usage (Phase 61 task 3).
+--
+-- `/proc/mounts` is parsed for the live mount list; `statvfs(3)` is
+-- called via libc FFI for free/total bytes on a given path. mount /
+-- unmount syscalls are wrapped too — they'll error without root, so
+-- callers should expect that.
+--
+-- Cross-process subscribers can listen on the IPC bus topics:
+--   "storage.mounted"     payload = mount entry map
+--   "storage.unmounted"   payload = device path
+--
+-- Mount events are *opt-in*: call StorageWatcher.poll() from your main
+-- loop and the watcher diffs against the previous /proc/mounts snapshot,
+-- publishing one event per change.
+
+from "ffi.clarity" import bind, alloc, Pointer, struct, cstring
+from "ipc.clarity" import bus
+
+-- ── Read /proc/mounts ──────────────────────────────────
+
+fn parse_mounts_text(text) {
+    mut out = []
+    for line in split(text, "\n") {
+        let trimmed = trim(line)
+        if len(trimmed) == 0 { continue }
+        let parts = split(trimmed, " ")
+        if len(parts) < 4 { continue }
+        push(out, {
+            "device": parts[0],
+            "mountpoint": parts[1],
+            "fstype": parts[2],
+            "options": parts[3]
+        })
+    }
+    return out
+}
+
+fn mounts() {
+    if not exists("/proc/mounts") { return [] }
+    return parse_mounts_text(read("/proc/mounts"))
+}
+
+-- Find a mount entry by mountpoint (returns null if not mounted).
+fn mount_at(path) {
+    for m in mounts() {
+        if m["mountpoint"] == path { return m }
+    }
+    return null
+}
+
+-- ── Disk usage via statvfs ─────────────────────────────
+--
+-- struct statvfs (Linux 64-bit layout, simplified to the four fields
+-- we actually read):
+--   u64 f_bsize       offset 0
+--   u64 f_frsize      offset 8
+--   u64 f_blocks     offset 16
+--   u64 f_bfree      offset 24
+--   u64 f_bavail     offset 32
+-- The full struct is larger but we only need the head.
+
+fn disk_usage(path) {
+    -- statvfs takes (const char *, struct statvfs *), returns int 0/-1
+    let StatvfsHead = struct("StatvfsHead", [
+        ["f_bsize", "u64"],
+        ["f_frsize", "u64"],
+        ["f_blocks", "u64"],
+        ["f_bfree", "u64"],
+        ["f_bavail", "u64"]
+    ])
+    -- Allocate the full struct size (Linux glibc statvfs is ~120 bytes;
+    -- we over-allocate to be safe across libc versions).
+    let buf = alloc(128)
+    let sv = bind("libc", "statvfs", ["string", "ptr"], "int")
+    let rc = sv(path, buf)
+    if rc != 0 {
+        throw "StorageError: statvfs('" + path + "') failed (rc=" + str(rc) + ")"
+    }
+    let head = StatvfsHead.from_ptr(buf)
+    let frsize = head.get("f_frsize")
+    let blocks = head.get("f_blocks")
+    let bfree = head.get("f_bfree")
+    let bavail = head.get("f_bavail")
+    return {
+        "total_bytes": frsize * blocks,
+        "free_bytes": frsize * bfree,
+        "available_bytes": frsize * bavail,
+        "used_bytes": frsize * (blocks - bfree)
+    }
+}
+
+-- ── mount / unmount syscalls (require root) ───────────
+
+fn mount(source, target, fstype, opts) {
+    let mt = bind("libc", "mount", ["string", "string", "string", "u64", "ptr"], "int")
+    let flags = if opts != null and has(opts, "flags") { opts["flags"] } else { 0 }
+    let data = if opts != null and has(opts, "data") { cstring(opts["data"]) } else { null }
+    let rc = mt(source, target, fstype, flags, data ?? 0)
+    if rc != 0 {
+        throw "StorageError: mount(" + source + " -> " + target + ") failed (rc=" + str(rc) + " — usually means not root)"
+    }
+}
+
+fn umount(target) {
+    let um = bind("libc", "umount", ["string"], "int")
+    let rc = um(target)
+    if rc != 0 {
+        throw "StorageError: umount(" + target + ") failed (rc=" + str(rc) + ")"
+    }
+}
+
+-- ── StorageWatcher — diff /proc/mounts and emit IPC events ──
+
+class StorageWatcher {
+    fn init(ipc_bus) {
+        this.bus = ipc_bus ?? bus()
+        this._previous = mounts()
+    }
+
+    fn current() { return mounts() }
+
+    -- Snapshot the live /proc/mounts, compare to the previous snapshot,
+    -- emit one IPC event per added or removed entry, then update the
+    -- baseline. Returns {added: [...], removed: [...]} for callers that
+    -- want to act inline.
+    fn poll() {
+        let now = mounts()
+        let prev = this._previous
+        mut added = []
+        for m in now {
+            if not _has_mountpoint(prev, m["mountpoint"]) { push(added, m) }
+        }
+        mut removed = []
+        for m in prev {
+            if not _has_mountpoint(now, m["mountpoint"]) { push(removed, m) }
+        }
+        for m in added { this.bus.publish("storage.mounted", m) }
+        for m in removed { this.bus.publish("storage.unmounted", m) }
+        this._previous = now
+        return {"added": added, "removed": removed}
+    }
+}
+
+fn _has_mountpoint(list, mp) {
+    for m in list {
+        if m["mountpoint"] == mp { return true }
+    }
+    return false
+}
+
+-- Register the storage service handlers on a bus. Call this once
+-- during init to expose storage as an IPC service.
+fn register_storage_service(b) {
+    let svc = b ?? bus()
+    svc.register("storage.list_mounts", fn(req) { return mounts() })
+    svc.register("storage.disk_usage", fn(req) { return disk_usage(req["path"]) })
+    svc.register("storage.mount_at", fn(req) { return mount_at(req["path"]) })
+}
