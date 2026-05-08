@@ -1,0 +1,247 @@
+-- Playground app — Phase 69 task 4.
+--
+-- Native version of the web playground. One TextBuffer for the
+-- source, a runner that executes it on demand, an example gallery
+-- a user can pick from, and a snippets store (each save persists
+-- under ~/.clarity-os/playground/snippets/<id>.clarity).
+--
+--     let pg = playground_app()
+--     pg.set_source("show \"hi\"")
+--     pg.run()                          -- → {"output": "hi", "exit_code": 0}
+--     pg.save_snippet("hello", "Greeter")
+--     pg.share()                        -- → public-share URL placeholder
+--     pg.load_example("hello-world")    -- one of the gallery presets
+
+from "app_editor.clarity" import TextBuffer
+
+let DEFAULT_SOURCE = "-- Welcome to the Clarity Playground!\nshow \"Hello from Clarity\"\n"
+let SHARE_URL_PATTERN = "https://playground.clarity-lang.org/s/{id}"
+
+let _GALLERY = [
+    {
+        "id": "hello-world",
+        "title": "Hello, World",
+        "category": "basics",
+        "source": "let name = \"World\"\nshow \"Hello, \" + name + \"!\"\n"
+    },
+    {
+        "id": "fizzbuzz",
+        "title": "FizzBuzz",
+        "category": "basics",
+        "source": "let i = 1\nwhile i <= 15 {\n    if i % 15 == 0 { show \"FizzBuzz\" }\n    elif i % 3 == 0 { show \"Fizz\" }\n    elif i % 5 == 0 { show \"Buzz\" }\n    else { show i }\n    i = i + 1\n}\n"
+    },
+    {
+        "id": "pipes",
+        "title": "Pipe operator",
+        "category": "basics",
+        "source": "[1, 2, 3, 4, 5]\n  |> filter(x => x % 2 == 0)\n  |> map(x => x * x)\n  |> show\n"
+    },
+    {
+        "id": "classes",
+        "title": "Classes",
+        "category": "language",
+        "source": "class Greeter {\n    fn init(name) { this.name = name }\n    fn greet() { show \"hello \" + this.name }\n}\n\nlet g = Greeter(\"world\")\ng.greet()\n"
+    },
+    {
+        "id": "patterns",
+        "title": "Pattern matching",
+        "category": "language",
+        "source": "fn describe(v) {\n    match v {\n        0       => \"zero\"\n        1..9    => \"single digit\"\n        _ if v < 0 => \"negative\"\n        _       => \"big\"\n    }\n}\nshow describe(5)\n"
+    },
+    {
+        "id": "async",
+        "title": "Async/await",
+        "category": "concurrency",
+        "source": "async fn fetch_one(id) {\n    return \"item-\" + str(id)\n}\n\nasync fn main_demo() {\n    let a = await fetch_one(1)\n    let b = await fetch_one(2)\n    show [a, b]\n}\n\nmain_demo()\n"
+    }
+]
+
+class PlaygroundApp {
+    fn init() {
+        this.buffer = TextBuffer()
+        this.buffer.load(DEFAULT_SOURCE)
+        this.last_run = null
+        this.history = []                     -- list of {source, output, ts}
+        this.snippets = []                    -- {id, title, source, saved_at}
+        this._next_snippet_id = 1
+        this._runner = null
+        this.snippets_dir = _default_snippets_dir()
+    }
+
+    fn set_source(source) { this.buffer.load(source) }
+
+    fn source() { return this.buffer.to_text() }
+
+    fn set_runner(runner) { this._runner = runner }
+
+    -- ── Run ─────────────────────────────────────
+
+    fn run() {
+        let src = this.source()
+        let runner = if this._runner != null { this._runner } else { _real_runner }
+        let result = runner(src)
+        let stamped = {"source": src, "output": result["output"], "exit_code": result["exit_code"], "ts": time()}
+        this.last_run = stamped
+        push(this.history, stamped)
+        if len(this.history) > 50 {
+            mut next = []
+            mut i = 1
+            while i < len(this.history) { push(next, this.history[i]); i = i + 1 }
+            this.history = next
+        }
+        return result
+    }
+
+    -- ── Gallery ────────────────────────────────
+
+    fn examples() { return _GALLERY }
+
+    fn examples_by_category(category) {
+        mut out = []
+        for e in _GALLERY { if e["category"] == category { push(out, e) } }
+        return out
+    }
+
+    fn categories() {
+        mut seen = {}
+        mut order = []
+        for e in _GALLERY {
+            if not has(seen, e["category"]) {
+                seen[e["category"]] = true
+                push(order, e["category"])
+            }
+        }
+        return order
+    }
+
+    fn load_example(id) {
+        for e in _GALLERY {
+            if e["id"] == id {
+                this.set_source(e["source"])
+                return e
+            }
+        }
+        return null
+    }
+
+    -- ── Snippets ───────────────────────────────
+
+    fn save_snippet(id, title) {
+        let final_id = if id != null and len(id) > 0 { id } else { "snippet-" + str(this._next_snippet_id) }
+        this._next_snippet_id = this._next_snippet_id + 1
+        let entry = {
+            "id": final_id,
+            "title": title ?? final_id,
+            "source": this.source(),
+            "saved_at": time()
+        }
+        -- Replace existing if same id, else append
+        mut next = []
+        mut replaced = false
+        for s in this.snippets {
+            if s["id"] == final_id { push(next, entry); replaced = true }
+            else { push(next, s) }
+        }
+        if not replaced { push(next, entry) }
+        this.snippets = next
+        this._persist(entry)
+        return entry
+    }
+
+    fn list_snippets() { return this.snippets }
+
+    fn load_snippet(id) {
+        for s in this.snippets {
+            if s["id"] == id {
+                this.set_source(s["source"])
+                return s
+            }
+        }
+        return null
+    }
+
+    fn delete_snippet(id) {
+        mut next = []
+        mut removed = false
+        for s in this.snippets {
+            if s["id"] == id {
+                removed = true
+                exec_full("rm -f '" + this.snippets_dir + "/" + id + ".clarity'")
+            } else { push(next, s) }
+        }
+        this.snippets = next
+        return removed
+    }
+
+    fn _persist(entry) {
+        exec_full("mkdir -p '" + this.snippets_dir + "'")
+        let path = this.snippets_dir + "/" + entry["id"] + ".clarity"
+        write(path, entry["source"])
+    }
+
+    -- ── Sharing ────────────────────────────────
+
+    fn share() {
+        -- Production: POST the source to a paste service and return
+        -- the public URL. Skeleton: return a deterministic URL keyed
+        -- by source hash (using the first 12 hex chars of a tiny
+        -- in-Clarity hash so the test suite can assert determinism).
+        let id = _short_hash(this.source())
+        let url = replace(SHARE_URL_PATTERN, "{id}", id)
+        return {"id": id, "url": url}
+    }
+
+    fn summary() {
+        return {
+            "lines": len(this.buffer.lines),
+            "snippets": len(this.snippets),
+            "runs": len(this.history),
+            "last_exit": if this.last_run != null { this.last_run["exit_code"] } else { null }
+        }
+    }
+}
+
+fn playground_app() { return PlaygroundApp() }
+
+fn _real_runner(source) {
+    let path = "/tmp/_clarity_playground_run.clarity"
+    write(path, source)
+    let r = exec_full("clarity run '" + path + "' 2>&1")
+    exec_full("rm -f '" + path + "'")
+    return {"output": r.stdout, "exit_code": r.exit_code}
+}
+
+fn _default_snippets_dir() {
+    let home = env("HOME", "/tmp")
+    return home + "/.clarity-os/playground/snippets"
+}
+
+fn _short_hash(s) {
+    -- Tiny FNV-1a 32-bit. Stable, deterministic, no crypto strength;
+    -- just need a reproducible URL slug for the share button.
+    mut hash = 2166136261
+    mut i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        let code = _ord(c)
+        hash = (hash ^ code) & 0xFFFFFFFF
+        hash = (hash * 16777619) & 0xFFFFFFFF
+        i = i + 1
+    }
+    let alphabet = "0123456789abcdef"
+    mut out = ""
+    mut h = hash
+    mut j = 0
+    while j < 8 {
+        out = char_at(alphabet, h & 0xF) + out
+        h = (h >> 4) & 0xFFFFFFFF
+        j = j + 1
+    }
+    return out
+}
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0
+}

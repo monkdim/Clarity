@@ -1,0 +1,357 @@
+-- Visual UI builder — Phase 69 task 2.
+--
+-- Drag-and-drop GUI designer. Maintains a tree of UiNode descriptors
+-- (the design canvas), a palette of widget kinds, and a code
+-- generator that emits Clarity source for the design.
+--
+--     let b = ui_builder()
+--     let root = b.add(null, "WidgetRoot", {"width": 480, "height": 320})
+--     let title = b.add(root, "Label", {"text": "Hi", "x": 20, "y": 20, "w": 200, "h": 30})
+--     b.move_node(title, 40, 24)
+--     b.set_property(title, "text", "Hello")
+--     b.generate("Demo")           -- → Clarity source string
+--
+-- The builder doesn't care how the canvas paints — that's the
+-- widget-tree consumer's job. We expose hit-test + serialise +
+-- generate.
+
+let WIDGET_PALETTE = [
+    {"kind": "WidgetRoot", "import": "ui.clarity", "props": ["width", "height"]},
+    {"kind": "Label",      "import": "widgets.clarity", "props": ["text"]},
+    {"kind": "Button",     "import": "widgets.clarity", "props": ["text"]},
+    {"kind": "Checkbox",   "import": "widgets.clarity", "props": ["label_text"]},
+    {"kind": "TextInput",  "import": "widgets.clarity", "props": []},
+    {"kind": "Slider",     "import": "widgets.clarity", "props": ["min_v", "max_v"]},
+    {"kind": "ProgressBar","import": "widgets.clarity", "props": []},
+    {"kind": "ScrollView", "import": "widgets.clarity", "props": []},
+    {"kind": "ListView",   "import": "widgets.clarity", "props": ["items"]}
+]
+
+class UiNode {
+    fn init(id, kind, parent_id) {
+        this.id = id
+        this.kind = kind
+        this.parent_id = parent_id
+        this.children = []
+        this.props = {}
+        this.x = 0
+        this.y = 0
+        this.w = 100
+        this.h = 30
+        this.name = "widget" + str(id)
+    }
+}
+
+class UiBuilder {
+    fn init() {
+        this.nodes = {}              -- id -> UiNode
+        this.root_id = null
+        this._next_id = 1
+        this.selected = null
+        this.history = []            -- list of operation snapshots for undo
+        this._max_history = 100
+    }
+
+    -- ── Mutations ───────────────────────────────
+
+    fn add(parent_id, kind, props) {
+        if not _palette_has(kind) { throw "UiBuilderError: unknown widget kind '" + kind + "'" }
+        let id = this._alloc_id()
+        let node = UiNode(id, kind, parent_id)
+        if props != null {
+            for kv in entries(props) {
+                if kv[0] == "x" { node.x = kv[1] }
+                elif kv[0] == "y" { node.y = kv[1] }
+                elif kv[0] == "w" { node.w = kv[1] }
+                elif kv[0] == "h" { node.h = kv[1] }
+                elif kv[0] == "width" and kind == "WidgetRoot" { node.w = kv[1]; node.props["width"] = kv[1] }
+                elif kv[0] == "height" and kind == "WidgetRoot" { node.h = kv[1]; node.props["height"] = kv[1] }
+                else { node.props[kv[0]] = kv[1] }
+            }
+        }
+        this.nodes[id] = node
+        if parent_id == null {
+            this.root_id = id
+        } else {
+            push(this.nodes[parent_id].children, id)
+        }
+        this._snapshot()
+        return id
+    }
+
+    fn remove(id) {
+        if not has(this.nodes, id) { return false }
+        if id == this.root_id { return false }     -- can't delete root
+        let node = this.nodes[id]
+        -- detach from parent
+        if node.parent_id != null {
+            mut next = []
+            for c in this.nodes[node.parent_id].children {
+                if c != id { push(next, c) }
+            }
+            this.nodes[node.parent_id].children = next
+        }
+        -- recursively remove children
+        for c in node.children { this._remove_recursive(c) }
+        let id_key = str(id)
+        mut next_nodes = {}
+        for kv in entries(this.nodes) { if str(kv[0]) != id_key { next_nodes[kv[0]] = kv[1] } }
+        this.nodes = next_nodes
+        if this.selected == id { this.selected = null }
+        this._snapshot()
+        return true
+    }
+
+    fn _remove_recursive(id) {
+        if not has(this.nodes, id) { return }
+        for c in this.nodes[id].children { this._remove_recursive(c) }
+        let id_key = str(id)
+        mut next_nodes = {}
+        for kv in entries(this.nodes) { if str(kv[0]) != id_key { next_nodes[kv[0]] = kv[1] } }
+        this.nodes = next_nodes
+    }
+
+    fn move_node(id, x, y) {
+        if not has(this.nodes, id) { return false }
+        this.nodes[id].x = x
+        this.nodes[id].y = y
+        this._snapshot()
+        return true
+    }
+
+    fn resize_node(id, w, h) {
+        if not has(this.nodes, id) { return false }
+        if w < 1 or h < 1 { return false }
+        this.nodes[id].w = w
+        this.nodes[id].h = h
+        this._snapshot()
+        return true
+    }
+
+    fn set_property(id, name, value) {
+        if not has(this.nodes, id) { return false }
+        this.nodes[id].props[name] = value
+        this._snapshot()
+        return true
+    }
+
+    fn rename(id, new_name) {
+        if not has(this.nodes, id) { return false }
+        if not _is_valid_identifier(new_name) { return false }
+        this.nodes[id].name = new_name
+        return true
+    }
+
+    fn select(id) {
+        if id == null or has(this.nodes, id) {
+            this.selected = id
+            return true
+        }
+        return false
+    }
+
+    fn _snapshot() {
+        if len(this.history) >= this._max_history {
+            mut next = []
+            mut i = 1
+            while i < len(this.history) { push(next, this.history[i]); i = i + 1 }
+            this.history = next
+        }
+        push(this.history, _clone_state(this))
+    }
+
+    -- ── Hit testing ────────────────────────────
+
+    fn hit_test(x, y) {
+        -- DFS over the visible tree, deepest match wins
+        if this.root_id == null { return null }
+        return this._hit_test_recurse(this.root_id, x, y, 0, 0)
+    }
+
+    fn _hit_test_recurse(id, x, y, ox, oy) {
+        let node = this.nodes[id]
+        let nx = ox + node.x
+        let ny = oy + node.y
+        if x < nx or y < ny or x >= nx + node.w or y >= ny + node.h { return null }
+        for cid in node.children {
+            let r = this._hit_test_recurse(cid, x, y, nx, ny)
+            if r != null { return r }
+        }
+        return id
+    }
+
+    -- ── Serialisation ─────────────────────────
+
+    fn to_dict() {
+        if this.root_id == null { return null }
+        return this._serialise(this.root_id)
+    }
+
+    fn _serialise(id) {
+        let node = this.nodes[id]
+        mut out = {
+            "kind": node.kind,
+            "name": node.name,
+            "x": node.x, "y": node.y, "w": node.w, "h": node.h,
+            "props": node.props,
+            "children": []
+        }
+        for cid in node.children { push(out["children"], this._serialise(cid)) }
+        return out
+    }
+
+    -- ── Code generation ───────────────────────
+
+    fn generate(module_name) {
+        if this.root_id == null { return "-- empty design\n" }
+        mut imports = _collect_imports(this, this.root_id, {})
+        mut lines = []
+        push(lines, "-- Generated by ui_builder for " + module_name)
+        push(lines, "")
+        for kv in entries(imports) {
+            push(lines, "from \"" + kv[0] + "\" import " + join(kv[1], ", "))
+        }
+        push(lines, "")
+        push(lines, "fn build_" + _snake(module_name) + "() {")
+        this._gen_node(this.root_id, lines, 1)
+        push(lines, "    return " + this.nodes[this.root_id].name)
+        push(lines, "}")
+        push(lines, "")
+        return join(lines, "\n")
+    }
+
+    fn _gen_node(id, lines, indent) {
+        let node = this.nodes[id]
+        let pad = _indent(indent)
+        let ctor = _ctor_call(node)
+        push(lines, pad + "let " + node.name + " = " + ctor)
+        if node.kind != "WidgetRoot" {
+            push(lines, pad + node.name + ".set_bounds(" + str(node.x) + ", " + str(node.y) + ", " + str(node.w) + ", " + str(node.h) + ")")
+        }
+        for cid in node.children {
+            this._gen_node(cid, lines, indent)
+            push(lines, pad + this.nodes[id].name + ".add(" + this.nodes[cid].name + ")")
+        }
+    }
+
+    fn _alloc_id() {
+        let id = this._next_id
+        this._next_id = this._next_id + 1
+        return id
+    }
+}
+
+fn ui_builder() { return UiBuilder() }
+fn palette() { return WIDGET_PALETTE }
+
+-- ── Helpers ────────────────────────────────
+
+fn _palette_has(kind) {
+    for entry in WIDGET_PALETTE { if entry["kind"] == kind { return true } }
+    return false
+}
+
+fn _palette_entry(kind) {
+    for entry in WIDGET_PALETTE { if entry["kind"] == kind { return entry } }
+    return null
+}
+
+fn _collect_imports(builder, id, acc) {
+    let node = builder.nodes[id]
+    let entry = _palette_entry(node.kind)
+    if entry != null {
+        let mod = entry["import"]
+        if not has(acc, mod) { acc[mod] = [] }
+        if not contains(acc[mod], node.kind) { push(acc[mod], node.kind) }
+    }
+    for c in node.children { _collect_imports(builder, c, acc) }
+    return acc
+}
+
+fn _ctor_call(node) {
+    if node.kind == "WidgetRoot" {
+        return "WidgetRoot(" + str(node.w) + ", " + str(node.h) + ")"
+    }
+    let entry = _palette_entry(node.kind)
+    let needed = if entry == null { [] } else { entry["props"] }
+    mut args = []
+    for p in needed {
+        if has(node.props, p) {
+            push(args, _format_value(node.props[p]))
+        }
+    }
+    return node.kind + "(" + join(args, ", ") + ")"
+}
+
+fn _format_value(v) {
+    if type(v) == "string" { return "\"" + v + "\"" }
+    if type(v) == "list" {
+        mut parts = []
+        for item in v { push(parts, _format_value(item)) }
+        return "[" + join(parts, ", ") + "]"
+    }
+    return str(v)
+}
+
+fn _indent(n) {
+    mut s = ""
+    mut i = 0
+    while i < n { s = s + "    "; i = i + 1 }
+    return s
+}
+
+fn _snake(s) {
+    mut out = ""
+    mut i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        let code = _ord(c)
+        if code >= 65 and code <= 90 {
+            if i > 0 { out = out + "_" }
+            out = out + from_char_code(code + 32)
+        } else { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0
+}
+
+fn _is_valid_identifier(s) {
+    if len(s) == 0 { return false }
+    let first = char_at(s, 0)
+    let fc = _ord(first)
+    if not ((fc >= 65 and fc <= 90) or (fc >= 97 and fc <= 122) or first == "_") { return false }
+    mut i = 1
+    while i < len(s) {
+        let c = char_at(s, i)
+        let cc = _ord(c)
+        if not ((cc >= 65 and cc <= 90) or (cc >= 97 and cc <= 122) or (cc >= 48 and cc <= 57) or c == "_") { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn _clone_state(builder) {
+    -- Shallow snapshot: capture the tree shape + per-node fields
+    -- without aliasing the live dicts.
+    mut snap = {"root_id": builder.root_id, "nodes": {}}
+    for kv in entries(builder.nodes) {
+        let n = kv[1]
+        mut props_copy = {}
+        for pkv in entries(n.props) { props_copy[pkv[0]] = pkv[1] }
+        mut kids = []
+        for c in n.children { push(kids, c) }
+        snap["nodes"][kv[0]] = {
+            "id": n.id, "kind": n.kind, "name": n.name,
+            "parent_id": n.parent_id,
+            "x": n.x, "y": n.y, "w": n.w, "h": n.h,
+            "props": props_copy, "children": kids
+        }
+    }
+    return snap
+}
