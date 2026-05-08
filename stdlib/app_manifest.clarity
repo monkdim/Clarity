@@ -1,0 +1,343 @@
+-- App manifest — `clarity-app.toml` parser, generator, validator
+-- (Phase 64 task 1).
+--
+-- Every ClarityOS app ships a manifest at the root of its source
+-- tree. It plays the same role as macOS's Info.plist or XDG's
+-- .desktop file: identity, window defaults, requested permissions.
+--
+-- Layout:
+--
+--   [app]
+--   name        = "calc"
+--   version     = "0.1.0"
+--   author      = "you@example.com"
+--   description = "A small calculator."
+--   icon        = "icon.bmp"
+--   entry       = "main.clarity"
+--   categories  = ["utility", "math"]
+--
+--   [window]
+--   title     = "Calc"
+--   width     = 320
+--   height    = 480
+--   resizable = false
+--
+--   [permissions]
+--   filesystem    = ["read"]                -- ["read"], ["write"], ["read","write"]
+--   network       = ["api.example.com"]     -- true, false, or list of host patterns
+--   audio         = false
+--   notifications = true
+--   clipboard     = false
+--   process       = false
+--
+-- Use:
+--     let m = read_manifest("./clarity-app.toml")
+--     m.validate()                             -> []  (empty list = ok)
+--     m.requests("filesystem.read")            -> true
+--     m.requests("network")                    -> true
+--     m.allowed_hosts()                        -> ["api.example.com"]
+--     write_manifest("./clarity-app.toml", m)
+
+let MANIFEST_FILENAME = "clarity-app.toml"
+
+let _PERMISSION_GROUPS = ["filesystem", "network", "audio", "notifications", "clipboard", "process"]
+let _FILESYSTEM_SUBPERMS = ["read", "write"]
+
+-- ── Tiny TOML-with-arrays parser ─────────────────────
+
+fn _strip_inline_comment(s) {
+    -- Naive: strip everything from the first '#' that isn't inside a "..." string.
+    mut in_str = false
+    mut i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c == "\"" {
+            in_str = not in_str
+        } elif c == "#" and not in_str {
+            return trim(substring(s, 0, i))
+        }
+        i += 1
+    }
+    return s
+}
+
+fn _is_numeric_string(s) {
+    if len(s) == 0 { return false }
+    mut i = 0
+    let first = char_at(s, 0)
+    if first == "-" or first == "+" { i = 1 }
+    if i >= len(s) { return false }
+    mut saw_dot = false
+    mut saw_digit = false
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c == "." {
+            if saw_dot { return false }
+            saw_dot = true
+        } elif is_digit(c) {
+            saw_digit = true
+        } else {
+            return false
+        }
+        i += 1
+    }
+    return saw_digit
+}
+
+fn _parse_scalar(value) {
+    let v = trim(value)
+    if len(v) == 0 { return v }
+    if starts(v, "\"") and ends(v, "\"") and len(v) >= 2 {
+        return substring(v, 1, len(v) - 1)
+    }
+    if v == "true" { return true }
+    if v == "false" { return false }
+    if v == "null" { return null }
+    if _is_numeric_string(v) {
+        if contains(v, ".") { return float(v) }
+        return int(v)
+    }
+    return v
+}
+
+fn _split_array_items(text) {
+    -- Split a comma-separated list, respecting "..." string literals.
+    -- Caller has already stripped the outer [ and ].
+    mut items = []
+    mut current = ""
+    mut in_str = false
+    mut i = 0
+    while i < len(text) {
+        let c = char_at(text, i)
+        if c == "\"" {
+            in_str = not in_str
+            current = current + c
+        } elif c == "," and not in_str {
+            let t = trim(current)
+            if len(t) > 0 { push(items, t) }
+            current = ""
+        } else {
+            current = current + c
+        }
+        i += 1
+    }
+    let last = trim(current)
+    if len(last) > 0 { push(items, last) }
+    return items
+}
+
+fn _parse_value(raw) {
+    let v = trim(raw)
+    if starts(v, "[") and ends(v, "]") {
+        let inner = substring(v, 1, len(v) - 1)
+        let parts = _split_array_items(inner)
+        mut out = []
+        for p in parts { push(out, _parse_scalar(p)) }
+        return out
+    }
+    return _parse_scalar(v)
+}
+
+fn parse_manifest(text) {
+    mut result = {}
+    mut current = null
+    let lines = split(text, "\n")
+    for raw in lines {
+        let line = _strip_inline_comment(trim(raw))
+        if len(line) == 0 { continue }
+        if starts(line, "[") and ends(line, "]") {
+            let section = trim(substring(line, 1, len(line) - 1))
+            result[section] = {}
+            current = section
+            continue
+        }
+        if not contains(line, "=") { continue }
+        let eq = index_of(line, "=")
+        let key = trim(substring(line, 0, eq))
+        let raw_value = trim(substring(line, eq + 1))
+        let value = _parse_value(raw_value)
+        if current == null {
+            result[key] = value
+        } else {
+            result[current][key] = value
+        }
+    }
+    return result
+}
+
+-- ── Generator ────────────────────────────────────────
+
+fn _generate_value(v) {
+    if type(v) == "string" { return "\"" + v + "\"" }
+    if type(v) == "bool" { return if v { "true" } else { "false" } }
+    if type(v) == "null" { return "\"\"" }
+    if type(v) == "list" {
+        mut parts = []
+        for item in v { push(parts, _generate_value(item)) }
+        return "[" + join(parts, ", ") + "]"
+    }
+    return str(v)
+}
+
+fn generate_manifest(m) {
+    mut lines = []
+    let top = entries(m)
+    for kv in top {
+        if type(kv[1]) != "map" {
+            push(lines, kv[0] + " = " + _generate_value(kv[1]))
+        }
+    }
+    for kv in top {
+        if type(kv[1]) == "map" {
+            push(lines, "")
+            push(lines, "[" + kv[0] + "]")
+            for inner in entries(kv[1]) {
+                push(lines, inner[0] + " = " + _generate_value(inner[1]))
+            }
+        }
+    }
+    return join(lines, "\n") + "\n"
+}
+
+-- ── AppManifest ──────────────────────────────────────
+
+fn _get(map, key, default_val) {
+    if has(map, key) { return map[key] }
+    return default_val
+}
+
+class AppManifest {
+    fn init(data) {
+        let d = data ?? {}
+        let app = _get(d, "app", {})
+        let win = _get(d, "window", {})
+        let perms = _get(d, "permissions", {})
+
+        this.raw = d
+        this.name = _get(app, "name", "")
+        this.version = _get(app, "version", "0.1.0")
+        this.author = _get(app, "author", "")
+        this.description = _get(app, "description", "")
+        this.icon = _get(app, "icon", null)
+        this.entry = _get(app, "entry", "main.clarity")
+        this.categories = _get(app, "categories", [])
+
+        let default_title = if len(this.name) > 0 { this.name } else { "App" }
+        this.window = {
+            "title": _get(win, "title", default_title),
+            "width": _get(win, "width", 800),
+            "height": _get(win, "height", 600),
+            "resizable": _get(win, "resizable", true)
+        }
+        this.permissions = perms
+    }
+
+    -- Permission queries -------------------------------------------
+
+    fn requests(perm) {
+        -- "filesystem.read" / "filesystem.write" → list-membership check.
+        -- "network" / "audio" / "notifications" / "clipboard" / "process"
+        --     → true if the value is `true`, a non-empty list, or any
+        --       value parsed as truthy.
+        if contains(perm, ".") {
+            let dot = index_of(perm, ".")
+            let group = substring(perm, 0, dot)
+            let sub = substring(perm, dot + 1, len(perm))
+            if not has(this.permissions, group) { return false }
+            let val = this.permissions[group]
+            if type(val) == "list" {
+                for v in val { if v == sub { return true } }
+                return false
+            }
+            return val == true
+        }
+        if not has(this.permissions, perm) { return false }
+        let val = this.permissions[perm]
+        if type(val) == "bool" { return val }
+        if type(val) == "list" { return len(val) > 0 }
+        return val == true
+    }
+
+    fn allowed_hosts() {
+        -- For the network permission: returns the list of allowed
+        -- host patterns, or ["*"] if granted as a bare `true`.
+        if not has(this.permissions, "network") { return [] }
+        let v = this.permissions["network"]
+        if type(v) == "list" { return v }
+        if v == true { return ["*"] }
+        return []
+    }
+
+    -- Validation ---------------------------------------------------
+
+    fn validate() {
+        mut errors = []
+        if len(this.name) == 0 { push(errors, "missing app.name") }
+        if len(this.version) == 0 { push(errors, "missing app.version") }
+        if len(this.entry) == 0 { push(errors, "missing app.entry") }
+        if this.window["width"] <= 0 { push(errors, "window.width must be positive") }
+        if this.window["height"] <= 0 { push(errors, "window.height must be positive") }
+
+        for group_kv in entries(this.permissions) {
+            let g = group_kv[0]
+            let v = group_kv[1]
+            if not contains(_PERMISSION_GROUPS, g) {
+                push(errors, "unknown permission group: " + g)
+                continue
+            }
+            if g == "filesystem" {
+                if type(v) != "list" {
+                    push(errors, "permissions.filesystem must be a list of " + str(_FILESYSTEM_SUBPERMS))
+                } else {
+                    for sub in v {
+                        if not contains(_FILESYSTEM_SUBPERMS, sub) {
+                            push(errors, "unknown filesystem permission: " + str(sub))
+                        }
+                    }
+                }
+            } elif g == "network" {
+                if type(v) != "bool" and type(v) != "list" {
+                    push(errors, "permissions.network must be a bool or a list of host patterns")
+                }
+            } else {
+                if type(v) != "bool" {
+                    push(errors, "permissions." + g + " must be a bool")
+                }
+            }
+        }
+        return errors
+    }
+
+    -- Serialisation ------------------------------------------------
+
+    fn to_map() {
+        mut app_section = {
+            "name": this.name,
+            "version": this.version,
+            "entry": this.entry
+        }
+        if len(this.author) > 0 { app_section["author"] = this.author }
+        if len(this.description) > 0 { app_section["description"] = this.description }
+        if this.icon != null and len(this.icon) > 0 { app_section["icon"] = this.icon }
+        if len(this.categories) > 0 { app_section["categories"] = this.categories }
+        return {
+            "app": app_section,
+            "window": this.window,
+            "permissions": this.permissions
+        }
+    }
+
+    fn to_text() { return generate_manifest(this.to_map()) }
+}
+
+fn manifest(data) { return AppManifest(data) }
+fn manifest_from_text(text) { return AppManifest(parse_manifest(text)) }
+
+fn read_manifest(path) {
+    let text = read(path)
+    return manifest_from_text(text)
+}
+
+fn write_manifest(path, m) {
+    write(path, m.to_text())
+}

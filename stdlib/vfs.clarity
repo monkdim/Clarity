@@ -1,0 +1,363 @@
+-- VFS — virtual filesystem layer + tmpfs (Phase 65 task 6).
+--
+-- Clarity-side mirror of kernel/fs/vfs.zig and kernel/fs/tmpfs.zig.
+-- The kernel implementation is the canonical one; this module is
+-- the testable, fully-in-process reference that userspace code can
+-- run today on Linux/macOS.
+--
+-- An Fs is anything with the four operations groups:
+--   path lookup       lookup(parent, name) -> Inode | null
+--   metadata          stat(inode) -> {size, mode, mtime, ...}
+--   data I/O          read(inode, off, n) / write(inode, off, data)
+--   directory         readdir(inode), create(parent, name, mode),
+--                     mkdir, unlink, rmdir
+--
+-- Vfs(root_fs) plumbs path traversal: walks "/a/b/c" component by
+-- component through the right Fs, caches the dentries, and exposes
+-- the public API (open/close/read/write/stat/...).
+
+let TYPE_REG = "regular"
+let TYPE_DIR = "directory"
+let TYPE_LNK = "symlink"
+let TYPE_CHR = "char"
+let TYPE_BLK = "block"
+let TYPE_FIFO = "fifo"
+let TYPE_SOCK = "socket"
+
+class Inode {
+    fn init(num, file_type, mode) {
+        this.num = num
+        this.file_type = file_type
+        this.mode = mode
+        this.size = 0
+        this.nlink = 1
+        this.atime = 0
+        this.mtime = 0
+        this.ctime = 0
+        this.fs = null              -- back-ref to owning Fs
+        this.private = null         -- per-fs state
+    }
+}
+
+-- ── Tmpfs ───────────────────────────────────────────
+
+class TmpfsInode {
+    fn init(base) {
+        this.base = base            -- Inode
+        this.data = ""              -- backing string for regular files
+        this.children = {}          -- name -> TmpfsInode (for directories)
+    }
+}
+
+class Tmpfs {
+    fn init() {
+        this.name = "tmpfs"
+        this._next_inum = 1
+        let root_inode = Inode(this._next_inum, TYPE_DIR, 0x41ED)
+        this._next_inum = this._next_inum + 1
+        let root = TmpfsInode(root_inode)
+        root_inode.fs = this
+        root_inode.private = root
+        this.root = root_inode
+    }
+
+    fn _wrap(num, file_type, mode) {
+        let base = Inode(num, file_type, mode)
+        base.fs = this
+        let wrap = TmpfsInode(base)
+        base.private = wrap
+        return wrap
+    }
+
+    fn _alloc_num() {
+        let n = this._next_inum
+        this._next_inum = this._next_inum + 1
+        return n
+    }
+
+    fn lookup(parent_inode, name) {
+        let parent = parent_inode.private
+        if not has(parent.children, name) { return null }
+        return parent.children[name].base
+    }
+
+    fn create(parent_inode, name, mode) {
+        let parent = parent_inode.private
+        if has(parent.children, name) { throw "EEXIST: " + name }
+        let wrap = this._wrap(this._alloc_num(), TYPE_REG, mode)
+        parent.children[name] = wrap
+        return wrap.base
+    }
+
+    fn mkdir(parent_inode, name, mode) {
+        let parent = parent_inode.private
+        if has(parent.children, name) { throw "EEXIST: " + name }
+        let wrap = this._wrap(this._alloc_num(), TYPE_DIR, mode | 0x4000)
+        parent.children[name] = wrap
+        return wrap.base
+    }
+
+    fn unlink(parent_inode, name) {
+        let parent = parent_inode.private
+        if not has(parent.children, name) { throw "ENOENT: " + name }
+        let target = parent.children[name].base
+        if target.file_type == TYPE_DIR { throw "EISDIR: " + name }
+        mut next = {}
+        for kv in entries(parent.children) {
+            if kv[0] != name { next[kv[0]] = kv[1] }
+        }
+        parent.children = next
+    }
+
+    fn rmdir(parent_inode, name) {
+        let parent = parent_inode.private
+        if not has(parent.children, name) { throw "ENOENT: " + name }
+        let target = parent.children[name]
+        if target.base.file_type != TYPE_DIR { throw "ENOTDIR: " + name }
+        if len(keys(target.children)) > 0 { throw "ENOTEMPTY: " + name }
+        mut next = {}
+        for kv in entries(parent.children) {
+            if kv[0] != name { next[kv[0]] = kv[1] }
+        }
+        parent.children = next
+    }
+
+    fn read(inode, offset, count) {
+        let wrap = inode.private
+        if offset >= len(wrap.data) { return "" }
+        let end = if offset + count > len(wrap.data) { len(wrap.data) } else { offset + count }
+        return substring(wrap.data, offset, end)
+    }
+
+    fn write(inode, offset, data) {
+        let wrap = inode.private
+        let body = wrap.data
+        mut padded = ""
+        if offset == 0 {
+            padded = ""
+        } elif offset >= len(body) {
+            padded = body
+            mut i = len(body)
+            while i < offset { padded = padded + "\0"; i = i + 1 }
+        } else {
+            padded = substring(body, 0, offset)
+        }
+        let suffix_start = offset + len(data)
+        let suffix = if suffix_start < len(body) { substring(body, suffix_start, len(body)) } else { "" }
+        wrap.data = padded + data + suffix
+        if len(wrap.data) > inode.size { inode.size = len(wrap.data) }
+        return len(data)
+    }
+
+    fn truncate(inode, size) {
+        let wrap = inode.private
+        if size <= len(wrap.data) {
+            wrap.data = substring(wrap.data, 0, size)
+        } else {
+            mut s = wrap.data
+            mut i = len(s)
+            while i < size { s = s + "\0"; i = i + 1 }
+            wrap.data = s
+        }
+        inode.size = size
+    }
+
+    fn readdir(inode) {
+        let wrap = inode.private
+        mut entries_list = []
+        for kv in entries(wrap.children) {
+            push(entries_list, {
+                "name": kv[0],
+                "inum": kv[1].base.num,
+                "file_type": kv[1].base.file_type
+            })
+        }
+        return entries_list
+    }
+}
+
+fn tmpfs() { return Tmpfs() }
+
+-- ── Path helpers ────────────────────────────────────
+
+fn _split_path(path) {
+    mut parts = []
+    let raw = split(path, "/")
+    for p in raw {
+        if len(p) > 0 { push(parts, p) }
+    }
+    return parts
+}
+
+fn _basename(path) {
+    let parts = _split_path(path)
+    if len(parts) == 0 { return "" }
+    return parts[len(parts) - 1]
+}
+
+fn _parent_path(path) {
+    let parts = _split_path(path)
+    if len(parts) == 0 { return "/" }
+    mut head = "/"
+    mut i = 0
+    while i < len(parts) - 1 {
+        if i > 0 { head = head + "/" }
+        head = head + parts[i]
+        if i == 0 { head = "/" + parts[0] }
+        i = i + 1
+    }
+    if len(parts) == 1 { return "/" }
+    return head
+}
+
+-- ── Vfs ─────────────────────────────────────────────
+
+class Vfs {
+    fn init(root_fs) {
+        this.root_fs = root_fs
+        this.root = root_fs.root
+        this.cwd = "/"
+        this._fds = {}            -- fd -> {inode, pos, flags}
+        this._next_fd = 3
+    }
+
+    fn _resolve(path) {
+        if not starts(path, "/") {
+            -- relative path; resolve against cwd
+            return this._resolve(this._join(this.cwd, path))
+        }
+        mut current = this.root
+        let parts = _split_path(path)
+        for name in parts {
+            if current.file_type != TYPE_DIR { return null }
+            let next = current.fs.lookup(current, name)
+            if next == null { return null }
+            current = next
+        }
+        return current
+    }
+
+    fn _resolve_parent(path) {
+        return this._resolve(_parent_path(path))
+    }
+
+    fn _join(base, rel) {
+        if starts(rel, "/") { return rel }
+        if ends(base, "/") { return base + rel }
+        return base + "/" + rel
+    }
+
+    -- Public API mirrors the syscall surface
+
+    fn open(path, flags, mode) {
+        mut inode = this._resolve(path)
+        if inode == null {
+            -- O_CREAT bit (matches kernel_abi.O_CREAT = 64)
+            if (flags & 64) == 0 { throw "ENOENT: " + path }
+            let parent = this._resolve_parent(path)
+            if parent == null { throw "ENOENT: " + path }
+            inode = parent.fs.create(parent, _basename(path), mode)
+        }
+        -- O_TRUNC (512)
+        if (flags & 512) != 0 and inode.file_type == TYPE_REG {
+            inode.fs.truncate(inode, 0)
+        }
+        let fd = this._next_fd
+        this._next_fd = this._next_fd + 1
+        let pos = if (flags & 1024) != 0 { inode.size } else { 0 }
+        this._fds[fd] = {"inode": inode, "pos": pos, "flags": flags}
+        return fd
+    }
+
+    fn close(fd) {
+        if not has(this._fds, fd) { throw "EBADF: " + str(fd) }
+        mut next = {}
+        for k in keys(this._fds) {
+            if k != fd { next[k] = this._fds[k] }
+        }
+        this._fds = next
+        return 0
+    }
+
+    fn read(fd, count) {
+        if not has(this._fds, fd) { throw "EBADF: " + str(fd) }
+        let entry = this._fds[fd]
+        let inode = entry["inode"]
+        let chunk = inode.fs.read(inode, entry["pos"], count)
+        entry["pos"] = entry["pos"] + len(chunk)
+        return chunk
+    }
+
+    fn write(fd, data) {
+        if not has(this._fds, fd) { throw "EBADF: " + str(fd) }
+        let entry = this._fds[fd]
+        let inode = entry["inode"]
+        let n = inode.fs.write(inode, entry["pos"], data)
+        entry["pos"] = entry["pos"] + n
+        return n
+    }
+
+    fn lseek(fd, offset, whence) {
+        if not has(this._fds, fd) { throw "EBADF: " + str(fd) }
+        let entry = this._fds[fd]
+        if whence == 0 { entry["pos"] = offset }
+        elif whence == 1 { entry["pos"] = entry["pos"] + offset }
+        elif whence == 2 { entry["pos"] = entry["inode"].size + offset }
+        else { throw "EINVAL: bad whence" }
+        return entry["pos"]
+    }
+
+    fn stat(path) {
+        let inode = this._resolve(path)
+        if inode == null { throw "ENOENT: " + path }
+        return {
+            "size": inode.size,
+            "mode": inode.mode,
+            "mtime": inode.mtime,
+            "atime": inode.atime,
+            "ctime": inode.ctime,
+            "nlink": inode.nlink,
+            "file_type": inode.file_type,
+            "inum": inode.num
+        }
+    }
+
+    fn mkdir(path, mode) {
+        let parent = this._resolve_parent(path)
+        if parent == null { throw "ENOENT: " + path }
+        return parent.fs.mkdir(parent, _basename(path), mode)
+    }
+
+    fn unlink(path) {
+        let parent = this._resolve_parent(path)
+        if parent == null { throw "ENOENT: " + path }
+        parent.fs.unlink(parent, _basename(path))
+        return 0
+    }
+
+    fn rmdir(path) {
+        let parent = this._resolve_parent(path)
+        if parent == null { throw "ENOENT: " + path }
+        parent.fs.rmdir(parent, _basename(path))
+        return 0
+    }
+
+    fn readdir(path) {
+        let inode = this._resolve(path)
+        if inode == null { throw "ENOENT: " + path }
+        if inode.file_type != TYPE_DIR { throw "ENOTDIR: " + path }
+        return inode.fs.readdir(inode)
+    }
+
+    fn chdir(path) {
+        let inode = this._resolve(path)
+        if inode == null { throw "ENOENT: " + path }
+        if inode.file_type != TYPE_DIR { throw "ENOTDIR: " + path }
+        this.cwd = if starts(path, "/") { path } else { this._join(this.cwd, path) }
+        return 0
+    }
+
+    fn getcwd() { return this.cwd }
+}
+
+fn vfs(root_fs) { return Vfs(root_fs) }

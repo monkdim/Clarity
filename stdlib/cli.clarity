@@ -16,6 +16,8 @@ from "build.clarity" import build
 from "runtime_gen.clarity" import gen_runtime
 from "install.clarity" import install_self
 from "repl.clarity" import repl_start
+from "app_scaffold.clarity" import scaffold_app
+from "app_store.clarity" import app_store
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -57,6 +59,10 @@ fn _help() {
     show "  publish               Pack and publish to registry"
     show "  search <query>        Search the package registry"
     show "  info <pkg>            Show package info from registry"
+    show "  app new <dir>         Scaffold a new ClarityOS app"
+    show "  app list              List installed ClarityOS apps"
+    show "  app install <name>    Install a ClarityOS app"
+    show "  app remove <name>     Uninstall a ClarityOS app"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
@@ -451,6 +457,159 @@ fn do_info(cli_args) {
     show ""
 }
 
+-- ── App subcommands ─────────────────────────────────────
+
+fn _print_app_usage() {
+    show "Usage: clarity app <subcommand> [args]"
+    show ""
+    show "Subcommands:"
+    show "  new <dir>             Scaffold a new app project"
+    show "                          --template <basic|gui>"
+    show "                          --author <name> --description <text>"
+    show "  list                  List installed apps"
+    show "  install <name>        Install an app from the registry"
+    show "  remove <name>         Uninstall an app"
+    show "  info <name>           Show registry metadata for an app"
+    show "  search <query>        Search the app catalogue"
+}
+
+fn _arg_value(cli_args, flag) {
+    mut i = 0
+    while i < len(cli_args) {
+        if cli_args[i] == flag and i + 1 < len(cli_args) {
+            return cli_args[i + 1]
+        }
+        i += 1
+    }
+    return null
+}
+
+fn do_app(cli_args) {
+    if len(cli_args) < 2 {
+        _print_app_usage()
+        return null
+    }
+    let sub = cli_args[1]
+
+    if sub == "new" {
+        if len(cli_args) < 3 {
+            show red("Usage: clarity app new <dir> [--template basic|gui]")
+            exit(1)
+        }
+        let dest = cli_args[2]
+        mut opts = {}
+        let tpl = _arg_value(cli_args, "--template")
+        if tpl != null { opts["template"] = tpl }
+        let author = _arg_value(cli_args, "--author")
+        if author != null { opts["author"] = author }
+        let descr = _arg_value(cli_args, "--description")
+        if descr != null { opts["description"] = descr }
+        let name = _arg_value(cli_args, "--name")
+        if name != null { opts["name"] = name }
+        let result = scaffold_app(dest, opts)
+        show ""
+        show "  Created " + bold(green(result["name"])) + " (" + result["template"] + " template) at " + dest
+        for f in result["created"] {
+            show "    " + dim("•") + " " + f
+        }
+        show ""
+        show "  Next: " + cyan("cd " + dest + " && clarity run main.clarity")
+        return null
+    }
+
+    if sub == "list" {
+        let store = app_store()
+        let installed = store.installed()
+        if len(installed) == 0 {
+            show "  No apps installed."
+            return null
+        }
+        show ""
+        for record in installed {
+            show "  " + bold(green(record["name"])) + " " + dim("v" + record["version"]) + "  " + dim(record["dir"])
+        }
+        show ""
+        return null
+    }
+
+    if sub == "install" {
+        if len(cli_args) < 3 {
+            show red("Usage: clarity app install <name>")
+            exit(1)
+        }
+        let name = cli_args[2]
+        let store = app_store()
+        try {
+            let entry = store.install(name)
+            show "  " + green("installed") + " " + entry.name + " v" + entry.version
+        } catch e {
+            show red("  install failed: " + str(e))
+            exit(1)
+        }
+        return null
+    }
+
+    if sub == "remove" {
+        if len(cli_args) < 3 {
+            show red("Usage: clarity app remove <name>")
+            exit(1)
+        }
+        let name = cli_args[2]
+        let store = app_store()
+        if store.remove(name) {
+            show "  " + green("removed") + " " + name
+        } else {
+            show "  " + yellow(name) + " not installed"
+        }
+        return null
+    }
+
+    if sub == "info" {
+        if len(cli_args) < 3 {
+            show red("Usage: clarity app info <name>")
+            exit(1)
+        }
+        let store = app_store()
+        let info = store.info(cli_args[2])
+        if info == null {
+            show "  Not found in registry."
+            return null
+        }
+        show ""
+        show "  " + bold(green(info.name)) + " " + dim("v" + info.version)
+        if len(info.description) > 0 { show "  " + info.description }
+        if len(info.author) > 0 { show "  Author: " + info.author }
+        if len(info.categories) > 0 { show "  Categories: " + join(info.categories, ", ") }
+        if info.rating > 0 { show "  Rating: " + str(info.rating) }
+        show ""
+        return null
+    }
+
+    if sub == "search" {
+        if len(cli_args) < 3 {
+            show red("Usage: clarity app search <query>")
+            exit(1)
+        }
+        let store = app_store()
+        let results = store.search(cli_args[2])
+        if len(results) == 0 {
+            show "  No apps found."
+            return null
+        }
+        show ""
+        for entry in results {
+            show "  " + bold(green(entry.name)) + " " + dim("v" + entry.version)
+            if len(entry.description) > 0 { show "    " + entry.description }
+        }
+        show ""
+        return null
+    }
+
+    show red("Unknown app subcommand: " + sub)
+    _print_app_usage()
+    exit(1)
+}
+
 -- ── LSP delegation ──────────────────────────────────────
 
 fn start_lsp() {
@@ -587,6 +746,12 @@ fn main() {
     -- Build
     if command == "build" {
         build(cli_args)
+        return null
+    }
+
+    -- App subcommands (Phase 64)
+    if command == "app" {
+        do_app(cli_args)
         return null
     }
 

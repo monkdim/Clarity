@@ -1,0 +1,200 @@
+-- mkiso — assemble a bootable ClarityOS ISO image (Phase 67 task 1).
+--
+-- Builds an ISO tree under a staging directory, generates BIOS +
+-- UEFI bootloader configurations, and (if the host has xorriso /
+-- grub-mkrescue available) packs the result into a single ISO file
+-- ready for QEMU or USB write.
+--
+-- Layout the builder produces:
+--
+--     iso-staging/
+--     ├── boot/
+--     │   ├── clarity-kernel              # the Zig kernel ELF
+--     │   └── grub/
+--     │       └── grub.cfg                # BIOS GRUB config
+--     ├── EFI/
+--     │   └── BOOT/
+--     │       ├── BOOTX64.EFI              # UEFI loader
+--     │       └── grub.cfg                # UEFI GRUB config
+--     ├── bin/
+--     │   ├── clarity                      # host-mode binary (for live)
+--     │   └── clarity-init                 # bare-metal runtime
+--     └── lib/clarity/
+--         └── stdlib/                     # transpiled stdlib bundle
+--
+-- The class is pure-state: builders that are called without a host
+-- toolchain can still be used to inspect what would have been
+-- written, which is what the test suite does.
+--
+--     let iso = IsoBuilder({"output": "claritos-1.0.iso", "label": "ClarityOS"})
+--     iso.add_kernel("/path/to/clarity-kernel")
+--     iso.add_runtime("/path/to/clarity-init")
+--     iso.add_app("calc", "/path/to/calc/")
+--     let plan = iso.plan()             -- pure-state: list of file ops
+--     iso.build()                       -- side-effecting: actually packs
+
+let DEFAULT_LABEL = "ClarityOS"
+let DEFAULT_OUTPUT = "claritos.iso"
+let GRUB_DEFAULT_TIMEOUT = 5
+
+class IsoBuilder {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.staging_dir = if has(o, "staging") { o["staging"] } else { "/tmp/clarity-iso-staging" }
+        this.output = if has(o, "output") { o["output"] } else { DEFAULT_OUTPUT }
+        this.label = if has(o, "label") { o["label"] } else { DEFAULT_LABEL }
+        this.timeout = if has(o, "timeout") { o["timeout"] } else { GRUB_DEFAULT_TIMEOUT }
+        this.uefi = if has(o, "uefi") { o["uefi"] } else { true }
+        this.bios = if has(o, "bios") { o["bios"] } else { true }
+        this.cmdline = if has(o, "cmdline") { o["cmdline"] } else { "" }
+        this.kernel_path = null
+        this.runtime_path = null
+        this.uefi_loader_path = null
+        this.stdlib_dir = null
+        this.apps = []
+        this.extra_files = []
+    }
+
+    fn add_kernel(path) { this.kernel_path = path }
+    fn add_runtime(path) { this.runtime_path = path }
+    fn add_uefi_loader(path) { this.uefi_loader_path = path }
+    fn add_stdlib_bundle(dir) { this.stdlib_dir = dir }
+    fn add_app(name, dir) { push(this.apps, {"name": name, "dir": dir}) }
+    fn add_extra(src, dst) { push(this.extra_files, {"src": src, "dst": dst}) }
+
+    -- ── Plan: pure-state list of operations ──────────
+
+    fn plan() {
+        mut ops = []
+        push(ops, {"kind": "mkdir", "path": this.staging_dir + "/boot"})
+        push(ops, {"kind": "mkdir", "path": this.staging_dir + "/boot/grub"})
+        push(ops, {"kind": "mkdir", "path": this.staging_dir + "/bin"})
+        push(ops, {"kind": "mkdir", "path": this.staging_dir + "/lib/clarity/stdlib"})
+        if this.uefi {
+            push(ops, {"kind": "mkdir", "path": this.staging_dir + "/EFI/BOOT"})
+        }
+        if this.kernel_path != null {
+            push(ops, {"kind": "copy", "src": this.kernel_path, "dst": this.staging_dir + "/boot/clarity-kernel"})
+        }
+        if this.runtime_path != null {
+            push(ops, {"kind": "copy", "src": this.runtime_path, "dst": this.staging_dir + "/bin/clarity-init"})
+        }
+        if this.uefi and this.uefi_loader_path != null {
+            push(ops, {"kind": "copy", "src": this.uefi_loader_path, "dst": this.staging_dir + "/EFI/BOOT/BOOTX64.EFI"})
+        }
+        if this.stdlib_dir != null {
+            push(ops, {"kind": "copy_tree", "src": this.stdlib_dir, "dst": this.staging_dir + "/lib/clarity/stdlib"})
+        }
+        for app in this.apps {
+            push(ops, {"kind": "copy_tree", "src": app["dir"], "dst": this.staging_dir + "/lib/clarity/apps/" + app["name"]})
+        }
+        for extra in this.extra_files {
+            push(ops, {"kind": "copy", "src": extra["src"], "dst": this.staging_dir + extra["dst"]})
+        }
+        if this.bios {
+            push(ops, {"kind": "write", "path": this.staging_dir + "/boot/grub/grub.cfg", "content": this.bios_grub_cfg()})
+        }
+        if this.uefi {
+            push(ops, {"kind": "write", "path": this.staging_dir + "/EFI/BOOT/grub.cfg", "content": this.uefi_grub_cfg()})
+        }
+        push(ops, {"kind": "pack", "image": this.output, "label": this.label, "from": this.staging_dir})
+        return ops
+    }
+
+    -- ── GRUB config generation ──────────────────────
+
+    fn bios_grub_cfg() {
+        return this._grub_cfg("BIOS")
+    }
+
+    fn uefi_grub_cfg() {
+        return this._grub_cfg("UEFI")
+    }
+
+    fn _grub_cfg(mode) {
+        mut lines = []
+        push(lines, "# ClarityOS GRUB config (" + mode + ")")
+        push(lines, "set timeout=" + str(this.timeout))
+        push(lines, "set default=0")
+        push(lines, "")
+        push(lines, "menuentry 'ClarityOS' {")
+        push(lines, "    multiboot2 /boot/clarity-kernel" + (if len(this.cmdline) > 0 { " " + this.cmdline } else { "" }))
+        push(lines, "    boot")
+        push(lines, "}")
+        push(lines, "")
+        push(lines, "menuentry 'ClarityOS (rescue shell)' {")
+        push(lines, "    multiboot2 /boot/clarity-kernel rescue")
+        push(lines, "    boot")
+        push(lines, "}")
+        push(lines, "")
+        push(lines, "menuentry 'ClarityOS installer' {")
+        push(lines, "    multiboot2 /boot/clarity-kernel boot=installer")
+        push(lines, "    boot")
+        push(lines, "}")
+        return join(lines, "\n") + "\n"
+    }
+
+    -- ── Validation ──────────────────────────────────
+
+    fn validate() {
+        mut errors = []
+        if this.kernel_path == null { push(errors, "missing kernel (call add_kernel)") }
+        if this.runtime_path == null { push(errors, "missing runtime (call add_runtime)") }
+        if this.uefi and this.uefi_loader_path == null {
+            push(errors, "uefi=true but no UEFI loader (call add_uefi_loader)")
+        }
+        if not this.bios and not this.uefi {
+            push(errors, "at least one of bios / uefi must be enabled")
+        }
+        if len(this.label) == 0 { push(errors, "label must be non-empty") }
+        if not ends(this.output, ".iso") { push(errors, "output should end in .iso") }
+        return errors
+    }
+
+    -- ── Execute ─────────────────────────────────────
+
+    fn build() {
+        let errs = this.validate()
+        if len(errs) > 0 { throw "IsoError: " + join(errs, "; ") }
+        let ops = this.plan()
+        for op in ops { this._execute(op) }
+        return this.output
+    }
+
+    fn _execute(op) {
+        let kind = op["kind"]
+        if kind == "mkdir" {
+            exec_full("mkdir -p '" + op["path"] + "'")
+        } elif kind == "copy" {
+            exec_full("mkdir -p '" + this._dirname(op["dst"]) + "'")
+            exec_full("cp '" + op["src"] + "' '" + op["dst"] + "'")
+        } elif kind == "copy_tree" {
+            exec_full("mkdir -p '" + op["dst"] + "'")
+            exec_full("cp -R '" + op["src"] + "/.' '" + op["dst"] + "'")
+        } elif kind == "write" {
+            write(op["path"], op["content"])
+        } elif kind == "pack" {
+            this._pack(op)
+        }
+    }
+
+    fn _pack(op) {
+        let cmd = "command -v grub-mkrescue >/dev/null 2>&1 && echo grub || (command -v xorriso >/dev/null 2>&1 && echo xorriso || echo none)"
+        let r = exec_full(cmd)
+        let tool = trim(r.stdout)
+        if tool == "grub" {
+            exec_full("grub-mkrescue -o '" + op["image"] + "' --volid='" + op["label"] + "' '" + op["from"] + "'")
+        } elif tool == "xorriso" {
+            exec_full("xorriso -as mkisofs -o '" + op["image"] + "' -V '" + op["label"] + "' -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin -c boot/boot.cat -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -eltorito-alt-boot -e EFI/BOOT/BOOTX64.EFI -no-emul-boot -isohybrid-gpt-basdat '" + op["from"] + "'")
+        } else {
+            throw "IsoError: neither grub-mkrescue nor xorriso available; install grub-pc-bin + xorriso to pack"
+        }
+    }
+
+    fn _dirname(path) {
+        let r = exec_full("dirname '" + path + "'")
+        return trim(r.stdout)
+    }
+}
+
+fn iso_builder(opts) { return IsoBuilder(opts) }

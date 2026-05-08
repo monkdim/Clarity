@@ -1,0 +1,273 @@
+-- Tiny HTML parser (Phase 68 task 1).
+--
+-- Hand-rolled, single-pass tokenizer + DOM builder for the
+-- ClarityOS browser. Targets a strict subset:
+--
+--   text                    plain text nodes
+--   <p>, <h1>..<h6>          block elements
+--   <a href=...>             hyperlinks
+--   <img src=... alt=...>    images (rendered as alt-text fallback)
+--   <ul>, <ol>, <li>         lists
+--   <form>, <input>, <button>
+--   <div>, <span>            generic containers
+--   <strong>, <em>, <code>   inline emphasis
+--   <br>, <hr>               void elements
+--
+-- Comments (<!--...-->) are dropped. Unknown tags are kept as
+-- generic Element nodes so the layout engine can ignore + recurse
+-- through their children. Self-closing tags (<br/>, <hr/>) are
+-- recognised but neither HTML5-style "<br>" nor "<br/>" matter for
+-- the parse tree — both produce one void Element with no children.
+--
+--     let dom = parse_html("<h1>Hi</h1><p>world</p>")
+--     dom.tag                  -- "document"
+--     dom.children[0].tag      -- "h1"
+--     dom.children[0].text()   -- "Hi"
+
+let TYPE_DOCUMENT = "document"
+let TYPE_ELEMENT = "element"
+let TYPE_TEXT = "text"
+let TYPE_COMMENT = "comment"
+
+let _VOID_TAGS = ["br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source", "track", "wbr"]
+let _BLOCK_TAGS = ["html", "body", "head", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "form", "section", "article", "nav", "header", "footer", "main", "blockquote", "pre", "table", "tr", "thead", "tbody"]
+let _INLINE_TAGS = ["span", "a", "strong", "em", "code", "b", "i", "u", "small", "sub", "sup", "mark"]
+
+class HtmlNode {
+    fn init(node_type, tag) {
+        this.node_type = node_type
+        this.tag = tag                -- string for element/document; null for text
+        this.attrs = {}                -- attribute map (lower-cased keys)
+        this.children = []
+        this.value = ""                -- text content for TEXT nodes
+        this.parent = null
+    }
+
+    fn append(child) {
+        child.parent = this
+        push(this.children, child)
+        return child
+    }
+
+    -- Concatenated text of this node + all descendants
+    fn text() {
+        if this.node_type == TYPE_TEXT { return this.value }
+        mut out = ""
+        for c in this.children { out = out + c.text() }
+        return out
+    }
+
+    -- Walk all elements (DFS) with `tag` matching the argument
+    fn find_all(target_tag) {
+        mut out = []
+        if this.node_type == TYPE_ELEMENT and this.tag == target_tag { push(out, this) }
+        for c in this.children {
+            for found in c.find_all(target_tag) { push(out, found) }
+        }
+        return out
+    }
+
+    fn first(target_tag) {
+        let all = this.find_all(target_tag)
+        if len(all) == 0 { return null }
+        return all[0]
+    }
+
+    fn attr(name) {
+        if has(this.attrs, name) { return this.attrs[name] }
+        return null
+    }
+
+    fn is_block() { return contains(_BLOCK_TAGS, this.tag) }
+    fn is_inline() { return contains(_INLINE_TAGS, this.tag) }
+    fn is_void() { return contains(_VOID_TAGS, this.tag) }
+}
+
+fn html_node(node_type, tag) { return HtmlNode(node_type, tag) }
+
+-- ── Parser ──────────────────────────────────────────
+
+class HtmlParser {
+    fn init(source) {
+        this.src = source
+        this.pos = 0
+        this.errors = []
+    }
+
+    fn _eof() { return this.pos >= len(this.src) }
+    fn _peek() {
+        if this._eof() { return "" }
+        return char_at(this.src, this.pos)
+    }
+    fn _starts_at(prefix) {
+        let n = len(prefix)
+        if this.pos + n > len(this.src) { return false }
+        return substring(this.src, this.pos, this.pos + n) == prefix
+    }
+    fn _advance() { this.pos = this.pos + 1 }
+
+    fn _skip_whitespace() {
+        while not this._eof() {
+            let c = this._peek()
+            if c == " " or c == "\t" or c == "\n" or c == "\r" { this._advance() }
+            else { break }
+        }
+    }
+
+    fn _read_until(stop) {
+        let start = this.pos
+        while not this._eof() and not this._starts_at(stop) {
+            this._advance()
+        }
+        return substring(this.src, start, this.pos)
+    }
+
+    fn _read_tag_name() {
+        let start = this.pos
+        while not this._eof() {
+            let c = this._peek()
+            if c == " " or c == "\t" or c == "\n" or c == ">" or c == "/" { break }
+            this._advance()
+        }
+        return lower(substring(this.src, start, this.pos))
+    }
+
+    fn _read_attr() {
+        this._skip_whitespace()
+        let name_start = this.pos
+        while not this._eof() {
+            let c = this._peek()
+            if c == "=" or c == ">" or c == "/" or c == " " or c == "\t" or c == "\n" { break }
+            this._advance()
+        }
+        if this.pos == name_start { return null }
+        let name = lower(substring(this.src, name_start, this.pos))
+        this._skip_whitespace()
+        mut value = ""
+        if not this._eof() and this._peek() == "=" {
+            this._advance()
+            this._skip_whitespace()
+            if not this._eof() and (this._peek() == "\"" or this._peek() == "'") {
+                let quote = this._peek()
+                this._advance()
+                let val_start = this.pos
+                while not this._eof() and this._peek() != quote { this._advance() }
+                value = substring(this.src, val_start, this.pos)
+                if not this._eof() { this._advance() }     -- consume closing quote
+            } else {
+                let val_start = this.pos
+                while not this._eof() {
+                    let c = this._peek()
+                    if c == " " or c == "\t" or c == "\n" or c == ">" or c == "/" { break }
+                    this._advance()
+                }
+                value = substring(this.src, val_start, this.pos)
+            }
+        }
+        return {"name": name, "value": value}
+    }
+
+    fn parse() {
+        let doc = html_node(TYPE_DOCUMENT, "document")
+        mut stack = [doc]
+        while not this._eof() {
+            if this._starts_at("<!--") {
+                this.pos = this.pos + 4
+                this._read_until("-->")
+                if this._starts_at("-->") { this.pos = this.pos + 3 }
+                continue
+            }
+            if this._starts_at("<!") {
+                -- doctype or other declaration: drop to >
+                this._read_until(">")
+                if not this._eof() { this._advance() }
+                continue
+            }
+            if this._peek() == "<" {
+                -- Tag: opening or closing
+                this._advance()
+                let is_close = (not this._eof() and this._peek() == "/")
+                if is_close { this._advance() }
+                let tag = this._read_tag_name()
+                if len(tag) == 0 {
+                    -- Stray "<" — treat as text
+                    let parent = stack[len(stack) - 1]
+                    parent.append(this._text_node("<"))
+                    continue
+                }
+                if is_close {
+                    this._read_until(">")
+                    if not this._eof() { this._advance() }
+                    -- Pop until we find the matching tag (best effort)
+                    mut depth = len(stack) - 1
+                    while depth > 0 {
+                        if stack[depth].tag == tag {
+                            mut new_stack = []
+                            mut j = 0
+                            while j < depth { push(new_stack, stack[j]); j = j + 1 }
+                            stack = new_stack
+                            break
+                        }
+                        depth = depth - 1
+                    }
+                    continue
+                }
+                -- Opening tag: collect attrs until > or />
+                let elem = html_node(TYPE_ELEMENT, tag)
+                mut self_close = false
+                while not this._eof() {
+                    this._skip_whitespace()
+                    if this._eof() { break }
+                    let c = this._peek()
+                    if c == ">" { this._advance(); break }
+                    if c == "/" {
+                        self_close = true
+                        this._advance()
+                        continue
+                    }
+                    let attr = this._read_attr()
+                    if attr == null { this._advance(); continue }
+                    elem.attrs[attr["name"]] = attr["value"]
+                }
+                let parent = stack[len(stack) - 1]
+                parent.append(elem)
+                if not self_close and not contains(_VOID_TAGS, tag) {
+                    push(stack, elem)
+                }
+                continue
+            }
+            -- Text run up to next "<"
+            let start = this.pos
+            while not this._eof() and this._peek() != "<" { this._advance() }
+            let raw = substring(this.src, start, this.pos)
+            let trimmed = trim(raw)
+            if len(trimmed) > 0 {
+                let parent = stack[len(stack) - 1]
+                parent.append(this._text_node(_decode_entities(trimmed)))
+            }
+        }
+        return doc
+    }
+
+    fn _text_node(value) {
+        let n = html_node(TYPE_TEXT, null)
+        n.value = value
+        return n
+    }
+}
+
+fn _decode_entities(s) {
+    mut out = s
+    out = replace(out, "&amp;", "&")
+    out = replace(out, "&lt;", "<")
+    out = replace(out, "&gt;", ">")
+    out = replace(out, "&quot;", "\"")
+    out = replace(out, "&apos;", "'")
+    out = replace(out, "&nbsp;", " ")
+    return out
+}
+
+fn parse_html(source) {
+    let p = HtmlParser(source)
+    return p.parse()
+}

@@ -1,0 +1,245 @@
+-- IMAP4rev1 client (Phase 68 task 2).
+--
+-- Pure-state command builder + response parser. The transport
+-- (TLS-wrapped TCP socket) is supplied by the caller as anything
+-- that exposes:
+--
+--   send(line)        -> send a CRLF-terminated line
+--   recv_line()       -> read the next CRLF-terminated line
+--
+-- Tests inject a FakeTransport that records sent lines and replays
+-- canned responses. Real use lands TLS in a follow-up phase by
+-- wiring in net.clarity's TCP layer + bearssl/mbedtls.
+
+let _CRLF = "\r\n"
+
+fn _is_continuation(line) {
+    -- "+ ready for input" — server wants more data
+    if len(line) == 0 { return false }
+    return char_at(line, 0) == "+"
+}
+
+fn _is_tagged(line, tag) {
+    return starts(line, tag + " ")
+}
+
+fn _is_untagged(line) {
+    if len(line) == 0 { return false }
+    return char_at(line, 0) == "*"
+}
+
+class ImapClient {
+    fn init(transport) {
+        this.transport = transport
+        this._tag_counter = 0
+        this.state = "disconnected"        -- disconnected | greeted | authenticated | selected | logout
+        this.selected_mailbox = null
+        this.capabilities = []
+        this.log = []                       -- list of [direction, line]
+        this.errors = []
+    }
+
+    fn _next_tag() {
+        this._tag_counter = this._tag_counter + 1
+        return "A" + str(this._tag_counter)
+    }
+
+    fn _send(line) {
+        push(this.log, ["S", line])
+        this.transport.send(line + _CRLF)
+    }
+
+    fn _recv() {
+        let line = this.transport.recv_line()
+        let stripped = if ends(line, _CRLF) { substring(line, 0, len(line) - 2) } else { line }
+        push(this.log, ["R", stripped])
+        return stripped
+    }
+
+    fn _command(name, args) {
+        let tag = this._next_tag()
+        let parts = if args == null { [tag, name] } else { [tag, name, args] }
+        this._send(join(parts, " "))
+        return this._read_response(tag)
+    }
+
+    -- Read lines until we hit our tagged terminator. Returns
+    -- {tag, status, text, untagged: [...]}. Untagged responses
+    -- (server-pushed events like "* 17 EXISTS") accumulate into
+    -- the list.
+    fn _read_response(tag) {
+        mut untagged = []
+        while true {
+            let line = this._recv()
+            if _is_untagged(line) {
+                push(untagged, substring(line, 2, len(line)))
+                continue
+            }
+            if _is_continuation(line) {
+                return {"tag": null, "status": "continuation", "text": line, "untagged": untagged}
+            }
+            if _is_tagged(line, tag) {
+                let rest = substring(line, len(tag) + 1, len(line))
+                let space = index_of(rest, " ")
+                let status = if space < 0 { rest } else { substring(rest, 0, space) }
+                let text = if space < 0 { "" } else { substring(rest, space + 1, len(rest)) }
+                return {"tag": tag, "status": status, "text": text, "untagged": untagged}
+            }
+            -- Continuation of an existing untagged response
+            push(untagged, line)
+        }
+    }
+
+    -- ── Connection / login ─────────────────────────
+
+    fn read_greeting() {
+        let line = this._recv()
+        if not _is_untagged(line) {
+            this.errors = ["bad greeting: " + line]
+            return false
+        }
+        this.state = "greeted"
+        return true
+    }
+
+    fn capability() {
+        let resp = this._command("CAPABILITY", null)
+        for line in resp["untagged"] {
+            if starts(line, "CAPABILITY ") {
+                let raw = substring(line, len("CAPABILITY "), len(line))
+                this.capabilities = split(raw, " ")
+            }
+        }
+        return resp
+    }
+
+    fn login(user, pass) {
+        let resp = this._command("LOGIN", _quote(user) + " " + _quote(pass))
+        if resp["status"] == "OK" {
+            this.state = "authenticated"
+            return true
+        }
+        push(this.errors, "login failed: " + resp["text"])
+        return false
+    }
+
+    fn logout() {
+        let resp = this._command("LOGOUT", null)
+        this.state = "logout"
+        return resp["status"] == "OK"
+    }
+
+    -- ── Mailboxes ──────────────────────────────────
+
+    fn select(mailbox) {
+        let resp = this._command("SELECT", _quote(mailbox))
+        if resp["status"] != "OK" {
+            push(this.errors, "select failed: " + resp["text"])
+            return null
+        }
+        let info = {"exists": 0, "recent": 0, "uidvalidity": 0, "uidnext": 0, "flags": []}
+        for line in resp["untagged"] {
+            if ends(line, " EXISTS") {
+                info["exists"] = int(substring(line, 0, len(line) - len(" EXISTS")))
+            } elif ends(line, " RECENT") {
+                info["recent"] = int(substring(line, 0, len(line) - len(" RECENT")))
+            } elif starts(line, "OK [UIDVALIDITY ") {
+                let inner = substring(line, len("OK [UIDVALIDITY "), len(line))
+                let close = index_of(inner, "]")
+                if close > 0 { info["uidvalidity"] = int(substring(inner, 0, close)) }
+            } elif starts(line, "OK [UIDNEXT ") {
+                let inner = substring(line, len("OK [UIDNEXT "), len(line))
+                let close = index_of(inner, "]")
+                if close > 0 { info["uidnext"] = int(substring(inner, 0, close)) }
+            }
+        }
+        this.selected_mailbox = mailbox
+        this.state = "selected"
+        return info
+    }
+
+    fn list(reference, pattern) {
+        let resp = this._command("LIST", _quote(reference) + " " + _quote(pattern))
+        mut mailboxes = []
+        for line in resp["untagged"] {
+            if starts(line, "LIST ") {
+                push(mailboxes, _parse_list_entry(substring(line, 5, len(line))))
+            }
+        }
+        return mailboxes
+    }
+
+    fn search(criteria) {
+        let resp = this._command("SEARCH", criteria)
+        mut ids = []
+        for line in resp["untagged"] {
+            if starts(line, "SEARCH ") {
+                let raw = trim(substring(line, 7, len(line)))
+                if len(raw) == 0 { continue }
+                let parts = split(raw, " ")
+                for p in parts { if len(trim(p)) > 0 { push(ids, int(trim(p))) } }
+            }
+        }
+        return ids
+    }
+
+    fn fetch_envelope(seq_set) {
+        let resp = this._command("FETCH", seq_set + " (ENVELOPE)")
+        mut envelopes = []
+        for line in resp["untagged"] {
+            if contains(line, " FETCH ") {
+                push(envelopes, _parse_envelope(line))
+            }
+        }
+        return envelopes
+    }
+}
+
+-- ── Helpers ────────────────────────────────
+
+fn _quote(s) {
+    -- IMAP quoted string: backslash-escape \ and ", surround with "
+    mut out = "\""
+    mut i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c == "\\" or c == "\"" { out = out + "\\" + c }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out + "\""
+}
+
+fn _parse_list_entry(line) {
+    -- LIST (\HasNoChildren) "/" "INBOX"
+    let lp = index_of(line, "(")
+    let rp = index_of(line, ")")
+    let flags_raw = if lp >= 0 and rp > lp { substring(line, lp + 1, rp) } else { "" }
+    mut flags = []
+    for f in split(flags_raw, " ") {
+        let t = trim(f)
+        if len(t) > 0 { push(flags, t) }
+    }
+    let after = trim(substring(line, rp + 1, len(line)))
+    let parts = split(after, " ")
+    let delim = if len(parts) > 0 { _strip_quotes(parts[0]) } else { "/" }
+    let name = if len(parts) > 1 { _strip_quotes(parts[1]) } else { "" }
+    return {"flags": flags, "delimiter": delim, "name": name}
+}
+
+fn _parse_envelope(line) {
+    -- "23 FETCH (ENVELOPE (...))" — minimal extraction of seq + raw
+    let space = index_of(line, " ")
+    let seq = if space > 0 { int(substring(line, 0, space)) } else { 0 }
+    return {"seq": seq, "raw": line}
+}
+
+fn _strip_quotes(s) {
+    let t = trim(s)
+    if len(t) >= 2 and starts(t, "\"") and ends(t, "\"") {
+        return substring(t, 1, len(t) - 1)
+    }
+    return t
+}
+
+fn imap_client(transport) { return ImapClient(transport) }
