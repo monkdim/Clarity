@@ -1,0 +1,223 @@
+-- Chat app — Phase 68 task 3.
+--
+-- Connection-agnostic chat state machine. Each Channel holds a
+-- message log + member list + unread counter. ChatApp aggregates
+-- channels across one or more connections, where a connection is
+-- a WebSocket-backed session, an IRC line-protocol session, or
+-- something else implementing the same protocol surface.
+--
+-- The protocol contract any backend implements:
+--
+--     fn connect()                    -> bool
+--     fn join(channel)                -> bool
+--     fn part(channel)                -> bool
+--     fn send(channel, text)          -> bool
+--     fn poll()                       -> list of events:
+--           {"kind": "message", "channel", "from", "text", "ts"}
+--           {"kind": "join",    "channel", "user"}
+--           {"kind": "part",    "channel", "user"}
+--           {"kind": "presence", "user", "online"}
+
+let MAX_HISTORY = 1000
+
+class Channel {
+    fn init(name) {
+        this.name = name
+        this.messages = []
+        this.members = []
+        this.unread = 0
+        this.topic = ""
+    }
+
+    fn add_message(msg) {
+        push(this.messages, msg)
+        if len(this.messages) > MAX_HISTORY {
+            mut next = []
+            let drop = len(this.messages) - MAX_HISTORY
+            mut i = drop
+            while i < len(this.messages) { push(next, this.messages[i]); i = i + 1 }
+            this.messages = next
+        }
+        this.unread = this.unread + 1
+    }
+
+    fn add_member(user) {
+        for m in this.members { if m == user { return false } }
+        push(this.members, user)
+        return true
+    }
+
+    fn remove_member(user) {
+        mut next = []
+        for m in this.members { if m != user { push(next, m) } }
+        this.members = next
+    }
+}
+
+fn channel(name) { return Channel(name) }
+
+class ChatConnection {
+    fn init(name, backend) {
+        this.name = name
+        this.backend = backend         -- has connect/join/part/send/poll
+        this.connected = false
+    }
+
+    fn connect() {
+        this.connected = this.backend.connect() == true
+        return this.connected
+    }
+
+    fn join(name) { return this.backend.join(name) }
+    fn part(name) { return this.backend.part(name) }
+    fn send(name, text) { return this.backend.send(name, text) }
+    fn poll() { return this.backend.poll() }
+}
+
+fn chat_connection(name, backend) { return ChatConnection(name, backend) }
+
+class ChatApp {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.user = if has(o, "user") { o["user"] } else { "anon" }
+        this.connections = []
+        this.channels = {}              -- key "conn::channel" -> Channel
+        this.active_key = null
+        this.presence = {}              -- user -> bool online
+    }
+
+    fn add_connection(conn) {
+        push(this.connections, conn)
+        return conn
+    }
+
+    fn _key(conn_name, channel_name) {
+        return conn_name + "::" + channel_name
+    }
+
+    fn join(conn_name, channel_name) {
+        let conn = this._find_conn(conn_name)
+        if conn == null { return false }
+        if not conn.connected and not conn.connect() { return false }
+        if not conn.join(channel_name) { return false }
+        let key = this._key(conn_name, channel_name)
+        if not has(this.channels, key) { this.channels[key] = channel(channel_name) }
+        if this.active_key == null { this.active_key = key }
+        return true
+    }
+
+    fn part(conn_name, channel_name) {
+        let conn = this._find_conn(conn_name)
+        if conn == null { return false }
+        conn.part(channel_name)
+        let key = this._key(conn_name, channel_name)
+        mut next = {}
+        for kv in entries(this.channels) {
+            if kv[0] != key { next[kv[0]] = kv[1] }
+        }
+        this.channels = next
+        if this.active_key == key {
+            let ks = keys(this.channels)
+            this.active_key = if len(ks) > 0 { ks[0] } else { null }
+        }
+        return true
+    }
+
+    fn send(text) {
+        if this.active_key == null { return false }
+        let parts = split(this.active_key, "::")
+        if len(parts) != 2 { return false }
+        let conn = this._find_conn(parts[0])
+        if conn == null { return false }
+        let ok = conn.send(parts[1], text)
+        if ok {
+            this.channels[this.active_key].add_message({
+                "from": this.user,
+                "text": text,
+                "ts": time()
+            })
+            -- Don't bump our own unread counter
+            this.channels[this.active_key].unread = this.channels[this.active_key].unread - 1
+            if this.channels[this.active_key].unread < 0 { this.channels[this.active_key].unread = 0 }
+        }
+        return ok
+    }
+
+    fn select(conn_name, channel_name) {
+        let key = this._key(conn_name, channel_name)
+        if not has(this.channels, key) { return false }
+        this.active_key = key
+        this.channels[key].unread = 0
+        return true
+    }
+
+    fn active_channel() {
+        if this.active_key == null { return null }
+        return this.channels[this.active_key]
+    }
+
+    -- Run one polling round across every connection. Dispatches
+    -- events into channels + presence; returns the raw event list
+    -- so the caller can render banners.
+    fn poll() {
+        mut all_events = []
+        for conn in this.connections {
+            let events = conn.poll()
+            for ev in events {
+                this._dispatch(conn.name, ev)
+                push(all_events, ev)
+            }
+        }
+        return all_events
+    }
+
+    fn _dispatch(conn_name, ev) {
+        let kind = ev["kind"]
+        if kind == "message" {
+            let key = this._key(conn_name, ev["channel"])
+            if not has(this.channels, key) { this.channels[key] = channel(ev["channel"]) }
+            this.channels[key].add_message({
+                "from": ev["from"],
+                "text": ev["text"],
+                "ts": if has(ev, "ts") { ev["ts"] } else { time() }
+            })
+        } elif kind == "join" {
+            let key = this._key(conn_name, ev["channel"])
+            if not has(this.channels, key) { this.channels[key] = channel(ev["channel"]) }
+            this.channels[key].add_member(ev["user"])
+        } elif kind == "part" {
+            let key = this._key(conn_name, ev["channel"])
+            if has(this.channels, key) { this.channels[key].remove_member(ev["user"]) }
+        } elif kind == "presence" {
+            this.presence[ev["user"]] = ev["online"] == true
+        }
+    }
+
+    fn _find_conn(name) {
+        for c in this.connections { if c.name == name { return c } }
+        return null
+    }
+
+    fn unread_total() {
+        mut total = 0
+        for kv in entries(this.channels) {
+            total = total + kv[1].unread
+        }
+        return total
+    }
+
+    fn channel_list() {
+        mut out = []
+        for kv in entries(this.channels) {
+            push(out, {
+                "key": kv[0],
+                "name": kv[1].name,
+                "unread": kv[1].unread,
+                "active": kv[0] == this.active_key
+            })
+        }
+        return out
+    }
+}
+
+fn chat_app(opts) { return ChatApp(opts) }
