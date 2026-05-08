@@ -1,0 +1,174 @@
+-- Workspace — virtual desktops for the window manager.
+--
+-- A Workspace owns its own list of Windows. The WorkspaceManager
+-- swaps which Workspace's windows are currently mounted on a
+-- Compositor, optionally with a slide animation between them.
+--
+--     let wsm = WorkspaceManager(compositor, 4)
+--     wsm.add_window_to(0, my_window)
+--     wsm.switch_to(1)               -- jump
+--     wsm.slide_to(2, 0.3)           -- animated slide over 300ms
+
+from "compositor.clarity" import Compositor
+
+class Workspace {
+    fn init(name) {
+        this.name = name
+        this.windows = []      -- mounted into compositor on activation
+    }
+
+    fn add(window) { push(this.windows, window) }
+
+    fn remove(window) {
+        mut out = []
+        for w in this.windows {
+            if w != window { push(out, w) }
+        }
+        this.windows = out
+    }
+
+    fn contains(window) {
+        for w in this.windows {
+            if w == window { return true }
+        }
+        return false
+    }
+}
+
+class WorkspaceManager {
+    fn init(compositor, count) {
+        this.compositor = compositor
+        this.workspaces = []
+        mut i = 0
+        while i < count {
+            push(this.workspaces, Workspace("Workspace " + str(i + 1)))
+            i += 1
+        }
+        this.active_index = 0
+    }
+
+    fn count() { return len(this.workspaces) }
+    fn active() { return this.workspaces[this.active_index] }
+
+    fn add_window_to(index, window) {
+        if index < 0 or index >= len(this.workspaces) {
+            throw "WorkspaceError: index out of range"
+        }
+        this.workspaces[index].add(window)
+        if index == this.active_index { this.compositor.add(window) }
+    }
+
+    fn move_window(window, to_index) {
+        if to_index < 0 or to_index >= len(this.workspaces) {
+            throw "WorkspaceError: target index out of range"
+        }
+        for ws in this.workspaces { ws.remove(window) }
+        this.workspaces[to_index].add(window)
+        if to_index == this.active_index {
+            this.compositor.add(window)
+        } else {
+            this.compositor.remove(window)
+        }
+    }
+
+    -- Switch to workspace `index` immediately (no animation).
+    fn switch_to(index) {
+        if index == this.active_index { return null }
+        if index < 0 or index >= len(this.workspaces) {
+            throw "WorkspaceError: index out of range"
+        }
+        for w in this.active().windows { this.compositor.remove(w) }
+        this.active_index = index
+        for w in this.active().windows { this.compositor.add(w) }
+        this.compositor.mark_all()
+    }
+
+    fn next() {
+        let next_idx = (this.active_index + 1) % len(this.workspaces)
+        this.switch_to(next_idx)
+    }
+
+    fn prev() {
+        let prev_idx = (this.active_index - 1 + len(this.workspaces)) % len(this.workspaces)
+        this.switch_to(prev_idx)
+    }
+
+    -- Animated slide. The animation is driven by the caller (UI loop)
+    -- through `step(progress)` — fraction 0..1 inclusive of the full
+    -- transition. Returns a SlideAnimation that you tick from a render
+    -- loop until done() is true. This keeps the WorkspaceManager
+    -- synchronous and timing-policy-free.
+    fn begin_slide(target_index) {
+        if target_index == this.active_index { return null }
+        if target_index < 0 or target_index >= len(this.workspaces) {
+            throw "WorkspaceError: target index out of range"
+        }
+        return SlideAnimation(this, target_index)
+    }
+}
+
+class SlideAnimation {
+    fn init(manager, target_index) {
+        this.manager = manager
+        this.from_index = manager.active_index
+        this.to_index = target_index
+        this.progress = 0.0
+        this._committed = false
+        -- Direction: +1 for left (next), -1 for right (prev). With
+        -- wrap-around we always pick the shorter path.
+        let n = len(manager.workspaces)
+        let forward = (target_index - this.from_index + n) % n
+        let backward = (this.from_index - target_index + n) % n
+        this.direction = if forward <= backward { 1 } else { -1 }
+        -- Snapshot of source-workspace windows at start so we can offset
+        -- their positions during the animation without permanently
+        -- mutating them.
+        this._src_origin = []
+        for w in manager.active().windows {
+            push(this._src_origin, [w, w.x])
+        }
+    }
+
+    -- Advance progress (0..1). Caller is responsible for deciding how
+    -- much time `dt` is and converting it to a fraction.
+    fn step(fraction) {
+        if this._committed { return null }
+        this.progress += fraction
+        if this.progress >= 1.0 {
+            this.progress = 1.0
+            this._commit()
+            return null
+        }
+        let screen_w = this.manager.compositor.width
+        let offset = int(0 - this.direction * screen_w * this.progress)
+        for entry in this._src_origin {
+            let w = entry[0]
+            let original = entry[1]
+            w.move(original + offset, w.y)
+        }
+        this.manager.compositor.mark_all()
+    }
+
+    -- Skip to the end immediately.
+    fn finish() {
+        if not this._committed { this._commit() }
+    }
+
+    fn done() { return this._committed }
+
+    fn _commit() {
+        -- Restore source-window positions before the swap so they're
+        -- left where the user expects when they come back.
+        for entry in this._src_origin {
+            let w = entry[0]
+            let original = entry[1]
+            w.move(original, w.y)
+        }
+        this.manager.switch_to(this.to_index)
+        this._committed = true
+    }
+}
+
+fn workspace_manager(compositor, count) {
+    return WorkspaceManager(compositor, count)
+}
