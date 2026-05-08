@@ -776,6 +776,8 @@ def bundle(compile_native=False):
         'lockscreen.clarity', 'settings.clarity',
         'app_calc.clarity', 'app_viewer.clarity', 'app_monitor.clarity',
         'app_editor.clarity', 'app_files.clarity', 'app_terminal.clarity',
+        'app_manifest.clarity', 'app_sandbox.clarity', 'app_store.clarity',
+        'app_scaffold.clarity', 'hot_reload.clarity',
         'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',

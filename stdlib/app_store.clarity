@@ -1,0 +1,346 @@
+-- App store / package index — registry-backed app catalogue
+-- (Phase 64 task 3).
+--
+-- Builds on top of the existing Clarity package registry. An "app" is
+-- a package whose tarball ships a clarity-app.toml at its root. The
+-- registry returns app-specific metadata (icon URL, screenshots,
+-- categories, rating, install count) on top of the regular package
+-- record.
+--
+-- AppStore exposes the catalogue (`list`, `search`, `info`) plus the
+-- side of the world that touches the local filesystem (`install`,
+-- `remove`, `installed`). Apps install into ~/.clarity-os/apps/<name>/
+-- by default; the install root is overridable for tests.
+--
+-- The `client` parameter is any object with two methods:
+--     get(endpoint)        -> map | null   (parsed JSON)
+--     download(url, dest)  -> bool          (true on success)
+-- Tests inject a fake client; production code uses HttpAppStoreClient.
+--
+--     let store = app_store()
+--     store.list()                     -> [AppEntry, ...]
+--     store.search("editor")           -> [AppEntry, ...]
+--     store.info("calc")               -> AppEntry | null
+--     store.install("calc")            -> AppEntry (also writes index)
+--     store.installed()                -> [{name, version, dir}, ...]
+--     store.remove("calc")             -> bool
+--     store.launch_command("calc")     -> "clarity run <path>/main.clarity"
+
+from "app_manifest.clarity" import AppManifest, manifest_from_text, MANIFEST_FILENAME
+
+let DEFAULT_REGISTRY = "https://registry.clarity-lang.org"
+let INSTALLED_INDEX = "installed.json"
+
+-- ── Path helpers ─────────────────────────────────────
+
+fn _quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+fn _exists(path) {
+    let result = exec_full("test -e " + _quote(path) + " && echo yes || echo no")
+    return trim(result.stdout) == "yes"
+}
+
+fn _mkdir_p(path) { exec_full("mkdir -p " + _quote(path)) }
+fn _rm_rf(path) { exec_full("rm -rf " + _quote(path)) }
+
+fn _read_json(path) {
+    if not _exists(path) { return null }
+    try { return json_parse(read(path)) } catch e { return null }
+}
+
+fn _write_json(path, data) { write(path, json_string(data)) }
+
+fn _home() {
+    let h = env("HOME", "")
+    if len(h) > 0 { return h }
+    return "/tmp"
+}
+
+fn default_install_root() { return _home() + "/.clarity-os/apps" }
+
+-- ── AppEntry ─────────────────────────────────────────
+
+class AppEntry {
+    fn init(data) {
+        let d = data ?? {}
+        this.raw = d
+        this.name = if has(d, "name") { d["name"] } else { "" }
+        this.version = if has(d, "version") { d["version"] } else { "" }
+        this.description = if has(d, "description") { d["description"] } else { "" }
+        this.author = if has(d, "author") { d["author"] } else { "" }
+        this.icon = if has(d, "icon") { d["icon"] } else { null }
+        this.categories = if has(d, "categories") { d["categories"] } else { [] }
+        this.screenshots = if has(d, "screenshots") { d["screenshots"] } else { [] }
+        this.rating = if has(d, "rating") { d["rating"] } else { 0.0 }
+        this.installs = if has(d, "installs") { d["installs"] } else { 0 }
+        this.tarball_url = if has(d, "tarball_url") { d["tarball_url"] } else { null }
+    }
+
+    fn to_map() {
+        return {
+            "name": this.name,
+            "version": this.version,
+            "description": this.description,
+            "author": this.author,
+            "icon": this.icon ?? "",
+            "categories": this.categories,
+            "screenshots": this.screenshots,
+            "rating": this.rating,
+            "installs": this.installs
+        }
+    }
+}
+
+fn _entries_from_list(data) {
+    mut out = []
+    if data == null { return out }
+    mut raw = []
+    if type(data) == "list" {
+        raw = data
+    } elif type(data) == "map" {
+        if has(data, "apps") {
+            raw = data["apps"]
+        } elif has(data, "packages") {
+            raw = data["packages"]
+        }
+    }
+    for item in raw { push(out, AppEntry(item)) }
+    return out
+}
+
+-- ── HTTP client (curl-backed) ────────────────────────
+
+class HttpAppStoreClient {
+    fn init(registry_url) { this.registry_url = registry_url }
+
+    fn get(endpoint) {
+        let url = this.registry_url + endpoint
+        let result = exec_full("curl -s -f " + _quote(url) + " 2>/dev/null")
+        if result.exit_code != 0 { return null }
+        try { return json_parse(trim(result.stdout)) } catch e { return null }
+    }
+
+    fn download(url, dest) {
+        let result = exec_full("curl -s -f -L -o " + _quote(dest) + " " + _quote(url) + " 2>/dev/null")
+        return result.exit_code == 0
+    }
+}
+
+-- ── Local-only client (for tests + offline mirrors) ──
+
+-- Backed by an in-memory map of {endpoint: response} and an
+-- {url: source_file_path} table for downloads. The download
+-- method copies the source into the destination tarball path.
+class LocalAppStoreClient {
+    fn init() {
+        this.responses = {}     -- endpoint -> map | list
+        this.tarballs = {}      -- url -> source path on disk
+    }
+
+    fn set(endpoint, value) { this.responses[endpoint] = value }
+    fn set_tarball(url, source_path) { this.tarballs[url] = source_path }
+
+    fn get(endpoint) {
+        if has(this.responses, endpoint) { return this.responses[endpoint] }
+        return null
+    }
+
+    fn download(url, dest) {
+        if not has(this.tarballs, url) { return false }
+        let src = this.tarballs[url]
+        if not _exists(src) { return false }
+        let result = exec_full("cp " + _quote(src) + " " + _quote(dest))
+        return result.exit_code == 0
+    }
+}
+
+-- ── AppStore ─────────────────────────────────────────
+
+class AppStore {
+    fn init(opts) {
+        let o = opts ?? {}
+        let registry_url = if has(o, "registry") { o["registry"] } else { DEFAULT_REGISTRY }
+        this.client = if has(o, "client") { o["client"] } else { HttpAppStoreClient(registry_url) }
+        this.install_root = if has(o, "install_root") { o["install_root"] } else { default_install_root() }
+        _mkdir_p(this.install_root)
+        this.index_path = this.install_root + "/" + INSTALLED_INDEX
+        if not _exists(this.index_path) {
+            _write_json(this.index_path, {"apps": {}})
+        }
+    }
+
+    -- ── Catalogue ────────────────────────────────────
+
+    fn list() { return _entries_from_list(this.client.get("/apps")) }
+
+    fn search(query) {
+        return _entries_from_list(this.client.get("/apps/search?q=" + query))
+    }
+
+    fn info(name) {
+        let data = this.client.get("/apps/" + name)
+        if data == null { return null }
+        return AppEntry(data)
+    }
+
+    fn featured() {
+        return _entries_from_list(this.client.get("/apps/featured"))
+    }
+
+    fn by_category(category) {
+        return _entries_from_list(this.client.get("/apps/category/" + category))
+    }
+
+    -- ── Local install index ──────────────────────────
+
+    fn _read_index() {
+        let data = _read_json(this.index_path)
+        if data == null { return {"apps": {}} }
+        if not has(data, "apps") { data["apps"] = {} }
+        return data
+    }
+
+    fn _write_index(idx) { _write_json(this.index_path, idx) }
+
+    fn installed() {
+        let idx = this._read_index()
+        mut out = []
+        for kv in entries(idx["apps"]) {
+            mut record = kv[1]
+            record["name"] = kv[0]
+            push(out, record)
+        }
+        return out
+    }
+
+    fn is_installed(name) {
+        let idx = this._read_index()
+        return has(idx["apps"], name)
+    }
+
+    fn install_dir(name) { return this.install_root + "/" + name }
+
+    -- ── Install / remove ─────────────────────────────
+
+    fn install(name, ...rest) {
+        let entry = this.info(name)
+        if entry == null { throw "AppStoreError: '" + name + "' not found" }
+        if entry.tarball_url == null {
+            throw "AppStoreError: '" + name + "' has no tarball_url"
+        }
+        let dest_dir = this.install_dir(name)
+        if _exists(dest_dir) { _rm_rf(dest_dir) }
+        _mkdir_p(dest_dir)
+
+        let tarball = dest_dir + ".tar.gz"
+        let ok = this.client.download(entry.tarball_url, tarball)
+        if not ok {
+            _rm_rf(dest_dir)
+            throw "AppStoreError: download of '" + name + "' failed"
+        }
+        let extract = exec_full("tar xzf " + _quote(tarball) + " -C " + _quote(dest_dir))
+        exec_full("rm -f " + _quote(tarball))
+        if extract.exit_code != 0 {
+            _rm_rf(dest_dir)
+            throw "AppStoreError: extract of '" + name + "' failed"
+        }
+
+        -- Validate: the bundle must contain a clarity-app.toml.
+        let manifest_path = dest_dir + "/" + MANIFEST_FILENAME
+        if not _exists(manifest_path) {
+            _rm_rf(dest_dir)
+            throw "AppStoreError: '" + name + "' has no " + MANIFEST_FILENAME
+        }
+
+        let m = manifest_from_text(read(manifest_path))
+        let errs = m.validate()
+        if len(errs) > 0 {
+            _rm_rf(dest_dir)
+            throw "AppStoreError: '" + name + "' manifest invalid: " + join(errs, "; ")
+        }
+
+        let idx = this._read_index()
+        idx["apps"][name] = {
+            "version": entry.version,
+            "dir": dest_dir,
+            "manifest": manifest_path,
+            "entry": m.entry,
+            "installed_at": time()
+        }
+        this._write_index(idx)
+        return entry
+    }
+
+    -- Install from a local source directory (no network). The source
+    -- dir must contain clarity-app.toml. Used by `clarity app new` +
+    -- by tests that want to exercise the index without HTTP.
+    fn install_local(source_dir) {
+        let manifest_path = source_dir + "/" + MANIFEST_FILENAME
+        if not _exists(manifest_path) {
+            throw "AppStoreError: '" + source_dir + "' has no " + MANIFEST_FILENAME
+        }
+        let m = manifest_from_text(read(manifest_path))
+        let errs = m.validate()
+        if len(errs) > 0 {
+            throw "AppStoreError: manifest invalid: " + join(errs, "; ")
+        }
+        let dest_dir = this.install_dir(m.name)
+        if _exists(dest_dir) { _rm_rf(dest_dir) }
+        _mkdir_p(dest_dir)
+        exec_full("cp -R " + _quote(source_dir + "/.") + " " + _quote(dest_dir))
+
+        let idx = this._read_index()
+        idx["apps"][m.name] = {
+            "version": m.version,
+            "dir": dest_dir,
+            "manifest": dest_dir + "/" + MANIFEST_FILENAME,
+            "entry": m.entry,
+            "installed_at": time()
+        }
+        this._write_index(idx)
+        return m
+    }
+
+    fn remove(name) {
+        let idx = this._read_index()
+        if not has(idx["apps"], name) { return false }
+        let record = idx["apps"][name]
+        let dir = if has(record, "dir") { record["dir"] } else { this.install_dir(name) }
+        if _exists(dir) { _rm_rf(dir) }
+        mut next = {}
+        for kv in entries(idx["apps"]) {
+            if kv[0] != name { next[kv[0]] = kv[1] }
+        }
+        idx["apps"] = next
+        this._write_index(idx)
+        return true
+    }
+
+    -- ── Launching ────────────────────────────────────
+
+    fn launch_command(name) {
+        let idx = this._read_index()
+        if not has(idx["apps"], name) { return null }
+        let record = idx["apps"][name]
+        let dir = record["dir"]
+        let entry = if has(record, "entry") { record["entry"] } else { "main.clarity" }
+        return "clarity run " + dir + "/" + entry
+    }
+
+    fn manifest_for(name) {
+        let idx = this._read_index()
+        if not has(idx["apps"], name) { return null }
+        let record = idx["apps"][name]
+        let mp = if has(record, "manifest") { record["manifest"] } else { record["dir"] + "/" + MANIFEST_FILENAME }
+        if not _exists(mp) { return null }
+        return manifest_from_text(read(mp))
+    }
+}
+
+fn app_store(...rest) {
+    let opts = if len(rest) > 0 { rest[0] } else { {} }
+    return AppStore(opts)
+}
