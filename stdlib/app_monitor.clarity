@@ -1,0 +1,320 @@
+-- System monitor app — Phase 63 task 6.
+--
+-- Reads /proc/stat, /proc/meminfo, /proc/loadavg, /proc/uptime, and
+-- /proc/<pid>/status to assemble a live snapshot of CPU, memory, load,
+-- uptime, and the running process list. Pure parsers + a Widget that
+-- paints small bar/line charts.
+--
+-- Refresh model: callers tick the monitor on a timer (typically every
+-- second). `tick()` reads the live state and updates rolling history
+-- buffers. Painting just consumes the history.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, line, hline
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font
+from "graphics.clarity" import rgb
+
+-- ── Pure parsers (testable without /proc) ─────────────
+
+-- Extract the aggregate "cpu" line from /proc/stat as
+-- {user, nice, system, idle, iowait, total}. The kernel groups every
+-- timer tick into one of these buckets.
+fn parse_stat_text(text) {
+    for line in split(text, "\n") {
+        if starts(line, "cpu ") {
+            let rest = trim(substring(line, 4, len(line)))
+            mut nums = []
+            for tok in split(rest, " ") {
+                let t = trim(tok)
+                if len(t) > 0 { push(nums, int(t)) }
+            }
+            mut total = 0
+            for n in nums { total += n }
+            let user   = if len(nums) > 0 { nums[0] } else { 0 }
+            let nice   = if len(nums) > 1 { nums[1] } else { 0 }
+            let system = if len(nums) > 2 { nums[2] } else { 0 }
+            let idle   = if len(nums) > 3 { nums[3] } else { 0 }
+            let iowait = if len(nums) > 4 { nums[4] } else { 0 }
+            return {
+                "user": user, "nice": nice, "system": system,
+                "idle": idle, "iowait": iowait, "total": total
+            }
+        }
+    }
+    return {"user": 0, "nice": 0, "system": 0, "idle": 0, "iowait": 0, "total": 0}
+}
+
+-- Compute CPU % busy from two snapshots taken `dt` apart.
+fn cpu_percent_between(prev, curr) {
+    let total_diff = curr["total"] - prev["total"]
+    if total_diff <= 0 { return 0.0 }
+    let idle_diff = (curr["idle"] - prev["idle"]) + (curr["iowait"] - prev["iowait"])
+    let busy = total_diff - idle_diff
+    return busy * 100.0 / total_diff
+}
+
+-- /proc/meminfo as bytes. MemTotal/MemFree/MemAvailable are reported
+-- in kB; we convert to bytes for consistency with statvfs.
+fn parse_meminfo_text(text) {
+    mut out = {}
+    for line in split(text, "\n") {
+        let colon = index_of(line, ":")
+        if colon <= 0 { continue }
+        let key = trim(substring(line, 0, colon))
+        let rest = trim(substring(line, colon + 1, len(line)))
+        let parts = split(rest, " ")
+        if len(parts) == 0 { continue }
+        let val = int(trim(parts[0]))
+        let factor = if len(parts) > 1 and trim(parts[len(parts) - 1]) == "kB" { 1024 } else { 1 }
+        out[key] = val * factor
+    }
+    return out
+}
+
+fn parse_loadavg_text(text) {
+    let parts = split(trim(text), " ")
+    if len(parts) < 3 { return [0.0, 0.0, 0.0] }
+    return [float(parts[0]), float(parts[1]), float(parts[2])]
+}
+
+fn parse_uptime_text(text) {
+    let parts = split(trim(text), " ")
+    if len(parts) == 0 { return 0.0 }
+    return float(parts[0])
+}
+
+-- /proc/<pid>/status — one entry per process. Returns a map of
+-- {pid, name, state, vm_rss_bytes, threads}.
+fn parse_status_text(text) {
+    mut out = {"pid": 0, "name": "", "state": "?", "vm_rss_bytes": 0, "threads": 0}
+    for line in split(text, "\n") {
+        let colon = index_of(line, ":")
+        if colon <= 0 { continue }
+        let key = trim(substring(line, 0, colon))
+        let val = trim(substring(line, colon + 1, len(line)))
+        if key == "Pid" { out["pid"] = int(val) }
+        elif key == "Name" { out["name"] = val }
+        elif key == "State" {
+            let parts = split(val, " ")
+            out["state"] = if len(parts) > 0 { parts[0] } else { val }
+        }
+        elif key == "VmRSS" {
+            let parts = split(val, " ")
+            if len(parts) > 0 { out["vm_rss_bytes"] = int(parts[0]) * 1024 }
+        }
+        elif key == "Threads" { out["threads"] = int(val) }
+    }
+    return out
+}
+
+-- ── Live readers (Linux /proc) ────────────────────────
+
+fn cpu_snapshot() {
+    if not exists("/proc/stat") { return parse_stat_text("") }
+    return parse_stat_text(read("/proc/stat"))
+}
+
+fn meminfo() {
+    if not exists("/proc/meminfo") { return {} }
+    return parse_meminfo_text(read("/proc/meminfo"))
+}
+
+fn loadavg() {
+    if not exists("/proc/loadavg") { return [0.0, 0.0, 0.0] }
+    return parse_loadavg_text(read("/proc/loadavg"))
+}
+
+fn uptime_seconds() {
+    if not exists("/proc/uptime") { return 0.0 }
+    return parse_uptime_text(read("/proc/uptime"))
+}
+
+fn process_list() {
+    if not exists("/proc") { return [] }
+    let r = exec_full("ls /proc 2>/dev/null")
+    let names = split(trim(r.stdout), "\n")
+    mut out = []
+    for name in names {
+        let n = trim(name)
+        if len(n) == 0 { continue }
+        -- Process directories are all-digit names
+        mut all_digits = true
+        for c in chars(n) {
+            if not is_digit(c) { all_digits = false }
+        }
+        if not all_digits { continue }
+        let path = "/proc/" + n + "/status"
+        if exists(path) {
+            push(out, parse_status_text(read(path)))
+        }
+    }
+    return out
+}
+
+-- Send SIGTERM (15) by default; SIGKILL (9) is opt-in via second arg.
+fn kill_pid(pid, signal) {
+    let sig = if signal == null { 15 } else { signal }
+    let r = exec_full("kill -" + str(sig) + " " + str(pid) + " 2>&1")
+    return r.exit_code == 0
+}
+
+-- ── Widget ────────────────────────────────────────────
+
+class SystemMonitor < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "monitor"
+        this.history_size = 60
+        this._cpu_history = []
+        this._mem_history = []
+        this._last_cpu = null
+        this.processes = []
+        this.uptime = 0.0
+        this.load = [0.0, 0.0, 0.0]
+        this.mem = {}
+        this.last_cpu_pct = 0.0
+    }
+
+    -- Pull /proc once. Caller is responsible for calling this on a
+    -- timer (e.g. once a second).
+    fn tick() {
+        let curr = cpu_snapshot()
+        if this._last_cpu != null {
+            this.last_cpu_pct = cpu_percent_between(this._last_cpu, curr)
+            this._push_history(this._cpu_history, this.last_cpu_pct)
+        }
+        this._last_cpu = curr
+        this.mem = meminfo()
+        if has(this.mem, "MemTotal") and has(this.mem, "MemAvailable") {
+            let used = this.mem["MemTotal"] - this.mem["MemAvailable"]
+            let pct = used * 100.0 / this.mem["MemTotal"]
+            this._push_history(this._mem_history, pct)
+        }
+        this.load = loadavg()
+        this.uptime = uptime_seconds()
+        this.processes = process_list()
+    }
+
+    fn _push_history(buf, value) {
+        push(buf, value)
+        while len(buf) > this.history_size {
+            mut shifted = []
+            mut i = 1
+            while i < len(buf) { push(shifted, buf[i]); i += 1 }
+            buf = shifted
+        }
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "background")
+        let surface = theme_color(t, "surface")
+        let fg = theme_color(t, "foreground")
+        let muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+
+        -- Top row: CPU graph + headline
+        let chart_h = 80
+        fill_rect(fb, r[0] + 8, r[1] + 8, r[2] - 16, chart_h, surface)
+        rect(fb, r[0] + 8, r[1] + 8, r[2] - 16, chart_h, theme_color(t, "border"))
+        let cpu_label = "CPU " + str(int(this.last_cpu_pct)) + "%"
+        draw_text(fb, r[0] + 16, r[1] + 14, cpu_label, f, fg)
+        this._paint_history(fb, this._cpu_history, r[0] + 80, r[1] + 14, r[2] - 96, chart_h - 14, accent)
+
+        -- Memory line
+        let load_y = r[1] + chart_h + 24
+        let mem_total = if has(this.mem, "MemTotal") { this.mem["MemTotal"] } else { 0 }
+        let mem_avail = if has(this.mem, "MemAvailable") { this.mem["MemAvailable"] } else { 0 }
+        let mem_used = mem_total - mem_avail
+        let mem_pct = if mem_total > 0 { int(mem_used * 100 / mem_total) } else { 0 }
+        let mem_label = "Memory " + str(mem_pct) + "%   Load " + _fmt_load(this.load) + "   Up " + _fmt_uptime(this.uptime)
+        draw_text(fb, r[0] + 16, load_y, mem_label, f, muted)
+
+        -- Process list header
+        let list_top = load_y + 24
+        let row_h = 20
+        let col_pid = r[0] + 16
+        let col_name = r[0] + 80
+        let col_state = r[2] - 200
+        let col_rss = r[2] - 100
+        draw_text(fb, col_pid, list_top, "PID", f, muted)
+        draw_text(fb, col_name, list_top, "Name", f, muted)
+        draw_text(fb, col_state, list_top, "State", f, muted)
+        draw_text(fb, col_rss, list_top, "RSS (KB)", f, muted)
+        hline(fb, r[0] + 16, list_top + f.height + 4, r[0] + r[2] - 16, theme_color(t, "border"))
+
+        -- Process rows (top 16 by RSS)
+        let sorted = _top_by_rss(this.processes, 16)
+        mut i = 0
+        while i < len(sorted) {
+            let p = sorted[i]
+            let row_y = list_top + f.height + 12 + i * row_h
+            if row_y >= r[1] + r[3] - row_h { break }
+            draw_text(fb, col_pid, row_y, str(p["pid"]), f, fg)
+            draw_text(fb, col_name, row_y, p["name"], f, fg)
+            draw_text(fb, col_state, row_y, p["state"], f, fg)
+            draw_text(fb, col_rss, row_y, str(p["vm_rss_bytes"] / 1024), f, fg)
+            i += 1
+        }
+    }
+
+    fn _paint_history(fb, hist, x, y, w, h, color) {
+        let n = len(hist)
+        if n < 2 { return null }
+        mut i = 1
+        while i < n {
+            let x0 = x + (i - 1) * w / (this.history_size - 1)
+            let x1 = x + i * w / (this.history_size - 1)
+            let y0 = y + h - int(hist[i - 1] * h / 100)
+            let y1 = y + h - int(hist[i] * h / 100)
+            line(fb, x0, y0, x1, y1, color)
+            i += 1
+        }
+    }
+}
+
+fn _top_by_rss(procs, n) {
+    mut copy = []
+    for p in procs { push(copy, p) }
+    -- Selection sort top-n; n is small so quadratic is fine.
+    mut i = 0
+    while i < n and i < len(copy) {
+        mut max_idx = i
+        mut j = i + 1
+        while j < len(copy) {
+            if copy[j]["vm_rss_bytes"] > copy[max_idx]["vm_rss_bytes"] {
+                max_idx = j
+            }
+            j += 1
+        }
+        if max_idx != i {
+            let tmp = copy[i]
+            copy[i] = copy[max_idx]
+            copy[max_idx] = tmp
+        }
+        i += 1
+    }
+    mut out = []
+    let limit = if len(copy) < n { len(copy) } else { n }
+    mut k = 0
+    while k < limit { push(out, copy[k]); k += 1 }
+    return out
+}
+
+fn _fmt_load(la) {
+    return str(la[0]) + " " + str(la[1]) + " " + str(la[2])
+}
+
+fn _fmt_uptime(seconds) {
+    let s = int(seconds)
+    let h = s / 3600
+    let m = (s % 3600) / 60
+    return str(h) + "h " + str(m) + "m"
+}
+
+fn system_monitor() { return SystemMonitor() }

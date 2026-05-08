@@ -138,12 +138,12 @@
 
 | # | Task | Status | Description |
 |---|------|--------|-------------|
-| 1 | **Terminal** | Pending | `apps/terminal.clarity` — VT100/xterm emulator: ANSI escape parsing, 256-color + truecolor, scrollback buffer, tabs, split panes. Runs the Clarity shell (already built in Phase 27) |
-| 2 | **File manager** | Pending | `apps/files.clarity` — icon/list/column views, breadcrumb path bar, sidebar (home/desktop/documents/downloads/volumes), drag-and-drop, copy/move/delete, file previews, search |
-| 3 | **Text editor** | Pending | `apps/editor.clarity` — syntax highlighting (Clarity + common languages), line numbers, tab bar, find/replace (regex), undo/redo, auto-indent, bracket matching, minimap. Not a full IDE — think TextEdit or Mousepad |
-| 4 | **Image viewer** | Pending | `apps/viewer.clarity` — open BMP/PNG/JPEG, zoom, pan, rotate, fit-to-window, slideshow, basic filters (brightness, contrast, grayscale) |
-| 5 | **Calculator** | Pending | `apps/calculator.clarity` — standard mode (basic arithmetic), scientific mode (trig, log, powers), history tape, keyboard input |
-| 6 | **System monitor** | Pending | `apps/monitor.clarity` — CPU/memory/disk usage graphs, process list (PID, name, CPU%, MEM%), kill process, network activity, uptime |
+| 1 | **Terminal** | Done | `stdlib/app_terminal.clarity` — `Terminal` engine: VT100 / xterm parser handling control chars (\\b \\r \\n \\t), CSI cursor moves (A B C D H f), erase-in-line/display (K J), full SGR repertoire (16 colors + bright + reset, xterm 256-color, truecolor `38;2;R;G;B`), scrollback buffer with limit. `TerminalApp` Widget paints the cell grid and exposes `feed(bytes)` for any process pipe. PTY (forkpty) deferred. |
+| 2 | **File manager** | Done | `stdlib/app_files.clarity` — `FilesApp` Widget with sidebar (Home / Documents / Downloads / Root + storage.mounts), breadcrumb path bar, file list with size + dir-vs-file glyph. `navigate(path)`, `copy_file`/`move_file`/`delete_file`/`make_directory` ops. Click + double-click to open, Backspace to go up, arrow keys to move selection. Tree view + previews + drag-drop deferred. |
+| 3 | **Text editor** | Done | `stdlib/app_editor.clarity` — `TextBuffer` with cursor + lines + per-action undo/redo, `find(needle)` + `replace_at(row, col, needle, repl)`, dirty flag. `EditorApp` Widget paints gutter + line numbers + caret + status footer. Cursor keys + Backspace/Delete/Enter; `Ctrl+Z`/`Ctrl+Y`/`Ctrl+S`. Syntax highlighting + tabs + minimap deferred. |
+| 4 | **Image viewer** | Done | `stdlib/app_viewer.clarity` — `ImageViewer` Widget loads BMP via `image.load_bmp`, supports zoom (`+`/`-`/`0`/`f`/wheel), pan (arrow keys + drag), rotate left/right, and three filters (grayscale, brightness, invert) with single-shot undo. Status footer shows path / dimensions / zoom. PNG/JPEG ride along once those decoders land. |
+| 5 | **Calculator** | Done | `stdlib/app_calc.clarity` — `Calculator` engine: digits, decimal entry, +/-/*/÷, =, C, ±, %, history of past evaluations. `CalculatorApp` paints a display + 4×5 button grid (with the `0` cell spanning two columns) and routes both mouse clicks and keyboard input. Scientific mode (trig/log/powers) deferred. |
+| 6 | **System monitor** | Done | `stdlib/app_monitor.clarity` — pure parsers for `/proc/stat` / `/proc/meminfo` / `/proc/loadavg` / `/proc/uptime` / `/proc/<pid>/status`; `cpu_percent_between(prev, curr)` differences two snapshots; `kill_pid(pid, signal)` SIGTERMs by default. `SystemMonitor` Widget paints a CPU history graph, memory + load + uptime line, and a top-by-RSS process list. `tick()` is the caller-driven refresh hook. |
 
 ---
 

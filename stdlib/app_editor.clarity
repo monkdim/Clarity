@@ -1,0 +1,408 @@
+-- Text editor app — Phase 63 task 3.
+--
+-- Two layers like the calculator:
+--   * `TextBuffer`        the cursor + text + undo/redo state. Pure
+--                         data, no rendering. All edit operations push
+--                         their inverse onto the undo stack.
+--   * `EditorApp`         a Widget that paints a gutter + line numbers
+--                         + the buffer with a blinking caret, and
+--                         routes input through TextBuffer.
+--
+-- Find/replace is in TextBuffer (find/find_next/replace), exercised
+-- here without the toolbar UI for now.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, line, hline
+from "font.clarity" import draw_text, measure_text
+from "theme.clarity" import theme_color, theme_font
+
+class TextBuffer {
+    fn init() {
+        this.lines = [""]
+        this.cursor_row = 0
+        this.cursor_col = 0
+        this._undo = []
+        this._redo = []
+        this.dirty = false
+    }
+
+    fn load(text) {
+        if text == null { text = "" }
+        let raw = split(text, "\n")
+        this.lines = if len(raw) == 0 { [""] } else { raw }
+        this.cursor_row = 0
+        this.cursor_col = 0
+        this._undo = []
+        this._redo = []
+        this.dirty = false
+    }
+
+    fn to_text() { return join(this.lines, "\n") }
+
+    -- ── Edit ops (each pushes inverse to undo stack) ──
+
+    fn insert_char(ch) {
+        let line = this.lines[this.cursor_row]
+        let prefix = substring(line, 0, this.cursor_col)
+        let suffix = substring(line, this.cursor_col, len(line))
+        this.lines[this.cursor_row] = prefix + ch + suffix
+        this._push_undo({"op": "delete_char", "row": this.cursor_row, "col": this.cursor_col})
+        this.cursor_col += 1
+        this.dirty = true
+    }
+
+    fn insert_newline() {
+        let line = this.lines[this.cursor_row]
+        let before = substring(line, 0, this.cursor_col)
+        let after = substring(line, this.cursor_col, len(line))
+        this.lines[this.cursor_row] = before
+        this._splice_in(this.cursor_row + 1, after)
+        this._push_undo({"op": "join_line", "row": this.cursor_row})
+        this.cursor_row += 1
+        this.cursor_col = 0
+        this.dirty = true
+    }
+
+    fn delete_back() {
+        if this.cursor_col > 0 {
+            let line = this.lines[this.cursor_row]
+            let removed = substring(line, this.cursor_col - 1, this.cursor_col)
+            this.lines[this.cursor_row] = substring(line, 0, this.cursor_col - 1) + substring(line, this.cursor_col, len(line))
+            this._push_undo({"op": "insert_char", "row": this.cursor_row, "col": this.cursor_col - 1, "ch": removed})
+            this.cursor_col -= 1
+            this.dirty = true
+            return null
+        }
+        if this.cursor_row > 0 {
+            let prev = this.lines[this.cursor_row - 1]
+            let curr = this.lines[this.cursor_row]
+            let join_at = len(prev)
+            this.lines[this.cursor_row - 1] = prev + curr
+            this._splice_out(this.cursor_row)
+            this._push_undo({"op": "split_line", "row": this.cursor_row - 1, "col": join_at})
+            this.cursor_row -= 1
+            this.cursor_col = join_at
+            this.dirty = true
+        }
+    }
+
+    fn delete_forward() {
+        let line = this.lines[this.cursor_row]
+        if this.cursor_col < len(line) {
+            let removed = substring(line, this.cursor_col, this.cursor_col + 1)
+            this.lines[this.cursor_row] = substring(line, 0, this.cursor_col) + substring(line, this.cursor_col + 1, len(line))
+            this._push_undo({"op": "insert_char", "row": this.cursor_row, "col": this.cursor_col, "ch": removed})
+            this.dirty = true
+            return null
+        }
+        if this.cursor_row < len(this.lines) - 1 {
+            let next = this.lines[this.cursor_row + 1]
+            this.lines[this.cursor_row] = line + next
+            this._splice_out(this.cursor_row + 1)
+            this._push_undo({"op": "split_line", "row": this.cursor_row, "col": len(line)})
+            this.dirty = true
+        }
+    }
+
+    -- ── Cursor movement ──────────────────────────────
+
+    fn move_left() {
+        if this.cursor_col > 0 {
+            this.cursor_col -= 1
+            return null
+        }
+        if this.cursor_row > 0 {
+            this.cursor_row -= 1
+            this.cursor_col = len(this.lines[this.cursor_row])
+        }
+    }
+
+    fn move_right() {
+        let line = this.lines[this.cursor_row]
+        if this.cursor_col < len(line) {
+            this.cursor_col += 1
+            return null
+        }
+        if this.cursor_row < len(this.lines) - 1 {
+            this.cursor_row += 1
+            this.cursor_col = 0
+        }
+    }
+
+    fn move_up() {
+        if this.cursor_row > 0 {
+            this.cursor_row -= 1
+            let line = this.lines[this.cursor_row]
+            if this.cursor_col > len(line) { this.cursor_col = len(line) }
+        }
+    }
+
+    fn move_down() {
+        if this.cursor_row < len(this.lines) - 1 {
+            this.cursor_row += 1
+            let line = this.lines[this.cursor_row]
+            if this.cursor_col > len(line) { this.cursor_col = len(line) }
+        }
+    }
+
+    fn move_home() { this.cursor_col = 0 }
+    fn move_end() { this.cursor_col = len(this.lines[this.cursor_row]) }
+
+    -- ── Find / replace ────────────────────────────────
+
+    fn find(needle) {
+        if len(needle) == 0 { return null }
+        mut row = this.cursor_row
+        mut col = this.cursor_col
+        while row < len(this.lines) {
+            let line = this.lines[row]
+            let start = if row == this.cursor_row { col } else { 0 }
+            let idx = _find_in(line, needle, start)
+            if idx >= 0 {
+                this.cursor_row = row
+                this.cursor_col = idx
+                return [row, idx]
+            }
+            row += 1
+        }
+        return null
+    }
+
+    fn replace_at(row, col, needle, replacement) {
+        let line = this.lines[row]
+        if col + len(needle) > len(line) { return false }
+        if substring(line, col, col + len(needle)) != needle { return false }
+        this.lines[row] = substring(line, 0, col) + replacement + substring(line, col + len(needle), len(line))
+        this.dirty = true
+        return true
+    }
+
+    -- ── Undo / redo ──────────────────────────────────
+
+    fn _push_undo(action) {
+        push(this._undo, action)
+        this._redo = []
+    }
+
+    fn undo() {
+        if len(this._undo) == 0 { return false }
+        let n = len(this._undo)
+        let action = this._undo[n - 1]
+        mut new_undo = []
+        mut i = 0
+        while i < n - 1 { push(new_undo, this._undo[i]); i += 1 }
+        this._undo = new_undo
+        push(this._redo, this._inverse(action))
+        this._apply_action(action)
+        return true
+    }
+
+    fn redo() {
+        if len(this._redo) == 0 { return false }
+        let n = len(this._redo)
+        let action = this._redo[n - 1]
+        mut new_redo = []
+        mut i = 0
+        while i < n - 1 { push(new_redo, this._redo[i]); i += 1 }
+        this._redo = new_redo
+        push(this._undo, this._inverse(action))
+        this._apply_action(action)
+        return true
+    }
+
+    fn _apply_action(a) {
+        let op = a["op"]
+        if op == "insert_char" {
+            let line = this.lines[a["row"]]
+            this.lines[a["row"]] = substring(line, 0, a["col"]) + a["ch"] + substring(line, a["col"], len(line))
+            this.cursor_row = a["row"]
+            this.cursor_col = a["col"] + 1
+        } elif op == "delete_char" {
+            let line = this.lines[a["row"]]
+            this.lines[a["row"]] = substring(line, 0, a["col"]) + substring(line, a["col"] + 1, len(line))
+            this.cursor_row = a["row"]
+            this.cursor_col = a["col"]
+        } elif op == "join_line" {
+            let row = a["row"]
+            let prev = this.lines[row]
+            let next = this.lines[row + 1]
+            this.lines[row] = prev + next
+            this._splice_out(row + 1)
+            this.cursor_row = row
+            this.cursor_col = len(prev)
+        } elif op == "split_line" {
+            let row = a["row"]
+            let col = a["col"]
+            let line = this.lines[row]
+            this.lines[row] = substring(line, 0, col)
+            this._splice_in(row + 1, substring(line, col, len(line)))
+            this.cursor_row = row + 1
+            this.cursor_col = 0
+        }
+    }
+
+    fn _inverse(a) {
+        let op = a["op"]
+        if op == "insert_char" { return {"op": "delete_char", "row": a["row"], "col": a["col"]} }
+        if op == "delete_char" {
+            let line = this.lines[a["row"]]
+            let ch = substring(line, a["col"], a["col"] + 1)
+            return {"op": "insert_char", "row": a["row"], "col": a["col"], "ch": ch}
+        }
+        if op == "join_line" { return {"op": "split_line", "row": a["row"], "col": len(this.lines[a["row"]])} }
+        if op == "split_line" { return {"op": "join_line", "row": a["row"]} }
+        return a
+    }
+
+    fn _splice_in(idx, text) {
+        mut out = []
+        mut i = 0
+        while i < len(this.lines) {
+            if i == idx { push(out, text) }
+            push(out, this.lines[i])
+            i += 1
+        }
+        if idx >= len(this.lines) { push(out, text) }
+        this.lines = out
+    }
+
+    fn _splice_out(idx) {
+        mut out = []
+        mut i = 0
+        while i < len(this.lines) {
+            if i != idx { push(out, this.lines[i]) }
+            i += 1
+        }
+        this.lines = out
+    }
+}
+
+fn _find_in(haystack, needle, start) {
+    let h_len = len(haystack)
+    let n_len = len(needle)
+    if n_len == 0 { return -1 }
+    mut i = start
+    while i + n_len <= h_len {
+        if substring(haystack, i, i + n_len) == needle { return i }
+        i += 1
+    }
+    return -1
+}
+
+-- ── App widget ────────────────────────────────────────
+
+class EditorApp < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "editor"
+        this.focusable = true
+        this.buffer = TextBuffer()
+        this.gutter_w = 48
+        this.scroll_top = 0
+        this.path = null
+    }
+
+    fn open(path) {
+        if exists(path) { this.buffer.load(read(path)) }
+        else { this.buffer.load("") }
+        this.path = path
+    }
+
+    fn save() {
+        if this.path == null { return false }
+        write(this.path, this.buffer.to_text())
+        this.buffer.dirty = false
+        return true
+    }
+
+    fn _line_height() {
+        let f = theme_font(this.theme())
+        return f.height + 2
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let bg = theme_color(t, "background")
+        let surface = theme_color(t, "surface")
+        let fg = theme_color(t, "foreground")
+        let muted = theme_color(t, "foreground_muted")
+        let accent = theme_color(t, "accent")
+
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+        -- Gutter
+        fill_rect(fb, r[0], r[1], this.gutter_w, r[3], surface)
+
+        let lh = this._line_height()
+        let visible = r[3] / lh
+        mut i = 0
+        while i < visible and (this.scroll_top + i) < len(this.buffer.lines) {
+            let row = this.scroll_top + i
+            let y = r[1] + i * lh
+            -- Line number
+            let num = str(row + 1)
+            let nm = measure_text(f, num)
+            draw_text(fb, r[0] + this.gutter_w - nm[0] - 6, y, num, f, muted)
+            -- Line content
+            let line = this.buffer.lines[row]
+            draw_text(fb, r[0] + this.gutter_w + 6, y, line, f, fg)
+            -- Caret
+            if row == this.buffer.cursor_row {
+                let prefix = substring(line, 0, this.buffer.cursor_col)
+                let pm = measure_text(f, prefix)
+                let cx = r[0] + this.gutter_w + 6 + pm[0]
+                line(fb, cx, y, cx, y + lh - 2, accent)
+            }
+            i += 1
+        }
+
+        -- Status bar at the bottom
+        let status_y = r[1] + r[3] - lh
+        fill_rect(fb, r[0], status_y, r[2], lh, surface)
+        let pos = "Ln " + str(this.buffer.cursor_row + 1) + ", Col " + str(this.buffer.cursor_col + 1)
+        let dirty = if this.buffer.dirty { " ●" } else { "" }
+        let label = (this.path ?? "<unsaved>") + dirty + "   " + pos
+        draw_text(fb, r[0] + 8, status_y + 1, label, f, muted)
+    }
+
+    fn _ensure_visible() {
+        let lh = this._line_height()
+        let visible = (this.height - lh) / lh    -- minus status row
+        if this.buffer.cursor_row < this.scroll_top { this.scroll_top = this.buffer.cursor_row }
+        if this.buffer.cursor_row >= this.scroll_top + visible {
+            this.scroll_top = this.buffer.cursor_row - visible + 1
+        }
+        if this.scroll_top < 0 { this.scroll_top = 0 }
+    }
+
+    fn _handle(event) {
+        let kind = type(event)
+        if kind == "MouseEvent" and event.is_press {
+            this.focus()
+            return true
+        }
+        if kind != "KeyEvent" or not this.focused or not event.is_press { return false }
+        let n = event.name
+        if n == "Left"  { this.buffer.move_left();  this._ensure_visible(); return true }
+        if n == "Right" { this.buffer.move_right(); this._ensure_visible(); return true }
+        if n == "Up"    { this.buffer.move_up();    this._ensure_visible(); return true }
+        if n == "Down"  { this.buffer.move_down();  this._ensure_visible(); return true }
+        if n == "Home"  { this.buffer.move_home(); return true }
+        if n == "End"   { this.buffer.move_end(); return true }
+        if n == "Enter" { this.buffer.insert_newline(); this._ensure_visible(); return true }
+        if n == "Backspace" { this.buffer.delete_back(); this._ensure_visible(); return true }
+        if n == "Delete" { this.buffer.delete_forward(); return true }
+        if event.modifiers["ctrl"] {
+            if n == "z" or event.char == "z" { this.buffer.undo(); return true }
+            if n == "y" or event.char == "y" { this.buffer.redo(); return true }
+            if n == "s" or event.char == "s" { this.save(); return true }
+        }
+        if event.char != null and len(event.char) > 0 {
+            this.buffer.insert_char(event.char); return true
+        }
+        return false
+    }
+}
+
+fn editor() { return EditorApp() }

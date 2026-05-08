@@ -1,0 +1,292 @@
+-- Image viewer app — Phase 63 task 4.
+--
+-- Loads a BMP off disk (PNG/JPEG hooks ride along once those decoders
+-- land), supports zoom (+ / - / 0 / fit), pan (arrow keys / drag),
+-- rotate left/right, and a few basic image filters.
+--
+--     let v = ImageViewer()
+--     v.set_bounds(0, 0, 800, 600)
+--     v.open("/home/user/wallpaper.bmp")
+--
+-- Filters mutate the image in place; undo is a single-shot snapshot
+-- captured before each filter — keeps memory predictable.
+
+from "ui.clarity" import Widget
+from "draw.clarity" import fill_rect, rect, line
+from "font.clarity" import draw_text, measure_text
+from "graphics.clarity" import rgb, rgba, red_of, green_of, blue_of, alpha_of
+from "image.clarity" import Image, image, load_bmp, save_bmp
+from "theme.clarity" import theme_color, theme_font
+
+class ImageViewer < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "imageviewer"
+        this.focusable = true
+        this.image = null
+        this.path = null
+        this.zoom = 1.0
+        this.pan_x = 0
+        this.pan_y = 0
+        this._fit_on_load = true
+        this.error_message = null
+        this._undo_image = null
+        this._dragging = false
+        this._drag_anchor_x = 0
+        this._drag_anchor_y = 0
+    }
+
+    -- ── File loading ──────────────────────────────────
+
+    fn open(path) {
+        try {
+            this.image = load_bmp(path)
+            this.path = path
+            this.error_message = null
+            this._undo_image = null
+            this.pan_x = 0
+            this.pan_y = 0
+            if this._fit_on_load { this.fit_to_window() }
+        } catch e {
+            this.image = null
+            this.path = path
+            this.error_message = str(e)
+        }
+    }
+
+    fn save_as(path) {
+        if this.image == null { return false }
+        save_bmp(this.image, path)
+        return true
+    }
+
+    -- ── View transforms ──────────────────────────────
+
+    fn fit_to_window() {
+        if this.image == null { return null }
+        let r = this.screen_rect()
+        if r[2] <= 0 or r[3] <= 0 { return null }
+        let sx = r[2] * 1.0 / this.image.width
+        let sy = r[3] * 1.0 / this.image.height
+        let s = if sx < sy { sx } else { sy }
+        this.zoom = s
+        this.pan_x = 0
+        this.pan_y = 0
+    }
+
+    fn actual_size() {
+        this.zoom = 1.0
+        this.pan_x = 0
+        this.pan_y = 0
+    }
+
+    fn zoom_in()  { this.zoom = this.zoom * 1.25 }
+    fn zoom_out() {
+        this.zoom = this.zoom / 1.25
+        if this.zoom < 0.05 { this.zoom = 0.05 }
+    }
+
+    fn pan(dx, dy) {
+        this.pan_x += dx
+        this.pan_y += dy
+    }
+
+    -- ── Rotation (90° CCW per call, via Image.rotate_90) ──
+
+    fn rotate_left() {
+        if this.image == null { return null }
+        this._undo_image = this.image
+        this.image = this.image.rotate_90()
+    }
+
+    fn rotate_right() {
+        if this.image == null { return null }
+        this._undo_image = this.image
+        -- Three left rotations equal one right rotation.
+        this.image = this.image.rotate_90().rotate_90().rotate_90()
+    }
+
+    -- ── Filters ──────────────────────────────────────
+
+    fn _snapshot() {
+        if this.image == null { return null }
+        let copy = image(this.image.width, this.image.height)
+        mut y = 0
+        while y < this.image.height {
+            mut x = 0
+            while x < this.image.width {
+                copy.put_pixel(x, y, this.image.get_pixel(x, y))
+                x += 1
+            }
+            y += 1
+        }
+        this._undo_image = copy
+    }
+
+    fn undo() {
+        if this._undo_image == null { return null }
+        this.image = this._undo_image
+        this._undo_image = null
+    }
+
+    fn grayscale() {
+        if this.image == null { return null }
+        this._snapshot()
+        let img = this.image
+        mut y = 0
+        while y < img.height {
+            mut x = 0
+            while x < img.width {
+                let c = img.get_pixel(x, y)
+                let r = red_of(c); let g = green_of(c); let b = blue_of(c); let a = alpha_of(c)
+                let gray = int((r * 30 + g * 59 + b * 11) / 100)
+                img.put_pixel(x, y, rgba(gray, gray, gray, a))
+                x += 1
+            }
+            y += 1
+        }
+    }
+
+    fn brightness(delta) {
+        if this.image == null { return null }
+        this._snapshot()
+        let img = this.image
+        mut y = 0
+        while y < img.height {
+            mut x = 0
+            while x < img.width {
+                let c = img.get_pixel(x, y)
+                mut r = red_of(c) + delta
+                mut g = green_of(c) + delta
+                mut b = blue_of(c) + delta
+                if r < 0 { r = 0 }
+                if r > 255 { r = 255 }
+                if g < 0 { g = 0 }
+                if g > 255 { g = 255 }
+                if b < 0 { b = 0 }
+                if b > 255 { b = 255 }
+                img.put_pixel(x, y, rgba(r, g, b, alpha_of(c)))
+                x += 1
+            }
+            y += 1
+        }
+    }
+
+    fn invert() {
+        if this.image == null { return null }
+        this._snapshot()
+        let img = this.image
+        mut y = 0
+        while y < img.height {
+            mut x = 0
+            while x < img.width {
+                let c = img.get_pixel(x, y)
+                img.put_pixel(x, y, rgba(255 - red_of(c), 255 - green_of(c), 255 - blue_of(c), alpha_of(c)))
+                x += 1
+            }
+            y += 1
+        }
+    }
+
+    -- ── Painting ─────────────────────────────────────
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "background"))
+
+        if this.error_message != null {
+            let msg = "Could not open: " + (this.path ?? "<no file>")
+            let m = measure_text(f, msg)
+            draw_text(fb, r[0] + (r[2] - m[0]) / 2, r[1] + (r[3] - m[1]) / 2, msg, f, theme_color(t, "danger"))
+            return null
+        }
+
+        if this.image == null {
+            let hint = "No image loaded"
+            let m = measure_text(f, hint)
+            draw_text(fb, r[0] + (r[2] - m[0]) / 2, r[1] + (r[3] - m[1]) / 2, hint, f, theme_color(t, "foreground_muted"))
+            return null
+        }
+
+        let dw = int(this.image.width * this.zoom)
+        let dh = int(this.image.height * this.zoom)
+        if dw <= 0 or dh <= 0 { return null }
+        let dx = r[0] + (r[2] - dw) / 2 + this.pan_x
+        let dy = r[1] + (r[3] - dh) / 2 + this.pan_y
+
+        -- Nearest-neighbour blit, clipped to the visible rect.
+        mut yy = 0
+        while yy < dh {
+            let py = dy + yy
+            if py < r[1] { yy += 1; continue }
+            if py >= r[1] + r[3] { break }
+            let src_y = int(yy / this.zoom)
+            mut xx = 0
+            while xx < dw {
+                let px = dx + xx
+                if px < r[0] { xx += 1; continue }
+                if px >= r[0] + r[2] { break }
+                let src_x = int(xx / this.zoom)
+                fb.put_pixel(px, py, this.image.get_pixel(src_x, src_y))
+                xx += 1
+            }
+            yy += 1
+        }
+
+        -- Status footer: filename + dimensions + zoom %
+        let pct = int(this.zoom * 100)
+        let dims = str(this.image.width) + "×" + str(this.image.height)
+        let label = (this.path ?? "<unsaved>") + "   " + dims + "   " + str(pct) + "%"
+        draw_text(fb, r[0] + 8, r[1] + r[3] - f.height - 6, label, f, theme_color(t, "foreground_muted"))
+    }
+
+    -- ── Events ───────────────────────────────────────
+
+    fn _handle(event) {
+        let kind = type(event)
+        if kind == "KeyEvent" and event.is_press {
+            let n = event.name
+            if n == "+" or event.char == "+" { this.zoom_in(); return true }
+            if n == "-" or event.char == "-" { this.zoom_out(); return true }
+            if n == "0" or event.char == "0" { this.actual_size(); return true }
+            if n == "f" or event.char == "f" { this.fit_to_window(); return true }
+            if n == "Left"  { this.pan(20, 0); return true }
+            if n == "Right" { this.pan(-20, 0); return true }
+            if n == "Up"    { this.pan(0, 20); return true }
+            if n == "Down"  { this.pan(0, -20); return true }
+            if n == "r" or event.char == "r" { this.rotate_right(); return true }
+            if n == "l" or event.char == "l" { this.rotate_left(); return true }
+            if n == "g" or event.char == "g" { this.grayscale(); return true }
+            if n == "i" or event.char == "i" { this.invert(); return true }
+            if n == "u" or event.char == "u" { this.undo(); return true }
+        }
+        if kind == "MouseEvent" {
+            if event.is_press and event.button == 1 {
+                this.focus()
+                this._dragging = true
+                this._drag_anchor_x = event.x
+                this._drag_anchor_y = event.y
+                return true
+            }
+            if event.is_release and this._dragging {
+                this._dragging = false
+                return true
+            }
+            if event.is_motion and this._dragging {
+                this.pan(event.x - this._drag_anchor_x, event.y - this._drag_anchor_y)
+                this._drag_anchor_x = event.x
+                this._drag_anchor_y = event.y
+                return true
+            }
+            if event.is_scroll {
+                if event.scroll_y > 0 { this.zoom_in() } else { this.zoom_out() }
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn image_viewer() { return ImageViewer() }
