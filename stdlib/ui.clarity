@@ -1,0 +1,358 @@
+-- UI — Widget base + tree dispatch.
+--
+-- Every UI element is a `Widget`. Widgets compose into a tree: each
+-- widget knows its parent, has a list of children, and renders into a
+-- Framebuffer when `draw(fb)` is called. Position is local to the
+-- parent; `screen_rect()` resolves to absolute coordinates by walking
+-- up the tree.
+--
+-- Events come in via InputBus (Phase 58) and get dispatched through
+-- `handle_event(event)` — children get a chance first, in z-order
+-- (children later in the list are drawn on top, so they hit-test first
+-- when traversing from end to start).
+--
+-- Subclasses override `_paint(fb)` for their own appearance and
+-- `_handle(event)` for their own behaviour. The base `draw` and
+-- `handle_event` take care of clipping, hit-testing, and recursing
+-- into children.
+
+from "graphics.clarity" import Framebuffer
+
+class Widget {
+    fn init() {
+        this._setup_widget()
+    }
+
+    -- Widget field setup, factored so subclasses can call it from their
+    -- own init without re-typing every field. Clarity subclasses don't
+    -- auto-call parent init, so this is the conventional way to
+    -- "inherit fields".
+    fn _setup_widget() {
+        this.x = 0
+        this.y = 0
+        this.width = 0
+        this.height = 0
+        this.parent = null
+        this.children = []
+        this.visible = true
+        this.enabled = true
+        this.focused = false
+        this.focusable = false      -- only widgets that opt in receive focus
+        this.tab_index = 0
+        -- Per-widget overrides for layout: when null, the parent layout
+        -- decides; otherwise these clamp the widget's resulting size.
+        this.min_width = null
+        this.min_height = null
+        this.max_width = null
+        this.max_height = null
+        -- Optional named role for screen readers / theming.
+        this.role = "widget"
+        -- Hooks. Use on_click / on_key / on_focus to register without
+        -- subclassing.
+        this._click_handler = null
+        this._key_handler = null
+        this._focus_handler = null
+        this._blur_handler = null
+        this._theme = null
+        -- Optional layout arranger (FlexLayout/GridLayout/StackLayout/null).
+        this.layout = null
+    }
+
+    -- ── Tree management ────────────────────────────────
+
+    fn add(child) {
+        if child.parent != null { child.parent._remove_internal(child) }
+        child.parent = this
+        push(this.children, child)
+        return child
+    }
+
+    fn remove(child) {
+        this._remove_internal(child)
+        child.parent = null
+    }
+
+    fn _remove_internal(child) {
+        mut out = []
+        for c in this.children {
+            if c != child { push(out, c) }
+        }
+        this.children = out
+    }
+
+    fn root() {
+        if this.parent == null { return this }
+        return this.parent.root()
+    }
+
+    -- ── Geometry ───────────────────────────────────────
+
+    fn local_origin() {
+        mut px = 0
+        mut py = 0
+        if this.parent != null {
+            let p = this.parent.local_origin()
+            px = p[0]; py = p[1]
+        }
+        return [px + this.x, py + this.y]
+    }
+
+    fn screen_rect() {
+        let p = this.local_origin()
+        return [p[0], p[1], this.width, this.height]
+    }
+
+    fn contains_screen(sx, sy) {
+        let r = this.screen_rect()
+        return sx >= r[0] and sx < r[0] + r[2]
+           and sy >= r[1] and sy < r[1] + r[3]
+    }
+
+    fn set_bounds(x, y, w, h) {
+        this.x = x; this.y = y; this.width = w; this.height = h
+    }
+
+    -- ── Theme ──────────────────────────────────────────
+
+    -- Look up the active theme by walking up the tree. Subclasses use
+    -- `this.theme()` rather than reaching for a global theme so an app
+    -- can scope themes per subtree.
+    fn theme() {
+        if this._theme != null { return this._theme }
+        if this.parent != null { return this.parent.theme() }
+        return null
+    }
+
+    fn set_theme(t) { this._theme = t }
+
+    -- ── Drawing ────────────────────────────────────────
+
+    -- Public draw: handles visibility + recurses into children. The
+    -- subclass-overridable hook is `_paint`.
+    fn draw(fb) {
+        if not this.visible { return null }
+        this._paint(fb)
+        for child in this.children {
+            child.draw(fb)
+        }
+    }
+
+    -- Default paint: nothing. Subclasses override.
+    fn _paint(fb) { return null }
+
+    -- ── Event dispatch ─────────────────────────────────
+
+    -- Public handle_event: returns true if the event was consumed.
+    -- Children get the event first (top-most z first), then the
+    -- widget's own `_handle` fires.
+    fn handle_event(event) {
+        if not this.visible or not this.enabled { return false }
+        -- Walk children top-most-first (last drawn = on top).
+        mut i = len(this.children) - 1
+        while i >= 0 {
+            if this.children[i].handle_event(event) { return true }
+            i -= 1
+        }
+        -- Mouse events that aren't inside us bubble back up.
+        let kind = _event_kind(event)
+        if kind == "mouse" and not this.contains_screen(event.x, event.y) {
+            return false
+        }
+        return this._handle(event)
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind(event)
+        if kind == "mouse" and event.is_press and this._click_handler != null {
+            return this._click_handler(event) == true
+        }
+        if kind == "key" and this.focused and this._key_handler != null {
+            return this._key_handler(event) == true
+        }
+        return false
+    }
+
+    -- ── Focus ──────────────────────────────────────────
+
+    fn focus() {
+        if not this.focusable or this.focused { return null }
+        let r = this.root()
+        if r != this { r._clear_focus() }
+        this.focused = true
+        if this._focus_handler != null { this._focus_handler() }
+    }
+
+    fn blur() {
+        if not this.focused { return null }
+        this.focused = false
+        if this._blur_handler != null { this._blur_handler() }
+    }
+
+    fn _clear_focus() {
+        if this.focused { this.blur() }
+        for child in this.children {
+            child._clear_focus()
+        }
+    }
+
+    -- ── Convenience hook setters ───────────────────────
+
+    fn on_click(fn_) { this._click_handler = fn_ }
+    fn on_key(fn_) { this._key_handler = fn_ }
+    fn on_focus(fn_) { this._focus_handler = fn_ }
+    fn on_blur(fn_) { this._blur_handler = fn_ }
+
+    -- ── Layout ─────────────────────────────────────────
+    --
+    -- A widget reports its preferred size to its parent's layout via
+    -- `preferred_size()`. The parent layout calls `set_bounds` to
+    -- finalise placement. Subclasses can override `preferred_size` to
+    -- describe how big they'd like to be.
+    fn preferred_size() {
+        return [this.width, this.height]
+    }
+
+    -- Run the attached layout (if any) to reposition children, then
+    -- recurse so nested layouts get a chance.
+    fn relayout() {
+        if this.layout != null {
+            this.layout.arrange(this)
+        }
+        for child in this.children { child.relayout() }
+    }
+}
+
+-- ── Helpers ───────────────────────────────────────────
+
+-- Identify an event by class name. MouseEvent / KeyEvent / TouchEvent
+-- come from different modules but each is its own ClarityInstance, so
+-- type() reports the class name and we dispatch on that.
+fn _event_kind(event) {
+    let t = type(event)
+    if t == "MouseEvent" { return "mouse" }
+    if t == "KeyEvent" { return "key" }
+    if t == "TouchEvent" { return "touch" }
+    return "unknown"
+}
+
+-- ── Root container with InputBus integration ──────────
+
+from "event_bus.clarity" import InputBus
+
+class WidgetRoot {
+    fn init(width, height) {
+        this.width = width
+        this.height = height
+        this.root = Widget()
+        this.root.set_bounds(0, 0, width, height)
+        this._focus_chain = []
+        this._focus_index = -1
+    }
+
+    fn add(widget) { return this.root.add(widget) }
+    fn set_theme(t) { this.root.set_theme(t) }
+
+    -- Wire this WidgetRoot into an InputBus so input flows to widgets.
+    fn attach_to_bus(bus) {
+        let r = this
+        bus.on_mouse(fn(me) { return r.dispatch_mouse(me) })
+        bus.on_key(fn(ke) { return r.dispatch_key(ke) })
+        bus.on_touch(fn(te) { return r.dispatch_touch(te) })
+    }
+
+    fn dispatch_mouse(me) {
+        -- Click in a focusable widget transfers focus.
+        if me.is_press {
+            let target = this._hit_test(this.root, me.x, me.y)
+            if target != null and target.focusable {
+                target.focus()
+                this._sync_focus_index_to(target)
+            }
+        }
+        return this.root.handle_event(me)
+    }
+
+    fn dispatch_key(ke) {
+        -- Tab / Shift+Tab walk the focus chain before regular handling.
+        if ke.is_press and ke.name == "Tab" {
+            if ke.modifiers["shift"] { this.focus_prev() } else { this.focus_next() }
+            return true
+        }
+        return this.root.handle_event(ke)
+    }
+
+    fn dispatch_touch(te) { return this.root.handle_event(te) }
+
+    fn render(fb) { this.root.draw(fb) }
+
+    -- Build a flat list of focusable descendants in tree order.
+    fn rebuild_focus_chain() {
+        this._focus_chain = []
+        this._collect_focusables(this.root)
+        this._focus_chain = _stable_sort_by_tab_index(this._focus_chain)
+    }
+
+    fn _collect_focusables(w) {
+        if not w.visible or not w.enabled { return null }
+        if w.focusable { push(this._focus_chain, w) }
+        for c in w.children { this._collect_focusables(c) }
+    }
+
+    fn focus_next() {
+        if len(this._focus_chain) == 0 { this.rebuild_focus_chain() }
+        let n = len(this._focus_chain)
+        if n == 0 { return null }
+        this._focus_index = (this._focus_index + 1) % n
+        this._focus_chain[this._focus_index].focus()
+    }
+
+    fn focus_prev() {
+        if len(this._focus_chain) == 0 { this.rebuild_focus_chain() }
+        let n = len(this._focus_chain)
+        if n == 0 { return null }
+        this._focus_index = (this._focus_index - 1 + n) % n
+        this._focus_chain[this._focus_index].focus()
+    }
+
+    fn _sync_focus_index_to(widget) {
+        if len(this._focus_chain) == 0 { this.rebuild_focus_chain() }
+        mut i = 0
+        while i < len(this._focus_chain) {
+            if this._focus_chain[i] == widget {
+                this._focus_index = i
+                return null
+            }
+            i += 1
+        }
+    }
+
+    fn _hit_test(w, sx, sy) {
+        if not w.visible or not w.enabled { return null }
+        if not w.contains_screen(sx, sy) { return null }
+        mut i = len(w.children) - 1
+        while i >= 0 {
+            let h = this._hit_test(w.children[i], sx, sy)
+            if h != null { return h }
+            i -= 1
+        }
+        return w
+    }
+}
+
+fn _stable_sort_by_tab_index(items) {
+    -- Insertion sort: stable, fine for the small N a UI tree has.
+    mut out = []
+    for it in items { push(out, it) }
+    mut i = 1
+    while i < len(out) {
+        mut j = i
+        while j > 0 and out[j].tab_index < out[j - 1].tab_index {
+            let tmp = out[j]
+            out[j] = out[j - 1]
+            out[j - 1] = tmp
+            j -= 1
+        }
+        i += 1
+    }
+    return out
+}

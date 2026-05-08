@@ -1,0 +1,413 @@
+-- UI / layout / theme / widgets tests — Phase 60.
+--
+-- Exercises the Widget tree, Flex/Grid layouts, theme accessors, every
+-- core widget's paint + event paths, and the WidgetRoot focus chain.
+-- Synthetic input events come straight from input.clarity:raw — same
+-- pattern as Phase 58's tests, no real device required.
+
+from "graphics.clarity" import framebuffer, BLACK, WHITE
+from "ui.clarity" import Widget, WidgetRoot
+from "layout.clarity" import FlexLayout, GridLayout, StackLayout, flex_row, flex_column, grid, stack
+from "theme.clarity" import dark, light, default, theme_color, theme_font, theme_spacing
+from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view
+from "event_bus.clarity" import InputBus
+from "input.clarity" import EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y, REL_WHEEL, BTN_LEFT, KEY_PRESS, KEY_RELEASE
+from "keymap.clarity" import KEY_TAB, KEY_LEFTSHIFT, KEY_A, Modifiers
+from "mouse.clarity" import MouseEvent
+from "keymap.clarity" import KeyEvent
+
+-- Event-builder helpers so test bodies stay readable.
+fn me_press(x, y, button) {
+    let e = MouseEvent()
+    e.x = x; e.y = y; e.button = button; e.is_press = true
+    return e
+}
+fn me_release(x, y, button) {
+    let e = MouseEvent()
+    e.x = x; e.y = y; e.button = button; e.is_release = true
+    return e
+}
+fn me_motion(x, y, dx, dy) {
+    let e = MouseEvent()
+    e.x = x; e.y = y; e.dx = dx; e.dy = dy; e.is_motion = true
+    return e
+}
+fn me_scroll(x, y, dy_notches) {
+    let e = MouseEvent()
+    e.x = x; e.y = y; e.scroll_y = dy_notches; e.is_scroll = true
+    return e
+}
+fn ke_press(code, name, char_) {
+    let m = Modifiers()
+    return KeyEvent(code, name, char_, true, false, m.snapshot())
+}
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+fn raw(t, code, value) {
+    return {"time_sec": 0, "time_usec": 0, "type": t, "code": code, "value": value}
+}
+
+-- ── Widget basics ──────────────────────────────────────
+
+show "-- UI: Widget tree & screen_rect --"
+
+let parent = Widget()
+parent.set_bounds(100, 50, 400, 300)
+
+let child = Widget()
+child.set_bounds(20, 10, 100, 50)
+parent.add(child)
+
+let grand = Widget()
+grand.set_bounds(5, 5, 30, 20)
+child.add(grand)
+
+assert_eq(child.parent, parent, "child.parent set on add")
+assert_eq(len(parent.children), 1, "parent has one child")
+assert_eq(grand.root(), parent, "root() walks to top")
+
+-- screen_rect adds up positions through the tree
+assert_eq(child.screen_rect(), [120, 60, 100, 50], "child screen rect")
+assert_eq(grand.screen_rect(), [125, 65, 30, 20], "grandchild screen rect")
+assert(child.contains_screen(150, 80), "child contains")
+assert(not child.contains_screen(50, 50), "child does not contain outside")
+
+-- remove() clears parent linkage
+parent.remove(child)
+assert_eq(len(parent.children), 0, "removed")
+assert_eq(child.parent, null, "parent unlinked")
+
+-- ── Theme accessors ───────────────────────────────────
+
+show "-- Theme: accessors --"
+
+let dt = dark()
+assert(theme_color(dt, "accent") != 0, "accent has a color")
+assert_eq(theme_spacing(dt, 2), 16, "spacing scales by unit")
+assert(theme_font(dt) != null, "font present")
+
+let lt = light()
+assert(lt["background"] != dt["background"], "light bg differs from dark bg")
+
+-- Walking up the tree finds the theme set on a parent
+let root_w = Widget()
+root_w.set_theme(dt)
+let nested = Widget()
+let inner = Widget()
+nested.add(inner)
+root_w.add(nested)
+assert_eq(inner.theme(), dt, "theme inherited via tree walk")
+
+-- Per-subtree override
+nested.set_theme(lt)
+assert_eq(inner.theme(), lt, "nearer theme wins")
+assert_eq(root_w.theme(), dt, "root unaffected")
+
+-- ── FlexLayout: row + column + justify ───────────────
+
+show "-- Layout: FlexLayout row --"
+
+let panel = Widget()
+panel.set_bounds(0, 0, 200, 60)
+panel.layout = flex_row({"gap": 10, "justify": "start"})
+
+let a = label("a")
+let b = label("bb")
+let c = label("ccc")
+panel.add(a); panel.add(b); panel.add(c)
+
+-- preferred_size uses the font; we don't care about exact widths, just
+-- that the layout puts them in left-to-right order with gaps.
+panel.relayout()
+assert_eq(a.x, 0, "first child at x=0")
+assert(b.x > a.x + a.width - 1, "b after a")
+assert(c.x > b.x + b.width - 1, "c after b")
+assert_eq(a.y, 0, "row aligns at y=0 (start)")
+
+-- center justify: first child shifted right by half the slack
+let panel2 = Widget()
+panel2.set_bounds(0, 0, 300, 40)
+panel2.layout = flex_row({"justify": "center", "gap": 4})
+let p1 = label("XX"); let p2 = label("YY")
+panel2.add(p1); panel2.add(p2)
+panel2.relayout()
+assert(p1.x > 0, "centered: first child not at x=0")
+
+-- column direction stacks vertically
+let col = Widget()
+col.set_bounds(0, 0, 80, 200)
+col.layout = flex_column({"gap": 5})
+let r1 = label("r1"); let r2 = label("r2"); let r3 = label("r3")
+col.add(r1); col.add(r2); col.add(r3)
+col.relayout()
+assert_eq(r1.y, 0, "column first y=0")
+assert(r2.y > r1.y + r1.height - 1, "r2 below r1")
+assert(r3.y > r2.y + r2.height - 1, "r3 below r2")
+
+-- align center: cross-axis offset
+let col2 = Widget()
+col2.set_bounds(0, 0, 200, 100)
+col2.layout = flex_column({"align": "center"})
+let cw = label("hi")
+col2.add(cw)
+col2.relayout()
+assert(cw.x > 0, "centered horizontally in column")
+
+-- align stretch: cross-axis fills the container
+let col3 = Widget()
+col3.set_bounds(0, 0, 200, 100)
+col3.layout = flex_column({"align": "stretch"})
+let sw = label("hi")
+col3.add(sw)
+col3.relayout()
+assert_eq(sw.width, 200, "stretch width")
+
+-- padding + space_between
+let panel3 = Widget()
+panel3.set_bounds(0, 0, 200, 40)
+panel3.layout = flex_row({"justify": "space_between", "padding": 10})
+let l1 = label("L"); let l2 = label("R")
+panel3.add(l1); panel3.add(l2)
+panel3.relayout()
+assert_eq(l1.x, 10, "padding pushes first to x=10")
+assert(l2.x + l2.width >= 200 - 10 - 1, "second pushed against right padding")
+
+-- ── GridLayout ────────────────────────────────────────
+
+show "-- Layout: GridLayout --"
+
+let g = Widget()
+g.set_bounds(0, 0, 200, 200)
+g.layout = grid(2, 2, {"gap": 10})
+let g1 = Widget(); let g2 = Widget(); let g3 = Widget(); let g4 = Widget()
+g.add(g1); g.add(g2); g.add(g3); g.add(g4)
+g.relayout()
+-- Cell size: (200 - 10) / 2 = 95
+assert_eq(g1.x, 0, "grid cell 0 x")
+assert_eq(g1.y, 0, "grid cell 0 y")
+assert_eq(g1.width, 95, "grid cell width")
+assert_eq(g2.x, 105, "grid cell 1 x = 95+10")
+assert_eq(g3.y, 105, "grid cell 2 y wraps to next row")
+
+-- ── Label preferred_size ──────────────────────────────
+
+show "-- Widgets: Label --"
+
+let lbl = label("Hello")
+lbl.set_theme(default())
+let p = lbl.preferred_size()
+assert(p[0] > 0, "label has width")
+assert_eq(p[1], 8, "label height = 8 (builtin font)")
+
+-- Paint actually draws to the framebuffer
+let lfb = framebuffer(80, 16)
+lfb.clear(BLACK)
+let lbl2 = label("A")
+lbl2.set_theme(default())
+lbl2.set_bounds(0, 0, 16, 16)
+lbl2.draw(lfb)
+-- 'A' row 0 = 0x18 — pixels at cols 3 and 4 lit, vertically centred so
+-- around y = (16-8)/2 = 4. So col 3, y 4 should be lit.
+assert(lfb.get_pixel(3, 4) != BLACK, "label A row 0 col 3 lit")
+
+-- ── Button click + keyboard activation ───────────────
+
+show "-- Widgets: Button --"
+
+let btn = button("OK")
+btn.set_theme(default())
+btn.set_bounds(20, 10, 80, 32)
+mut clicks = 0
+btn.on_click(fn(e) { clicks += 1 })
+assert(btn.focusable, "button is focusable")
+
+-- Direct event dispatch via handle_event
+btn.handle_event(me_press(50, 20, 1))
+assert(btn.pressed, "button pressed on press")
+assert(btn.focused, "button focused on press")
+btn.handle_event(me_release(50, 20, 1))
+assert(not btn.pressed, "button no longer pressed on release")
+assert_eq(clicks, 1, "click handler fired")
+
+-- ── Checkbox toggle ───────────────────────────────────
+
+show "-- Widgets: Checkbox --"
+
+let cb = checkbox("Enable")
+cb.set_theme(default())
+cb.set_bounds(0, 0, 120, 20)
+assert(not cb.checked, "starts unchecked")
+mut cb_changes = 0
+cb.on_click(fn(e) { cb_changes += 1 })
+cb.handle_event(me_press(5, 5, 1))
+assert(cb.checked, "click toggles on")
+assert_eq(cb_changes, 1, "handler fired")
+cb.handle_event(me_press(5, 5, 1))
+assert(not cb.checked, "click toggles off")
+
+-- ── ProgressBar ──────────────────────────────────────
+
+show "-- Widgets: ProgressBar --"
+
+let pb = progress_bar()
+pb.set_theme(default())
+pb.set_bounds(0, 0, 100, 8)
+pb.set_value(0.5)
+assert_eq(pb.value, 0.5, "value set")
+pb.set_value(2.0)
+assert_eq(pb.value, 1.0, "value clamps to 1.0")
+pb.set_value(-1.0)
+assert_eq(pb.value, 0.0, "value clamps to 0.0")
+
+-- ── Slider drag ──────────────────────────────────────
+
+show "-- Widgets: Slider --"
+
+let sl = slider(0, 100)
+sl.set_theme(default())
+sl.set_bounds(0, 0, 200, 20)
+assert_eq(sl.value, 0, "starts at min")
+
+-- Click in the middle should set value to ~50
+sl.handle_event(me_press(100, 10, 1))
+assert(sl.value > 30 and sl.value < 70, "click near middle yields ~50")
+
+-- Keyboard arrows
+let prev_val = sl.value
+sl.handle_event(ke_press(106, "Right", null))
+assert(sl.value > prev_val, "Right key increments")
+
+sl.handle_event(ke_press(102, "Home", null))
+assert_eq(sl.value, 0, "Home jumps to min")
+
+-- ── TextInput typing ─────────────────────────────────
+
+show "-- Widgets: TextInput --"
+
+let ti = text_input()
+ti.set_theme(default())
+ti.set_bounds(0, 0, 200, 24)
+ti.focus()
+ti.handle_event(ke_press(35, "h", "h"))
+ti.handle_event(ke_press(23, "i", "i"))
+assert_eq(ti.text, "hi", "typed two chars")
+assert_eq(ti.cursor, 2, "cursor at end")
+
+ti.handle_event(ke_press(105, "Left", null))
+assert_eq(ti.cursor, 1, "cursor moved left")
+
+ti.handle_event(ke_press(14, "Backspace", null))
+assert_eq(ti.text, "i", "backspace removed char before cursor")
+assert_eq(ti.cursor, 0, "cursor decremented")
+
+ti.handle_event(ke_press(111, "Delete", null))
+assert_eq(ti.text, "", "delete removed char at cursor")
+
+-- ── ScrollView ───────────────────────────────────────
+
+show "-- Widgets: ScrollView --"
+
+let sv = scroll_view()
+sv.set_theme(default())
+sv.set_bounds(0, 0, 100, 80)
+let big = Widget()
+big.set_bounds(0, 0, 100, 200)
+big.preferred_size = fn() { return [100, 200] }   -- dynamic override... won't work
+-- The scroll math uses big's preferred_size. Without overriding it,
+-- preferred_size returns [width, height] = [100, 200], which is what
+-- we set above — that's fine.
+sv.set_content(big)
+sv.relayout()
+assert_eq(sv._max_scroll(), 120, "max scroll = content_h - viewport")
+
+sv.scroll_by(50)
+assert_eq(sv.scroll_y, 50, "scrolled by 50")
+sv.scroll_by(1000)
+assert_eq(sv.scroll_y, 120, "clamped to max")
+sv.scroll_by(-5000)
+assert_eq(sv.scroll_y, 0, "clamped to 0")
+
+-- Scroll wheel via mouse event
+sv.focus()
+sv.handle_event(me_scroll(50, 40, -2))
+assert_eq(sv.scroll_y, 64, "wheel scrolls by step * notches")
+
+-- ── ListView ─────────────────────────────────────────
+
+show "-- Widgets: ListView --"
+
+let lv = list_view(["Alpha", "Beta", "Gamma", "Delta"])
+lv.set_theme(default())
+lv.set_bounds(0, 0, 120, 100)
+assert_eq(lv.selected, -1, "no initial selection")
+lv.handle_event(me_press(30, 30, 1))
+assert_eq(lv.selected, 1, "click row 1 (y=30 / row_height 24)")
+
+lv.handle_event(ke_press(108, "Down", null))
+assert_eq(lv.selected, 2, "down arrow advances")
+lv.handle_event(ke_press(108, "Down", null))
+lv.handle_event(ke_press(108, "Down", null))
+assert_eq(lv.selected, 3, "down arrow stops at end")
+
+-- ── WidgetRoot focus chain (Tab navigation) ───────────
+
+show "-- Widget: WidgetRoot focus chain --"
+
+let root = WidgetRoot(800, 600)
+root.set_theme(default())
+let f1 = button("First")
+let f2 = button("Second")
+let f3 = button("Third")
+f1.set_bounds(0, 0, 80, 24)
+f2.set_bounds(0, 30, 80, 24)
+f3.set_bounds(0, 60, 80, 24)
+root.add(f1); root.add(f2); root.add(f3)
+root.rebuild_focus_chain()
+assert_eq(len(root._focus_chain), 3, "three focusable widgets")
+
+root.focus_next()
+assert(f1.focused, "Tab focuses first")
+root.focus_next()
+assert(f2.focused, "Tab focuses second")
+assert(not f1.focused, "first blurred")
+root.focus_next()
+assert(f3.focused, "third focused")
+root.focus_next()
+assert(f1.focused, "wrap around")
+root.focus_prev()
+assert(f3.focused, "Shift+Tab goes back")
+
+-- Tab is consumed by WidgetRoot before children see it
+let bus = InputBus()
+bus.set_bounds(800, 600)
+root.attach_to_bus(bus)
+let started_focus = root._focus_index
+-- WidgetRoot.dispatch_key is what an InputBus listener would call;
+-- exercise that pathway directly.
+root.dispatch_key(ke_press(15, "Tab", null))
+assert(root._focus_index != started_focus, "Tab via WidgetRoot.dispatch_key advances focus chain")
+
+-- Mouse click on a focusable widget transfers focus
+root.dispatch_mouse(me_press(40, 70, 1))
+assert(f3.focused, "click transferred focus to clicked widget")
+
+-- ── Summary ─────────────────────────────────────────
+
+show ""
+show "UI: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " ui test(s) failed" }

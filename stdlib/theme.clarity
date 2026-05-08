@@ -1,0 +1,110 @@
+-- Theme — colors, fonts, spacing, corner radii.
+--
+-- Themes are plain mergeable dicts (same shape as chrome.clarity) so
+-- callers can build custom themes by overriding individual keys
+-- without subclassing:
+--
+--     let dim = theme.dark()
+--     let purple = merge(dim, {"accent": 0xFF8B5CF6})
+--     widget_root.set_theme(purple)
+
+from "font.clarity" import builtin_font
+
+let _BASE = {
+    "spacing_unit": 8,        -- 8 px scale base; sizes go 4/8/12/16/24/32
+    "corner_radius": 4,
+    "border_width": 1,
+    "shadow_alpha": 0x66,     -- alpha of soft shadow under elevated surfaces
+    "transition_ms": 150
+}
+
+-- ── Built-in themes ────────────────────────────────────
+
+fn dark() {
+    return merge(_BASE, {
+        "background":       0xFF1A1A1A,
+        "surface":          0xFF252525,
+        "surface_elevated": 0xFF2E2E2E,
+        "border":           0xFF3A3A3A,
+        "foreground":       0xFFE6E6E6,
+        "foreground_muted": 0xFF999999,
+        "accent":           0xFF4A90E2,
+        "accent_muted":     0xFF3A6FA8,
+        "selection":        0x804A90E2,
+        "danger":           0xFFE74C3C,
+        "warning":          0xFFF1C40F,
+        "success":          0xFF2ECC71,
+        "focus_ring":       0xFF7FB4F0,
+        "disabled":         0xFF555555,
+        "font":             builtin_font()
+    })
+}
+
+fn light() {
+    return merge(_BASE, {
+        "background":       0xFFF7F7F7,
+        "surface":          0xFFFFFFFF,
+        "surface_elevated": 0xFFFFFFFF,
+        "border":           0xFFD0D0D0,
+        "foreground":       0xFF1A1A1A,
+        "foreground_muted": 0xFF666666,
+        "accent":           0xFF1976D2,
+        "accent_muted":     0xFF6FA8DC,
+        "selection":        0x801976D2,
+        "danger":           0xFFD32F2F,
+        "warning":          0xFFF57C00,
+        "success":          0xFF388E3C,
+        "focus_ring":       0xFF42A5F5,
+        "disabled":         0xFFAAAAAA,
+        "font":             builtin_font()
+    })
+}
+
+fn high_contrast() {
+    return merge(_BASE, {
+        "background":       0xFF000000,
+        "surface":          0xFF000000,
+        "surface_elevated": 0xFF101010,
+        "border":           0xFFFFFFFF,
+        "foreground":       0xFFFFFFFF,
+        "foreground_muted": 0xFFCCCCCC,
+        "accent":           0xFFFFFF00,
+        "accent_muted":     0xFFCCCC00,
+        "selection":        0xFFFFFF00,
+        "danger":           0xFFFF6666,
+        "warning":          0xFFFFCC00,
+        "success":          0xFF66FF66,
+        "focus_ring":       0xFFFFFF00,
+        "disabled":         0xFF666666,
+        "font":             builtin_font(),
+        "border_width":     2
+    })
+}
+
+-- Default = dark, since the desktop shell's first impression is
+-- always at least vaguely "an actual computer".
+fn default() { return dark() }
+
+-- ── Style accessors ────────────────────────────────────
+--
+-- Tiny helpers so widget code reads like `theme_color(t, "accent")`
+-- instead of `t["accent"]` (slightly nicer at call sites and gives us
+-- a single place to add fallbacks later).
+
+fn theme_color(t, key) {
+    if t == null { return 0xFF000000 }
+    if has(t, key) { return t[key] }
+    return 0xFF000000
+}
+
+fn theme_font(t) {
+    if t == null { return builtin_font() }
+    if has(t, "font") { return t["font"] }
+    return builtin_font()
+}
+
+fn theme_spacing(t, multiple) {
+    let m = if multiple == null { 1 } else { multiple }
+    let unit = if t != null and has(t, "spacing_unit") { t["spacing_unit"] } else { 8 }
+    return unit * m
+}

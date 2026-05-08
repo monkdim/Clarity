@@ -1,0 +1,569 @@
+-- Widgets — concrete subclasses of `Widget`.
+--
+-- Each widget provides three things:
+--   * its own state fields (text, checked, value, ...)
+--   * a `_paint(fb)` override that draws via graphics/draw/font
+--   * a `_handle(event)` override for any local behaviour
+--
+-- All widgets pull colours/fonts from the active theme via
+-- `this.theme()` so dropping the root's theme swaps the look.
+
+from "ui.clarity" import Widget
+from "theme.clarity" import theme_color, theme_font, theme_spacing
+from "graphics.clarity" import rgb, rgba
+from "draw.clarity" import line, hline, vline, fill_rect, rect, circle
+from "font.clarity" import draw_text, measure_text
+
+-- ── Label — non-interactive text ───────────────────────
+
+class Label < Widget {
+    fn init(text) {
+        this._setup_widget()
+        this.role = "label"
+        this.text = text ?? ""
+        this.color_key = "foreground"
+        this.align = "start"      -- start | center | end
+    }
+
+    fn preferred_size() {
+        let f = theme_font(this.theme())
+        let m = measure_text(f, this.text)
+        return [m[0], m[1]]
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        let color = theme_color(t, this.color_key)
+        let m = measure_text(f, this.text)
+        mut tx = r[0]
+        if this.align == "center" { tx = r[0] + (r[2] - m[0]) / 2 }
+        elif this.align == "end" { tx = r[0] + r[2] - m[0] }
+        let ty = r[1] + (r[3] - m[1]) / 2
+        draw_text(fb, tx, ty, this.text, f, color)
+    }
+}
+
+fn label(text) { return Label(text) }
+
+-- ── Button ─────────────────────────────────────────────
+
+class Button < Widget {
+    fn init(text) {
+        this._setup_widget()
+        this.role = "button"
+        this.text = text ?? ""
+        this.focusable = true
+        this.pressed = false
+        this.padding_x = 12
+        this.padding_y = 6
+    }
+
+    fn preferred_size() {
+        let f = theme_font(this.theme())
+        let m = measure_text(f, this.text)
+        return [m[0] + this.padding_x * 2, m[1] + this.padding_y * 2]
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let bg = if not this.enabled {
+            theme_color(t, "disabled")
+        } else { if this.pressed { theme_color(t, "accent_muted") } else { theme_color(t, "accent") } }
+        let fg = theme_color(t, "foreground")
+        fill_rect(fb, r[0], r[1], r[2], r[3], bg)
+        if this.focused {
+            rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "focus_ring"))
+        } else {
+            rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "border"))
+        }
+        let f = theme_font(t)
+        let m = measure_text(f, this.text)
+        draw_text(fb, r[0] + (r[2] - m[0]) / 2, r[1] + (r[3] - m[1]) / 2, this.text, f, fg)
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" {
+            if event.is_press {
+                this.pressed = true
+                this.focus()
+                return true
+            }
+            if event.is_release {
+                let was_pressed = this.pressed
+                this.pressed = false
+                if was_pressed and this._click_handler != null {
+                    this._click_handler(event)
+                }
+                return true
+            }
+        }
+        if kind == "key" and this.focused and event.is_press {
+            if event.name == "Enter" or event.name == " " {
+                if this._click_handler != null { this._click_handler(event) }
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn button(text) { return Button(text) }
+
+-- ── Checkbox ───────────────────────────────────────────
+
+class Checkbox < Widget {
+    fn init(label_text) {
+        this._setup_widget()
+        this.role = "checkbox"
+        this.label = label_text ?? ""
+        this.checked = false
+        this.focusable = true
+        this.box_size = 16
+        this.gap = 8
+    }
+
+    fn preferred_size() {
+        let f = theme_font(this.theme())
+        let m = measure_text(f, this.label)
+        let h = if m[1] > this.box_size { m[1] } else { this.box_size }
+        return [this.box_size + this.gap + m[0], h]
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let by = r[1] + (r[3] - this.box_size) / 2
+        let border_color = if this.focused { theme_color(t, "focus_ring") } else { theme_color(t, "border") }
+        let bg = if this.checked { theme_color(t, "accent") } else { theme_color(t, "surface") }
+        fill_rect(fb, r[0], by, this.box_size, this.box_size, bg)
+        rect(fb, r[0], by, this.box_size, this.box_size, border_color)
+        if this.checked {
+            -- Two-line checkmark: from lower-left up to upper-right
+            let cx = r[0]
+            let cy = by
+            let s = this.box_size
+            let fg = theme_color(t, "foreground")
+            line(fb, cx + 3, cy + s / 2,     cx + s / 2 - 1, cy + s - 4, fg)
+            line(fb, cx + s / 2 - 1, cy + s - 4, cx + s - 3, cy + 3,         fg)
+        }
+        let f = theme_font(t)
+        let m = measure_text(f, this.label)
+        draw_text(fb, r[0] + this.box_size + this.gap, r[1] + (r[3] - m[1]) / 2, this.label, f, theme_color(t, "foreground"))
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_press {
+            this.checked = not this.checked
+            this.focus()
+            if this._click_handler != null { this._click_handler(event) }
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press and (event.name == " " or event.name == "Enter") {
+            this.checked = not this.checked
+            if this._click_handler != null { this._click_handler(event) }
+            return true
+        }
+        return false
+    }
+
+    fn toggle() { this.checked = not this.checked }
+}
+
+fn checkbox(label_text) { return Checkbox(label_text) }
+
+-- ── ProgressBar ────────────────────────────────────────
+
+class ProgressBar < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "progressbar"
+        this.value = 0.0          -- 0.0 .. 1.0
+        this.indeterminate = false
+    }
+
+    fn set_value(v) {
+        if v < 0.0 { v = 0.0 }
+        if v > 1.0 { v = 1.0 }
+        this.value = v
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "surface"))
+        rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "border"))
+        if not this.indeterminate {
+            let inner_w = int(r[2] * this.value)
+            if inner_w > 0 {
+                fill_rect(fb, r[0] + 1, r[1] + 1, inner_w - 1, r[3] - 2, theme_color(t, "accent"))
+            }
+        }
+    }
+}
+
+fn progress_bar() { return ProgressBar() }
+
+-- ── Slider ─────────────────────────────────────────────
+
+class Slider < Widget {
+    fn init(min_v, max_v) {
+        this._setup_widget()
+        this.role = "slider"
+        this.focusable = true
+        this.min = min_v ?? 0
+        this.max = max_v ?? 100
+        this.value = this.min
+        this.step = 1
+        this._dragging = false
+    }
+
+    fn set_value(v) {
+        if v < this.min { v = this.min }
+        if v > this.max { v = this.max }
+        this.value = v
+        if this._click_handler != null { this._click_handler(this) }
+    }
+
+    fn _track_y(r) { return r[1] + r[3] / 2 - 1 }
+    fn _knob_radius() { return 6 }
+
+    fn _value_to_x(r) {
+        let kr = this._knob_radius()
+        let span = r[2] - kr * 2
+        if this.max == this.min { return r[0] + kr }
+        let frac = (this.value - this.min) * 1.0 / (this.max - this.min)
+        return int(r[0] + kr + frac * span)
+    }
+
+    fn _x_to_value(r, sx) {
+        let kr = this._knob_radius()
+        let span = r[2] - kr * 2
+        if span <= 0 { return this.min }
+        mut frac = (sx - r[0] - kr) * 1.0 / span
+        if frac < 0 { frac = 0 }
+        if frac > 1 { frac = 1 }
+        let raw = this.min + frac * (this.max - this.min)
+        return int(raw / this.step) * this.step
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let track_y = this._track_y(r)
+        fill_rect(fb, r[0], track_y, r[2], 3, theme_color(t, "border"))
+        -- Filled portion of the track
+        let knob_x = this._value_to_x(r)
+        fill_rect(fb, r[0], track_y, knob_x - r[0], 3, theme_color(t, "accent"))
+        -- Knob
+        let kr = this._knob_radius()
+        circle(fb, knob_x, r[1] + r[3] / 2, kr, theme_color(t, "accent"))
+        if this.focused {
+            rect(fb, knob_x - kr - 1, r[1] + r[3] / 2 - kr - 1, kr * 2 + 2, kr * 2 + 2, theme_color(t, "focus_ring"))
+        }
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        let r = this.screen_rect()
+        if kind == "mouse" {
+            if event.is_press {
+                this._dragging = true
+                this.focus()
+                this.set_value(this._x_to_value(r, event.x))
+                return true
+            }
+            if event.is_release and this._dragging {
+                this._dragging = false
+                return true
+            }
+            if event.is_motion and this._dragging {
+                this.set_value(this._x_to_value(r, event.x))
+                return true
+            }
+        }
+        if kind == "key" and this.focused and event.is_press {
+            if event.name == "Left"  { this.set_value(this.value - this.step); return true }
+            if event.name == "Right" { this.set_value(this.value + this.step); return true }
+            if event.name == "Home"  { this.set_value(this.min); return true }
+            if event.name == "End"   { this.set_value(this.max); return true }
+        }
+        return false
+    }
+}
+
+fn slider(min_v, max_v) { return Slider(min_v, max_v) }
+
+-- ── TextInput ──────────────────────────────────────────
+-- Single-line editable text. Supports Backspace, arrow keys, Home, End,
+-- Delete, and printable characters from KeyEvent.char.
+
+class TextInput < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "textbox"
+        this.focusable = true
+        this.text = ""
+        this.cursor = 0
+        this.placeholder = ""
+        this.padding_x = 6
+        this.padding_y = 4
+    }
+
+    fn preferred_size() {
+        let f = theme_font(this.theme())
+        return [120, f.height + this.padding_y * 2]
+    }
+
+    fn set_text(s) {
+        this.text = s ?? ""
+        if this.cursor > len(this.text) { this.cursor = len(this.text) }
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "surface"))
+        let border_c = if this.focused { theme_color(t, "focus_ring") } else { theme_color(t, "border") }
+        rect(fb, r[0], r[1], r[2], r[3], border_c)
+        let display = this.text
+        let fg = theme_color(t, "foreground")
+        if len(display) == 0 {
+            display = this.placeholder
+            fg = theme_color(t, "foreground_muted")
+        }
+        draw_text(fb, r[0] + this.padding_x, r[1] + this.padding_y, display, f, fg)
+        if this.focused and len(this.text) > 0 {
+            let prefix = substring(this.text, 0, this.cursor)
+            let m = measure_text(f, prefix)
+            let cx = r[0] + this.padding_x + m[0]
+            line(fb, cx, r[1] + this.padding_y, cx, r[1] + r[3] - this.padding_y, theme_color(t, "foreground"))
+        } elif this.focused {
+            let cx = r[0] + this.padding_x
+            line(fb, cx, r[1] + this.padding_y, cx, r[1] + r[3] - this.padding_y, theme_color(t, "foreground"))
+        }
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_press {
+            this.focus()
+            return true
+        }
+        if kind != "key" or not this.focused or not event.is_press { return false }
+        let n = len(this.text)
+        if event.name == "Backspace" {
+            if this.cursor > 0 {
+                this.text = substring(this.text, 0, this.cursor - 1) + substring(this.text, this.cursor, n)
+                this.cursor -= 1
+            }
+            return true
+        }
+        if event.name == "Delete" {
+            if this.cursor < n {
+                this.text = substring(this.text, 0, this.cursor) + substring(this.text, this.cursor + 1, n)
+            }
+            return true
+        }
+        if event.name == "Left"  { if this.cursor > 0 { this.cursor -= 1 }; return true }
+        if event.name == "Right" { if this.cursor < n { this.cursor += 1 }; return true }
+        if event.name == "Home"  { this.cursor = 0; return true }
+        if event.name == "End"   { this.cursor = n; return true }
+        if event.char != null {
+            this.text = substring(this.text, 0, this.cursor) + event.char + substring(this.text, this.cursor, n)
+            this.cursor += 1
+            if this._click_handler != null { this._click_handler(this) }
+            return true
+        }
+        return false
+    }
+}
+
+fn text_input() { return TextInput() }
+
+-- ── ScrollView ─────────────────────────────────────────
+-- Single scrollable child, with vertical scroll bar. The child reports
+-- its preferred size; if larger than the viewport, scrolling kicks in.
+
+class ScrollView < Widget {
+    fn init() {
+        this._setup_widget()
+        this.role = "scrollview"
+        this.focusable = true
+        this.scroll_y = 0
+        this.scroll_step = 32
+    }
+
+    fn set_content(child) {
+        for c in this.children { this.remove(c) }
+        this.add(child)
+    }
+
+    fn _content() {
+        if len(this.children) == 0 { return null }
+        return this.children[0]
+    }
+
+    fn _content_h() {
+        let c = this._content()
+        if c == null { return 0 }
+        let p = c.preferred_size()
+        return p[1]
+    }
+
+    fn _max_scroll() {
+        let ch = this._content_h()
+        if ch <= this.height { return 0 }
+        return ch - this.height
+    }
+
+    fn relayout() {
+        let c = this._content()
+        if c != null {
+            let p = c.preferred_size()
+            -- Lay the child out at its full preferred height, offset by
+            -- the scroll position.
+            c.set_bounds(0, 0 - this.scroll_y, this.width, p[1])
+            c.relayout()
+        }
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "background"))
+        -- Vertical scroll-bar track + thumb (only when needed)
+        let max = this._max_scroll()
+        if max > 0 {
+            let bar_w = 6
+            let bar_x = r[0] + r[2] - bar_w - 2
+            fill_rect(fb, bar_x, r[1] + 2, bar_w, r[3] - 4, theme_color(t, "border"))
+            let content_h = this._content_h()
+            let thumb_h = (r[3] - 4) * r[3] / content_h
+            if thumb_h < 16 { thumb_h = 16 }
+            let scroll_range = r[3] - 4 - thumb_h
+            let thumb_y = r[1] + 2 + int(scroll_range * this.scroll_y / max)
+            fill_rect(fb, bar_x, thumb_y, bar_w, thumb_h, theme_color(t, "accent"))
+        }
+    }
+
+    fn scroll_by(dy) {
+        let max = this._max_scroll()
+        this.scroll_y += dy
+        if this.scroll_y < 0 { this.scroll_y = 0 }
+        if this.scroll_y > max { this.scroll_y = max }
+        this.relayout()
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_scroll {
+            -- One scroll notch = scroll_step px in the opposite direction
+            this.scroll_by(0 - event.scroll_y * this.scroll_step)
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press {
+            if event.name == "Down" or event.name == "PageDown" {
+                let step = if event.name == "PageDown" { this.height } else { this.scroll_step }
+                this.scroll_by(step); return true
+            }
+            if event.name == "Up" or event.name == "PageUp" {
+                let step = if event.name == "PageUp" { this.height } else { this.scroll_step }
+                this.scroll_by(0 - step); return true
+            }
+            if event.name == "Home" { this.scroll_by(0 - this.scroll_y); return true }
+            if event.name == "End"  { this.scroll_by(this._max_scroll()); return true }
+        }
+        return false
+    }
+}
+
+fn scroll_view() { return ScrollView() }
+
+-- ── ListView ───────────────────────────────────────────
+-- A simple vertical list of selectable string items.
+
+class ListView < Widget {
+    fn init(items) {
+        this._setup_widget()
+        this.role = "listbox"
+        this.focusable = true
+        this.items = items ?? []
+        this.selected = -1
+        this.row_height = 24
+    }
+
+    fn set_items(items) {
+        this.items = items
+        if this.selected >= len(items) { this.selected = -1 }
+    }
+
+    fn preferred_size() {
+        return [120, len(this.items) * this.row_height]
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "surface"))
+        let border_c = if this.focused { theme_color(t, "focus_ring") } else { theme_color(t, "border") }
+        rect(fb, r[0], r[1], r[2], r[3], border_c)
+        mut i = 0
+        while i < len(this.items) {
+            let row_y = r[1] + i * this.row_height
+            if row_y >= r[1] + r[3] { break }
+            if i == this.selected {
+                fill_rect(fb, r[0] + 1, row_y, r[2] - 2, this.row_height, theme_color(t, "accent"))
+            }
+            let m = measure_text(f, this.items[i])
+            draw_text(fb, r[0] + 8, row_y + (this.row_height - m[1]) / 2, this.items[i], f, theme_color(t, "foreground"))
+            i += 1
+        }
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        let r = this.screen_rect()
+        if kind == "mouse" and event.is_press {
+            this.focus()
+            let local_y = event.y - r[1]
+            let idx = int(local_y / this.row_height)
+            if idx >= 0 and idx < len(this.items) {
+                this.selected = idx
+                if this._click_handler != null { this._click_handler(this) }
+            }
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press {
+            if event.name == "Down" {
+                if this.selected < len(this.items) - 1 { this.selected += 1 }
+                if this._click_handler != null { this._click_handler(this) }
+                return true
+            }
+            if event.name == "Up" {
+                if this.selected > 0 { this.selected -= 1 }
+                if this._click_handler != null { this._click_handler(this) }
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn list_view(items) { return ListView(items) }
+
+-- Local helper duplicated from ui.clarity (modules can't re-import each
+-- other's private helpers cleanly without circular deps).
+fn _event_kind_local(event) {
+    let t = type(event)
+    if t == "MouseEvent" { return "mouse" }
+    if t == "KeyEvent" { return "key" }
+    if t == "TouchEvent" { return "touch" }
+    return "unknown"
+}
