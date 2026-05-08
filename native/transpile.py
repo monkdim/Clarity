@@ -707,6 +707,7 @@ def transpile_with_runtime(path):
         '  _ffi_write_u32, _ffi_write_i32, _ffi_write_u64, _ffi_write_i64,\n'
         '  _ffi_write_f32, _ffi_write_f64,\n'
         '  _ffi_callback, _ffi_callback_close,\n'
+        '  _ffi_fill_u32, _ffi_copy, _ffi_write_buffer, _ffi_read_buffer,\n'
         '  formatClarityError, clarityMain\n'
         '} from "./runtime.js";\n\n'
     )
@@ -764,6 +765,7 @@ def bundle(compile_native=False):
         'highlight.clarity', 'completer.clarity', 'pretty.clarity', 'claude.clarity',
         'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
         'transpile.clarity',
+        'graphics.clarity', 'draw.clarity', 'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
         'install.clarity',
