@@ -36,7 +36,7 @@ let IO_SECTION = {
 let TYPE_SECTION = {
     label: "Type conversions",
     fns: [
-        {name: "$int", params: "v", body: "if (typeof v === 'string') return parseInt(v, 10) || 0;\n  return Math.trunc(Number(v));"},
+        {name: "$int", params: "v", body: "if (typeof v === 'string') {\n    const s = v.trim();\n    if (/^[+-]?0x/i.test(s)) return parseInt(s, 16) || 0;\n    if (/^[+-]?0o/i.test(s)) return parseInt(s.replace(/0o/i, ''), 8) || 0;\n    if (/^[+-]?0b/i.test(s)) return parseInt(s.replace(/0b/i, ''), 2) || 0;\n    return parseInt(s, 10) || 0;\n  }\n  return Math.trunc(Number(v));"},
         {name: "$float", params: "v", body: "return parseFloat(v);"},
         {name: "str", params: "v", body: "return display(v);"},
         {name: "$bool", params: "v", body: "return truthy(v);"},
@@ -317,7 +317,11 @@ let FFI_SECTION = {
         {name: "_ffi_write_f32", params: "p, offset, val", body: "_ffi_view(p).setFloat32(offset, val, true);"},
         {name: "_ffi_write_f64", params: "p, offset, val", body: "_ffi_view(p).setFloat64(offset, val, true);"},
         {name: "_ffi_callback", params: "fn, args, ret", body: "const cb = new JSCallback(fn, {\n    args: (args || []).map($ffi_type),\n    returns: $ffi_type(ret || 'void'),\n  });\n  return { addr: cb.ptr, _callback: cb };"},
-        {name: "_ffi_callback_close", params: "handle", body: "if (handle && handle._callback) {\n    handle._callback.close();\n    handle._callback = null;\n  }"}
+        {name: "_ffi_callback_close", params: "handle", body: "if (handle && handle._callback) {\n    handle._callback.close();\n    handle._callback = null;\n  }"},
+        {name: "_ffi_fill_u32", params: "p, byte_offset, count, value", body: "if (!p || !p._buffer) throw new Error('FFIError: fill_u32 requires a runtime-allocated pointer');\n  const buf = p._buffer;\n  const pattern = Buffer.alloc(4);\n  pattern.writeUInt32LE((value >>> 0), 0);\n  buf.fill(pattern, byte_offset, byte_offset + count * 4);"},
+        {name: "_ffi_copy", params: "dst, dst_offset, src, src_offset, length", body: "if (!dst || !dst._buffer) throw new Error('FFIError: copy destination must be a runtime-allocated pointer');\n  const dbuf = dst._buffer;\n  if (src && src._buffer) { src._buffer.copy(dbuf, dst_offset, src_offset, src_offset + length); return; }\n  const addr = _ffi_addr(src);\n  for (let i = 0; i < length; i++) { dbuf[dst_offset + i] = bunRead.u8(addr, src_offset + i); }"},
+        {name: "_ffi_write_buffer", params: "p, path", body: "if (!p || !p._buffer) throw new Error('FFIError: write_buffer requires a runtime-allocated pointer');\n  writeFileSync(path, p._buffer);"},
+        {name: "_ffi_read_buffer", params: "path", body: "const data = readFileSync(path);\n  return { _buffer: data, size: data.length };"}
     ]
 }
 

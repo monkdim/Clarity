@@ -1,0 +1,265 @@
+-- Graphics & draw tests — exercises the Phase 57 Framebuffer + 2D primitives.
+
+from "graphics.clarity" import Framebuffer, framebuffer, rgb, rgba, BLACK, WHITE, RED, GREEN, BLUE, red_of, green_of, blue_of, alpha_of
+from "ffi.clarity" import Pointer
+from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: {msg} (expected {expected}, got {actual})"
+    }
+}
+
+-- ── Color packing ───────────────────────────────────────
+
+show "-- Graphics: color packing --"
+
+let red = rgb(255, 0, 0)
+assert_eq(red_of(red), 255, "red component")
+assert_eq(green_of(red), 0, "green component zero")
+assert_eq(blue_of(red), 0, "blue component zero")
+assert_eq(alpha_of(red), 255, "rgb defaults to alpha 255")
+
+let semi = rgba(10, 20, 30, 128)
+assert_eq(red_of(semi), 10, "rgba red")
+assert_eq(green_of(semi), 20, "rgba green")
+assert_eq(blue_of(semi), 30, "rgba blue")
+assert_eq(alpha_of(semi), 128, "rgba alpha")
+
+assert_eq(BLACK, 0xFF000000, "BLACK constant")
+assert_eq(WHITE, 0xFFFFFFFF, "WHITE constant")
+
+-- ── Framebuffer basics ──────────────────────────────────
+
+show "-- Graphics: Framebuffer init --"
+
+let fb = framebuffer(64, 48)
+assert_eq(fb.width, 64, "width")
+assert_eq(fb.height, 48, "height")
+assert_eq(fb.stride, 256, "stride = width * 4")
+assert_eq(fb.size, 64 * 48 * 4, "buffer size")
+
+show "-- Graphics: put/get_pixel --"
+
+fb.put_pixel(10, 5, RED)
+assert_eq(fb.get_pixel(10, 5), RED, "put then get")
+fb.put_pixel(10, 5, GREEN)
+assert_eq(fb.get_pixel(10, 5), GREEN, "overwrite")
+
+-- Out-of-bounds reads return 0, writes are silently ignored
+assert_eq(fb.get_pixel(-1, 0), 0, "oob negative x")
+assert_eq(fb.get_pixel(64, 0), 0, "oob right edge")
+assert_eq(fb.get_pixel(0, 48), 0, "oob bottom edge")
+fb.put_pixel(-1, 0, RED)
+fb.put_pixel(100, 100, RED)
+assert_eq(fb.get_pixel(0, 0), 0, "oob writes don't bleed in")
+
+-- ── clear / fill_rect ───────────────────────────────────
+
+show "-- Graphics: clear --"
+
+fb.clear(BLUE)
+assert_eq(fb.get_pixel(0, 0), BLUE, "clear top-left")
+assert_eq(fb.get_pixel(63, 47), BLUE, "clear bottom-right")
+assert_eq(fb.get_pixel(32, 24), BLUE, "clear middle")
+
+show "-- Graphics: fill_rect --"
+
+fb.clear(BLACK)
+fb.fill_rect(10, 10, 20, 15, RED)
+assert_eq(fb.get_pixel(9, 10), BLACK, "outside left")
+assert_eq(fb.get_pixel(10, 10), RED, "inside top-left")
+assert_eq(fb.get_pixel(29, 24), RED, "inside bottom-right")
+assert_eq(fb.get_pixel(30, 24), BLACK, "outside right")
+assert_eq(fb.get_pixel(10, 25), BLACK, "outside below")
+
+-- Rect that overlaps the edge is clipped, not crashed
+fb.clear(BLACK)
+fb.fill_rect(60, 45, 10, 10, GREEN)
+assert_eq(fb.get_pixel(60, 45), GREEN, "clipped fill_rect (corner)")
+assert_eq(fb.get_pixel(63, 47), GREEN, "clipped fill_rect (edge)")
+
+-- ── stroke_rect outline ─────────────────────────────────
+
+show "-- Graphics: stroke_rect --"
+
+fb.clear(BLACK)
+fb.stroke_rect(5, 5, 10, 8, WHITE)
+assert_eq(fb.get_pixel(5, 5), WHITE, "stroke top-left corner")
+assert_eq(fb.get_pixel(14, 5), WHITE, "stroke top-right corner")
+assert_eq(fb.get_pixel(5, 12), WHITE, "stroke bottom-left corner")
+assert_eq(fb.get_pixel(14, 12), WHITE, "stroke bottom-right corner")
+assert_eq(fb.get_pixel(10, 8), BLACK, "stroke interior is empty")
+
+-- ── Bresenham line ──────────────────────────────────────
+
+show "-- Draw: line (Bresenham) --"
+
+fb.clear(BLACK)
+line(fb, 0, 0, 10, 0, RED)
+assert_eq(fb.get_pixel(0, 0), RED, "horiz line start")
+assert_eq(fb.get_pixel(10, 0), RED, "horiz line end")
+assert_eq(fb.get_pixel(5, 0), RED, "horiz line middle")
+
+fb.clear(BLACK)
+line(fb, 0, 0, 0, 10, RED)
+assert_eq(fb.get_pixel(0, 0), RED, "vert line start")
+assert_eq(fb.get_pixel(0, 10), RED, "vert line end")
+
+fb.clear(BLACK)
+line(fb, 0, 0, 10, 10, RED)
+assert_eq(fb.get_pixel(0, 0), RED, "diagonal start")
+assert_eq(fb.get_pixel(10, 10), RED, "diagonal end")
+assert_eq(fb.get_pixel(5, 5), RED, "diagonal middle")
+
+fb.clear(BLACK)
+line(fb, 10, 5, 0, 5, BLUE)
+assert_eq(fb.get_pixel(10, 5), BLUE, "reverse horiz start")
+assert_eq(fb.get_pixel(0, 5), BLUE, "reverse horiz end")
+assert_eq(fb.get_pixel(5, 5), BLUE, "reverse horiz middle")
+
+-- ── hline / vline shortcuts ─────────────────────────────
+
+show "-- Draw: hline / vline --"
+
+fb.clear(BLACK)
+hline(fb, 5, 5, 10, GREEN)
+assert_eq(fb.get_pixel(5, 5), GREEN, "hline left")
+assert_eq(fb.get_pixel(10, 5), GREEN, "hline right")
+assert_eq(fb.get_pixel(7, 5), GREEN, "hline middle")
+assert_eq(fb.get_pixel(11, 5), BLACK, "hline doesn't overshoot")
+
+fb.clear(BLACK)
+vline(fb, 5, 10, 5, RED)
+assert_eq(fb.get_pixel(5, 5), RED, "vline reverse top")
+assert_eq(fb.get_pixel(5, 10), RED, "vline reverse bottom")
+
+-- ── circle_outline / circle ─────────────────────────────
+
+show "-- Draw: circle outline --"
+
+fb.clear(BLACK)
+circle_outline(fb, 32, 24, 10, WHITE)
+assert_eq(fb.get_pixel(32 + 10, 24), WHITE, "outline +x")
+assert_eq(fb.get_pixel(32 - 10, 24), WHITE, "outline -x")
+assert_eq(fb.get_pixel(32, 24 + 10), WHITE, "outline +y")
+assert_eq(fb.get_pixel(32, 24 - 10), WHITE, "outline -y")
+assert_eq(fb.get_pixel(32, 24), BLACK, "outline does not fill centre")
+
+show "-- Draw: filled circle --"
+
+fb.clear(BLACK)
+circle(fb, 32, 24, 8, GREEN)
+assert_eq(fb.get_pixel(32, 24), GREEN, "filled centre")
+assert_eq(fb.get_pixel(32 + 7, 24), GREEN, "filled near edge +x")
+assert_eq(fb.get_pixel(32, 24 + 7), GREEN, "filled near edge +y")
+assert_eq(fb.get_pixel(32 + 9, 24), BLACK, "outside circle")
+
+-- ── rounded_rect ────────────────────────────────────────
+
+show "-- Draw: rounded_rect --"
+
+fb.clear(BLACK)
+rounded_rect(fb, 10, 10, 30, 20, 5, RED)
+-- Centre is filled
+assert_eq(fb.get_pixel(25, 20), RED, "rounded centre")
+-- Top edge is filled
+assert_eq(fb.get_pixel(20, 10), RED, "top edge")
+-- Corner pixel is OUTSIDE the rounded shape
+assert_eq(fb.get_pixel(10, 10), BLACK, "corner is rounded off")
+-- Inset corner pixel IS filled
+assert_eq(fb.get_pixel(15, 15), RED, "inset filled")
+
+-- ── polygon / polyline ──────────────────────────────────
+
+show "-- Draw: polygon --"
+
+fb.clear(BLACK)
+let triangle = [[5, 5], [25, 5], [15, 20]]
+polygon(fb, triangle, RED)
+
+assert_eq(fb.get_pixel(5, 5), RED, "polygon vertex 0")
+assert_eq(fb.get_pixel(25, 5), RED, "polygon vertex 1")
+assert_eq(fb.get_pixel(15, 20), RED, "polygon vertex 2")
+assert_eq(fb.get_pixel(15, 5), RED, "polygon edge midpoint")
+
+fb.clear(BLACK)
+polyline(fb, [[0, 0], [10, 0], [10, 10]], BLUE)
+assert_eq(fb.get_pixel(0, 0), BLUE, "polyline start")
+assert_eq(fb.get_pixel(10, 0), BLUE, "polyline corner")
+assert_eq(fb.get_pixel(10, 10), BLUE, "polyline end")
+
+-- ── arc (sampled) ───────────────────────────────────────
+
+show "-- Draw: arc --"
+
+fb.clear(BLACK)
+-- 0° to 90° arc draws the bottom-right quadrant of a circle
+arc(fb, 32, 24, 8, 0, 90, RED)
+assert_eq(fb.get_pixel(32 + 8, 24), RED, "arc at 0°")
+assert_eq(fb.get_pixel(32, 24 + 8), RED, "arc at 90°")
+assert_eq(fb.get_pixel(32 - 8, 24), BLACK, "arc avoids 180°")
+assert_eq(fb.get_pixel(32, 24 - 8), BLACK, "arc avoids 270°")
+
+-- ── blit between framebuffers ───────────────────────────
+
+show "-- Graphics: blit --"
+
+let src = framebuffer(8, 8)
+src.clear(BLACK)
+src.fill_rect(2, 2, 4, 4, GREEN)
+
+let dst = framebuffer(32, 32)
+dst.clear(WHITE)
+dst.blit(src, 0, 0, 10, 10, 8, 8)
+-- The green square inside src lands at dst (10+2, 10+2) .. (10+5, 10+5)
+assert_eq(dst.get_pixel(12, 12), GREEN, "blit green inner pixel")
+assert_eq(dst.get_pixel(10, 10), BLACK, "blit black border pixel")
+assert_eq(dst.get_pixel(9, 9), WHITE, "blit doesn't touch outside")
+
+-- ── BMP round-trip (header sanity) ──────────────────────
+
+show "-- Graphics: save_bmp --"
+
+let small = framebuffer(4, 3)
+small.clear(BLACK)
+small.put_pixel(0, 0, RED)
+small.put_pixel(3, 2, BLUE)
+
+let bmp_path = "/tmp/_clarity_test_graphics.bmp"
+small.save_bmp(bmp_path)
+assert(exists(bmp_path), "save_bmp creates a file")
+
+-- Read the file as raw bytes (binary, not UTF-8) and verify the BMP
+-- signature, geometry, and overall size.
+let bmp_handle = _ffi_read_buffer(bmp_path)
+let bmp = Pointer(bmp_handle)
+assert_eq(bmp.read_u8(0), 66, "BMP magic 'B'")
+assert_eq(bmp.read_u8(1), 77, "BMP magic 'M'")
+assert_eq(bmp.read_u32(2), 14 + 40 + 4 * 3 * 4, "BMP file size header")
+assert_eq(bmp.read_u32(10), 54, "BMP pixel offset")
+assert_eq(bmp.read_u32(14), 40, "BMP DIB header size")
+assert_eq(bmp.read_i32(18), 4, "BMP width = 4")
+assert_eq(bmp.read_i32(22), 3, "BMP height = 3")
+assert_eq(bmp.read_u16(26), 1, "BMP planes = 1")
+assert_eq(bmp.read_u16(28), 32, "BMP bits-per-pixel = 32")
+assert_eq(bmp_handle.size, 14 + 40 + 4 * 3 * 4, "BMP total file size")
+
+-- Cleanup
+exec("rm -f " + bmp_path)
+
+-- ── Summary ─────────────────────────────────────────────
+
+show ""
+show "Graphics: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " graphics test(s) failed" }

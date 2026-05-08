@@ -45,7 +45,13 @@ export function lines(path) { return readFileSync(path, 'utf-8').split('\n'); }
 // ── Type conversions ─────────────────────────────────────
 
 export function $int(v) {
-  if (typeof v === 'string') return parseInt(v, 10) || 0;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (/^[+-]?0x/i.test(s)) return parseInt(s, 16) || 0;
+    if (/^[+-]?0o/i.test(s)) return parseInt(s.replace(/0o/i, ''), 8) || 0;
+    if (/^[+-]?0b/i.test(s)) return parseInt(s.replace(/0b/i, ''), 2) || 0;
+    return parseInt(s, 10) || 0;
+  }
   return Math.trunc(Number(v));
 }
 
@@ -608,6 +614,52 @@ export function _ffi_write_i64(p, offset, val) { _ffi_view(p).setBigInt64(offset
 export function _ffi_write_u64(p, offset, val) { _ffi_view(p).setBigUint64(offset, BigInt(val), true); }
 export function _ffi_write_f32(p, offset, val) { _ffi_view(p).setFloat32(offset, val, true); }
 export function _ffi_write_f64(p, offset, val) { _ffi_view(p).setFloat64(offset, val, true); }
+
+// Bulk fill a region of an owned pointer with a u32 pattern. Much faster
+// than calling write_u32 in a Clarity loop — used by Framebuffer.clear and
+// fill_rect to set hundreds of thousands of pixels at native speed.
+export function _ffi_fill_u32(p, byte_offset, count, value) {
+  if (!p || !p._buffer) {
+    throw new Error('FFIError: fill_u32 requires a runtime-allocated pointer');
+  }
+  const buf = p._buffer;
+  const pattern = Buffer.alloc(4);
+  pattern.writeUInt32LE((value >>> 0), 0);
+  // Buffer.fill repeats the 4-byte pattern across [start, end).
+  buf.fill(pattern, byte_offset, byte_offset + count * 4);
+}
+
+// Bulk copy from one owned (or wrapped) pointer to an owned destination.
+export function _ffi_copy(dst, dst_offset, src, src_offset, length) {
+  if (!dst || !dst._buffer) {
+    throw new Error('FFIError: copy destination must be a runtime-allocated pointer');
+  }
+  const dbuf = dst._buffer;
+  if (src && src._buffer) {
+    src._buffer.copy(dbuf, dst_offset, src_offset, src_offset + length);
+    return;
+  }
+  // Foreign source — pull bytes one at a time through bunRead.
+  const addr = _ffi_addr(src);
+  for (let i = 0; i < length; i++) {
+    dbuf[dst_offset + i] = bunRead.u8(addr, src_offset + i);
+  }
+}
+
+// Write the buffer's bytes to a file path. Useful for save_bmp and friends.
+export function _ffi_write_buffer(p, path) {
+  if (!p || !p._buffer) {
+    throw new Error('FFIError: write_buffer requires a runtime-allocated pointer');
+  }
+  writeFileSync(path, p._buffer);
+}
+
+// Read a file as raw bytes into a Pointer-shaped handle. Handy for
+// inspecting binary outputs and as a building block for image loaders.
+export function _ffi_read_buffer(path) {
+  const data = readFileSync(path);
+  return { _buffer: data, size: data.length };
+}
 
 // Drop the JS-side buffer reference. The OS-level memory is reclaimed by GC.
 // For pointers we didn't allocate (no _buffer), this is a no-op.
