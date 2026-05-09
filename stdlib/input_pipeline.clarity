@@ -1,0 +1,107 @@
+-- Input pipeline — kernel scancodes → keymap → InputBus events
+-- (Phase 72 task 3).
+--
+-- The kernel's PS/2 driver pushes scancodes into a ring buffer.
+-- Userspace's clarity-init reads from /dev/tty0 (canonical mode for
+-- shell input) and from /dev/input0 (raw scancodes for the desktop
+-- session). This pipeline tracks the modifier state, translates
+-- scancodes via the existing keymap module, and dispatches the
+-- result onto the existing InputBus from Phase 58.
+
+from "keymap.clarity" import Modifiers, KEY_LEFTSHIFT, KEY_RIGHTSHIFT, KEY_LEFTCTRL, KEY_RIGHTCTRL, KEY_LEFTALT, KEY_RIGHTALT, KEY_LEFTMETA, KEY_RIGHTMETA, KEY_CAPSLOCK, decode_key
+
+let EV_KEY = 1
+let KEY_RELEASE = 0
+let KEY_PRESS = 1
+
+let EVENT_KEY = "key"
+let EVENT_MOUSE = "mouse"
+let EVENT_TOUCH = "touch"
+
+-- Source of input bytes: anything with `read_scancodes() -> [int]`.
+class ScancodeSource {
+    fn init() { this.queue = [] }
+    fn push(scancode, is_press) { push(this.queue, {"code": scancode, "press": is_press}) }
+    fn read_scancodes() {
+        let out = this.queue
+        this.queue = []
+        return out
+    }
+}
+
+fn scancode_source() { return ScancodeSource() }
+
+-- ── Pipeline ─────────────────────────────────
+
+class InputPipeline {
+    fn init(source, bus) {
+        this.source = source
+        this.bus = bus                  -- has dispatch_byte / on_key / on_mouse
+        this.modifiers = Modifiers()
+        this.event_count = 0
+        this.events = []                -- last-N captured for tests
+    }
+
+    -- One pump cycle: drain all pending scancodes from the source,
+    -- translate, dispatch, capture.
+    fn pump() {
+        let raws = this.source.read_scancodes()
+        for ev in raws {
+            this._handle_scancode(ev["code"], ev["press"])
+        }
+        return len(raws)
+    }
+
+    fn _handle_scancode(code, is_press) {
+        -- Update our tracker first so the snapshot in `event` reflects
+        -- the post-this-event state. decode_key reads modifiers as
+        -- they were *before* this scancode arrived, so we update
+        -- after dispatching for the keypress itself.
+        let raw_event = {
+            "type": EV_KEY,
+            "code": code,
+            "value": if is_press { KEY_PRESS } else { KEY_RELEASE }
+        }
+        let decoded = decode_key(raw_event, this.modifiers)
+        -- Mirror the modifier update decode_key would have done.
+        this.modifiers.update(raw_event)
+        let event = {
+            "kind": EVENT_KEY,
+            "code": code,
+            "press": is_press,
+            "char": if decoded != null { decoded.char } else { null },
+            "name": if decoded != null { decoded.name } else { null },
+            "shift": this.modifiers.shift,
+            "ctrl": this.modifiers.ctrl,
+            "alt": this.modifiers.alt,
+            "meta": this.modifiers.meta
+        }
+        this._dispatch(event)
+    }
+
+    fn _dispatch(event) {
+        this.event_count = this.event_count + 1
+        push(this.events, event)
+        if len(this.events) > 256 {
+            mut next = []
+            mut i = 1
+            while i < len(this.events) { push(next, this.events[i]); i = i + 1 }
+            this.events = next
+        }
+        if this.bus != null and event["kind"] == EVENT_KEY {
+            this.bus.on_key(event)
+        }
+    }
+
+    -- Inject a raw byte stream (what we'd get from /dev/tty0 in
+    -- canonical mode) — bypasses the scancode translator and feeds
+    -- characters directly to the bus's text-input listeners.
+    fn dispatch_text_byte(byte) {
+        let event = {"kind": "text", "char": from_char_code(byte), "byte": byte}
+        push(this.events, event)
+        this.event_count = this.event_count + 1
+        if this.bus != null { this.bus.on_text(event) }
+    }
+}
+
+fn input_pipeline(source, bus) { return InputPipeline(source, bus) }
