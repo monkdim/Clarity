@@ -1,0 +1,286 @@
+-- /bin/clarity-init — userspace bootstrap for ClarityOS
+-- (Phase 72 task 1).
+--
+-- The first user process. The kernel `spawn_user`s us; we
+-- coordinate everything else: mount the filesystem tree, start the
+-- service supervisor, run the input pipeline, spawn the desktop
+-- session.
+--
+-- Designed to be testable via injected backends — the test suite
+-- swaps in a FakeSyscall + FakeProcessTable + FakeInputBus and
+-- drives the same boot sequence the real kernel would.
+
+let DEFAULT_CONFIG_PATH = "/etc/clarity-os.toml"
+
+let MOUNT_ROOT = {"target": "/", "fs": "tmpfs", "flags": "rw"}
+let MOUNT_DEV = {"target": "/dev", "fs": "devfs", "flags": "ro,nodev"}
+let MOUNT_PROC = {"target": "/proc", "fs": "procfs", "flags": "ro"}
+let MOUNT_TMP = {"target": "/tmp", "fs": "tmpfs", "flags": "rw,nosuid,nodev,size=64m"}
+
+let DEFAULT_MOUNTS = [MOUNT_ROOT, MOUNT_DEV, MOUNT_PROC, MOUNT_TMP]
+
+let DEFAULT_SERVICES = [
+    {"name": "logger",      "deps": [],                       "restart": "always",
+     "cmd": "/bin/clarity-logger"},
+    {"name": "input",       "deps": ["logger"],               "restart": "always",
+     "cmd": "/bin/clarity-input"},
+    {"name": "compositor",  "deps": ["logger", "input"],      "restart": "always",
+     "cmd": "/bin/clarity-compositor"},
+    {"name": "window-mgr",  "deps": ["compositor"],           "restart": "always",
+     "cmd": "/bin/clarity-wm"},
+    {"name": "shell",       "deps": ["window-mgr"],           "restart": "always",
+     "cmd": "/bin/clarity-shell"},
+    {"name": "launcher",    "deps": ["shell"],                "restart": "on-failure",
+     "cmd": "/bin/clarity-launcher"}
+]
+
+let STATE_BOOT = "boot"
+let STATE_MOUNTING = "mounting"
+let STATE_SUPERVISING = "supervising"
+let STATE_RUNNING = "running"
+let STATE_SHUTDOWN = "shutdown"
+
+class InitApp {
+    fn init(syscall_backend, process_table, input_bus, opts) {
+        let o = opts ?? {}
+        this.syscall = syscall_backend
+        this.process_table = process_table
+        this.input_bus = input_bus
+        this.config_path = if has(o, "config") { o["config"] } else { DEFAULT_CONFIG_PATH }
+        this.mount_plan = if has(o, "mounts") { o["mounts"] } else { DEFAULT_MOUNTS }
+        this.service_specs = if has(o, "services") { o["services"] } else { DEFAULT_SERVICES }
+        this.state = STATE_BOOT
+        this.mounted = []
+        this.services = {}             -- name -> {pid, state, restarts, last_exit}
+        this.boot_log = []
+        this.errors = []
+        this.config = {}
+        this.uptime_ticks = 0
+    }
+
+    -- ── Boot sequence ─────────────────────────
+
+    fn boot() {
+        this._log("clarity-init: starting (PID " + str(this.syscall.getpid()) + ")")
+        this._read_config()
+        this._mount_all()
+        this._start_services()
+        this.state = STATE_RUNNING
+        this._log("clarity-init: ready")
+        return true
+    }
+
+    fn _log(line) {
+        push(this.boot_log, line)
+        this.syscall.write(2, line + "\n")
+    }
+
+    fn _read_config() {
+        try {
+            let body = this.syscall.read_file(this.config_path)
+            this.config = _parse_simple_toml(body)
+            this._log("clarity-init: loaded " + this.config_path)
+        } catch e {
+            this._log("clarity-init: no config at " + this.config_path + " — using defaults")
+            this.config = {}
+        }
+    }
+
+    fn _mount_all() {
+        this.state = STATE_MOUNTING
+        for m in this.mount_plan {
+            let ok = this.syscall.mount(m["fs"], m["target"], m["flags"])
+            if ok {
+                push(this.mounted, m)
+                this._log("  mount " + m["fs"] + " on " + m["target"])
+            } else {
+                push(this.errors, "mount failed: " + m["target"])
+                this._log("  [error] mount " + m["target"] + " failed")
+            }
+        }
+    }
+
+    fn _start_services() {
+        this.state = STATE_SUPERVISING
+        let order = _topo_sort(this.service_specs)
+        for name in order {
+            let spec = _find_spec(this.service_specs, name)
+            this._spawn_service(spec)
+        }
+    }
+
+    fn _spawn_service(spec) {
+        let pid = this.syscall.spawn(spec["cmd"])
+        if pid <= 0 {
+            this._log("  [error] spawn " + spec["name"] + " failed")
+            this.services[spec["name"]] = {"pid": -1, "state": "failed", "restarts": 0, "last_exit": -1}
+            return false
+        }
+        this.services[spec["name"]] = {"pid": pid, "state": "running", "restarts": 0, "last_exit": null, "spec": spec}
+        this._log("  spawn " + spec["name"] + " (PID " + str(pid) + ")")
+        return true
+    }
+
+    -- ── Tick — runs the supervisor + input pump ──
+
+    fn tick() {
+        if this.state == STATE_SHUTDOWN { return }
+        this.uptime_ticks = this.uptime_ticks + 1
+        this._reap_children()
+        this._pump_input()
+    }
+
+    fn _reap_children() {
+        while true {
+            let z = this.syscall.waitpid(-1)
+            if z == null { break }
+            this._handle_child_exit(z)
+        }
+    }
+
+    fn _handle_child_exit(z) {
+        mut name = null
+        for kv in entries(this.services) {
+            if kv[1]["pid"] == z["pid"] { name = kv[0]; break }
+        }
+        if name == null { return }
+        let svc = this.services[name]
+        svc["state"] = "exited"
+        svc["last_exit"] = z["exit_code"]
+        let spec = svc["spec"]
+        let policy = if has(spec, "restart") { spec["restart"] } else { "no" }
+        let should_restart = policy == "always" or (policy == "on-failure" and z["exit_code"] != 0)
+        if should_restart {
+            svc["restarts"] = svc["restarts"] + 1
+            let new_pid = this.syscall.spawn(spec["cmd"])
+            if new_pid > 0 {
+                svc["pid"] = new_pid
+                svc["state"] = "running"
+                this._log("  restart " + name + " (PID " + str(new_pid) + ", attempt " + str(svc["restarts"]) + ")")
+            } else {
+                svc["state"] = "failed"
+                this._log("  [error] restart " + name + " failed")
+            }
+        } else {
+            this._log("  service " + name + " exited (" + str(z["exit_code"]) + "), no restart")
+        }
+    }
+
+    fn _pump_input() {
+        if this.input_bus == null { return }
+        let bytes = this.syscall.read_tty()
+        if len(bytes) == 0 { return }
+        for b in bytes { this.input_bus.dispatch_byte(b) }
+    }
+
+    -- ── Shutdown ──────────────────────────────
+
+    fn shutdown() {
+        this.state = STATE_SHUTDOWN
+        let order = _reverse(_topo_sort(this.service_specs))
+        for name in order {
+            if not has(this.services, name) { continue }
+            let svc = this.services[name]
+            if svc["pid"] > 0 { this.syscall.kill(svc["pid"], 15) }
+        }
+        this._log("clarity-init: shutdown")
+    }
+
+    -- ── Introspection ────────────────────────
+
+    fn summary() {
+        return {
+            "state": this.state,
+            "mounts": len(this.mounted),
+            "services": len(keys(this.services)),
+            "running": _count_running(this.services),
+            "uptime_ticks": this.uptime_ticks,
+            "errors": this.errors
+        }
+    }
+}
+
+fn init_app(syscall_backend, process_table, input_bus, ...rest) {
+    let opts = if len(rest) > 0 { rest[0] } else { {} }
+    return InitApp(syscall_backend, process_table, input_bus, opts)
+}
+
+-- ── Helpers ──────────────────────────────
+
+fn _topo_sort(specs) {
+    -- Kahn's algorithm on the dependency edges.
+    mut indeg = {}
+    for s in specs { indeg[s["name"]] = 0 }
+    for s in specs {
+        for d in s["deps"] {
+            if has(indeg, d) { indeg[s["name"]] = indeg[s["name"]] + 1 }
+        }
+    }
+    mut queue = []
+    for s in specs { if indeg[s["name"]] == 0 { push(queue, s["name"]) } }
+    mut order = []
+    while len(queue) > 0 {
+        let n = queue[0]
+        mut next_q = []
+        mut i = 1
+        while i < len(queue) { push(next_q, queue[i]); i = i + 1 }
+        queue = next_q
+        push(order, n)
+        for s in specs {
+            for d in s["deps"] {
+                if d == n {
+                    indeg[s["name"]] = indeg[s["name"]] - 1
+                    if indeg[s["name"]] == 0 { push(queue, s["name"]) }
+                }
+            }
+        }
+    }
+    if len(order) != len(specs) { throw "InitError: dependency cycle in service list" }
+    return order
+}
+
+fn _reverse(list) {
+    mut out = []
+    mut i = len(list) - 1
+    while i >= 0 { push(out, list[i]); i = i - 1 }
+    return out
+}
+
+fn _find_spec(specs, name) {
+    for s in specs { if s["name"] == name { return s } }
+    return null
+}
+
+fn _count_running(services) {
+    mut n = 0
+    for kv in entries(services) { if kv[1]["state"] == "running" { n = n + 1 } }
+    return n
+}
+
+fn _parse_simple_toml(text) {
+    -- Bare-bones TOML for clarity-os.toml: top-level scalars +
+    -- single-section [section] tables. We don't need the full
+    -- parser from package.clarity here.
+    mut out = {}
+    mut current = null
+    let lines = split(text, "\n")
+    for raw in lines {
+        let line = trim(raw)
+        if len(line) == 0 or starts(line, "#") { continue }
+        if starts(line, "[") and ends(line, "]") {
+            current = trim(substring(line, 1, len(line) - 1))
+            out[current] = {}
+            continue
+        }
+        if not contains(line, "=") { continue }
+        let eq = index_of(line, "=")
+        let key = trim(substring(line, 0, eq))
+        mut value = trim(substring(line, eq + 1, len(line)))
+        if starts(value, "\"") and ends(value, "\"") and len(value) >= 2 {
+            value = substring(value, 1, len(value) - 1)
+        }
+        if current == null { out[key] = value }
+        else { out[current][key] = value }
+    }
+    return out
+}

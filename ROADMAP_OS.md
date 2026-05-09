@@ -274,6 +274,22 @@
 
 ---
 
+## Phase 72 — Userspace bootstrap: `/bin/clarity-init`, procfs, input pipeline
+
+> The first user process. The kernel `spawn_user`s us; we coordinate everything else: mount the filesystem tree, start the service supervisor, run the input pipeline, spawn the desktop session.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **clarity-init bootstrap** | Done | `stdlib/init_app.clarity` — `InitApp` class. Boot sequence: read config from `/etc/clarity-os.toml`, mount tree, topo-sort the service spec list, spawn each service. `tick()` runs the supervisor (waitpid loop reaps zombies + restarts per policy) + the input pump (reads `/dev/tty0` → dispatches bytes to the InputBus). Pluggable syscall backend so the test suite drives the same boot sequence the real kernel would. |
+| 2 | **Mount tree** | Done | DEFAULT_MOUNTS = root tmpfs, /dev devfs (ro,nodev), /proc procfs (ro), /tmp tmpfs (rw,nosuid,nodev,size=64m). The mount syscall is delegated to the syscall backend; init records what was mounted and surfaces failures in `errors`. |
+| 3 | **Kernel input → event_bus pipeline** | Done | `stdlib/input_pipeline.clarity` — `InputPipeline(source, bus)`. `pump()` drains scancodes from the source, runs each through `keymap.decode_key` with the live Modifiers tracker (auto-updated via `Modifiers.update`), wraps the result as a key event {code, press, char, name, shift/ctrl/alt/meta}, dispatches to `bus.on_key`. Captures events into a 256-deep ring for tests. `dispatch_text_byte()` is the canonical-mode fast path: byte goes straight to `bus.on_text` without touching the keymap. |
+| 4 | **Service supervisor** | Done | Topo-ordered start (Kahn's algo over the dep graph; cycles throw); restart policies "always" / "on-failure" / "no" — clean exit with on-failure does *not* respawn, exit_code != 0 does; failed-to-spawn services land in state="failed" rather than crashing init. Reverse topo on `shutdown()` — SIGTERMs the launcher first, the logger last. Test suite verifies the policy with both clean-exit-no-restart and crash-then-restart paths against fresh init instances. |
+| 5 | **procfs** | Done | `kernel/fs/procfs.zig` materialises content on every read (cpuinfo from cpu count, meminfo from `pmm.stats()`, uptime from the timer's tick counter, loadavg/version constants); `op_lookup` finds top-level entries + numeric PIDs that match a live process. `stdlib/procfs.clarity` mirrors the same shape against an injected process-table snapshot for tests; supports `read("/proc/<pid>/status")` style VFS-shaped lookup that throws ENOENT for unknown paths. |
+
+**Tests:** `stdlib/test_init_app.clarity` — 65 assertions: init boot reads config, mounts in order (4 mounts), spawns services in topo order (logger first; launcher last), populates service registry; supervision reaps a logger zombie + restarts per policy, *doesn't* restart launcher on clean exit but *does* on a crash (verified on a fresh init), failed-to-spawn services marked "failed", shutdown SIGTERMs all 6 services; procfs renders cpuinfo / meminfo (loaded from injected stats) / uptime / loadavg (formatted to 2dp) / version, per-PID status / cmdline / comm, throws ENOENT on unknown PID + unknown top-level path; input pipeline translates KEY_A → "a" without shift, holding KEY_LEFTSHIFT then pressing KEY_A produces "A", modifier-only events dispatched, text-byte fast path bypasses keymap; end-to-end init.tick() pumps tty bytes into the bus.
+
+---
+
 ## Phase 75 — Polish & Ship ClarityOS 1.0
 
 > The release. (Renumbered from Phase 70; phases 70–74 finish the bare-metal port first.)

@@ -781,6 +781,7 @@ def bundle(compile_native=False):
         'kernel_abi.clarity', 'syscall.clarity', 'scheduler.clarity', 'vfs.clarity',
         'elf.clarity', 'process_model.clarity',
         'tty.clarity',
+        'init_app.clarity', 'procfs.clarity', 'input_pipeline.clarity',
         'platform.clarity',
         'mkiso.clarity', 'live_usb.clarity', 'run_vm.clarity',
         'installer.clarity', 'hardware.clarity',
