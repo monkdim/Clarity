@@ -1,0 +1,394 @@
+-- Phase 75 — polish & ship tests.
+--
+-- Performance profiler (boot timeline, frame profile percentile,
+-- memory + app launch gates), crash recovery (journal severity
+-- filtering + tail + persistence; watchdog backoff + circuit
+-- breaker; crash dialog state machine + bug-report flow), branding
+-- (typography/spacing/radius tokens + icon recipes), website
+-- generator (page count + key content), release pipeline (validate
+-- → gate → changelog → build → notes → publish, all with fakes).
+
+from "perf_profiler.clarity" import boot_profile, frame_profile, memory_profile, app_launch_profile, release_gate, TARGET_BOOT_MS, TARGET_FRAME_MS, TARGET_IDLE_RAM_MB, TARGET_APP_LAUNCH_MS
+from "crash_recovery.clarity" import journal, watchdog, crash_dialog, SEV_DEBUG, SEV_INFO, SEV_WARN, SEV_ERROR, SEV_FATAL, DIALOG_INITIAL, DIALOG_DETAILS, DIALOG_REPORTING, DIALOG_REPORTED, DIALOG_DISMISSED
+from "branding.clarity" import BRAND_NAME, BRAND_TAGLINE, BRAND_DOMAIN, typography, spacing, radius, icon_recipes
+from "website_gen.clarity" import website
+from "release.clarity" import release, GATE_PASS, GATE_FAIL
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Boot profile ────────────────────────
+
+show "-- Phase 75: boot profile --"
+
+let bp = boot_profile()
+bp.begin(0)
+bp.mark("kernel", 0)
+bp.mark("init", 800)
+bp.mark("mounts", 1100)
+bp.mark("services", 1500)
+bp.mark("desktop", 3000)
+bp.ready(3800)
+assert_eq(bp.total_ms(), 3800, "total_ms")
+assert(bp.passes_target(), "3.8s passes 5s target")
+let slow = bp.slowest_phase()
+-- services took 1500ms (1500→3000), longer than any other phase
+assert_eq(slow["name"], "services", "services is slowest")
+
+-- A slower boot trips the gate
+let bp_slow = boot_profile()
+bp_slow.begin(0); bp_slow.mark("kernel", 0); bp_slow.ready(6000)
+assert(not bp_slow.passes_target(), "6s misses 5s target")
+
+-- ── Frame profile ────────────────────
+
+show "-- Phase 75: frame profile --"
+
+let fp = frame_profile()
+mut i = 0
+while i < 60 { fp.observe(15.0); i = i + 1 }
+assert(fp.passes_target(), "60×15ms passes")
+assert(fp.fps() > 60.0, "fps over 60")
+assert_eq(fp.dropped, 0, "no dropped frames")
+
+-- Add some bad frames
+mut j = 0
+while j < 5 { fp.observe(40.0); j = j + 1 }
+assert(fp.dropped > 0, "dropped frames recorded")
+
+-- ── Memory profile ──────────────────
+
+show "-- Phase 75: memory profile --"
+
+let mp = memory_profile()
+mp.snapshot("idle", 200 * 1024, 0)
+assert(mp.passes_target(), "200MB idle under 256MB target")
+
+let mp_bad = memory_profile()
+mp_bad.snapshot("idle", 300 * 1024, 0)
+assert(not mp_bad.passes_target(), "300MB idle over target")
+
+-- ── App launch profile ──────────────
+
+show "-- Phase 75: app launch profile --"
+
+let alp = app_launch_profile()
+alp.observe("calc", 0, 100)
+alp.observe("files", 0, 180)
+alp.observe("editor", 0, 220)
+assert(alp.passes_target(), "all launches under 250ms")
+assert_eq(alp.slowest()["app"], "editor", "editor slowest")
+
+let alp_bad = app_launch_profile()
+alp_bad.observe("browser", 0, 400)
+assert(not alp_bad.passes_target(), "400ms misses 250ms")
+
+-- ── Release gate ───────────────────
+
+show "-- Phase 75: release gate --"
+
+-- Build a fresh, clean frame profile so the dropped-frame test
+-- earlier doesn't poison the gate.
+let fp_clean = frame_profile()
+mut fk = 0
+while fk < 60 { fp_clean.observe(15.0); fk = fk + 1 }
+
+let gate = release_gate(bp, fp_clean, mp, alp)
+let report = gate.report()
+assert(report["ready_for_1_0"], "gate passes for 1.0")
+assert(report["boot"]["passes"], "boot passes")
+assert(report["frame"]["passes"], "frame passes")
+assert(report["memory"]["passes"], "memory passes")
+assert(report["app_launch"]["passes"], "app_launch passes")
+
+-- Any failing component fails the gate
+let bad_gate = release_gate(bp_slow, fp_clean, mp, alp)
+assert(not bad_gate.passes(), "gate fails when boot misses target")
+
+-- ── Journal ────────────────────────
+
+show "-- Phase 75: journal --"
+
+let jrn = journal(64)
+jrn.info("init", "starting", null)
+jrn.warn("net", "no carrier", {"iface": "eth0"})
+jrn.error("compositor", "frame budget exceeded", null)
+assert_eq(len(jrn.entries), 3, "3 entries")
+assert_eq(jrn.tail(2)[0]["source"], "net", "tail returns last 2")
+
+-- Severity filtering
+jrn.set_min_severity(SEV_WARN)
+jrn.debug("x", "won't appear", null)
+jrn.info("x", "won't appear", null)
+jrn.warn("x", "appears", null)
+assert_eq(len(jrn.entries), 4, "only warn passed the filter")
+
+-- Subscriber notification
+mut received = []
+jrn.subscribe(fn(entry) { push(received, entry["message"]) })
+jrn.error("y", "subscribed event", null)
+assert_eq(len(received), 1, "subscriber notified")
+assert_eq(received[0], "subscribed event", "subscriber payload")
+
+-- Capacity rolls oldest out
+let jrn2 = journal(3)
+jrn2.info("a", "1", null); jrn2.info("a", "2", null)
+jrn2.info("a", "3", null); jrn2.info("a", "4", null)
+assert_eq(len(jrn2.entries), 3, "capped at 3")
+assert_eq(jrn2.entries[0]["message"], "2", "oldest dropped")
+
+-- ── Watchdog ───────────────────────
+
+show "-- Phase 75: watchdog --"
+
+let jrn3 = journal(64)
+let wd = watchdog({"journal": jrn3, "burst_limit": 3, "burst_window_ms": 60000, "backoff_ms": 100})
+mut spawn_count = 0
+let factory = fn(name) { spawn_count = spawn_count + 1; return 1000 + spawn_count }
+wd.register("editor", factory)
+
+-- 1st crash: scheduled with 100ms backoff
+let r1 = wd.record_crash("editor", 1, 0)
+assert(r1, "1st crash accepted")
+assert_eq(wd.state("editor"), "backoff", "state = backoff")
+
+-- tick before backoff completes: no restart yet
+wd.tick(50)
+assert_eq(spawn_count, 0, "no restart before backoff")
+
+-- tick after backoff: factory invoked
+let restarted = wd.tick(200)
+assert(contains(restarted, "editor"), "editor restarted")
+assert_eq(spawn_count, 1, "factory invoked once")
+assert_eq(wd.state("editor"), "running", "state = running after restart")
+
+-- Trip the circuit breaker: 3 crashes within window
+wd.record_crash("editor", 1, 1000)
+wd.record_crash("editor", 1, 1100)
+let trip = wd.record_crash("editor", 1, 1200)
+assert(not trip, "third crash trips breaker")
+assert_eq(wd.state("editor"), "tripped", "state = tripped")
+
+-- reset() lifts the trip
+assert(wd.reset("editor"), "reset succeeded")
+assert_eq(wd.state("editor"), "registered", "back to registered")
+
+-- ── Crash dialog ─────────────────
+
+show "-- Phase 75: crash dialog --"
+
+let dlg = crash_dialog({"source": "calc", "message": "divide by zero", "exit_code": 134})
+assert_eq(dlg.state, DIALOG_INITIAL, "starts initial")
+assert(not dlg.expanded, "details hidden initially")
+
+dlg.toggle_details()
+assert(dlg.expanded, "details expanded")
+assert_eq(dlg.state, DIALOG_DETAILS, "state = details")
+dlg.toggle_details()
+assert(not dlg.expanded, "details collapsed again")
+
+-- Dismiss path
+let action = dlg.dismiss()
+assert_eq(action["action"], "dismiss", "dismiss action")
+assert_eq(dlg.state, DIALOG_DISMISSED, "state = dismissed")
+
+-- Restart path
+let dlg2 = crash_dialog({"source": "files", "message": "EBADF", "exit_code": 1})
+let r = dlg2.restart_app()
+assert_eq(r["action"], "restart_app", "restart action")
+assert_eq(r["source"], "files", "source carried")
+
+-- Bug report path with injected reporter
+let dlg3 = crash_dialog({"source": "editor", "message": "panic", "exit_code": 134})
+mut reporter_calls = 0
+dlg3.set_reporter(fn(report) { reporter_calls = reporter_calls + 1; return "BR-12345" })
+let br = dlg3.report_bug()
+assert_eq(br["action"], "report_bug", "report action")
+assert_eq(br["report_id"], "BR-12345", "report id")
+assert_eq(reporter_calls, 1, "reporter invoked")
+assert_eq(dlg3.state, DIALOG_REPORTED, "state = reported")
+
+-- Without a reporter, action returns null
+let dlg4 = crash_dialog({"source": "x", "message": "y", "exit_code": 1})
+assert_eq(dlg4.report_bug(), null, "report_bug w/o reporter returns null")
+
+-- ── Branding tokens + icons ─────────
+
+show "-- Phase 75: branding --"
+
+assert_eq(BRAND_NAME, "ClarityOS", "brand name")
+assert(contains(BRAND_TAGLINE, "Simple"), "tagline includes 'Simple'")
+assert_eq(BRAND_DOMAIN, "clarityos.dev", "domain")
+
+-- Typography + spacing + radius scales
+assert_eq(typography("display"), 48, "display = 48")
+assert_eq(typography("body"), 14, "body = 14")
+assert_eq(typography("nope"), 14, "fallback = body")
+assert_eq(spacing("md"), 8, "md spacing")
+assert_eq(spacing("xxl"), 40, "xxl spacing")
+assert_eq(radius("md"), 8, "md radius")
+
+-- Icon recipes for the Phase 63 default apps
+let icons = icon_recipes()
+assert(has(icons, "terminal"), "terminal icon")
+assert(has(icons, "files"), "files icon")
+assert(has(icons, "editor"), "editor icon")
+assert(has(icons, "calc"), "calc icon")
+assert(has(icons, "viewer"), "viewer icon")
+assert(has(icons, "monitor"), "monitor icon")
+assert(has(icons, "browser"), "browser icon")
+assert(has(icons, "mail"), "mail icon")
+assert(has(icons, "chat"), "chat icon")
+assert(has(icons, "store"), "store icon")
+assert(has(icons, "settings"), "settings icon")
+assert_eq(icons["terminal"]["accent"], 0xFF38D6E0, "terminal accent = teal")
+
+-- ── Website generator ────────────
+
+show "-- Phase 75: website --"
+
+let site = website({"version": "1.0.0", "iso_size_mb": 240, "iso_sha256": "abc123"})
+let pages = site.build()
+assert_eq(site.page_count(), 6, "6 pages built")
+assert(has(pages, "/index.html"), "index.html")
+assert(has(pages, "/download.html"), "download.html")
+assert(has(pages, "/docs/index.html"), "docs/index.html")
+assert(has(pages, "/community.html"), "community.html")
+assert(has(pages, "/css/style.css"), "css/style.css")
+assert(has(pages, "/og.html"), "og.html")
+
+let index = pages["/index.html"]
+assert(contains(index, BRAND_NAME), "index has brand name")
+assert(contains(index, BRAND_TAGLINE), "index has tagline")
+assert(contains(index, "1.0.0"), "index shows version")
+assert(contains(index, "Download"), "index has CTA")
+
+let dl = pages["/download.html"]
+assert(contains(dl, "abc123"), "download page has SHA256")
+assert(contains(dl, "240 MB"), "download page has size")
+assert(contains(dl, "qemu-system-x86_64"), "download page has QEMU instructions")
+
+let css = pages["/css/style.css"]
+assert(contains(css, "--teal"), "css has --teal var")
+assert(contains(css, "--violet"), "css has --violet var")
+assert(contains(css, "--magenta"), "css has --magenta var")
+assert(contains(css, "linear-gradient"), "css uses gradients")
+
+let og = pages["/og.html"]
+assert(contains(og, "og:title"), "og card present")
+assert(contains(og, "twitter:card"), "twitter card present")
+
+-- Build to a real directory (host runtime path)
+exec_full("rm -rf /tmp/_clarity_site_test")
+let site2 = website({"output": "/tmp/_clarity_site_test", "version": "1.0.0"})
+site2.build_to_dir()
+assert(exists("/tmp/_clarity_site_test/index.html"), "index.html written")
+assert(exists("/tmp/_clarity_site_test/css/style.css"), "css/style.css written")
+exec_full("rm -rf /tmp/_clarity_site_test")
+
+-- ── Release pipeline (with injected fakes) ──
+
+show "-- Phase 75: release pipeline --"
+
+class FakeGit {
+    fn init() {
+        this.dirty = false
+        this.branch = "main"
+        this.tags = []
+        this.last = "v0.9.0"
+        this.commits = [
+            {"sha": "abc1", "subject": "Phase 75: polish"},
+            {"sha": "def2", "subject": "Phase 74: ISO + UX"},
+            {"sha": "ghi3", "subject": "Phase 73: compositor"}
+        ]
+        this.created_tags = []
+        this.pushed_tags = []
+    }
+    fn status() { return {"dirty": this.dirty, "branch": this.branch} }
+    fn tag_exists(t) { return contains(this.tags, t) }
+    fn last_tag() { return this.last }
+    fn log_since(_t) { return this.commits }
+    fn log_all() { return this.commits }
+    fn create_tag(t, _m) { push(this.created_tags, t); push(this.tags, t); return true }
+    fn push_tag(t) { push(this.pushed_tags, t); return true }
+}
+
+class FakeBuilder {
+    fn init() { this.calls = 0 }
+    fn build(opts) {
+        this.calls = this.calls + 1
+        return {
+            "ok": true,
+            "artefacts": [
+                {"name": "claritos-1.0.0.iso", "path": "/tmp/claritos.iso", "size": 240000000, "size_mb": 240, "url": "https://example/iso"},
+                {"name": "claritos-1.0.0.tar.gz", "path": "/tmp/claritos.tgz", "size": 30000000, "size_mb": 30, "url": "https://example/tgz"}
+            ]
+        }
+    }
+    fn sha256(_path) { return "abc123def456" }
+}
+
+class FakePublisher {
+    fn init() { this.published = [] }
+    fn publish(opts) {
+        push(this.published, opts)
+        return {"ok": true, "url": "https://github.com/monkdim/Clarity/releases/tag/" + opts["tag"]}
+    }
+}
+
+let fake_git = FakeGit()
+let fake_builder = FakeBuilder()
+let fake_publisher = FakePublisher()
+let fake_gate = release_gate(bp, fp_clean, mp, alp)  -- the passing gate
+
+let rel = release({
+    "version": "1.0.0",
+    "git": fake_git,
+    "builder": fake_builder,
+    "publisher": fake_publisher,
+    "gate": fake_gate
+})
+
+let ok = rel.run()
+assert(ok, "release pipeline succeeded")
+assert(contains(fake_git.created_tags, "v1.0.0"), "tag created")
+assert(contains(fake_git.pushed_tags, "v1.0.0"), "tag pushed")
+assert_eq(fake_builder.calls, 1, "builder invoked once")
+assert_eq(len(fake_publisher.published), 1, "publisher invoked once")
+assert(contains(rel.changelog, "Phase 75"), "changelog includes Phase 75")
+assert(contains(rel.release_notes, "claritos-1.0.0.iso"), "notes include ISO")
+assert(contains(rel.release_notes, "abc123def456"), "notes include SHA256")
+let summary = rel.summary()
+assert(summary["ok"], "summary ok")
+
+-- Dirty tree blocks the release
+let dirty_git = FakeGit()
+dirty_git.dirty = true
+let rel_dirty = release({"version": "1.0.0", "git": dirty_git, "builder": fake_builder, "publisher": fake_publisher})
+assert(not rel_dirty.run(), "dirty tree blocks release")
+
+-- Failing gate blocks the release
+let bad_release_gate = release_gate(bp_slow, fp_clean, mp, alp)
+let rel_bad = release({"version": "1.0.1", "git": FakeGit(), "builder": fake_builder, "publisher": fake_publisher, "gate": bad_release_gate})
+assert(not rel_bad.run(), "failing gate blocks release")
+
+-- Dry run skips publish
+let rel_dry = release({"version": "1.0.2", "git": FakeGit(), "builder": fake_builder, "publisher": fake_publisher, "dry_run": true})
+assert(rel_dry.run(), "dry run succeeds")
+mut found_skipped = false
+for s in rel_dry.steps { if s["kind"] == "publish" and s["status"] == "skipped" { found_skipped = true } }
+assert(found_skipped, "publish step skipped in dry-run")
+
+-- ── Summary ────────────────────────
+
+show ""
+show "Phase 75: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 75 test(s) failed" }
