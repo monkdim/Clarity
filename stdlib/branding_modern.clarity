@@ -1,0 +1,260 @@
+-- Modernised branding kit — Phase 76 design refresh.
+--
+-- Replaces branding.clarity's Drop+Leaf+highlight skeuomorphism with
+-- a flat two-tone drop where the leaf lives as a curved cut-out in
+-- the negative space (no pasted highlight). Single-colour wordmark
+-- (deep moss); the spring gradient lives only on accent elements
+-- (focus rings, dock stripe, progress fills).
+--
+-- App icons simplified: each is a rounded square + accent stripe +
+-- a single bold abstract mark. No fiddly literal glyphs.
+
+from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline
+from "graphics.clarity" import Framebuffer
+from "theme_meadow.clarity" import brand_gradient, _lerp_color
+
+-- ── Brand identity ─────────────────────────────
+
+let BRAND_NAME = "ClarityOS"
+let BRAND_TAGLINE = "Simple code. Real power."
+let BRAND_DOMAIN = "clarityos.dev"
+
+-- ── Drop + Leaf logo (modern, flat, no skeuo) ───
+
+-- A water drop in the theme's primary-dark colour, with a leaf
+-- shape carved into the negative space (lighter primary fill).
+-- Reads as "clarity (water) + nature (leaf)" without pasted-on
+-- highlights or veins.
+fn paint_logo(fb, cx, cy, size, theme, opts) {
+    let o = opts ?? {}
+    let drop_color = if has(o, "primary") { o["primary"] } else { theme["primary"] }
+    let leaf_color = if has(o, "secondary") { o["secondary"] } else { _lerp_color(theme["primary"], theme["surface"], 0.35) }
+    -- Drop silhouette: pointed top + circular bulb. We approximate
+    -- via a series of horizontal slices so it stays scalable + we
+    -- don't need bezier support in draw.clarity.
+    let half_w = int(size * 0.55)
+    let pointy_h = int(size * 0.55)            -- top half is pointed
+    let bulb_r = half_w
+    -- Top wedge
+    mut row = 0
+    while row < pointy_h {
+        let frac = row / pointy_h              -- 0 at apex, 1 at shoulder
+        let w = int(half_w * frac)
+        let x0 = cx - w
+        let y = cy - int(size * 0.55) + row
+        fill_rect(fb, x0, y, w * 2, 1, drop_color)
+        row = row + 1
+    }
+    -- Bulb (circle in lower half)
+    circle(fb, cx, cy - int(size * 0.55) + pointy_h, bulb_r, drop_color)
+    -- Carve out the leaf — a smaller pointed-oval inside the bulb,
+    -- rotated visually by drawing it as a stack of horizontal
+    -- slices that taper top + bottom.
+    let leaf_h = int(size * 0.55)
+    let leaf_w = int(size * 0.32)
+    let leaf_top = cy - int(size * 0.05)
+    mut lr = 0
+    while lr < leaf_h {
+        -- Pointed-oval thickness curve: peaks at the middle.
+        let local = lr / (leaf_h - 1)
+        let dist = if local < 0.5 { local * 2 } else { (1.0 - local) * 2 }
+        let lw = int(leaf_w * dist)
+        if lw > 0 {
+            let leaf_x = cx - leaf_w / 2 + lr / 4    -- slight rightward lean
+            fill_rect(fb, leaf_x, leaf_top + lr, lw, 1, leaf_color)
+        }
+        lr = lr + 1
+    }
+}
+
+-- Wordmark: single-color deep-ink, modern letter spacing applied
+-- via small per-glyph offsets. The gradient does NOT live on the
+-- wordmark itself — it's reserved for accent elements.
+fn paint_wordmark(fb, x, y, text, theme, opts) {
+    let o = opts ?? {}
+    from "font.clarity" import draw_text, measure_text, builtin_font
+    let font = if has(o, "font") { o["font"] } else { builtin_font() }
+    let color = if has(o, "color") { o["color"] } else { theme["foreground"] }
+    let letter_spacing = if has(o, "letter_spacing") { o["letter_spacing"] } else { 1 }
+    mut cursor = x
+    mut i = 0
+    while i < len(text) {
+        let glyph = char_at(text, i)
+        draw_text(fb, cursor, y, glyph, font, color)
+        cursor = cursor + measure_text(font, glyph) + letter_spacing
+        i = i + 1
+    }
+    return cursor - x
+}
+
+-- ── Modern app icons ────────────────────────────
+
+-- Each app gets one bold abstract mark on a rounded surface with
+-- a top accent stripe in the app's accent colour. No more literal
+-- "$_" glyphs or bar charts.
+
+let APP_ICONS = {
+    "terminal":  {"mark": "wave",     "accent": "primary"},
+    "files":     {"mark": "stack",    "accent": "secondary"},
+    "editor":    {"mark": "stripes",  "accent": "tertiary"},
+    "calc":      {"mark": "grid",     "accent": "highlight"},
+    "viewer":    {"mark": "frame",    "accent": "primary_dark"},
+    "monitor":   {"mark": "pulse",    "accent": "secondary"},
+    "browser":   {"mark": "ring",     "accent": "highlight"},
+    "mail":      {"mark": "envelope", "accent": "tertiary"},
+    "chat":      {"mark": "bubble",   "accent": "primary"},
+    "store":     {"mark": "diamond",  "accent": "secondary"},
+    "settings":  {"mark": "cog",      "accent": "ink_soft"}
+}
+
+fn _accent_color(theme, key) {
+    if has(theme, key) { return theme[key] }
+    return theme["primary"]
+}
+
+fn paint_icon(fb, app_id, x, y, size, theme) {
+    if not has(APP_ICONS, app_id) { _draw_blank(fb, x, y, size, theme); return false }
+    let recipe = APP_ICONS[app_id]
+    let accent = _accent_color(theme, recipe["accent"])
+    let radius = int(size / 5)
+    -- Soft surface (no border — modern OSes don't outline icons)
+    rounded_rect(fb, x, y, size, size, radius, theme["surface"])
+    -- Top accent stripe
+    fill_rect(fb, x, y, size, max(2, int(size / 16)), accent)
+    -- Centred mark in the accent colour
+    let inset = int(size * 0.22)
+    let cx = x + size / 2
+    let cy = y + size / 2
+    let r = int((size - inset * 2) / 2)
+    let mark = recipe["mark"]
+    if mark == "wave"     { _mark_wave(fb, cx, cy, r, accent) }
+    elif mark == "stack"  { _mark_stack(fb, cx, cy, r, accent) }
+    elif mark == "stripes"{ _mark_stripes(fb, cx, cy, r, accent) }
+    elif mark == "grid"   { _mark_grid(fb, cx, cy, r, accent) }
+    elif mark == "frame"  { _mark_frame(fb, cx, cy, r, accent) }
+    elif mark == "pulse"  { _mark_pulse(fb, cx, cy, r, accent) }
+    elif mark == "ring"   { _mark_ring(fb, cx, cy, r, accent) }
+    elif mark == "envelope" { _mark_envelope(fb, cx, cy, r, accent) }
+    elif mark == "bubble" { _mark_bubble(fb, cx, cy, r, accent) }
+    elif mark == "diamond"{ _mark_diamond(fb, cx, cy, r, accent) }
+    elif mark == "cog"    { _mark_cog(fb, cx, cy, r, accent) }
+    return true
+}
+
+fn icon_recipes() { return APP_ICONS }
+
+fn _draw_blank(fb, x, y, size, theme) {
+    rounded_rect(fb, x, y, size, size, int(size / 5), theme["surface"])
+    fill_rect(fb, x, y, size, max(2, int(size / 16)), theme["accent"])
+}
+
+-- ── Mark painters (single bold abstract glyph each) ──
+
+fn _mark_wave(fb, cx, cy, r, color) {
+    -- Three stacked horizontal bars with a "carrot" indent on the left
+    fill_rect(fb, cx - r,         cy - r / 2 - 4, r * 2, 4, color)
+    fill_rect(fb, cx - r + r / 3, cy - 2,         r * 2 - r / 3, 4, color)
+    fill_rect(fb, cx - r,         cy + r / 2 - 4, r * 2 - r / 3, 4, color)
+}
+
+fn _mark_stack(fb, cx, cy, r, color) {
+    -- Three offset rectangles like a folder stack
+    fill_rect(fb, cx - r + 2, cy - r + 2, r * 2 - 4, r * 2 / 3, color)
+    fill_rect(fb, cx - r,     cy - r + r / 3, r * 2, r * 2 / 3, color)
+    fill_rect(fb, cx - r + 2, cy - r + r * 2 / 3 - 2, r * 2 - 4, r * 2 / 3, color)
+}
+
+fn _mark_stripes(fb, cx, cy, r, color) {
+    -- Three horizontal bars of varying length (paragraph)
+    fill_rect(fb, cx - r,     cy - r,     r * 2,     3, color)
+    fill_rect(fb, cx - r,     cy - 1,     r * 7 / 4, 3, color)
+    fill_rect(fb, cx - r,     cy + r - 4, r * 6 / 4, 3, color)
+}
+
+fn _mark_grid(fb, cx, cy, r, color) {
+    -- 2x2 dot grid
+    let d = max(3, r / 3)
+    fill_rect(fb, cx - r,     cy - r,     d, d, color)
+    fill_rect(fb, cx + r - d, cy - r,     d, d, color)
+    fill_rect(fb, cx - r,     cy + r - d, d, d, color)
+    fill_rect(fb, cx + r - d, cy + r - d, d, d, color)
+    -- center dot
+    fill_rect(fb, cx - d / 2, cy - d / 2, d, d, color)
+}
+
+fn _mark_frame(fb, cx, cy, r, color) {
+    -- Picture frame with a horizon line + sun dot
+    rect(fb, cx - r, cy - r, r * 2, r * 2, color)
+    fill_rect(fb, cx - r + 4, cy + r / 2, r * 2 - 8, 2, color)
+    circle(fb, cx + r / 3, cy - r / 4, max(2, r / 5), color)
+}
+
+fn _mark_pulse(fb, cx, cy, r, color) {
+    -- ECG pulse: flat - peak - flat
+    fill_rect(fb, cx - r,         cy - 1, r / 2, 3, color)
+    fill_rect(fb, cx - r / 2,     cy - r, 3, r * 2, color)
+    fill_rect(fb, cx - r / 2,     cy - r, r / 3, 3, color)
+    fill_rect(fb, cx - r / 6,     cy + r - 3, 3, 3, color)
+    fill_rect(fb, cx - r / 6,     cy + r - 3, r * 5 / 6, 3, color)
+}
+
+fn _mark_ring(fb, cx, cy, r, color) {
+    circle(fb, cx, cy, r, color)
+    -- Inner ring negative space (filled with surface)
+    -- Faked by drawing a smaller circle in transparent — we don't
+    -- have transparency in the runtime fill. Keep it solid; the
+    -- accent stripe + size make it readable.
+}
+
+fn _mark_envelope(fb, cx, cy, r, color) {
+    -- Envelope: rectangle + V flap
+    rect(fb, cx - r, cy - r * 2 / 3, r * 2, r * 4 / 3, color)
+    line(fb, cx - r, cy - r * 2 / 3, cx,     cy + r / 4,  color)
+    line(fb, cx + r, cy - r * 2 / 3, cx,     cy + r / 4,  color)
+}
+
+fn _mark_bubble(fb, cx, cy, r, color) {
+    -- Rounded square + tail
+    rounded_rect(fb, cx - r, cy - r, r * 2, r * 5 / 4, max(3, r / 3), color)
+    -- Tail
+    polygon(fb, [
+        [cx - r / 2 + 2,  cy + r / 4],
+        [cx - r + 2,      cy + r],
+        [cx,              cy + r / 4]
+    ], color)
+}
+
+fn _mark_diamond(fb, cx, cy, r, color) {
+    polygon(fb, [
+        [cx,     cy - r],
+        [cx + r, cy],
+        [cx,     cy + r],
+        [cx - r, cy]
+    ], color)
+}
+
+fn _mark_cog(fb, cx, cy, r, color) {
+    circle(fb, cx, cy, r, color)
+    -- Six teeth (drawn as small rects extending outward)
+    let tooth_w = max(3, r / 4)
+    let tooth_h = max(3, r / 3)
+    fill_rect(fb, cx - tooth_w / 2, cy - r - tooth_h, tooth_w, tooth_h, color)
+    fill_rect(fb, cx - tooth_w / 2, cy + r,           tooth_w, tooth_h, color)
+    fill_rect(fb, cx - r - tooth_h, cy - tooth_w / 2, tooth_h, tooth_w, color)
+    fill_rect(fb, cx + r,           cy - tooth_w / 2, tooth_h, tooth_w, color)
+}
+
+-- ── Design tokens (re-exported from theme but kept for compat) ──
+
+let TYPE_SCALE = {
+    "display": 48, "title": 28, "h1": 24, "h2": 20,
+    "h3": 16, "body": 14, "caption": 12, "micro": 10
+}
+let SPACING_SCALE = { "xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24, "xxl": 40 }
+let RADIUS_SCALE = { "sm": 6, "md": 10, "lg": 14, "pill": 9999 }
+
+fn typography(token) { if has(TYPE_SCALE, token) { return TYPE_SCALE[token] }; return TYPE_SCALE["body"] }
+fn spacing(token)    { if has(SPACING_SCALE, token) { return SPACING_SCALE[token] }; return SPACING_SCALE["md"] }
+fn radius(token)     { if has(RADIUS_SCALE, token) { return RADIUS_SCALE[token] }; return RADIUS_SCALE["md"] }
+
+fn max(a, b) { if a > b { return a }; return b }

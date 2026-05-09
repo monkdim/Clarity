@@ -1,0 +1,263 @@
+-- Spring themes — Meadow (default), Bloom, Watercolor.
+--
+-- Phase 76 design refresh. Replaces Aurora as the flagship; Aurora
+-- is preserved as the "Midnight" option in theme_registry.clarity
+-- so users who want a dark theme still have it.
+--
+-- Three principles:
+--   1. Bright, familiar canvas — cream / eggshell / parchment, never
+--      pure white (too clinical).
+--   2. Spring palette — sage greens, daffodil yellow, blossom pink,
+--      sky blue. Saturated but desaturated; alive without shouting.
+--   3. Soft elevation — color-tinted shadows + frosted backdrop on
+--      chrome (no hairline borders, no harsh black drop shadows).
+--
+--     let theme = meadow()
+--     theme["primary"]              -- 0xFF6BAA75 (leaf green)
+--     theme["accent_gradient"]      -- callable: gradient(t) -> color
+--     theme["radius"]["window"]     -- 14
+--
+-- Themes are plain dicts so any widget that already takes a theme
+-- (Phase 60+) accepts them without code changes.
+
+-- ── Shared design tokens (same shape across all spring variants) ──
+
+let _RADIUS = {
+    "window":  14,
+    "card":    12,
+    "control": 10,
+    "pill":    9999,
+    "tag":     6
+}
+
+let _SPACING = {
+    "xs":  4, "sm":  8, "md":  12, "lg":  16, "xl":  24, "xxl":  40
+}
+
+let _TYPE = {
+    "display": 48, "title": 28, "h1": 24, "h2": 20,
+    "h3": 16, "body": 14, "caption": 12, "micro": 10
+}
+
+let _MOTION = {
+    "fast_ms":   140,
+    "base_ms":   200,
+    "slow_ms":   320,
+    "easing":    "ease_out_cubic"
+}
+
+let _BASE_SHARED = {
+    "radius":      _RADIUS,
+    "spacing":     _SPACING,
+    "typography":  _TYPE,
+    "motion":      _MOTION,
+    "border_width": 1,
+    "shadow_blur":  18,
+    "shadow_dy":    4
+}
+
+fn _merge(a, b) {
+    mut out = {}
+    for kv in entries(a) { out[kv[0]] = kv[1] }
+    for kv in entries(b) { out[kv[0]] = kv[1] }
+    return out
+}
+
+-- ── Meadow palette (default) ────────────────────
+
+let MEADOW_CANVAS    = 0xFFF4F1EA
+let MEADOW_SURFACE   = 0xFFFFFFFF
+let MEADOW_SURFACE_2 = 0xFFFAF7F0
+let MEADOW_INK       = 0xFF2B3A2E
+let MEADOW_INK_SOFT  = 0xFF425646
+let MEADOW_PRIMARY   = 0xFF6BAA75
+let MEADOW_PRIMARY_D = 0xFF3D6E4B
+let MEADOW_SECONDARY = 0xFFF5C16C
+let MEADOW_TERTIARY  = 0xFFE8A4B4
+let MEADOW_SKY       = 0xFFA0C6DC
+let MEADOW_SKY_D     = 0xFF6CA0BC
+let MEADOW_MUTED     = 0xFF8B958B
+let MEADOW_BORDER    = 0xFFDCD7C8
+let MEADOW_SHADOW    = 0x402B3A2E      -- 25% deep moss (color-tinted, not pure black)
+
+fn meadow() {
+    return _merge(_BASE_SHARED, {
+        "name":              "Meadow",
+        "id":                "meadow",
+        "background":        MEADOW_CANVAS,
+        "surface":           MEADOW_SURFACE,
+        "surface_elevated":  MEADOW_SURFACE_2,
+        "border":            MEADOW_BORDER,
+        "foreground":        MEADOW_INK,
+        "foreground_muted":  MEADOW_MUTED,
+        "ink_soft":          MEADOW_INK_SOFT,
+        "primary":           MEADOW_PRIMARY,
+        "primary_dark":      MEADOW_PRIMARY_D,
+        "accent":            MEADOW_PRIMARY,
+        "accent_secondary":  MEADOW_SECONDARY,
+        "accent_tertiary":   MEADOW_TERTIARY,
+        "highlight":         MEADOW_SKY,
+        "selection":         0x406BAA75,
+        "danger":            0xFFD96A6A,
+        "warning":           MEADOW_SECONDARY,
+        "success":           MEADOW_PRIMARY,
+        "focus_ring":        MEADOW_PRIMARY,
+        "disabled":          0xFFC2BFB6,
+        "shadow":            MEADOW_SHADOW,
+        "scheme":            "light"
+    })
+}
+
+-- ── Bloom palette (mint sky + apricot peach + coral) ──
+
+let BLOOM_CANVAS     = 0xFFFFFCF5
+let BLOOM_SURFACE    = 0xFFFFFFFF
+let BLOOM_SURFACE_2  = 0xFFFFF8E5
+let BLOOM_INK        = 0xFF1F2937
+let BLOOM_PRIMARY    = 0xFF5BC0BE
+let BLOOM_PRIMARY_D  = 0xFF388B89
+let BLOOM_SECONDARY  = 0xFFF4A261
+let BLOOM_TERTIARY   = 0xFFE76F51
+let BLOOM_HIGHLIGHT  = 0xFFF2CC8F
+let BLOOM_MUTED      = 0xFF9AA5B1
+let BLOOM_BORDER     = 0xFFE4E0D0
+let BLOOM_SHADOW     = 0x4031708E
+
+fn bloom() {
+    return _merge(_BASE_SHARED, {
+        "name":              "Bloom",
+        "id":                "bloom",
+        "background":        BLOOM_CANVAS,
+        "surface":           BLOOM_SURFACE,
+        "surface_elevated":  BLOOM_SURFACE_2,
+        "border":            BLOOM_BORDER,
+        "foreground":        BLOOM_INK,
+        "foreground_muted":  BLOOM_MUTED,
+        "ink_soft":          0xFF374151,
+        "primary":           BLOOM_PRIMARY,
+        "primary_dark":      BLOOM_PRIMARY_D,
+        "accent":            BLOOM_PRIMARY,
+        "accent_secondary":  BLOOM_SECONDARY,
+        "accent_tertiary":   BLOOM_TERTIARY,
+        "highlight":         BLOOM_HIGHLIGHT,
+        "selection":         0x405BC0BE,
+        "danger":            BLOOM_TERTIARY,
+        "warning":           BLOOM_HIGHLIGHT,
+        "success":           BLOOM_PRIMARY,
+        "focus_ring":        BLOOM_PRIMARY,
+        "disabled":          0xFFCBD2D9,
+        "shadow":            BLOOM_SHADOW,
+        "scheme":            "light"
+    })
+}
+
+-- ── Watercolor palette (parchment + dreamy pastels) ──
+
+let WC_CANVAS    = 0xFFFBF7F0
+let WC_SURFACE   = 0xFFFFFFFF
+let WC_SURFACE_2 = 0xFFF5EFE0
+let WC_INK       = 0xFF3D405B
+let WC_PRIMARY   = 0xFFB8C5A6
+let WC_PRIMARY_D = 0xFF7E8C6A
+let WC_SECONDARY = 0xFFF2C4C2
+let WC_TERTIARY  = 0xFFC8DDE9
+let WC_HIGHLIGHT = 0xFFF1E3B6
+let WC_MUTED     = 0xFFB0A8B9
+let WC_BORDER    = 0xFFE5DFCE
+let WC_SHADOW    = 0x4045485E
+
+fn watercolor() {
+    return _merge(_BASE_SHARED, {
+        "name":              "Watercolor",
+        "id":                "watercolor",
+        "background":        WC_CANVAS,
+        "surface":           WC_SURFACE,
+        "surface_elevated":  WC_SURFACE_2,
+        "border":            WC_BORDER,
+        "foreground":        WC_INK,
+        "foreground_muted":  WC_MUTED,
+        "ink_soft":          0xFF55587A,
+        "primary":           WC_PRIMARY,
+        "primary_dark":      WC_PRIMARY_D,
+        "accent":            WC_PRIMARY,
+        "accent_secondary":  WC_SECONDARY,
+        "accent_tertiary":   WC_TERTIARY,
+        "highlight":         WC_HIGHLIGHT,
+        "selection":         0x40B8C5A6,
+        "danger":            0xFFE5A0A0,
+        "warning":           WC_HIGHLIGHT,
+        "success":           WC_PRIMARY_D,
+        "focus_ring":        WC_PRIMARY_D,
+        "disabled":          0xFFD0CCD8,
+        "shadow":            WC_SHADOW,
+        "scheme":            "light"
+    })
+}
+
+-- ── Brand gradient sampler ─────────────────────
+
+-- Spring brand spine: sky → primary → secondary. Used by focus
+-- rings, dock accent stripe, progress bar fills, splash spinner.
+fn brand_gradient(theme, t) {
+    mut clamped = t
+    if clamped < 0.0 { clamped = 0.0 }
+    if clamped > 1.0 { clamped = 1.0 }
+    let stops = [
+        {"t": 0.0, "color": theme["highlight"]},
+        {"t": 0.5, "color": theme["primary"]},
+        {"t": 1.0, "color": theme["accent_secondary"]}
+    ]
+    return _lerp_along(stops, clamped)
+}
+
+fn warm_gradient(theme, t) {
+    mut clamped = t
+    if clamped < 0.0 { clamped = 0.0 }
+    if clamped > 1.0 { clamped = 1.0 }
+    let stops = [
+        {"t": 0.0, "color": theme["accent_secondary"]},
+        {"t": 0.5, "color": theme["accent_tertiary"]},
+        {"t": 1.0, "color": theme["highlight"]}
+    ]
+    return _lerp_along(stops, clamped)
+}
+
+fn _lerp_along(stops, t) {
+    mut i = 0
+    while i < len(stops) - 1 {
+        let a = stops[i]
+        let b = stops[i + 1]
+        if t >= a["t"] and t <= b["t"] {
+            let span = b["t"] - a["t"]
+            let local = if span == 0.0 { 0.0 } else { (t - a["t"]) / span }
+            return _lerp_color(a["color"], b["color"], local)
+        }
+        i = i + 1
+    }
+    return stops[len(stops) - 1]["color"]
+}
+
+fn _lerp_color(a, b, t) {
+    -- Unpack via division so the high byte of 0xFF...... ARGB
+    -- constants doesn't get sign-extended (Clarity's `>> 24`
+    -- treats the value as int32).
+    let aa = int(a / 16777216) & 0xFF
+    let ar = int(a / 65536) & 0xFF
+    let ag = int(a / 256) & 0xFF
+    let ab = a & 0xFF
+    let ba = int(b / 16777216) & 0xFF
+    let br = int(b / 65536) & 0xFF
+    let bg = int(b / 256) & 0xFF
+    let bb = b & 0xFF
+    let oa = int(aa + (ba - aa) * t)
+    let or_ = int(ar + (br - ar) * t)
+    let og = int(ag + (bg - ag) * t)
+    let ob = int(ab + (bb - ab) * t)
+    return oa * 16777216 + or_ * 65536 + og * 256 + ob
+}
+
+fn default_spring_theme() { return meadow() }
+
+fn spring_palettes() {
+    return [meadow(), bloom(), watercolor()]
+}
