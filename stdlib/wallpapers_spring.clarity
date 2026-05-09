@@ -1,0 +1,122 @@
+-- Spring wallpapers — Phase 76 design refresh.
+--
+-- Asymmetric vertical gradient with a soft "horizon" band at ~55%
+-- of the canvas. Replaces the symmetrical Aurora-night band stack
+-- which felt static. Same overall API as wallpapers.clarity so
+-- callers can swap implementations without changes.
+--
+-- Each preset takes (fb, theme, ?opts) and paints into fb. All
+-- four presets are FFI-friendly: they use fill_rect (one runtime
+-- helper per stripe) instead of put_pixel loops, so they're fast
+-- enough to render in interpreted mode.
+
+from "graphics.clarity" import Framebuffer, framebuffer
+from "draw.clarity" import fill_rect, rect, line, circle
+from "theme_meadow.clarity" import brand_gradient, _lerp_color
+
+let HORIZON_FRAC = 0.55             -- where the soft band sits
+let HORIZON_BAND_HEIGHT = 80
+let GRADIENT_BANDS = 48              -- vertical gradient resolution
+
+-- ── Cream → primary → sky asymmetric gradient ──
+
+fn paint_meadow_morning(fb, theme, opts) {
+    let o = opts ?? {}
+    let bands = if has(o, "bands") { o["bands"] } else { GRADIENT_BANDS }
+    let band_h = int(fb.height / bands)
+    if band_h < 1 { return }
+    -- Two-zone vertical gradient: canvas → primary at the top half,
+    -- primary-muted → sky at the bottom half. The cross-over sits
+    -- at HORIZON_FRAC.
+    let canvas_color = theme["background"]
+    let mid_color = _lerp_color(theme["primary"], theme["background"], 0.55)
+    let bottom_color = _lerp_color(theme["highlight"], theme["background"], 0.40)
+    mut i = 0
+    while i < bands {
+        let frac = i / (bands - 1)
+        mut color = canvas_color
+        if frac < HORIZON_FRAC {
+            let local = frac / HORIZON_FRAC
+            color = _lerp_color(canvas_color, mid_color, local)
+        } else {
+            let local = (frac - HORIZON_FRAC) / (1.0 - HORIZON_FRAC)
+            color = _lerp_color(mid_color, bottom_color, local)
+        }
+        let y0 = i * band_h
+        let h = if i == bands - 1 { fb.height - y0 } else { band_h }
+        fill_rect(fb, 0, y0, fb.width, h, color)
+        i = i + 1
+    }
+    -- Horizon band — soft sage-to-primary stripe at HORIZON_FRAC,
+    -- adds the asymmetric anchor without per-pixel work.
+    let band_top = int(fb.height * HORIZON_FRAC) - HORIZON_BAND_HEIGHT / 2
+    let band_color = _lerp_color(theme["primary"], canvas_color, 0.65)
+    fill_rect(fb, 0, band_top, fb.width, 2, band_color)
+    let band_color_2 = _lerp_color(theme["accent_secondary"], canvas_color, 0.70)
+    fill_rect(fb, 0, band_top + 14, fb.width, 1, band_color_2)
+}
+
+-- ── Bloom — eggshell → mint → coral diagonal ──
+
+fn paint_bloom_morning(fb, theme, opts) {
+    paint_meadow_morning(fb, theme, opts)
+    -- Bloom shares the same recipe; the *theme* substitution gives
+    -- it a different colour story (mint sky + apricot peach).
+}
+
+-- ── Watercolor — parchment + soft horizontal washes ──
+
+fn paint_watercolor(fb, theme, opts) {
+    let o = opts ?? {}
+    let bands = if has(o, "bands") { o["bands"] } else { 24 }
+    let band_h = int(fb.height / bands)
+    if band_h < 1 { return }
+    fb.clear(theme["background"])
+    -- Three soft washes at 1/4, 1/2, 3/4 — each a single fill_rect
+    -- with a translucent tint.
+    let washes = [
+        {"y": int(fb.height * 0.20), "h": 60, "color": theme["accent_tertiary"]},
+        {"y": int(fb.height * 0.50), "h": 80, "color": theme["primary"]},
+        {"y": int(fb.height * 0.78), "h": 50, "color": theme["highlight"]}
+    ]
+    for w in washes {
+        mut row = 0
+        while row < w["h"] {
+            let dist = row - w["h"] / 2
+            let abs_dist = if dist < 0 { -dist } else { dist }
+            let alpha_byte = int(60 - abs_dist * 60 / (w["h"] / 2))
+            if alpha_byte > 0 {
+                let tinted = _lerp_color(theme["background"], w["color"], alpha_byte / 255.0)
+                fill_rect(fb, 0, w["y"] + row - w["h"] / 2, fb.width, 1, tinted)
+            }
+            row = row + 1
+        }
+    }
+}
+
+-- ── Solid (theme bg) — minimal fallback ──
+
+fn paint_solid(fb, theme, opts) {
+    let o = opts ?? {}
+    let color = if has(o, "color") { o["color"] } else { theme["background"] }
+    fb.clear(color)
+}
+
+-- ── Catalogue ────────────────────────────────
+
+let SPRING_PRESETS = [
+    {"id": "meadow_morning",   "name": "Meadow Morning",  "paint": "meadow"},
+    {"id": "bloom_morning",    "name": "Bloom Morning",   "paint": "bloom"},
+    {"id": "watercolor",       "name": "Watercolor",      "paint": "watercolor"},
+    {"id": "solid",            "name": "Solid",           "paint": "solid"}
+]
+
+fn spring_presets() { return SPRING_PRESETS }
+
+fn paint_spring_preset(fb, theme, preset_id, opts) {
+    if preset_id == "meadow_morning" { paint_meadow_morning(fb, theme, opts); return true }
+    if preset_id == "bloom_morning"  { paint_bloom_morning(fb, theme, opts);  return true }
+    if preset_id == "watercolor"     { paint_watercolor(fb, theme, opts);     return true }
+    if preset_id == "solid"          { paint_solid(fb, theme, opts);          return true }
+    return false
+}
