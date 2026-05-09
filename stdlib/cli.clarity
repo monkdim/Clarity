@@ -722,13 +722,38 @@ fn os_cmd_run(cli_args) {
     mut opts = {"iso": _OS_ISO_PATH, "headless": headless, "serial": "stdio"}
     if boot_test != null {
         opts["boot_test_marker"] = boot_test
+        opts["timeout_seconds"] = 180
     }
     let r = qemu(opts)
 
     show ""
-    show bold("  Booting ClarityOS") + dim(" — Ctrl+A then X to quit")
+    if boot_test != null {
+        show bold("  Booting ClarityOS") + dim(" (boot test, marker: '" + boot_test + "')")
+    } else {
+        show bold("  Booting ClarityOS") + dim(" — Ctrl+A then X to quit")
+    }
     show ""
-    r.run()
+
+    let result = r.run()
+
+    if boot_test != null {
+        let saw = if has(result, "saw_marker") { result["saw_marker"] } else { false }
+        if saw {
+            show ""
+            show "  " + green("✓ saw marker: '" + boot_test + "'")
+            show ""
+        } else {
+            show ""
+            show "  " + red("✗ marker '" + boot_test + "' not seen on serial")
+            show ""
+            show dim("  --- QEMU stdout (tail) ---")
+            let stdout_text = if has(result, "stdout") { result["stdout"] } else { "" }
+            let n = len(stdout_text)
+            let tail_start = if n > 2000 { n - 2000 } else { 0 }
+            show substring(stdout_text, tail_start, n)
+            exit(1)
+        }
+    }
 }
 
 fn os_cmd_install(cli_args) {

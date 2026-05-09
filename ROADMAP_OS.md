@@ -17,18 +17,19 @@ What this document is *not*: a phase-by-phase chronicle. The phase tables that u
 
 ---
 
-## CI smoke test (the last piece of the developer workflow)
+## Developer workflow status
 
-The `clarity os` CLI subcommand is now wired (`build`, `run`, `iso`, `install`); `read_bytes`/`write_bytes` builtins exist; a cross-platform QEMU launcher in `stdlib/qemu.clarity` picks HVF on macOS and KVM on Linux. What's still missing is a **headless QEMU boot in CI** that greps the serial output for the `ClarityOS ready.` marker.
+The "Try ClarityOS" path documented in the README is now wired and CI-gated. Concretely:
 
-The infrastructure is there: `clarity os run --headless --boot-test "ClarityOS ready."` does the right thing locally; `run_vm.clarity` already understands `boot_test_marker` + `timeout_seconds`. The remaining work is in `.github/workflows/ci.yml`:
+- `clarity os build` shells out to `zig build` for the kernel and freestanding runtime, validates the artifacts, and packs `dist/claritos.iso` via the pure-Clarity ISO9660 packer.
+- `clarity os run` launches the ISO in QEMU — HVF on macOS, KVM on Linux when `/dev/kvm` is readable, TCG fallback otherwise. `--headless` and `--boot-test "<marker>"` make it scriptable.
+- A new `os-smoke` CI job on Linux installs zig + qemu-system-x86 + ovmf, runs `clarity os build`, then `clarity os run --headless --boot-test "ClarityOS ready."`, and fails the build if the marker isn't seen on serial within the timeout.
+- `kernel/zig-out` and `runtime/freestanding/zig-out` are cached keyed on the hash of the Zig + C sources, so cold runs are slow (~10 min) but rebuilds on PRs that don't touch the kernel are fast.
 
-- Install zig (the actions ecosystem has `goto-bus-stop/setup-zig` or equivalent).
-- Install qemu-system-x86 + ovmf via apt on Ubuntu, brew on macOS.
-- Run `./native/dist/clarity os build && ./native/dist/clarity os run --headless --boot-test "ClarityOS ready." --timeout 120` after the existing self-hosted tests.
-- Cache `kernel/zig-out` and `runtime/freestanding/zig-out` so subsequent runs are fast.
+Future polish — flagged here so the next contributor doesn't have to rediscover them:
 
-Skipped today because (a) it adds 5–10 minutes to every PR, and (b) needs a cache strategy that's its own design call.
+- The `os-smoke` job runs on Linux only. Adding a macOS leg would exercise HVF + Homebrew OVMF; mostly a copy-paste of the Linux job with `brew install qemu` instead of `apt`. Worth doing once we hit any platform-specific bugs.
+- The boot test uses TCG (no nested virt on GitHub-hosted runners), which is slow. Switching to a self-hosted runner with `/dev/kvm` would cut the smoke from ~10 min to ~1 min, but adds runner ops.
 
 ---
 

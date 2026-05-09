@@ -58,3 +58,68 @@ jobs:
 
       - name: Run smoke tests
         run: ./native/dist/clarity smoke ./native/dist/clarity
+
+  os-smoke:
+    name: OS smoke (linux-x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      - name: Bootstrap Clarity from latest release
+        id: bootstrap
+        run: |
+          curl -fsSL https://github.com/monkdim/Clarity/releases/latest/download/clarity-linux-x64.tar.gz -o clarity-bootstrap.tar.gz
+          tar xzf clarity-bootstrap.tar.gz
+          chmod +x clarity
+          mv clarity clarity-bootstrap
+          ./clarity-bootstrap transpile --bundle
+        continue-on-error: true
+
+      - name: Bootstrap fallback (pre-first-release)
+        if: steps.bootstrap.outcome != 'success'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Transpile via Python fallback
+        if: steps.bootstrap.outcome != 'success'
+        run: python native/transpile.py --bundle
+
+      - name: Compile native binary
+        run: |
+          cd native/dist
+          bun build --compile clarity-entry.js --outfile clarity
+
+      - name: Cache zig-out
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel/zig-out
+            kernel/.zig-cache
+            runtime/freestanding/zig-out
+            runtime/freestanding/.zig-cache
+          key: zig-out-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/build.zig', 'runtime/freestanding/**/*.zig', 'runtime/freestanding/**/*.c', 'runtime/freestanding/**/*.h', 'runtime/freestanding/build.zig') }}
+          restore-keys: |
+            zig-out-${{ runner.os }}-
+
+      - name: Build ClarityOS (kernel + runtime + ISO)
+        run: ./native/dist/clarity os build
+
+      - name: Headless boot test
+        run: ./native/dist/clarity os run --headless --boot-test "ClarityOS ready."
