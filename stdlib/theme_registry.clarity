@@ -1,0 +1,122 @@
+-- Theme registry — Phase 76.
+--
+-- Single source of truth for the four themes ClarityOS ships with:
+--
+--   meadow      (default) — sage green + daffodil + blossom + sky
+--   bloom       (variant) — mint sky + apricot peach + coral
+--   watercolor  (variant) — parchment + dreamy pastels
+--   midnight    (legacy)  — Aurora's deep violet-charcoal, kept
+--                           for users who genuinely want a dark
+--                           theme. Was Phase 74's flagship.
+--
+-- The registry persists the user's choice to ~/.clarity-os/theme
+-- on the host runtime + reads it back on session start.
+
+from "theme_meadow.clarity" import meadow, bloom, watercolor, default_spring_theme
+from "theme_aurora.clarity" import aurora
+
+let DEFAULT_THEME_ID = "meadow"
+let PERSIST_PATH = "/.clarity-os/theme"
+
+let _BUILT_INS = [
+    {"id": "meadow",     "name": "Meadow",      "factory": "meadow",     "scheme": "light"},
+    {"id": "bloom",      "name": "Bloom",       "factory": "bloom",      "scheme": "light"},
+    {"id": "watercolor", "name": "Watercolor",  "factory": "watercolor", "scheme": "light"},
+    {"id": "midnight",   "name": "Midnight",    "factory": "aurora",     "scheme": "dark"}
+]
+
+class ThemeRegistry {
+    fn init() {
+        this.themes = {}
+        for entry in _BUILT_INS {
+            let factory_name = entry["factory"]
+            mut t = null
+            if factory_name == "meadow"     { t = meadow() }
+            elif factory_name == "bloom"     { t = bloom() }
+            elif factory_name == "watercolor"{ t = watercolor() }
+            elif factory_name == "aurora"    {
+                t = aurora()
+                t["id"] = "midnight"
+                t["name"] = "Midnight"
+            }
+            if t != null { this.themes[entry["id"]] = t }
+        }
+        this.active_id = DEFAULT_THEME_ID
+        this._persist_dir = null
+    }
+
+    fn set_persist_dir(dir) { this._persist_dir = dir }
+
+    fn ids() {
+        mut out = []
+        for entry in _BUILT_INS { push(out, entry["id"]) }
+        return out
+    }
+
+    fn list() {
+        mut out = []
+        for entry in _BUILT_INS {
+            push(out, {"id": entry["id"], "name": entry["name"], "scheme": entry["scheme"]})
+        }
+        return out
+    }
+
+    fn get(id) {
+        if has(this.themes, id) { return this.themes[id] }
+        return null
+    }
+
+    fn active() {
+        if has(this.themes, this.active_id) { return this.themes[this.active_id] }
+        return this.themes[DEFAULT_THEME_ID]
+    }
+
+    fn set_active(id) {
+        if not has(this.themes, id) { return false }
+        this.active_id = id
+        this._persist()
+        return true
+    }
+
+    fn register(id, theme) {
+        -- Hook for third-party themes (apps install their own).
+        this.themes[id] = theme
+    }
+
+    -- Persistence -------------------------------------------------
+
+    fn _persist() {
+        if this._persist_dir == null { return }
+        let path = this._persist_dir + PERSIST_PATH
+        try {
+            exec_full("mkdir -p '" + this._persist_dir + "/.clarity-os'")
+            write(path, this.active_id)
+        } catch e {}
+    }
+
+    fn load() {
+        if this._persist_dir == null { return false }
+        let path = this._persist_dir + PERSIST_PATH
+        if not exists(path) { return false }
+        try {
+            let id = trim(read(path))
+            if has(this.themes, id) {
+                this.active_id = id
+                return true
+            }
+        } catch e {}
+        return false
+    }
+}
+
+fn theme_registry() { return ThemeRegistry() }
+
+fn default_registry() {
+    let r = theme_registry()
+    let home = env("HOME", "")
+    if len(home) > 0 {
+        r.set_persist_dir(home)
+        r.load()
+    }
+    return r
+}
