@@ -110,6 +110,7 @@ pub fn dispatch(nr: u64, args: Args) i64 {
         .write => return sys_write(args),
         .open => return sys_open(args),
         .close => return sys_close(args),
+        .mmap => return sys_mmap(args),
         .exit => return sys_exit(args),
         .fork => return sys_fork(),
         .exec => return sys_exec(args),
@@ -119,6 +120,7 @@ pub fn dispatch(nr: u64, args: Args) i64 {
         .getppid => return sys_getppid(),
         .nanosleep => return sys_nanosleep(args),
         .clock_gettime => return sys_clock_gettime(args),
+        .ioctl => return sys_ioctl(args),
         else => return -@as(i64, @intFromEnum(Errno.enosys)),
     }
 }
@@ -159,6 +161,40 @@ fn sys_close(args: Args) i64 {
     const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
     vfs.close(fd) catch return -@as(i64, @intFromEnum(Errno.ebadf));
     return 0;
+}
+
+// ── mmap / ioctl — graphics fast-path ───────────
+
+const MMAP_FB_FD: i32 = -2;       // fd we treat as "the framebuffer"
+const IOCTL_FB_GET_INFO: u64 = 0x4600;
+
+fn sys_mmap(args: Args) i64 {
+    // (addr, length, prot, flags, fd, offset). We honour just the
+    // graphics fast path — fd=MMAP_FB_FD maps the kernel framebuffer
+    // into the calling process at `addr`. Anonymous + file-backed
+    // mmap come in a later phase.
+    const addr: u64 = args.a0;
+    const fd: i32 = @intCast(@as(i64, @bitCast(args.a4)));
+    if (fd != MMAP_FB_FD) return -@as(i64, @intFromEnum(Errno.einval));
+    const cur = sched.current_thread() orelse return -@as(i64, @intFromEnum(Errno.esrch));
+    const proc = sched.process_table.lookup(cur.pid) orelse return -@as(i64, @intFromEnum(Errno.esrch));
+    const fb = @import("../drivers/framebuffer.zig");
+    const size = fb.map_into_user(proc.address_space, addr) catch return -@as(i64, @intFromEnum(Errno.enomem));
+    if (size == 0) return -@as(i64, @intFromEnum(Errno.enodev));
+    return @intCast(addr);
+}
+
+fn sys_ioctl(args: Args) i64 {
+    const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
+    const op: u64 = args.a1;
+    if (fd == MMAP_FB_FD and op == IOCTL_FB_GET_INFO) {
+        const fb = @import("../drivers/framebuffer.zig");
+        const info_user = fb.user_info() orelse return -@as(i64, @intFromEnum(Errno.enodev));
+        const dst: *fb.FbInfoForUser = @ptrFromInt(args.a2);
+        dst.* = info_user;
+        return 0;
+    }
+    return -@as(i64, @intFromEnum(Errno.enotty));
 }
 
 fn sys_exit(args: Args) i64 {
