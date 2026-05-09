@@ -1,0 +1,279 @@
+-- Crash recovery — Phase 75 task 2.
+--
+-- When a service or app crashes, ClarityOS should (a) keep the
+-- session alive, (b) tell the user something useful, (c) restart
+-- automatically when safe, (d) write a useful diagnostic to the
+-- journal so the user can report the bug.
+--
+-- Three pieces:
+--
+--   Journal       Append-only ring buffer of {ts, severity, source,
+--                  message, fields}. Persists to /var/log/clarity.log
+--                  on real systems; in-memory on the host runtime.
+--   Watchdog      Wraps services with an exponential-backoff restart
+--                  policy and a "give up after N failures inside M
+--                  seconds" circuit breaker so an irreparably-broken
+--                  service doesn't restart-storm.
+--   CrashDialog   The "something went wrong" UI: pure-state engine
+--                  (engine state machine + button actions); the
+--                  widget paint is a thin wrapper Phase 75 polish
+--                  drops in once the visual designer catches up.
+
+let SEV_DEBUG = "debug"
+let SEV_INFO = "info"
+let SEV_WARN = "warn"
+let SEV_ERROR = "error"
+let SEV_FATAL = "fatal"
+
+let _SEV_RANK = {
+    "debug": 0, "info": 1, "warn": 2, "error": 3, "fatal": 4
+}
+
+let DEFAULT_JOURNAL_CAPACITY = 4096
+
+class Journal {
+    fn init(capacity) {
+        this.capacity = if capacity == null { DEFAULT_JOURNAL_CAPACITY } else { capacity }
+        this.entries = []
+        this.min_severity = SEV_DEBUG
+        this.subscribers = []
+        this.persist_path = null
+    }
+
+    fn set_min_severity(sev) { this.min_severity = sev }
+    fn set_persist_path(path) { this.persist_path = path }
+    fn subscribe(handler) { push(this.subscribers, handler) }
+
+    fn log(severity, source, message, fields) {
+        if _SEV_RANK[severity] < _SEV_RANK[this.min_severity] { return null }
+        let entry = {
+            "ts": time(),
+            "severity": severity,
+            "source": source,
+            "message": message,
+            "fields": fields ?? {}
+        }
+        push(this.entries, entry)
+        if len(this.entries) > this.capacity {
+            mut next = []
+            mut i = 1
+            while i < len(this.entries) { push(next, this.entries[i]); i = i + 1 }
+            this.entries = next
+        }
+        for h in this.subscribers { h(entry) }
+        if this.persist_path != null {
+            try { exec_full("echo " + _shell_quote(_format(entry)) + " >> " + _shell_quote(this.persist_path)) } catch e {}
+        }
+        return entry
+    }
+
+    fn debug(source, message, fields) { return this.log(SEV_DEBUG, source, message, fields) }
+    fn info(source, message, fields)  { return this.log(SEV_INFO, source, message, fields) }
+    fn warn(source, message, fields)  { return this.log(SEV_WARN, source, message, fields) }
+    fn error(source, message, fields) { return this.log(SEV_ERROR, source, message, fields) }
+    fn fatal(source, message, fields) { return this.log(SEV_FATAL, source, message, fields) }
+
+    fn tail(n) {
+        let count = if n > len(this.entries) { len(this.entries) } else { n }
+        mut out = []
+        mut i = len(this.entries) - count
+        while i < len(this.entries) { push(out, this.entries[i]); i = i + 1 }
+        return out
+    }
+
+    fn filter(predicate) {
+        mut out = []
+        for e in this.entries { if predicate(e) { push(out, e) } }
+        return out
+    }
+
+    fn clear() { this.entries = [] }
+}
+
+fn journal(...rest) {
+    let cap = if len(rest) > 0 { rest[0] } else { null }
+    return Journal(cap)
+}
+
+-- ── Watchdog ────────────────────────────
+
+let DEFAULT_BURST_LIMIT = 5         -- max restarts allowed inside burst_window_ms
+let DEFAULT_BURST_WINDOW_MS = 60000
+let DEFAULT_BACKOFF_MS = 250
+
+class Watchdog {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.journal_ref = if has(o, "journal") { o["journal"] } else { null }
+        this.burst_limit = if has(o, "burst_limit") { o["burst_limit"] } else { DEFAULT_BURST_LIMIT }
+        this.burst_window_ms = if has(o, "burst_window_ms") { o["burst_window_ms"] } else { DEFAULT_BURST_WINDOW_MS }
+        this.backoff_ms = if has(o, "backoff_ms") { o["backoff_ms"] } else { DEFAULT_BACKOFF_MS }
+        this.services = {}              -- name -> {restarts: [ts...], state, next_attempt_ms, factory}
+    }
+
+    fn register(name, factory) {
+        this.services[name] = {
+            "name": name,
+            "factory": factory,
+            "restarts": [],
+            "state": "registered",
+            "next_attempt_ms": 0,
+            "last_exit": null
+        }
+    }
+
+    fn record_crash(name, exit_code, now_ms) {
+        if not has(this.services, name) { return false }
+        let svc = this.services[name]
+        svc["last_exit"] = exit_code
+        push(svc["restarts"], now_ms)
+        -- Drop restarts outside the burst window
+        mut recent = []
+        let cutoff = now_ms - this.burst_window_ms
+        for ts in svc["restarts"] { if ts >= cutoff { push(recent, ts) } }
+        svc["restarts"] = recent
+        if len(recent) >= this.burst_limit {
+            svc["state"] = "tripped"
+            svc["next_attempt_ms"] = -1
+            this._log(SEV_FATAL, name, "circuit breaker tripped after " + str(len(recent)) + " crashes in " + str(this.burst_window_ms) + " ms", {"exit_code": exit_code})
+            return false
+        }
+        -- Exponential backoff: 250ms, 500, 1000, 2000, ...
+        let attempt = len(recent)
+        let delay = this.backoff_ms * _pow2(attempt - 1)
+        svc["state"] = "backoff"
+        svc["next_attempt_ms"] = now_ms + delay
+        this._log(SEV_WARN, name, "scheduled restart in " + str(delay) + " ms (attempt " + str(attempt) + ")", {"exit_code": exit_code})
+        return true
+    }
+
+    fn tick(now_ms) {
+        mut restarted = []
+        for kv in entries(this.services) {
+            let svc = kv[1]
+            if svc["state"] == "backoff" and svc["next_attempt_ms"] > 0 and now_ms >= svc["next_attempt_ms"] {
+                let pid = (svc["factory"])(svc["name"])
+                if pid > 0 {
+                    svc["state"] = "running"
+                    push(restarted, kv[0])
+                    this._log(SEV_INFO, svc["name"], "restarted (PID " + str(pid) + ")", {})
+                } else {
+                    -- Factory returned a falsy PID — count as another crash
+                    this.record_crash(svc["name"], -1, now_ms)
+                }
+            }
+        }
+        return restarted
+    }
+
+    fn reset(name) {
+        if not has(this.services, name) { return false }
+        let svc = this.services[name]
+        svc["restarts"] = []
+        svc["state"] = "registered"
+        svc["next_attempt_ms"] = 0
+        return true
+    }
+
+    fn state(name) {
+        if not has(this.services, name) { return null }
+        return this.services[name]["state"]
+    }
+
+    fn _log(sev, source, msg, fields) {
+        if this.journal_ref != null { this.journal_ref.log(sev, source, msg, fields) }
+    }
+}
+
+fn watchdog(...rest) {
+    let opts = if len(rest) > 0 { rest[0] } else { {} }
+    return Watchdog(opts)
+}
+
+-- ── Crash dialog ────────────────────────
+
+let DIALOG_INITIAL = "initial"
+let DIALOG_DETAILS = "details"
+let DIALOG_REPORTING = "reporting"
+let DIALOG_REPORTED = "reported"
+let DIALOG_DISMISSED = "dismissed"
+
+class CrashDialog {
+    fn init(report) {
+        this.report = report                   -- {source, message, exit_code, journal_excerpt, ...}
+        this.state = DIALOG_INITIAL
+        this.expanded = false
+        this.report_id = null
+        this.actions_taken = []
+        this.reporter = null                   -- pluggable: fn(report) -> report_id
+    }
+
+    fn set_reporter(reporter) { this.reporter = reporter }
+
+    fn toggle_details() {
+        this.expanded = not this.expanded
+        push(this.actions_taken, "toggle_details")
+        this.state = if this.expanded { DIALOG_DETAILS } else { DIALOG_INITIAL }
+    }
+
+    fn restart_app() {
+        push(this.actions_taken, "restart_app")
+        this.state = DIALOG_DISMISSED
+        return {"action": "restart_app", "source": this.report["source"]}
+    }
+
+    fn dismiss() {
+        push(this.actions_taken, "dismiss")
+        this.state = DIALOG_DISMISSED
+        return {"action": "dismiss"}
+    }
+
+    fn report_bug() {
+        if this.reporter == null {
+            push(this.actions_taken, "report_unavailable")
+            return null
+        }
+        this.state = DIALOG_REPORTING
+        push(this.actions_taken, "report_bug")
+        try {
+            this.report_id = (this.reporter)(this.report)
+            this.state = DIALOG_REPORTED
+            return {"action": "report_bug", "report_id": this.report_id}
+        } catch e {
+            this.state = DIALOG_INITIAL
+            push(this.actions_taken, "report_failed:" + str(e))
+            return null
+        }
+    }
+
+    fn snapshot() {
+        return {
+            "state": this.state,
+            "expanded": this.expanded,
+            "report_id": this.report_id,
+            "actions": this.actions_taken
+        }
+    }
+}
+
+fn crash_dialog(report) { return CrashDialog(report) }
+
+-- ── Helpers ───────────────────────────
+
+fn _pow2(n) {
+    if n <= 0 { return 1 }
+    mut r = 1
+    mut i = 0
+    while i < n { r = r * 2; i = i + 1 }
+    return r
+}
+
+fn _format(entry) {
+    let fields_part = if len(keys(entry["fields"])) > 0 { " " + json_string(entry["fields"], 0) } else { "" }
+    return "[" + str(int(entry["ts"])) + "] " + upper(entry["severity"]) + " " + entry["source"] + ": " + entry["message"] + fields_part
+}
+
+fn _shell_quote(s) {
+    let escaped = replace(str(s), "'", "'\\''")
+    return "'" + escaped + "'"
+}

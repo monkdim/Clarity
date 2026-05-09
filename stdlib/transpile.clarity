@@ -87,6 +87,8 @@ let STDLIB_FILES = [
     "display_server.clarity", "desktop_session.clarity",
     "iso9660.clarity", "qemu_macos.clarity", "os_build.clarity",
     "theme_aurora.clarity", "wallpapers.clarity", "animations.clarity", "boot_splash.clarity",
+    "perf_profiler.clarity", "crash_recovery.clarity", "branding.clarity",
+    "website_gen.clarity", "release.clarity",
     "platform.clarity",
     "mkiso.clarity", "live_usb.clarity", "run_vm.clarity",
     "installer.clarity", "hardware.clarity",

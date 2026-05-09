@@ -1,0 +1,271 @@
+-- Release tooling — Phase 75 task 5.
+--
+-- The "press the big button" pipeline for shipping ClarityOS 1.0:
+--
+--   1. Validate the working tree (clean, on main, tags don't
+--      conflict).
+--   2. Run the release gate (perf + frame + memory + app launch
+--      from perf_profiler.clarity).
+--   3. Generate the changelog from git log since the previous tag.
+--   4. Build the kernel + runtime + ISO via os_build.
+--   5. Compute SHA256 of every artefact.
+--   6. Stage GitHub release notes.
+--   7. (Optional) push tag + upload artefacts.
+--
+-- Pluggable backends so tests drive the same pipeline against
+-- fakes; production wiring is `git`, `clarity build`, `clarity os
+-- build`, `gh release create`.
+
+let DEFAULT_VERSION = "1.0.0"
+let DEFAULT_BRANCH = "main"
+let DEFAULT_PRE_RELEASE = false
+
+let GATE_PASS = "pass"
+let GATE_FAIL = "fail"
+let GATE_SKIPPED = "skipped"
+
+class Release {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.version = if has(o, "version") { o["version"] } else { DEFAULT_VERSION }
+        this.branch = if has(o, "branch") { o["branch"] } else { DEFAULT_BRANCH }
+        this.pre_release = if has(o, "pre_release") { o["pre_release"] } else { DEFAULT_PRE_RELEASE }
+        this.git = if has(o, "git") { o["git"] } else { _real_git() }
+        this.builder = if has(o, "builder") { o["builder"] } else { _real_builder() }
+        this.publisher = if has(o, "publisher") { o["publisher"] } else { _real_publisher() }
+        this.gate = if has(o, "gate") { o["gate"] } else { null }
+        this.dry_run = if has(o, "dry_run") { o["dry_run"] } else { false }
+        this.steps = []                 -- ordered list of {kind, status, detail}
+        this.artefacts = []              -- {name, path, size, sha256}
+        this.changelog = ""
+        this.release_notes = ""
+    }
+
+    fn _step(kind, status, detail) {
+        push(this.steps, {"kind": kind, "status": status, "detail": detail})
+    }
+
+    -- ── 1. Validate working tree ──────────
+
+    fn validate() {
+        let status = this.git.status()
+        if status["dirty"] {
+            this._step("validate", "fail", "working tree dirty")
+            return false
+        }
+        if status["branch"] != this.branch {
+            this._step("validate", "fail", "on branch '" + status["branch"] + "', expected '" + this.branch + "'")
+            return false
+        }
+        let tag = "v" + this.version
+        if this.git.tag_exists(tag) {
+            this._step("validate", "fail", "tag " + tag + " already exists")
+            return false
+        }
+        this._step("validate", "pass", "clean tree on " + status["branch"])
+        return true
+    }
+
+    -- ── 2. Release gate ───────────────────
+
+    fn run_gate() {
+        if this.gate == null {
+            this._step("gate", GATE_SKIPPED, "no gate configured")
+            return true
+        }
+        if this.gate.passes() {
+            this._step("gate", GATE_PASS, "perf targets met")
+            return true
+        }
+        this._step("gate", GATE_FAIL, "perf targets missed: " + json_string(this.gate.report(), 0))
+        return false
+    }
+
+    -- ── 3. Changelog ─────────────────────
+
+    fn generate_changelog() {
+        let last_tag = this.git.last_tag()
+        let log = if last_tag == null { this.git.log_all() } else { this.git.log_since(last_tag) }
+        mut lines = []
+        push(lines, "## " + this.version + (if this.pre_release { " (pre-release)" } else { "" }))
+        push(lines, "")
+        if last_tag != null { push(lines, "Changes since " + last_tag + ":") }
+        else { push(lines, "First release.") }
+        push(lines, "")
+        for entry in log {
+            push(lines, "- " + entry["subject"])
+        }
+        this.changelog = join(lines, "\n")
+        this._step("changelog", "pass", str(len(log)) + " commits")
+        return this.changelog
+    }
+
+    -- ── 4. Build artefacts ───────────────
+
+    fn build_artefacts() {
+        let result = this.builder.build({"version": this.version})
+        if not result["ok"] {
+            this._step("build", "fail", result["error"])
+            return false
+        }
+        this.artefacts = result["artefacts"]
+        for a in this.artefacts {
+            a["sha256"] = this.builder.sha256(a["path"])
+        }
+        this._step("build", "pass", str(len(this.artefacts)) + " artefacts")
+        return true
+    }
+
+    -- ── 5. Release notes ─────────────────
+
+    fn compose_notes() {
+        let header = "# ClarityOS " + this.version + "\n\n" +
+                     (if this.pre_release { "_Pre-release. Expect rough edges._\n\n" } else { "" })
+        mut downloads = "## Downloads\n\n"
+        for a in this.artefacts {
+            downloads = downloads + "- [`" + a["name"] + "`](" + a["url"] + ") — " + str(a["size_mb"]) + " MB · `sha256:" + a["sha256"] + "`\n"
+        }
+        let body = downloads + "\n## Changelog\n\n" + this.changelog + "\n"
+        this.release_notes = header + body
+        return this.release_notes
+    }
+
+    -- ── 6. Publish ───────────────────────
+
+    fn publish() {
+        if this.dry_run {
+            this._step("publish", "skipped", "dry-run")
+            return true
+        }
+        let tag = "v" + this.version
+        let tag_ok = this.git.create_tag(tag, "Release " + this.version)
+        if not tag_ok {
+            this._step("publish", "fail", "git tag failed")
+            return false
+        }
+        let push_ok = this.git.push_tag(tag)
+        if not push_ok {
+            this._step("publish", "fail", "git push tag failed")
+            return false
+        }
+        let result = this.publisher.publish({
+            "tag": tag,
+            "title": "ClarityOS " + this.version,
+            "body": this.release_notes,
+            "artefacts": this.artefacts,
+            "pre_release": this.pre_release
+        })
+        if not result["ok"] {
+            this._step("publish", "fail", result["error"])
+            return false
+        }
+        this.release_url = result["url"]
+        this._step("publish", "pass", result["url"])
+        return true
+    }
+
+    -- ── Run end-to-end ──────────────────
+
+    fn run() {
+        if not this.validate() { return false }
+        if not this.run_gate() { return false }
+        this.generate_changelog()
+        if not this.build_artefacts() { return false }
+        this.compose_notes()
+        if not this.publish() { return false }
+        return true
+    }
+
+    fn summary() {
+        return {
+            "version": this.version,
+            "steps": this.steps,
+            "artefacts": this.artefacts,
+            "release_notes_len": len(this.release_notes),
+            "ok": this._all_passed()
+        }
+    }
+
+    fn _all_passed() {
+        for s in this.steps {
+            if s["status"] == "fail" { return false }
+        }
+        return true
+    }
+}
+
+fn release(opts) { return Release(opts) }
+
+-- ── Real backends (host runtime only) ────
+
+fn _real_git() {
+    return {
+        "status": fn() {
+            let r = exec_full("git status --porcelain")
+            let dirty = len(trim(r.stdout)) > 0
+            let br = exec_full("git branch --show-current")
+            return {"dirty": dirty, "branch": trim(br.stdout)}
+        },
+        "tag_exists": fn(tag) {
+            let r = exec_full("git rev-parse -q --verify 'refs/tags/" + tag + "' 2>&1")
+            return r.exit_code == 0
+        },
+        "last_tag": fn() {
+            let r = exec_full("git describe --tags --abbrev=0 2>/dev/null")
+            if r.exit_code != 0 { return null }
+            return trim(r.stdout)
+        },
+        "log_since": fn(tag) {
+            let r = exec_full("git log " + tag + "..HEAD --pretty=format:'%H|%s'")
+            return _parse_log(r.stdout)
+        },
+        "log_all": fn() {
+            let r = exec_full("git log --pretty=format:'%H|%s'")
+            return _parse_log(r.stdout)
+        },
+        "create_tag": fn(tag, msg) {
+            let r = exec_full("git tag -a " + tag + " -m '" + msg + "'")
+            return r.exit_code == 0
+        },
+        "push_tag": fn(tag) {
+            let r = exec_full("git push origin " + tag)
+            return r.exit_code == 0
+        }
+    }
+}
+
+fn _real_builder() {
+    return {
+        "build": fn(opts) {
+            -- Real version: invokes `clarity build --all` + os_build
+            -- to produce the binaries + ISO. Returns artefact list.
+            return {"ok": false, "error": "real builder not wired in this Clarity-side stub", "artefacts": []}
+        },
+        "sha256": fn(path) {
+            let r = exec_full("shasum -a 256 '" + path + "' | awk '{print $1}'")
+            return trim(r.stdout)
+        }
+    }
+}
+
+fn _real_publisher() {
+    return {
+        "publish": fn(opts) {
+            -- Real version: shells out to gh release create + uploads artefacts.
+            return {"ok": false, "error": "real publisher not wired in this Clarity-side stub"}
+        }
+    }
+}
+
+fn _parse_log(stdout) {
+    mut out = []
+    let lines = split(stdout, "\n")
+    for line in lines {
+        let t = trim(line)
+        if len(t) == 0 { continue }
+        let pipe = index_of(t, "|")
+        if pipe < 0 { continue }
+        push(out, {"sha": substring(t, 0, pipe), "subject": substring(t, pipe + 1, len(t))})
+    }
+    return out
+}
