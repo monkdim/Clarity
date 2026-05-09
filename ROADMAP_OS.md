@@ -258,6 +258,22 @@
 
 ---
 
+## Phase 71 — Freestanding runtime: QuickJS, libc shim, TTY, devfs, per-process fd table
+
+> Wires the runtime → kernel boundary so a userspace ELF can actually issue syscalls and have stdin/stdout/stderr go somewhere visible.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **QuickJS vendor scaffolding** | Done | `runtime/freestanding/third_party/fetch_quickjs.sh` downloads + extracts QuickJS-NG (default v0.5.0) into `third_party/quickjs/` so the build script can pick it up. README documents the why (Bun + V8 need a host libc; QuickJS doesn't) and the recovery plan if a missing-symbol surfaces. |
+| 2 | **Bundle embedder + build script** | Done | `runtime/freestanding/embed_bundle.zig` `@embedFile`'s the transpiled `clarity-entry.js` into the freestanding binary as `clarity_bundle_js[]`. `build.zig` checks for `third_party/quickjs/quickjs.h` at configure time and prints a friendly skip notice if not vendored yet; otherwise links QuickJS + `host_shim.zig` + `libc_shim.zig` + `embed_bundle.zig` + `quickjs_main.c` into `clarity-runtime`. Native bytecode VM target (`zig build vm`) shares the shim objects. |
+| 3 | **TTY driver + devfs** | Done | `kernel/drivers/tty.zig` — virtual terminal with canonical-mode line discipline (backspace deletes from line buffer + emits BS-space-BS, `\r`/`\n` commits the line + trailing newline to the input ring) + raw mode (every byte immediately readable) + echo toggle. `kernel/fs/devfs.zig` — devfs mounted at `/dev` with four character devices: `tty0` + `console` (alias) routing to `tty.tty0`, `null` (discards writes / EOF on read), `zero` (reads zero bytes / writes succeed). `op_create` / `op_mkdir` / `op_unlink` / `op_rmdir` all return `error.PermissionDenied` — devfs is read-only structurally. |
+| 4 | **Per-process fd table** | Done | `kernel/fs/vfs.zig` — global `fd_table` replaced with `PerProcessTable` struct + a `current_table_fn` resolver the scheduler installs at boot. `open` / `close` / `read` / `write` syscalls consult the current process's table; `fallback_table` covers early boot before the first process exists. Each table holds 256 fd slots; alloc returns the lowest free index (3+, since 0/1/2 are reserved for stdio). |
+| 5 | **libc shim** | Done | `runtime/freestanding/libc_shim.zig` — bump-allocator-backed `malloc`/`free`/`calloc`/`realloc` over a 16 MiB arena, `memcpy`/`memmove`/`memset`/`memcmp` via `@memcpy`/`@memset`, `strlen`/`strcmp`/`strncmp`/`strchr`, `read`/`write` syscalls routed through `host_shim`, `__assert_fail`/`abort` that print to fd 2 then exit, `__errno_location`. The full surface QuickJS calls into when running freestanding. |
+
+**Tests:** `stdlib/test_runtime_full.clarity` — 45 assertions: TTY canonical mode (echo prints chars, line commits on `\n`, BS-space-BS sequence on backspace + line-buffer rollback, empty-line backspace no-op, echo=false suppresses output but still commits, multi-character lines), TTY raw mode (every byte immediately available, no line buffering, BS + Ctrl+C passed through), mode switching (drops in-progress canonical line), TTY write capture (string + byte-list), fd table stdio install (3 fds at 0/1/2 → tty0), fd table alloc returns 3+ then 4+, close + bad-fd-throws, dup shares inode, fork-clone gives child fresh fds that mutate independently from parent, end-to-end userspace → kernel → tty (process writes to fd 1, read out of TTY's output capture; keyboard pushes input, process reads fd 0 and gets the committed line; bad-fd reads throw EBADF).
+
+---
+
 ## Phase 75 — Polish & Ship ClarityOS 1.0
 
 > The release. (Renumbered from Phase 70; phases 70–74 finish the bare-metal port first.)

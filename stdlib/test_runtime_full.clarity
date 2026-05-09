@@ -1,0 +1,224 @@
+-- Phase 71 — freestanding runtime tests.
+--
+-- TTY model (canonical + raw mode + echo + line discipline),
+-- per-process fd table (stdio install, alloc, close, lookup, dup,
+-- clone-on-fork), and the runtime / kernel boundary:
+--   * stdin/stdout/stderr always at fd 0/1/2
+--   * a userspace program writing to fd 1 reaches the TTY's
+--     output buffer
+--   * a userspace program reading from fd 0 sees what the keyboard
+--     pushed into the TTY
+
+from "tty.clarity" import Tty, tty, FdTable, fd_table, MODE_CANONICAL, MODE_RAW
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0
+}
+
+-- ── TTY: canonical mode line discipline ─────────
+
+show "-- Phase 71: TTY canonical --"
+
+let t = tty()
+assert_eq(t.mode, MODE_CANONICAL, "starts canonical")
+assert(t.echo, "echo on by default")
+assert(not t.input_available(), "no input yet")
+
+-- Type "hi\n" — characters echo + line commits on \n
+t.push_input(_ord("h"))
+t.push_input(_ord("i"))
+assert(not t.input_available(), "no commit before \\n")
+assert_eq(t.output_string(), "hi", "echo prints chars")
+t.push_input(10)
+assert(t.input_available(), "ring has data after \\n")
+assert_eq(t.input_pending(), 3, "h + i + \\n")
+assert_eq(t.read_string(3), "hi\n", "read returns line")
+
+-- Backspace deletes from line buffer + echoes BS-space-BS to
+-- overwrite the visible char (it doesn't un-echo what's already
+-- on the terminal).
+t.clear_output()
+t.push_input(_ord("a"))
+t.push_input(_ord("b"))
+t.push_input(8)             -- backspace
+assert_eq(t.output_string(), "ab" + from_char_code(8) + " " + from_char_code(8), "backspace echo sequence (BS space BS)")
+-- The line buffer should now be just "a"; commit it
+t.push_input(13)            -- CR also commits
+assert_eq(t.read_string(2), "a\n", "after bs, line is just 'a'")
+
+-- Backspace on empty line is a no-op
+t.clear_output()
+t.push_input(8)
+assert_eq(t.output_string(), "", "empty backspace no-op")
+
+-- echo=false suppresses output but line still commits
+t.echo = false
+t.push_input(_ord("x"))
+t.push_input(_ord("y"))
+t.push_input(10)
+assert_eq(t.output_string(), "", "echo off → no output")
+assert_eq(t.read_string(3), "xy\n", "line still committed")
+t.echo = true
+
+-- ── TTY: raw mode ───────────────────────────────
+
+show "-- Phase 71: TTY raw --"
+
+let t2 = tty()
+t2.set_mode(MODE_RAW)
+assert_eq(t2.mode, MODE_RAW, "raw mode set")
+
+-- Each byte is immediately available; no line buffering
+t2.push_input(_ord("a"))
+assert(t2.input_available(), "raw byte immediately available")
+assert_eq(t2.read_string(1), "a", "raw read returns 1 byte")
+
+-- Backspace + ctrl chars are passed through verbatim
+t2.push_input(8)
+t2.push_input(3)            -- Ctrl+C
+let raw_bytes = t2.read(2)
+assert_eq(len(raw_bytes), 2, "two raw bytes")
+assert_eq(raw_bytes[0], 8, "raw passes BS through")
+assert_eq(raw_bytes[1], 3, "raw passes Ctrl+C through")
+
+-- Switching back to canonical drops in-progress line
+let t3 = tty()
+t3.push_input(_ord("p"))
+t3.push_input(_ord("a"))
+t3.push_input(_ord("r"))
+t3.set_mode(MODE_RAW)
+t3.set_mode(MODE_CANONICAL)
+t3.push_input(10)
+assert_eq(t3.input_pending(), 1, "pre-switch chars dropped, only \\n left")
+
+-- ── TTY: write capture ──────────────────────────
+
+show "-- Phase 71: TTY write --"
+
+let t4 = tty()
+let n = t4.write_string("hello\n")
+assert_eq(n, 6, "wrote 6 bytes")
+assert_eq(t4.output_string(), "hello\n", "captured")
+
+t4.write([0x48, 0x69, 0x21])   -- "Hi!"
+assert_eq(t4.output_string(), "hello\nHi!", "byte-list write appends")
+
+-- ── Fd table: install stdio ─────────────────────
+
+show "-- Phase 71: fd table stdio --"
+
+let stdin_inode = {"name": "tty0", "kind": "char_device"}
+let stdout_inode = stdin_inode
+let stderr_inode = stdin_inode
+
+let fdt = fd_table()
+fdt.install_stdio(stdin_inode, stdout_inode, stderr_inode)
+assert_eq(fdt.count(), 3, "3 fds after stdio install")
+assert(fdt.lookup(0) != null, "fd 0 is stdin")
+assert(fdt.lookup(1) != null, "fd 1 is stdout")
+assert(fdt.lookup(2) != null, "fd 2 is stderr")
+assert_eq(fdt.lookup(0)["inode"]["name"], "tty0", "stdin → tty0")
+
+-- alloc returns the next free fd
+let fake_inode = {"name": "/etc/hostname", "kind": "regular"}
+let new_fd = fdt.alloc(fake_inode, 0)
+assert_eq(new_fd, 3, "first alloc → fd 3")
+assert_eq(fdt.count(), 4, "4 fds open")
+
+let new_fd2 = fdt.alloc(fake_inode, 0)
+assert_eq(new_fd2, 4, "second alloc → fd 4")
+
+-- close removes; subsequent alloc keeps incrementing (we don't
+-- reuse closed slots in the simple model — matches kernel behaviour
+-- before the per-bucket free list lands)
+fdt.close(3)
+assert_eq(fdt.count(), 4, "after close still 4 (0/1/2/4)")
+assert_eq(fdt.lookup(3), null, "closed fd is null")
+
+-- bad fd close throws
+mut threw = false
+try { fdt.close(99) } catch e { threw = true }
+assert(threw, "closing unknown fd throws")
+
+-- ── Fd table: dup + fork-clone ──────────────────
+
+show "-- Phase 71: fd table dup + clone --"
+
+let fdt2 = fd_table()
+fdt2.install_stdio(stdin_inode, stdout_inode, stderr_inode)
+let opened = fdt2.alloc(fake_inode, 0)
+fdt2.dup(opened, 99)
+assert(fdt2.lookup(99) != null, "dup target visible")
+assert_eq(fdt2.lookup(99)["inode"]["name"], fdt2.lookup(opened)["inode"]["name"], "dup shares inode")
+
+-- Clone for fork: child gets a fresh table with the same fds
+let child = fdt2.clone()
+assert_eq(child.count(), fdt2.count(), "clone has same fd count")
+assert(child.lookup(0) != null, "child still has stdin")
+-- Child mutating its table doesn't affect parent
+child.close(0)
+assert_eq(child.count(), fdt2.count() - 1, "child closed stdin")
+assert(fdt2.lookup(0) != null, "parent's stdin untouched")
+
+-- ── End-to-end: userspace program → kernel → tty ────
+
+show "-- Phase 71: e2e (userspace → kernel → tty) --"
+
+-- Simulate the full path: a process writes to fd 1 (stdout). The
+-- kernel's vfs.write looks up the fd in the per-process table,
+-- gets the tty inode, calls its .write op.
+let t5 = tty()
+let table = fd_table()
+table.install_stdio(t5, t5, t5)             -- all stdio routed to tty
+
+fn _process_write(fdt_arg, fd, bytes) {
+    let entry = fdt_arg.lookup(fd)
+    if entry == null { throw "EBADF: " + str(fd) }
+    let inode = entry["inode"]
+    -- inode is our Tty instance; in a real kernel it'd be a vfs.Inode
+    -- whose .fs.ops.write fans out to the tty driver.
+    return inode.write(bytes)
+}
+
+fn _process_read(fdt_arg, fd, count) {
+    let entry = fdt_arg.lookup(fd)
+    if entry == null { throw "EBADF: " + str(fd) }
+    return entry["inode"].read(count)
+}
+
+let bytes_out = [_ord("h"), _ord("i"), 10]
+_process_write(table, 1, bytes_out)
+assert_eq(t5.output_string(), "hi\n", "write(1, ...) reached the tty")
+
+-- Push some keyboard input + read fd 0 from the "process"
+t5.push_input(_ord("o")); t5.push_input(_ord("k")); t5.push_input(10)
+let in_bytes = _process_read(table, 0, 100)
+assert_eq(len(in_bytes), 3, "read 3 bytes")
+let in_str = ""
+mut s_buf = ""
+for b in in_bytes { s_buf = s_buf + from_char_code(b) }
+assert_eq(s_buf, "ok\n", "read(0, ...) returned committed line")
+
+-- Bad fd error path
+mut bad_threw = false
+try { _process_read(table, 42, 10) } catch e { bad_threw = true; assert(contains(str(e), "EBADF"), "EBADF") }
+assert(bad_threw, "read of unknown fd throws")
+
+-- ── Summary ─────────────────────────────────
+
+show ""
+show "Phase 71: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 71 test(s) failed" }
