@@ -306,6 +306,24 @@
 
 ---
 
+## Phase 74 — Bootable ISO + macOS QEMU launcher + UX foundation
+
+> The last phase before Layer 3 actually boots on a Mac. Pure-Clarity ISO9660 packer (no grub-mkrescue, no xorriso) so `clarity os build` works on every host. macOS-flavoured QEMU launcher with HVF + OVMF + virtio-gpu auto-discovery. Plus the visual-design foundation: Aurora flagship theme, wallpaper presets, animation primitives, animated boot splash.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **ISO9660 + El Torito packer** | Done | `stdlib/iso9660.clarity` — pure-Clarity ISO image builder. Lays out the image sector-by-sector (system area + Primary VD + Boot Record VD + Terminator + Boot Catalog + Path Table + Root dir + boot stub + files), writes the El Torito validation entry's checksum so the words sum to zero mod 0x10000, Level-1 8.3 names + ;1 versions + LSB/MSB pairs everywhere the spec calls for them. |
+| 2 | **macOS QEMU launcher** | Done | `stdlib/qemu_macos.clarity` — wraps Phase 67's QemuRunner with HVF (`-accel hvf`) when supported, OVMF firmware found by walking Homebrew + system paths, virtio-gpu/keyboard/tablet for input that doesn't grab the host pointer. `validate()` flags missing `qemu-system-x86_64` with the brew install command. |
+| 3 | **`clarity os build`** | Done | `stdlib/os_build.clarity` — `OsImageBuilder` end-to-end: set kernel + runtime + UEFI loader + config + per-app entries; `build()` returns the ISO bytes; `build_to_file(path)` writes them. GRUB cfg generated in-memory. |
+| 4 | **Aurora flagship theme** | Done | `stdlib/theme_aurora.clarity` — three principles: inky violet-charcoal canvas, teal→violet→magenta brand spine sampled by wallpaper / focus rings / launcher highlights, soft elevation with alpha-tinted borders + 12-px drop shadows. Variants: `aurora()`, `aurora_light()`, `aurora_hc()` (high-contrast, WCAG AAA). Plus a warm gradient (violet → coral → gold) for status badges. |
+| 5 | **Wallpaper presets** | Done | `stdlib/wallpapers.clarity` — four built-ins, all procedural (no MB-scale BMP assets): `aurora` (diagonal gradient + radial highlight), `aurora_night` (deep canvas with three soft horizontal aurora bands), `grid` (developer-focused, theme bg + 32-px grid lines), `solid`. Catalogue + `paint_preset` dispatch. |
+| 6 | **Animation primitives** | Done | `stdlib/animations.clarity` — 9 easing functions (linear, ease_in/out_quad/cubic, ease_out_back with overshoot, ease_out_bounce). `Animation` class + `TweenGroup` for compound animations. Preset animations: `window_open_animation()`, `window_close_animation()`, `dock_bounce_animation()`, `launcher_open_animation()`. |
+| 7 | **Animated boot splash** | Done | `stdlib/boot_splash.clarity` — first thing the user sees post-kernel-handoff. Aurora-night gradient background, centred ClarityOS wordmark in gradient text, tagline, three-arc spinner each sampling a different gradient point, bottom progress bar whose fill colour samples the gradient based on progress, status text driven by init's mount/spawn phases. `set_progress(pct, status)` from clarity-init; `fade_out(now)` triggers a 320ms ease-in cross-fade once the desktop session is ready. |
+
+**Tests:** `stdlib/test_os_build.clarity` — 98 assertions covering ISO9660 spec compliance (PVD magic, Boot Record VD, terminator, boot catalog validation entry + 0x55/0xAA key bytes + 0x88 bootable flag), OsImageBuilder plan + validation, macOS QEMU argv composition, Aurora theme structure + gradient sampling at endpoints + clamping + interpolation, wallpaper presets actually paint distinct pixels, animation easing curves match expected values + TweenGroup runs members concurrently, boot splash records the right paint ops at each phase + fade overlay applies during fade.
+
+---
+
 ## Phase 75 — Polish & Ship ClarityOS 1.0
 
 > The release. (Renumbered from Phase 70; phases 70–74 finish the bare-metal port first.)

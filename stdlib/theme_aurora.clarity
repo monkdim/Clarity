@@ -1,0 +1,160 @@
+-- Aurora — ClarityOS flagship theme.
+--
+-- Built around three principles:
+--
+--   1. Inky, slightly violet-leaning charcoal as the canvas.
+--      Pure black is harsh; #0E0F14 sits more comfortably and
+--      gives every accent room to glow.
+--   2. A teal-to-magenta gradient as the brand spine. Wallpaper,
+--      window-chrome accent stripe, focus rings, and the launcher
+--      all sample colors from this gradient.
+--   3. Soft elevation. Surfaces stack with subtle alpha-tinted
+--      borders and 12-pixel drop shadows so windows feel like
+--      they're floating, not stamped.
+--
+-- Built on top of theme.clarity's dictionary shape so existing
+-- widgets pick it up without changes — they just get a more
+-- polished default.
+
+from "theme.clarity" import dark
+
+let AURORA_TEAL = 0xFF38D6E0
+let AURORA_VIOLET = 0xFF8B5CF6
+let AURORA_MAGENTA = 0xFFE83A8B
+let AURORA_CORAL = 0xFFFF7E5F
+let AURORA_GOLD = 0xFFFFD166
+
+let AURORA_INK = 0xFF0E0F14
+let AURORA_SURFACE = 0xFF161823
+let AURORA_SURFACE_ELEVATED = 0xFF1E2030
+let AURORA_BORDER = 0xFF2A2D3D
+let AURORA_TEXT = 0xFFEDEEF5
+let AURORA_TEXT_MUTED = 0xFF8B92A7
+let AURORA_DISABLED = 0xFF4A4D5C
+
+fn aurora() {
+    return merge(dark(), {
+        "name":             "Aurora",
+        "background":       AURORA_INK,
+        "surface":          AURORA_SURFACE,
+        "surface_elevated": AURORA_SURFACE_ELEVATED,
+        "border":           AURORA_BORDER,
+        "foreground":       AURORA_TEXT,
+        "foreground_muted": AURORA_TEXT_MUTED,
+        "accent":           AURORA_TEAL,
+        "accent_secondary": AURORA_VIOLET,
+        "accent_tertiary":  AURORA_MAGENTA,
+        "highlight":        AURORA_GOLD,
+        "selection":        0x6638D6E0,        -- 40% teal
+        "danger":            AURORA_CORAL,
+        "warning":           AURORA_GOLD,
+        "success":           0xFF2EE6A6,
+        "focus_ring":        AURORA_TEAL,
+        "disabled":          AURORA_DISABLED,
+        "shadow":            0x80000000,        -- 50% black
+        "shadow_blur":       12,
+        "shadow_offset_y":   4,
+        "corner_radius":     8,
+        "border_width":      1,
+        "spacing":           8,
+        "transition_ms":     180
+    })
+}
+
+-- ── Variants ─────────────────────────────────
+
+-- Aurora light — same accent palette, inverted canvas. For users
+-- who hate dark UIs.
+fn aurora_light() {
+    return merge(aurora(), {
+        "name":             "Aurora Light",
+        "background":       0xFFF8F9FB,
+        "surface":          0xFFFFFFFF,
+        "surface_elevated": 0xFFFFFFFF,
+        "border":           0xFFE5E8F0,
+        "foreground":       0xFF14161E,
+        "foreground_muted": 0xFF606470,
+        "shadow":           0x33000000,
+        "disabled":         0xFFB8BCC8
+    })
+}
+
+-- Aurora high-contrast — for users with low vision. Palette
+-- preserves brand identity while clearing the WCAG AAA bar.
+fn aurora_hc() {
+    return merge(aurora(), {
+        "name":             "Aurora High Contrast",
+        "background":       0xFF000000,
+        "surface":          0xFF101216,
+        "surface_elevated": 0xFF181B20,
+        "border":           0xFFFFFFFF,
+        "foreground":       0xFFFFFFFF,
+        "foreground_muted": 0xFFD0D4E0,
+        "accent":           0xFF60E8F0,
+        "focus_ring":       0xFFFFD166,
+        "border_width":     2,
+        "shadow":           0xCC000000
+    })
+}
+
+-- ── Gradient sampler ───────────────────────────
+
+-- Sample a color along the Aurora teal → violet → magenta gradient
+-- given a parameter t ∈ [0, 1]. Used by the wallpaper preset, the
+-- focus-ring animation, and the launcher's column highlight.
+fn aurora_gradient(t) {
+    let stops = [
+        {"t": 0.0,  "color": AURORA_TEAL},
+        {"t": 0.5,  "color": AURORA_VIOLET},
+        {"t": 1.0,  "color": AURORA_MAGENTA}
+    ]
+    return _lerp_along(stops, t)
+}
+
+-- Pick a color from the secondary gradient (violet → coral → gold)
+-- for accent variety: status badges, notification urgencies.
+fn warm_gradient(t) {
+    let stops = [
+        {"t": 0.0,  "color": AURORA_VIOLET},
+        {"t": 0.5,  "color": AURORA_CORAL},
+        {"t": 1.0,  "color": AURORA_GOLD}
+    ]
+    return _lerp_along(stops, t)
+}
+
+fn _lerp_along(stops, t) {
+    mut clamped = t
+    if clamped < 0.0 { clamped = 0.0 }
+    if clamped > 1.0 { clamped = 1.0 }
+    mut i = 0
+    while i < len(stops) - 1 {
+        let a = stops[i]
+        let b = stops[i + 1]
+        if clamped >= a["t"] and clamped <= b["t"] {
+            let span = b["t"] - a["t"]
+            let local = if span == 0.0 { 0.0 } else { (clamped - a["t"]) / span }
+            return _lerp_color(a["color"], b["color"], local)
+        }
+        i = i + 1
+    }
+    return stops[len(stops) - 1]["color"]
+}
+
+fn _lerp_color(a, b, t) {
+    -- Unpack via division so we don't sign-extend the high byte of
+    -- 0xFF...... ARGB constants (Clarity's `>> 24` treats the
+    -- value as int32 and turns 0xFF000000 into -16777216).
+    let aa = int(a / 16777216) & 0xFF
+    let ar = int(a / 65536) & 0xFF
+    let ag = int(a / 256) & 0xFF
+    let ab = a & 0xFF
+    let ba = int(b / 16777216) & 0xFF
+    let br = int(b / 65536) & 0xFF
+    let bg = int(b / 256) & 0xFF
+    let bb = b & 0xFF
+    let oa = int(aa + (ba - aa) * t)
+    let or_ = int(ar + (br - ar) * t)
+    let og = int(ag + (bg - ag) * t)
+    let ob = int(ab + (bb - ab) * t)
+    return oa * 16777216 + or_ * 65536 + og * 256 + ob
+}

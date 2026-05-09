@@ -1,0 +1,133 @@
+-- macOS QEMU launcher — Phase 74 task 2.
+--
+-- Wraps the Phase 67 QemuRunner with auto-discovery of the right
+-- macOS bits: OVMF firmware via Homebrew (`brew --prefix qemu`),
+-- HVF acceleration when available, virtio-gpu for the framebuffer,
+-- virtio-keyboard / virtio-tablet for input, serial over stdio for
+-- the kernel boot log.
+--
+--     let r = qemu_macos({"iso": "claritos.iso", "ram_mb": 1024})
+--     r.run()                       -- launches QEMU; serial → terminal
+--     r.shell_command()             -- inspect the argv before running
+
+from "run_vm.clarity" import QemuRunner, qemu_runner
+
+let DEFAULT_RAM_MB = 1024
+let DEFAULT_CORES = 4
+
+class QemuMacosLauncher {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.iso = if has(o, "iso") { o["iso"] } else { null }
+        this.kernel = if has(o, "kernel") { o["kernel"] } else { null }
+        this.ram_mb = if has(o, "ram_mb") { o["ram_mb"] } else { DEFAULT_RAM_MB }
+        this.cores = if has(o, "cores") { o["cores"] } else { DEFAULT_CORES }
+        this.headless = if has(o, "headless") { o["headless"] } else { false }
+        this.use_hvf = if has(o, "hvf") { o["hvf"] } else { _has_hvf() }
+        this.serial = if has(o, "serial") { o["serial"] } else { "stdio" }
+        this.disk_image = if has(o, "disk") { o["disk"] } else { null }
+        this.boot_test_marker = if has(o, "boot_test_marker") { o["boot_test_marker"] } else { null }
+        this.snapshot = if has(o, "snapshot") { o["snapshot"] } else { false }
+        this.timeout_seconds = if has(o, "timeout_seconds") { o["timeout_seconds"] } else { 60 }
+        this.ovmf_paths = _discover_ovmf()
+    }
+
+    fn ovmf_code() { return this.ovmf_paths["code"] }
+    fn ovmf_vars() { return this.ovmf_paths["vars"] }
+
+    fn _runner_opts() {
+        mut opts = {
+            "iso": this.iso,
+            "kernel": this.kernel,
+            "memory_mb": this.ram_mb,
+            "cores": this.cores,
+            "headless": this.headless,
+            "kvm": false,
+            "uefi": this.ovmf_paths["found"],
+            "ovmf_code": this.ovmf_code(),
+            "ovmf_vars": this.ovmf_vars(),
+            "serial": this.serial,
+            "disk": this.disk_image,
+            "snapshot": this.snapshot,
+            "boot_test_marker": this.boot_test_marker,
+            "timeout_seconds": this.timeout_seconds,
+            "no_reboot": true,
+            "extra": this._mac_extras()
+        }
+        return opts
+    }
+
+    fn _mac_extras() {
+        mut extra = []
+        if this.use_hvf {
+            push(extra, "-accel"); push(extra, "hvf")
+        }
+        -- virtio devices for fb + input. virtio-gpu paints the
+        -- ClarityOS compositor; virtio-tablet gives an absolute-
+        -- positioned cursor that doesn't capture.
+        push(extra, "-device"); push(extra, "virtio-gpu-pci")
+        push(extra, "-device"); push(extra, "virtio-keyboard-pci")
+        push(extra, "-device"); push(extra, "virtio-tablet-pci")
+        -- USB (so QEMU's screenshot key combos work) and audio
+        push(extra, "-usb")
+        push(extra, "-device"); push(extra, "intel-hda")
+        push(extra, "-device"); push(extra, "hda-output")
+        return extra
+    }
+
+    fn runner() {
+        return qemu_runner(this._runner_opts())
+    }
+
+    fn shell_command() { return this.runner().shell_command() }
+
+    fn run() {
+        if not _qemu_installed() {
+            throw "QemuMacOSError: qemu-system-x86_64 not on PATH. Install via `brew install qemu`."
+        }
+        return this.runner().run()
+    }
+
+    fn validate() {
+        mut errors = this.runner().validate()
+        if not _qemu_installed() {
+            push(errors, "qemu-system-x86_64 not on PATH (brew install qemu)")
+        }
+        if this.ovmf_paths["found"] == false {
+            push(errors, "OVMF firmware not found — UEFI boot disabled. Install with `brew install qemu` (ships with edk2/OVMF) or set ovmf_code/ovmf_vars manually.")
+        }
+        return errors
+    }
+}
+
+fn qemu_macos(opts) { return QemuMacosLauncher(opts) }
+
+-- ── Detection helpers ──────────────────────────
+
+fn _qemu_installed() {
+    let r = exec_full("command -v qemu-system-x86_64 >/dev/null 2>&1 && echo yes || echo no")
+    return trim(r.stdout) == "yes"
+}
+
+fn _has_hvf() {
+    -- HVF is available on macOS 10.10+; we test by asking QEMU.
+    let r = exec_full("qemu-system-x86_64 -accel help 2>/dev/null | grep -q hvf && echo yes || echo no")
+    return trim(r.stdout) == "yes"
+}
+
+fn _discover_ovmf() {
+    -- Homebrew ships OVMF inside the qemu cellar. Check the usual
+    -- locations on macOS + Linux.
+    let candidates = [
+        ["/opt/homebrew/share/qemu/edk2-x86_64-code.fd", "/opt/homebrew/share/qemu/edk2-i386-vars.fd"],
+        ["/usr/local/share/qemu/edk2-x86_64-code.fd",    "/usr/local/share/qemu/edk2-i386-vars.fd"],
+        ["/usr/share/OVMF/OVMF_CODE.fd",                  "/usr/share/OVMF/OVMF_VARS.fd"],
+        ["/usr/share/qemu/OVMF_CODE.fd",                  "/usr/share/qemu/OVMF_VARS.fd"]
+    ]
+    for pair in candidates {
+        if exists(pair[0]) and exists(pair[1]) {
+            return {"found": true, "code": pair[0], "vars": pair[1]}
+        }
+    }
+    return {"found": false, "code": "", "vars": ""}
+}

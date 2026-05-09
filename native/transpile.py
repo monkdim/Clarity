@@ -783,6 +783,8 @@ def bundle(compile_native=False):
         'tty.clarity',
         'init_app.clarity', 'procfs.clarity', 'input_pipeline.clarity',
         'display_server.clarity', 'desktop_session.clarity',
+        'iso9660.clarity', 'qemu_macos.clarity', 'os_build.clarity',
+        'theme_aurora.clarity', 'wallpapers.clarity', 'animations.clarity', 'boot_splash.clarity',
         'platform.clarity',
         'mkiso.clarity', 'live_usb.clarity', 'run_vm.clarity',
         'installer.clarity', 'hardware.clarity',

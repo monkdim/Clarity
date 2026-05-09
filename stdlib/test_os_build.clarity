@@ -1,0 +1,350 @@
+-- Phase 74 — bootable ISO + macOS QEMU launcher tests + the UX
+-- foundation (Aurora theme, wallpaper presets, animations, boot
+-- splash).
+--
+-- The ISO9660 packer is exercised by building a minimal image
+-- (kernel stub + runtime stub + grub.cfg) and verifying the
+-- magic numbers + LBA placements line up with the spec. We don't
+-- pipe it through QEMU since this test runs on the host runtime.
+
+from "iso9660.clarity" import iso_builder, iso_root
+from "qemu_macos.clarity" import qemu_macos
+from "os_build.clarity" import os_image_builder
+from "theme_aurora.clarity" import aurora, aurora_light, aurora_hc, aurora_gradient, warm_gradient, AURORA_TEAL, AURORA_VIOLET, AURORA_MAGENTA
+from "wallpapers.clarity" import wallpaper_presets, paint_preset, paint_aurora_gradient, paint_grid, paint_solid
+from "animations.clarity" import animation, tween_group, ease, EASE_OUT_CUBIC, EASE_OUT_BACK, EASE_OUT_BOUNCE, LINEAR, window_open_animation, window_close_animation
+from "boot_splash.clarity" import boot_splash
+from "graphics.clarity" import framebuffer
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+fn assert_close(actual, expected, tolerance, msg) {
+    let diff = if actual > expected { actual - expected } else { expected - actual }
+    if diff <= tolerance { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected} +/- {tolerance}, got {actual})" }
+}
+
+fn _bytes(s) {
+    mut out = []
+    mut i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        mut code = 0
+        mut j = 0
+        while j < 256 { if from_char_code(j) == c { code = j; break }; j = j + 1 }
+        push(out, code)
+        i = i + 1
+    }
+    return out
+}
+
+-- ── ISO9660 packer ────────────────────────────
+
+show "-- Phase 74: ISO9660 packer --"
+
+let iso = iso_builder({"volume_id": "TESTVOL"})
+let stub_kernel = []
+mut k = 0
+while k < 32 { push(stub_kernel, 0x90); k = k + 1 }     -- 32 NOPs
+push(stub_kernel, 0xCB)                                  -- ret
+iso.set_boot_image(stub_kernel)
+iso.add_file("/boot/clarity-kernel", stub_kernel)
+iso.add_file("/etc/clarity-os.toml", _bytes("hello = \"world\""))
+
+let image = iso.build()
+assert(len(image) >= 22 * 2048, "image at least 22 sectors (mandatory descriptors + boot)")
+assert_eq(len(image) % 2048, 0, "image is sector-aligned")
+
+-- System area zero
+mut sa_zero = true
+mut i = 0
+while i < 16 * 2048 {
+    if image[i] != 0 { sa_zero = false; break }
+    i = i + 1
+}
+assert(sa_zero, "system area is zero")
+
+-- PVD at sector 16: type=1, then "CD001"
+let pvd_off = 16 * 2048
+assert_eq(image[pvd_off], 1, "PVD type byte")
+assert_eq(image[pvd_off + 1], 0x43, "PVD 'C'")
+assert_eq(image[pvd_off + 2], 0x44, "PVD 'D'")
+assert_eq(image[pvd_off + 3], 0x30, "PVD '0'")
+assert_eq(image[pvd_off + 4], 0x30, "PVD '0'")
+assert_eq(image[pvd_off + 5], 0x31, "PVD '1'")
+assert_eq(image[pvd_off + 6], 1, "PVD version")
+
+-- Volume ID right-padded with spaces
+let vol_off = pvd_off + 40
+assert_eq(image[vol_off],     0x54, "volume id 'T'")
+assert_eq(image[vol_off + 1], 0x45, "volume id 'E'")
+assert_eq(image[vol_off + 2], 0x53, "volume id 'S'")
+assert_eq(image[vol_off + 3], 0x54, "volume id 'T'")
+assert_eq(image[vol_off + 4], 0x56, "volume id 'V'")
+assert_eq(image[vol_off + 5], 0x4F, "volume id 'O'")
+assert_eq(image[vol_off + 6], 0x4C, "volume id 'L'")
+assert_eq(image[vol_off + 7], 0x20, "volume id space pad")
+
+-- Boot Record VD at sector 17: type=0
+let bvd_off = 17 * 2048
+assert_eq(image[bvd_off], 0, "BVD type byte")
+assert_eq(image[bvd_off + 1], 0x43, "BVD 'C'")
+
+-- Boot system identifier "EL TORITO SPECIFICATION"
+assert_eq(image[bvd_off + 7], 0x45, "EL")
+assert_eq(image[bvd_off + 8], 0x4C, "EL")
+assert_eq(image[bvd_off + 10], 0x54, "EL T")
+
+-- Terminator at sector 18: type=0xFF
+assert_eq(image[18 * 2048], 0xFF, "VD terminator")
+
+-- Boot catalog at sector 19: validation entry magic + checksum
+let cat_off = 19 * 2048
+assert_eq(image[cat_off], 1, "boot catalog header ID = 1 (validation)")
+assert_eq(image[cat_off + 28], 0x55, "key byte 1")
+assert_eq(image[cat_off + 29], 0xAA, "key byte 2")
+
+-- Default boot entry at off+32: bootable flag 0x88
+assert_eq(image[cat_off + 32], 0x88, "default entry bootable")
+assert_eq(image[cat_off + 33], 0x00, "no emulation")
+
+-- ── OS image builder ─────────────────────────
+
+show "-- Phase 74: OS image builder --"
+
+let b = os_image_builder({"output": "/tmp/_clarity_test_build.iso"})
+let kbytes = []
+mut kk = 0
+while kk < 64 { push(kbytes, 0x90); kk = kk + 1 }
+b.set_kernel(kbytes)
+let rbytes = []
+mut rr = 0
+while rr < 32 { push(rbytes, 0xCC); rr = rr + 1 }
+b.set_runtime(rbytes)
+b.set_config("[init]\nhostname = \"claritos\"\n")
+b.add_app("calc", _bytes("show \"calc\""))
+
+assert_eq(len(b.validate()), 0, "complete builder validates")
+
+let plan = b.plan()
+mut found_kernel = false
+mut found_runtime = false
+mut found_config = false
+mut found_grub = false
+mut found_app = false
+for op in plan {
+    if op["kind"] == "file" and op["path"] == "/boot/clarity-kernel" { found_kernel = true }
+    if op["kind"] == "file" and op["path"] == "/bin/clarity-init" { found_runtime = true }
+    if op["kind"] == "file" and op["path"] == "/etc/clarity-os.toml" { found_config = true }
+    if op["kind"] == "file" and op["path"] == "/lib/clarity/apps/calc/main.clarity" { found_app = true }
+    if op["kind"] == "grub_config" { found_grub = true }
+}
+assert(found_kernel, "plan includes kernel")
+assert(found_runtime, "plan includes runtime")
+assert(found_config, "plan includes config")
+assert(found_grub, "plan includes grub.cfg")
+assert(found_app, "plan includes calc app")
+
+-- Validation catches missing pieces
+let bad = os_image_builder({"output": "x"})
+let bad_errs = bad.validate()
+mut saw_kernel_err = false
+mut saw_iso_err = false
+for e in bad_errs {
+    if contains(e, "kernel") { saw_kernel_err = true }
+    if contains(e, ".iso")   { saw_iso_err = true }
+}
+assert(saw_kernel_err, "missing kernel reported")
+assert(saw_iso_err, "non-.iso output reported")
+
+-- ── macOS QEMU launcher ──────────────────────
+
+show "-- Phase 74: macOS QEMU launcher --"
+
+let lr = qemu_macos({"iso": "/tmp/test.iso", "ram_mb": 2048, "cores": 2, "headless": true})
+assert_eq(lr.ram_mb, 2048, "ram_mb")
+assert_eq(lr.cores, 2, "cores")
+let cmd = lr.shell_command()
+assert(contains(cmd, "qemu-system-x86_64"), "uses qemu-system-x86_64")
+assert(contains(cmd, "/tmp/test.iso"), "iso path in argv")
+assert(contains(cmd, "virtio-gpu-pci"), "virtio-gpu added")
+assert(contains(cmd, "virtio-keyboard-pci"), "virtio-keyboard added")
+assert(contains(cmd, "virtio-tablet-pci"), "virtio-tablet added")
+
+-- ── Aurora theme ────────────────────────────
+
+show "-- UX: Aurora theme --"
+
+let a = aurora()
+assert_eq(a["name"], "Aurora", "theme name")
+assert_eq(a["accent"], AURORA_TEAL, "accent = teal")
+assert_eq(a["accent_secondary"], AURORA_VIOLET, "secondary = violet")
+assert_eq(a["accent_tertiary"], AURORA_MAGENTA, "tertiary = magenta")
+assert(a["corner_radius"] == 8, "corner_radius set")
+assert(a["transition_ms"] == 180, "transition_ms set")
+
+let al = aurora_light()
+assert(contains(al["name"], "Light"), "light variant name")
+assert(al["background"] != a["background"], "light has lighter bg")
+let ah = aurora_hc()
+assert_eq(ah["border_width"], 2, "high-contrast bumps border_width")
+
+-- Aurora gradient samples
+let teal_at_0 = aurora_gradient(0.0)
+let violet_at_half = aurora_gradient(0.5)
+let magenta_at_1 = aurora_gradient(1.0)
+assert_eq(teal_at_0, AURORA_TEAL, "gradient(0) = teal")
+assert_eq(violet_at_half, AURORA_VIOLET, "gradient(0.5) = violet")
+assert_eq(magenta_at_1, AURORA_MAGENTA, "gradient(1) = magenta")
+
+-- Out-of-range clamps
+assert_eq(aurora_gradient(-1.0), AURORA_TEAL, "gradient(-1) clamps to teal")
+assert_eq(aurora_gradient(2.0), AURORA_MAGENTA, "gradient(2) clamps to magenta")
+
+-- A point between teal and violet should have R between teal.R and violet.R
+let mid = aurora_gradient(0.25)
+let mid_r = (mid >> 16) & 0xFF
+let teal_r = (AURORA_TEAL >> 16) & 0xFF
+let violet_r = (AURORA_VIOLET >> 16) & 0xFF
+let lo = if teal_r < violet_r { teal_r } else { violet_r }
+let hi = if teal_r > violet_r { teal_r } else { violet_r }
+assert(mid_r >= lo and mid_r <= hi, "gradient(0.25) interpolates R")
+
+-- Warm gradient: violet → coral → gold
+let w0 = warm_gradient(0.0)
+let w1 = warm_gradient(1.0)
+assert_eq(w0, AURORA_VIOLET, "warm(0) = violet")
+assert(w1 != w0, "warm(1) != warm(0)")
+
+-- ── Wallpapers ──────────────────────────────
+
+show "-- UX: wallpaper presets --"
+
+let presets = wallpaper_presets()
+assert_eq(len(presets), 4, "4 presets")
+mut ids = []
+for p in presets { push(ids, p["id"]) }
+assert(contains(ids, "aurora"), "aurora preset")
+assert(contains(ids, "aurora_night"), "aurora_night preset")
+assert(contains(ids, "grid"), "grid preset")
+assert(contains(ids, "solid"), "solid preset")
+
+-- Paint each into a small framebuffer
+let fb = framebuffer(64, 48)
+paint_aurora_gradient(fb, a)
+let p_top = fb.get_pixel(0, 0)
+let p_bot = fb.get_pixel(63, 47)
+assert(p_top != p_bot, "gradient varies across the canvas")
+
+let fb2 = framebuffer(64, 48)
+paint_solid(fb2, a, {"color": 0xFF112233})
+assert_eq(fb2.get_pixel(0, 0),   0xFF112233, "solid: top-left")
+assert_eq(fb2.get_pixel(32, 32), 0xFF112233, "solid: middle")
+
+let fb3 = framebuffer(64, 48)
+paint_grid(fb3, a, {"grid_step": 16})
+-- The line at x=0 should be visibly different from a non-grid pixel
+assert(fb3.get_pixel(0, 5) != fb3.get_pixel(5, 5), "grid line visible")
+
+let fb4 = framebuffer(32, 24)
+let ok = paint_preset(fb4, a, "aurora", {})
+assert(ok, "paint_preset returns true for known preset")
+assert(not paint_preset(fb4, a, "no-such", {}), "unknown preset returns false")
+
+-- ── Animation primitives ────────────────────
+
+show "-- UX: animations --"
+
+assert_eq(ease(LINEAR, 0.0), 0.0, "linear at 0")
+assert_eq(ease(LINEAR, 1.0), 1.0, "linear at 1")
+assert_eq(ease(LINEAR, 0.5), 0.5, "linear at 0.5")
+assert_close(ease(EASE_OUT_CUBIC, 0.5), 0.875, 0.001, "ease_out_cubic at 0.5")
+
+let anim = animation({"duration_ms": 200, "easing": EASE_OUT_CUBIC, "from": 0.0, "to": 100.0})
+assert_eq(anim.value(0), 0.0, "value before start = from")
+anim.start(1000)
+assert_eq(anim.value(1000), 0.0, "value at start = from")
+assert_eq(anim.value(1200), 100.0, "value at end = to")
+assert(anim.done(1200), "done at end")
+assert(not anim.done(1100), "not done midway")
+let mid_val = anim.value(1100)
+assert(mid_val > 50.0 and mid_val < 100.0, "midway value in upper half (eased out)")
+
+-- Tween group
+let g = tween_group()
+g.add("scale", animation({"duration_ms": 100, "from": 0.9, "to": 1.0}))
+g.add("opacity", animation({"duration_ms": 200, "from": 0.0, "to": 1.0}))
+g.start(2000)
+let v = g.values_at(2050)
+assert(v["scale"] > 0.9 and v["scale"] < 1.0, "scale midway")
+assert(v["opacity"] > 0.0 and v["opacity"] < 1.0, "opacity midway")
+assert(not g.done_at(2050), "group not done early")
+assert(g.done_at(2300), "group done after longest")
+
+-- Preset animations
+let wo = window_open_animation()
+wo.start(0)
+let wo_vals = wo.values_at(0)
+assert_eq(wo_vals["scale"], 0.92, "window-open scale starts at 0.92")
+assert_eq(wo_vals["opacity"], 0.0, "window-open opacity starts at 0")
+assert(wo.done_at(500), "window-open done by 500ms")
+
+let wc = window_close_animation()
+wc.start(0)
+assert_eq(wc.values_at(0)["opacity"], 1.0, "window-close opacity starts at 1")
+
+-- ── Boot splash ────────────────────────────
+
+show "-- UX: boot splash --"
+
+let splash_fb = framebuffer(800, 600)
+let splash = boot_splash(splash_fb, a)
+splash.start(0)
+splash.set_progress(0.0, "Starting kernel")
+splash.tick(0)
+assert(len(splash.captured_paint_ops) > 0, "splash recorded paint ops")
+mut saw_wordmark = false
+mut saw_status = false
+mut saw_track = false
+for op in splash.captured_paint_ops {
+    if op["kind"] == "wordmark" { saw_wordmark = true }
+    if op["kind"] == "status" { saw_status = true }
+    if op["kind"] == "track" { saw_track = true }
+}
+assert(saw_wordmark, "wordmark drawn")
+assert(saw_status, "status drawn")
+assert(saw_track, "progress track drawn")
+
+splash.set_progress(0.5, "Mounting filesystems")
+splash.tick(50)
+mut saw_fill = false
+for op in splash.captured_paint_ops {
+    if op["kind"] == "fill" { saw_fill = true }
+}
+assert(saw_fill, "progress fill drawn at 50%")
+
+splash.set_progress(1.0, "Ready")
+splash.fade_out(100)
+assert(not splash.done(100), "not done at fade start")
+assert(splash.done(500), "done after fade duration")
+
+splash.tick(200)
+mut saw_overlay = false
+for op in splash.captured_paint_ops {
+    if op["kind"] == "fade_overlay" { saw_overlay = true }
+}
+assert(saw_overlay, "fade overlay applied during fade")
+
+-- ── Summary ────────────────────────────────
+
+show ""
+show "Phase 74 + UX: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " test(s) failed" }
