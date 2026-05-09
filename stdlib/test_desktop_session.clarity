@@ -1,0 +1,269 @@
+-- Phase 73 — bare-metal compositor tests.
+--
+-- DisplayServer (frame loop, dirty-rect skip, mouse/key/text
+-- routing to the focused window, cursor tracking) +
+-- DesktopSession (boot mounts wallpaper/statusbar/dock at the
+-- right z-order; launch/close cycles; launcher show/hide;
+-- lock/unlock; notifications). All tested with stub Compositor +
+-- stub Window so the screen layer is replaced with a recording
+-- fake.
+
+from "display_server.clarity" import DisplayServer, display_server
+from "desktop_session.clarity" import DesktopSession, desktop_session, DEFAULT_PINNED
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Stub compositor + bus + screen ────────────
+
+class StubCompositor {
+    fn init(width, height) {
+        this.width = width
+        this.height = height
+        this.windows = []
+        this.focused = null
+        this.dirty = false
+        this.full_paint_calls = 0
+        this.render_calls = 0
+    }
+    fn add(w) { push(this.windows, w); this.dirty = true }
+    fn remove(w) {
+        mut next = []
+        for x in this.windows { if x != w { push(next, x) } }
+        this.windows = next
+        this.dirty = true
+    }
+    fn focus(w) {
+        if this.focused != null { this.focused["focused"] = false }
+        this.focused = w
+        if w != null { w["focused"] = true }
+    }
+    fn window_at(x, y) {
+        mut i = len(this.windows) - 1
+        while i >= 0 {
+            let w = this.windows[i]
+            if x >= w["x"] and y >= w["y"] and x < w["x"] + w["w"] and y < w["y"] + w["h"] { return w }
+            i = i - 1
+        }
+        return null
+    }
+    fn has_dirty() { return this.dirty }
+    fn mark_all() { this.dirty = true; this.full_paint_calls = this.full_paint_calls + 1 }
+    fn render() { this.dirty = false; this.render_calls = this.render_calls + 1 }
+}
+
+fn stub_compositor(w, h) { return StubCompositor(w, h) }
+
+class StubBus {
+    fn init() { this.queue = [] }
+    fn push_event(ev) { push(this.queue, ev) }
+    fn drain() {
+        let out = this.queue
+        this.queue = []
+        return out
+    }
+}
+
+class StubScreen {
+    fn init(w, h) { this.width = w; this.height = h }
+}
+
+class StubApp {
+    fn init(name) {
+        this.name = name
+        this.keys = []
+        this.text = []
+        this.mouse = []
+    }
+    fn on_key(ev)  { push(this.keys, ev) }
+    fn on_text(ev) { push(this.text, ev) }
+    fn on_mouse(ev){ push(this.mouse, ev) }
+}
+
+-- ── DisplayServer ─────────────────────────────
+
+show "-- Phase 73: display server --"
+
+let comp = stub_compositor(800, 600)
+let bus = StubBus()
+let screen = StubScreen(800, 600)
+let display = display_server({"compositor": comp, "screen": screen, "bus": bus})
+assert_eq(display.width, 800, "width")
+assert_eq(display.height, 600, "height")
+assert(display._needs_full_paint, "needs full paint at start")
+
+-- First frame paints fully
+let painted = display.frame()
+assert(painted, "first frame painted")
+assert_eq(display.frames_painted, 1, "1 frame painted")
+assert_eq(comp.full_paint_calls, 1, "compositor mark_all called")
+assert_eq(comp.render_calls, 1, "compositor.render called")
+
+-- Second frame with no dirty content — skipped
+let painted2 = display.frame()
+assert(not painted2, "no dirty → skip")
+assert_eq(display.frames_skipped, 1, "1 frame skipped")
+assert_eq(comp.render_calls, 1, "render not called again")
+
+-- Adding a window marks dirty
+let app_a = StubApp("a")
+let win_a = {"x": 100, "y": 100, "w": 300, "h": 200, "focused": false, "app": app_a,
+             "on_mouse": fn(ev) { app_a.on_mouse(ev) },
+             "on_key":   fn(ev) { app_a.on_key(ev) },
+             "on_text":  fn(ev) { app_a.on_text(ev) }}
+display.add_window(win_a)
+let painted3 = display.frame()
+assert(painted3, "frame painted after add_window")
+assert(not display._needs_full_paint, "full-paint flag cleared")
+
+-- Mouse press routes focus to the window under the cursor
+bus.push_event({"kind": "mouse", "x": 150, "y": 150, "press": true, "button": 1})
+display.tick()
+assert_eq(comp.focused, win_a, "focus moved to win_a on click")
+assert_eq(len(app_a.mouse), 1, "win_a saw the mouse event")
+
+-- Cursor tracks the last position
+assert_eq(display.cursor["x"], 150, "cursor x")
+assert_eq(display.cursor["y"], 150, "cursor y")
+
+-- Key + text events go to the focused window
+bus.push_event({"kind": "key", "char": "a", "press": true})
+bus.push_event({"kind": "text", "char": "b", "byte": 98})
+display.tick()
+assert_eq(len(app_a.keys), 1, "key event delivered")
+assert_eq(app_a.keys[0]["char"], "a", "key char")
+assert_eq(len(app_a.text), 1, "text event delivered")
+
+-- Mouse outside any window — no window focus change
+bus.push_event({"kind": "mouse", "x": 500, "y": 500, "press": true, "button": 1})
+display.tick()
+assert_eq(comp.focused, win_a, "still focused on win_a (no window at 500,500)")
+
+-- step() runs N ticks
+let p = display.step(5)
+assert(p >= 0, "step returns painted count")
+
+-- snapshot
+let snap = display.snapshot()
+assert(snap["frames_painted"] >= 1, "snapshot frames painted")
+assert(snap["events_dispatched"] >= 4, "events tracked")
+
+-- ── DesktopSession boot ───────────────────────
+
+show "-- Phase 73: desktop session --"
+
+let comp2 = stub_compositor(1024, 768)
+let bus2 = StubBus()
+let display2 = display_server({"compositor": comp2, "screen": StubScreen(1024, 768), "bus": bus2})
+
+mut wallpaper_built = 0
+mut statusbar_built = 0
+mut dock_built = 0
+let factories = {
+    "wallpaper":  fn(theme) { wallpaper_built = wallpaper_built + 1; return {"role": "wallpaper", "x": 0, "y": 0, "w": 1024, "h": 768, "focused": false} },
+    "statusbar":  fn(theme) { statusbar_built = statusbar_built + 1; return {"role": "statusbar", "x": 0, "y": 0, "w": 1024, "h": 28, "focused": false} },
+    "dock":       fn(theme, pinned) { dock_built = dock_built + 1; return {"role": "dock", "x": 0, "y": 712, "w": 1024, "h": 56, "focused": false} },
+    "calc":       fn(theme) { return StubApp("calc") },
+    "files":      fn(theme) { return StubApp("files") },
+    "terminal":   fn(theme) { return StubApp("terminal") },
+    "launcher":   fn(theme, pinned) { return {"role": "launcher", "x": 0, "y": 0, "w": 1024, "h": 768, "focused": false} },
+    "lockscreen": fn(theme) { return {"role": "lockscreen", "x": 0, "y": 0, "w": 1024, "h": 768, "focused": false} }
+}
+
+let session = desktop_session(display2, {}, {"factories": factories})
+session.boot({"width": 1024, "height": 768})
+assert_eq(wallpaper_built, 1, "wallpaper factory ran")
+assert_eq(statusbar_built, 1, "statusbar factory ran")
+assert_eq(dock_built, 1, "dock factory ran")
+assert_eq(len(comp2.windows), 3, "3 baseline widgets mounted")
+
+-- Default pinned list
+assert_eq(session.pinned, DEFAULT_PINNED, "default pinned apps")
+
+-- ── Launching apps ──────────────────────────
+
+let calc_entry = session.launch("calc")
+assert(calc_entry != null, "calc launched")
+assert_eq(session.running_count(), 1, "1 running")
+assert_eq(len(comp2.windows), 4, "4 windows after launch (3 + calc)")
+assert_eq(comp2.focused["title"], "Calculator", "calc focused")
+
+-- Launching the same app again returns the existing entry + focuses
+let calc_entry2 = session.launch("calc")
+assert_eq(calc_entry2, calc_entry, "re-launch returns same entry")
+assert_eq(session.running_count(), 1, "still 1 running")
+
+-- Launch a second app
+let files_entry = session.launch("files")
+assert_eq(session.running_count(), 2, "2 running")
+assert_eq(comp2.focused["title"], "Files", "files focused on launch")
+
+-- Unknown app throws
+mut threw = false
+try { session.launch("quantum-debugger") } catch e { threw = true }
+assert(threw, "unknown app throws")
+
+-- close_app removes the window + entry
+let removed = session.close_app("calc")
+assert(removed, "close returned true")
+assert_eq(session.running_count(), 1, "1 left")
+assert_eq(len(comp2.windows), 4, "3 baseline + files window")
+
+let removed_again = session.close_app("calc")
+assert(not removed_again, "close already-closed returns false")
+
+-- ── Launcher overlay ────────────────────────
+
+assert(session.show_launcher(), "launcher shown")
+assert(session.launcher != null, "launcher tracked")
+assert_eq(comp2.focused["role"], "launcher", "focus moved to launcher")
+assert(not session.show_launcher(), "second show is no-op")
+
+assert(session.hide_launcher(), "launcher hidden")
+assert(session.launcher == null, "launcher cleared")
+assert(not session.hide_launcher(), "hiding hidden is no-op")
+
+-- ── Lock / unlock ──────────────────────────
+
+assert(session.lock(), "lock ok")
+assert(session.locked, "locked flag set")
+assert_eq(comp2.focused["role"], "lockscreen", "lockscreen focused")
+assert(not session.lock(), "double-lock no-op")
+
+assert(session.unlock(), "unlock ok")
+assert(not session.locked, "unlocked")
+assert(not session.unlock(), "double-unlock no-op")
+
+-- ── Notifications ──────────────────────────
+
+session.notify("Hello", "From the desktop session")
+assert_eq(len(session.notifications), 1, "notification stored")
+assert_eq(session.notifications[0]["title"], "Hello", "title")
+
+let snap2 = session.snapshot()
+assert_eq(snap2["running_count"], 1, "snapshot running_count")
+assert_eq(snap2["notifications"], 1, "snapshot notifications")
+
+-- ── Cursor visibility ─────────────────────
+
+display.show_cursor(false)
+assert(not display.cursor["visible"], "cursor hidden")
+display.show_cursor(true)
+assert(display.cursor["visible"], "cursor shown again")
+display.set_cursor(10, 20)
+assert_eq(display.cursor["x"], 10, "cursor x set")
+assert_eq(display.cursor["y"], 20, "cursor y set")
+
+-- ── Summary ────────────────────────────────
+
+show ""
+show "Phase 73: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 73 test(s) failed" }
