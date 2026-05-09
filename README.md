@@ -57,18 +57,43 @@ That's the pitch: **a programming language good enough to write its own operatin
 
 ---
 
-## Try it in five minutes
+## Try Clarity in 60 seconds
+
+One binary, no runtime, works on macOS and Linux (x64 + ARM64).
 
 ```bash
-# Install Clarity
-curl -fsSL https://clarityos.dev/install.sh | bash
-clarity run examples/hello.clarity
+# 1. Install Clarity
+curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash
 
-# Boot ClarityOS in QEMU (macOS)
-brew install qemu zig
+# 2. Clone the repo and run your first program
 git clone https://github.com/monkdim/Clarity.git
-cd Clarity && clarity os build && clarity os run
+cd Clarity
+clarity run examples/hello.clarity
 ```
+
+That's it — you've run real Clarity. From here, `clarity shell` drops you into the interactive terminal, `clarity help` lists every command, and `examples/` has eight tours of the language (classes, async, patterns, file I/O, …).
+
+## Try ClarityOS in ~15 minutes
+
+ClarityOS boots in QEMU on macOS and Linux. The first run builds a ~240 MB ISO from source, so plan for a one-time wait; subsequent `clarity os run` invocations are instant.
+
+**macOS**
+
+```bash
+brew install qemu zig
+clarity os build && clarity os run
+```
+
+**Linux**
+
+```bash
+sudo apt install qemu-system-x86 ovmf zig    # Debian / Ubuntu
+# or: sudo dnf install qemu-system-x86 edk2-ovmf zig    # Fedora
+# or: sudo pacman -S qemu-base edk2-ovmf zig            # Arch
+clarity os build && clarity os run
+```
+
+You should land on the Meadow desktop — sage green, daffodil yellow, cream canvas — with terminal, files, editor, calc, viewer, and monitor pre-pinned to the dock.
 
 Full instructions, the language tour, every CLI command, and the developer-tools deep-dive live in **[GETTING_STARTED.md](GETTING_STARTED.md)**.
 
