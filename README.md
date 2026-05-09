@@ -61,7 +61,7 @@ That's the pitch: **a programming language good enough to write its own operatin
 
 ```bash
 # Install Clarity
-curl -fsSL https://clarityos.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash
 clarity run examples/hello.clarity
 
 # Boot ClarityOS in QEMU (macOS)
