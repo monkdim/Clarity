@@ -106,17 +106,10 @@ jobs:
           cd native/dist
           bun build --compile clarity-entry.js --outfile clarity
 
-      - name: Cache zig-out
-        uses: actions/cache@v4
-        with:
-          path: |
-            kernel/zig-out
-            kernel/.zig-cache
-            runtime/freestanding/zig-out
-            runtime/freestanding/.zig-cache
-          key: zig-out-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/build.zig', 'runtime/freestanding/**/*.zig', 'runtime/freestanding/**/*.c', 'runtime/freestanding/**/*.h', 'runtime/freestanding/build.zig') }}
-          restore-keys: |
-            zig-out-${{ runner.os }}-
+      # Note: zig-out caching intentionally omitted for now. The cache
+      # action failed with HTTP 22 on the first run (likely Actions
+      # cache scope/quota). Add back once the build itself is proven
+      # green; not a correctness concern, only build time.
 
       - name: Build ClarityOS (kernel + runtime + ISO)
         run: ./native/dist/clarity os build
