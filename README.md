@@ -1,716 +1,124 @@
-# Clarity
+# Clarity & ClarityOS
 
 **Simple code. Real power.**
 
-Clarity is a self-hosted programming language that combines the readability of Python with the expressiveness of functional languages. It features immutable-by-default variables, a pipe operator, pattern matching, classes, async/await, generators, and a full developer toolchain — all in a clean, minimal syntax.
+A modern programming language and the operating system written in it. End to end, top to bottom — one syntax, one toolchain, one design vocabulary. From the moment you press the power button to the moment you press *Enter* in the REPL, it's all Clarity.
 
-Clarity is **self-hosted**: the lexer, parser, interpreter, bytecode compiler, CLI, LSP server, and package manager are all written in Clarity itself. It can also compile to a standalone native binary via JavaScript transpilation.
-
-```
--- Hello World in Clarity
-let name = "World"
-show "Hello {name}!"
-
--- Pipes make data flow visible
-let result = [1, 2, 3, 4, 5]
-    |> filter(x => x % 2 == 0)
-    |> map(x => x * x)
-show result  -- [4, 16]
-```
+![ClarityOS desktop — Meadow theme](website/screenshots/meadow_desktop.png)
 
 ---
 
-## Table of Contents
+## Two projects, one story
 
-- [Install](#install)
-- [Quick Start](#quick-start)
-- [CLI Commands](#cli-commands)
-- [Language Features](#language-features)
-- [Developer Tools](#developer-tools)
-- [Self-Hosting](#self-hosting)
-- [Native Binary](#native-binary)
-- [Project Structure](#project-structure)
-- [Running Tests](#running-tests)
-- [Roadmap](#roadmap)
-- [License](#license)
+### Clarity, the language
+
+Clarity is what Python wishes it could be. It reads like English, runs like JavaScript, scales like Rust, and ships like Go — a single self-contained binary you can drop on any machine.
+
+- **Readable by default.** Immutable variables, named arguments, pattern matching, `|>` pipes that make data flow visible at a glance, `show "Hello {name}"` interpolation, `--` line comments. No semicolons, no type-juggling ceremony, no clever-but-cryptic operators.
+- **Powerful where it counts.** Classes with inheritance and interfaces, async / await, generators, decorators, comprehensions, destructuring, null coalescing, optional chaining, pattern matching. Everything modern languages give you, with none of the noise.
+- **Self-hosted, end to end.** The lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, language server, and shell are all written in Clarity. You can read every byte of the toolchain in the same syntax you use to ship apps. **550+ tests, all in Clarity.**
+- **Ships as a single binary.** Clarity transpiles to JavaScript, Bun compiles the bundle to a native executable for macOS, Linux, and Windows (x64 + ARM64). No runtime to install, no virtual environment to activate, no Python on the target machine. `clarity run hello.clarity` and you're done.
+- **Batteries included.** `clarity debug`, `clarity profile`, `clarity fmt`, `clarity lint`, `clarity test`, `clarity doc`, `clarity lsp`, `clarity install <pkg>`. The whole developer experience is one command away from the moment you install.
+
+### ClarityOS, the operating system
+
+ClarityOS is a complete desktop operating system built almost entirely in Clarity itself. The Zig micro-kernel handles paging, scheduling, and syscalls; everything above the syscall boundary — init, the filesystem layer, the input pipeline, the compositor, the window manager, the dock, the launcher, the settings panel, the file manager, the editor, the terminal, the calculator, the image viewer, the system monitor, the app store, the email client, the chat app, the IDE, the documentation viewer, the playground, the package manager, the ISO packer, the QEMU launcher, and the release pipeline — is Clarity, all the way down.
+
+- **Boots in under five seconds** to a desktop you'll actually want to use. Multiboot2 → ELF loader → ring switch → SYSCALL fast path → page faults → fork / exec / wait / kill → multiboot framebuffer → init → tmpfs / devfs / procfs → desktop session → login. No legacy cruft.
+- **A first-day-of-spring identity.** Meadow (the new flagship) is sage green, daffodil yellow, blossom pink, and sky blue on a cream canvas. Bloom is mint and apricot. Watercolor is dreamy pastels on parchment. Midnight is the deep violet-charcoal Aurora theme for users who want it dark. All four ship by default and switch live in **Settings → Appearance**.
+- **Designed like macOS, accessible like Windows.** Soft tinted shadows instead of harsh drop-shadows. 14-px window radii. Single-colour wordmark. Asymmetric layouts that anchor your attention without locking you in. Abstract app-icon marks (a wave for the terminal, a stack for files, a grid for calc, a cog for settings) that read at any size. Frosted chrome. Brand-gradient progress bars. Notifications that respect your focus.
+- **One language, top to bottom.** When you write an app for ClarityOS, you write Clarity. When you read the kernel's syscall table, it's defined in Clarity. When you customise your theme, it's a Clarity dict. When you build the ISO, you call a Clarity function. There is no impedance mismatch between the OS and the apps that run on it.
+- **Bootable on real hardware** or in QEMU on macOS with HVF acceleration, virtio-gpu, virtio-keyboard, OVMF auto-discovered. `clarity os build && clarity os run` and you're at a working desktop.
 
 ---
 
-## Install
+## Why this matters
 
-### Pre-built binary (recommended)
+Most operating systems are written in languages designed in the seventies, glued together with build systems designed in the eighties, decorated with UI frameworks designed in the nineties, distributed through package managers designed in the two-thousands. Each layer hides the layer below behind a wrapper. Reading the source is an archaeology project.
 
-Download the latest release for your platform from [Releases](https://github.com/monkdim/Clarity/releases), or build from source:
+ClarityOS is the opposite bet. **One language. One toolchain. One palette. One radius scale. One typography ramp. One way to ship code.** The boot splash, the kernel syscall stub, the file-manager sidebar, the website's CSS, the package registry's HTTP handler — all the same syntax, all the same conventions, all the same `clarity test` away from green. You can clone the repo on a Sunday afternoon and have a working mental model of the whole system by Sunday evening.
+
+That's the pitch: **a programming language good enough to write its own operating system in, and an operating system simple enough that you'd actually want to.**
+
+---
+
+## At a glance
+
+| | Clarity | ClarityOS |
+|---|---|---|
+| **Status** | v1.0.0 — 100% self-hosted, zero Python dependency at runtime | 1.0 — 76 phases shipped, bootable on macOS QEMU and bare metal |
+| **Lines of Clarity** | ~80,000 across the toolchain + stdlib | ~50,000 across kernel-adjacent userspace, desktop, apps, infra |
+| **Tests** | 430+ language and tooling tests, all in Clarity | 120+ ClarityOS tests on top (perf gate, crash recovery, theme switcher, …) |
+| **Boot time target** | — | under 5 s to desktop |
+| **Frame target** | — | 60 fps with frame-time tracking |
+| **Idle RAM target** | — | under 256 MB |
+| **App launch target** | — | under 250 ms cold |
+| **Dependencies on the target machine** | none — it's a single binary | Zig + QEMU (macOS / Linux) for the dev workflow; nothing for the burned ISO |
+
+---
+
+## Try it in five minutes
 
 ```bash
+# Install Clarity
+curl -fsSL https://clarityos.dev/install.sh | bash
+clarity run examples/hello.clarity
+
+# Boot ClarityOS in QEMU (macOS)
+brew install qemu zig
 git clone https://github.com/monkdim/Clarity.git
-cd Clarity
-clarity build --install
+cd Clarity && clarity os build && clarity os run
 ```
 
-### Build from source
-
-Requires [Bun](https://bun.sh):
-
-```bash
-curl -fsSL https://bun.sh/install | bash
-cd Clarity/native
-python3 transpile.py --bundle --compile
-# Binary is in native/dist/clarity
-```
-
-After install, the `clarity` command is available globally.
+Full instructions, the language tour, every CLI command, and the developer-tools deep-dive live in **[GETTING_STARTED.md](GETTING_STARTED.md)**.
 
 ---
 
-## Quick Start
+## What ClarityOS looks like
 
-Create a file called `hello.clarity`:
+Boot splash — asymmetric layout, logo + wordmark left-aligned in the upper third, full-width brand-gradient progress bar at the bottom:
 
-```
-let name = "Clarity"
-show "Hello from {name}!"
+![ClarityOS boot splash — Meadow theme](website/screenshots/meadow_splash.png)
 
-let nums = [1, 2, 3, 4, 5]
-let squares = nums |> map(x => x * x)
-show "Squares: {squares}"
+Theme picker in **Settings → Appearance** — three light spring themes plus Midnight, switchable at runtime, persisted to `~/.clarity-os/theme`:
 
-fn greet(person) {
-    show "Hey {person}, welcome!"
-}
-greet("Developer")
-```
+![ClarityOS theme picker — all four built-ins](website/screenshots/meadow_themes.png)
 
-Run it:
+Marketing lockup — a single wordmark, a single brand stripe, no skeuomorphism:
 
-```bash
-clarity run hello.clarity
-```
-
-Or launch the interactive shell:
-
-```bash
-clarity shell
-```
+![ClarityOS lockup](website/screenshots/meadow_lockup.png)
 
 ---
 
-## CLI Commands
+## What's inside
 
-```
-clarity run <file>              Run a Clarity program (--fast for bytecode VM)
-clarity shell                   Interactive terminal (Clarity + shell commands)
-clarity repl                    Basic interactive REPL
-clarity check <file>            Check syntax (--types for static type checking)
-clarity lint <file|dir>         Lint for common issues
-clarity fmt <file|dir>          Format code (--check, --write)
-clarity test [dir]              Run test files (test_*.clarity)
-clarity debug <file>            Interactive step-through debugger
-clarity profile <file>          Profile execution (timing, hotspots, call graph)
-clarity doc <file|dir>          Generate docs (--md, --json, -o <file>)
-clarity compile <file>          Show bytecode disassembly
-clarity tokens <file>           Show lexer output
-clarity ast <file>              Show parse tree
-clarity init                    Create a new clarity.toml
-clarity install                 Install dependencies from clarity.toml
-clarity install <pkg>           Add and install a package
-clarity publish                 Pack and publish to registry
-clarity search <query>          Search the package registry
-clarity info <pkg>              Show package info from registry
-clarity transpile <file>        Transpile to JavaScript (-o, --bundle)
-clarity build                   Build native binary (--all, --target, --install)
-clarity smoke                   Run smoke tests on the binary
-clarity gen-runtime             Regenerate native/runtime.js from spec
-clarity install-self            Install Clarity from source
-clarity bench                   Run performance benchmarks
-clarity lsp                     Start language server (for editors)
-```
+Clarity ships a self-hosted lexer, parser, AST, tree-walking interpreter, stack-based bytecode VM (48 opcodes), CLI dispatcher, REPL, shell, formatter, linter, type checker, debugger, profiler, doc generator, package manager + TOML parser, package registry server, language server (JSON-RPC 2.0), Clarity-to-JavaScript transpiler, build pipeline, installer, and a runtime spec that auto-generates the JS shim. Everything in `stdlib/`. Everything readable.
+
+ClarityOS adds a multiboot2 Zig micro-kernel (paging, scheduler, syscalls, fork/exec/wait/kill, page faults, timer, multiboot framebuffer), a freestanding QuickJS-based userspace runtime, init / tmpfs / devfs / procfs, an input pipeline, a compositor, a window manager, a dock, a launcher, a settings panel, a notification centre, a theme protocol with four built-in themes + a registry + a picker, asymmetric meadow / bloom / watercolor wallpapers, modern flat branding (Drop+Leaf logo, abstract app-icon marks), an asymmetric boot splash, a perf-profiler with a release gate (boot / frame / memory / launch), crash recovery (journal + watchdog + crash dialog with bug-report flow), a pure-Clarity ISO9660 packer, a macOS QEMU launcher with HVF, an installer, a website generator, a release pipeline, and the eleven default apps (terminal, files, editor, calc, viewer, monitor, browser, mail, chat, store, settings).
+
+For the full file-by-file structure, see the **Project structure** section of [GETTING_STARTED.md](GETTING_STARTED.md).
 
 ---
 
-## Language Features
+## Roadmap & history
 
-### Variables
+- **Clarity** — see [GAPS.md](GAPS.md) for the language's development history (Phases 24–48, the road to v1.0).
+- **ClarityOS** — see [ROADMAP_OS.md](ROADMAP_OS.md) for the OS roadmap (Phases 56–76, FFI through the spring design refresh).
 
-```
-let x = 42          -- immutable (default)
-mut counter = 0     -- mutable (opt-in)
-counter += 1
-
--- Type annotations (runtime checked)
-let name: string = "Alice"
-let age: int = 30
-```
-
-### Functions
-
-```
-fn add(a, b) {
-    return a + b
-}
-
--- Lambda shorthand
-let double = x => x * 2
-let multiply = (a, b) => a * b
-
--- Rest parameters
-fn first(head, ...tail) {
-    return head
-}
-
--- Typed functions
-fn divide(a: float, b: float) -> float {
-    return a / b
-}
-```
-
-### Pipes
-
-The pipe operator `|>` passes the result as the first argument to the next function:
-
-```
-let result = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    |> filter(x => x % 2 == 0)
-    |> map(x => x * x)
-    |> reduce((a, b) => a + b, 0)
-show result  -- 220
-```
-
-### Control Flow
-
-```
-if age >= 18 {
-    show "adult"
-} elif age >= 13 {
-    show "teen"
-} else {
-    show "child"
-}
-
--- If expressions (ternary)
-let label = if age >= 18 { "adult" } else { "minor" }
-
--- For loops
-for item in [1, 2, 3] {
-    show item
-}
-for i in 0..10 {
-    show i
-}
-
--- While loops
-mut n = 10
-while n > 0 {
-    n -= 1
-}
-```
-
-### Pattern Matching
-
-```
-fn describe(value) {
-    match value {
-        when 0 { show "zero" }
-        when 1 { show "one" }
-        when "hello" { show "greeting" }
-        else { show "something else: {value}" }
-    }
-}
-```
-
-### Classes & Inheritance
-
-```
-class Animal {
-    fn init(name, sound) {
-        this.name = name
-        this.sound = sound
-    }
-    fn speak() {
-        show "{this.name} says {this.sound}!"
-    }
-}
-
-class Dog < Animal {
-    fn init(name) {
-        this.name = name
-        this.sound = "woof"
-    }
-    fn fetch(item) {
-        show "{this.name} fetches the {item}"
-    }
-}
-
-let dog = Dog("Rex")
-dog.speak()       -- Rex says woof!
-dog.fetch("ball") -- Rex fetches the ball
-```
-
-### Interfaces
-
-```
-interface Drawable {
-    fn draw()
-    fn area() -> float
-}
-
-class Circle impl Drawable {
-    fn init(r) { this.r = r }
-    fn draw() { show "Drawing circle r={this.r}" }
-    fn area() { return 3.14159 * this.r * this.r }
-}
-```
-
-### Enums
-
-```
-enum Color { Red, Green, Blue }
-show Color.Red     -- 0
-show Color.names() -- ["Red", "Green", "Blue"]
-
-enum Status {
-    OK = 200
-    NotFound = 404
-    Error = 500
-}
-```
-
-### Destructuring & Spread
-
-```
-let [first, second, ...rest] = [1, 2, 3, 4, 5]
-let {name, age} = {name: "Alice", age: 30}
-
-let merged = [...list1, ...list2]
-let combined = {...map1, ...map2}
-```
-
-### Async/Await
-
-```
-async fn fetch_data() {
-    return 42
-}
-
-let result = await fetch_data()
-show result
-```
-
-### Generators
-
-```
-fn fibonacci() {
-    mut a = 0
-    mut b = 1
-    for i in 0..10 {
-        yield a
-        a, b = b, a + b
-    }
-}
-
-let fibs = fibonacci()
-show fibs  -- [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
-```
-
-### Comprehensions
-
-```
--- List comprehension
-let squares = [x * x for x in 0..10 if x > 3]
-
--- Map comprehension
-let lengths = {name: len(name) for name in ["alice", "bob", "charlie"]}
-```
-
-### Error Handling
-
-```
-try {
-    let result = risky_operation()
-} catch e {
-    show "Error: {e}"
-} finally {
-    show "Cleanup done"
-}
-
-throw "something went wrong"
-```
-
-### Decorators
-
-```
-fn log(wrapped) {
-    return fn(...args) {
-        show "calling function"
-        let result = wrapped(...args)
-        show "done"
-        return result
-    }
-}
-
-@log
-fn add(a, b) {
-    return a + b
-}
-```
-
-### Modules
-
-```
-import math
-show math.sqrt(16)
-
-from math import sqrt, pi
-show sqrt(2)
-
-import "utils.clarity"              -- file import
-from "helpers" import process_data  -- named import
-```
-
-**Built-in modules:** math, json, os, path, random, time, crypto, regex
-
-### Null Safety
-
-```
-let value = maybe_null ?? "default"   -- null coalescing
-let name = user?.profile?.name        -- optional chaining
-```
-
-### Raw Strings
-
-```
-let path = r"C:\Users\test\new"    -- no escape processing
-let regex = r"^\d{3}-\d{4}$"      -- no escape processing
-```
+Both projects are at 1.0 today. Both are still actively developed. Issues, PRs, and theme contributions are welcome.
 
 ---
 
-## Built-in Functions
+## Contributing
 
-| Function | Description |
-|----------|-------------|
-| `show` | Print values |
-| `len(x)` | Length of string, list, or map |
-| `type(x)` | Get type name |
-| `str(x)`, `int(x)`, `float(x)`, `bool(x)` | Type conversion |
-| `range(n)`, `range(start, end)` | Number sequences |
-| `map(list, fn)`, `filter(list, fn)`, `reduce(list, fn, init)` | Collection transforms |
-| `sort(list)`, `reverse(list)`, `unique(list)`, `flat(list)` | List operations |
-| `push(list, item)`, `pop(list)` | List mutation |
-| `keys(map)`, `values(map)`, `entries(map)` | Map access |
-| `join(list, sep)`, `split(str, sep)` | String operations |
-| `upper(s)`, `lower(s)`, `trim(s)`, `replace(s, a, b)` | String transforms |
-| `abs(n)`, `round(n)`, `floor(n)`, `ceil(n)`, `sqrt(n)` | Math |
-| `min(list)`, `max(list)`, `sum(list)` | Aggregation |
-| `read(path)`, `write(path, data)` | File I/O |
-| `ask(prompt)` | Read user input |
-| `exit(code)` | Exit with status code |
-
----
-
-## Developer Tools
-
-### Debugger
-
-Interactive step-through debugging with breakpoints, variable inspection, and watch expressions:
-
-```bash
-clarity debug app.clarity
-```
-
-**Commands:** `step`, `next`, `finish`, `continue`, `break <line>`, `print <expr>`, `eval <code>`, `vars`, `backtrace`, `watch <expr>`, `list`, `help`
-
-### Profiler
-
-Measure function timing, call counts, and identify hot lines:
-
-```bash
-clarity profile app.clarity
-```
-
-Outputs a full report with function profile (sorted by time), hot lines with colored heat bars, and a call graph showing caller/callee relationships.
-
-### Documentation Generator
-
-Extract docs from source comments and type annotations:
-
-```bash
-clarity doc stdlib/                   # Terminal output
-clarity doc stdlib/ --md -o docs.md   # Markdown file
-clarity doc stdlib/ --json            # JSON output
-```
-
-Supports `--` and `//` doc comments preceding functions, classes, enums, interfaces, and constants.
-
-### Type Checker
-
-Static type analysis without running your code:
-
-```bash
-clarity check app.clarity --types
-```
-
-Infers types from literals, expressions, and 70+ built-in return types. Validates type annotations on variables, function parameters, and return types.
-
-### Linter
-
-Catch common issues with 7 built-in rules:
-
-```bash
-clarity lint src/
-```
-
-**Rules:** unused variables (W001), mutable-never-reassigned (W002), redeclaration (W003), shadowing (W004), constant conditions (W005), null comparison style (W006), unreachable code (W007).
-
-### Formatter
-
-Consistent code formatting:
-
-```bash
-clarity fmt src/ --check    # Check without modifying
-clarity fmt src/ --write    # Format in-place
-```
-
-### Test Runner
-
-Discovers and runs `test_*.clarity` files:
-
-```bash
-clarity test              # Run all tests in current directory
-clarity test tests/       # Run tests in specific directory
-```
-
-### Watch Mode
-
-Auto-reload on file changes:
-
-```bash
-clarity run app.clarity --watch
-```
-
-### Bytecode Compiler
-
-Clarity includes a stack-based bytecode compiler and VM with 48 opcodes:
-
-```bash
-clarity compile program.clarity
-```
-
-### Language Server (LSP)
-
-For editor integration (VS Code, etc.):
-
-```bash
-clarity lsp
-```
-
-Provides real-time diagnostics, hover info for 30+ builtins, and code completion via JSON-RPC 2.0.
-
-### Package Manager
-
-```bash
-clarity init                         # Create clarity.toml
-clarity install                      # Install dependencies
-clarity install mylib --path ./libs  # Add local dependency
-```
-
----
-
-## Self-Hosting
-
-Clarity is fully self-hosted. The entire toolchain has been rewritten in Clarity:
-
-| Component | File | Description |
-|-----------|------|-------------|
-| Lexer | `stdlib/lexer.clarity` | Tokenizer — can tokenize its own source |
-| Token types | `stdlib/tokens.clarity` | All token types and keywords |
-| AST | `stdlib/ast_nodes.clarity` | 49 AST node types |
-| Parser | `stdlib/parser.clarity` | Full recursive descent parser |
-| Interpreter | `stdlib/interpreter.clarity` | Tree-walking interpreter with full dispatch |
-| Runtime | `stdlib/runtime.clarity` | Module system (math, json, os, time) |
-| Bytecode | `stdlib/bytecode.clarity` | 48-opcode compiler + stack VM |
-| CLI | `stdlib/cli.clarity` | Full command dispatcher (25 commands) |
-| LSP | `stdlib/lsp.clarity` | JSON-RPC language server |
-| Package Manager | `stdlib/package.clarity` | TOML parser, dependency management |
-| Registry | `stdlib/registry.clarity` | Package registry server |
-| Shell | `stdlib/shell.clarity` | Pipe/redirect tokenizer and parser |
-| REPL | `stdlib/repl.clarity` | Interactive shell with auto-detect |
-| Terminal UI | `stdlib/terminal.clarity` | Colors, cursor control, box drawing |
-| Process | `stdlib/process.clarity` | Process execution, PATH, environment |
-| Transpiler | `stdlib/transpile.clarity` | Self-hosted Clarity-to-JS transpiler |
-| Build | `stdlib/build.clarity` | Self-hosted build pipeline |
-| Installer | `stdlib/install.clarity` | Self-hosted installer |
-
-The native binary runs the self-hosted toolchain directly — no Python dependency required.
-
----
-
-## Native Binary
-
-Clarity can compile to a standalone native binary with zero Python dependency.
-
-### Building on macOS
-
-```bash
-# Install Bun (if not already installed)
-curl -fsSL https://bun.sh/install | bash
-
-# Clone and build
-git clone https://github.com/monkdim/Clarity.git
-cd Clarity/native
-bash build.sh
-
-# The binary is in native/dist/
-./dist/clarity run ../examples/hello.clarity
-```
-
-### Building on Linux
-
-```bash
-# Install Bun
-curl -fsSL https://bun.sh/install | bash
-
-# Build
-cd Clarity/native
-bash build.sh
-./dist/clarity run ../examples/hello.clarity
-```
-
-### Cross-platform builds
-
-```bash
-# Build for all platforms
-bash build.sh --all
-
-# Build for a specific target
-bash build.sh --target darwin-arm64    # macOS Apple Silicon
-bash build.sh --target darwin-x64      # macOS Intel
-bash build.sh --target linux-x64       # Linux x64
-bash build.sh --target linux-arm64     # Linux ARM64
-bash build.sh --target windows-x64     # Windows x64
-```
-
-### How it works
-
-1. `native/transpile.py` transpiles all Clarity source to JavaScript
-2. `native/runtime.js` provides the JS runtime shim (I/O, types, collections)
-3. Bun compiles the bundled JS to a single native executable
-
-### Verify the binary
-
-```bash
-clarity smoke
-```
-
----
-
-## Project Structure
-
-```
-Clarity/
-  stdlib/                   # The language — 100% Clarity
-    lexer.clarity           # Tokenizer
-    parser.clarity          # Recursive descent parser
-    ast_nodes.clarity       # 49 AST node types
-    tokens.clarity          # Token type definitions
-    interpreter.clarity     # Tree-walking interpreter
-    runtime.clarity         # Module system (math, json, os, time)
-    bytecode.clarity        # Bytecode compiler + stack VM
-    cli.clarity             # CLI dispatcher (25 commands)
-    formatter.clarity       # AST pretty-printer
-    linter.clarity          # 7-rule linter
-    type_checker.clarity    # Static type checker
-    debugger.clarity        # Interactive step-through debugger
-    profiler.clarity        # Execution profiler
-    docgen.clarity          # Documentation generator
-    package.clarity         # Package manager + TOML parser
-    registry.clarity        # Package registry server
-    lsp.clarity             # Language server (JSON-RPC 2.0)
-    shell.clarity           # Pipe/redirect tokenizer and parser
-    repl.clarity            # Interactive shell with auto-detect
-    terminal.clarity        # Terminal UI (colors, cursor, box drawing)
-    process.clarity         # Process execution, PATH, environment
-    transpile.clarity       # Self-hosted Clarity-to-JS transpiler
-    build.clarity           # Self-hosted build pipeline
-    install.clarity         # Self-hosted installer
-    runtime_spec.clarity    # Runtime.js spec (single source of truth)
-    runtime_gen.clarity     # JS codegen from runtime spec
-    collections.clarity     # Collection utilities
-    crypto.clarity          # Cryptographic functions
-    datetime.clarity        # Date/time utilities
-    db.clarity              # Database utilities
-    net.clarity             # Networking utilities
-    path.clarity            # Path manipulation
-    semver.clarity          # Semantic versioning
-    channel.clarity         # Channels (concurrency)
-    mutex.clarity           # Mutex synchronization
-    worker.clarity          # Worker threads
-    task.clarity            # Task management
-    benchmark.clarity       # Performance benchmarks
-    highlight.clarity       # Syntax highlighter
-    pretty.clarity          # Pretty printer
-    completer.clarity       # Tab completion
-    test_*.clarity          # Test suites (430+ tests)
-
-  native/                   # Build tooling (vendored)
-    transpile.py            # Clarity-to-JavaScript transpiler
-    parser.py               # Python bootstrap parser
-    lexer.py                # Python bootstrap lexer
-    ast_nodes.py            # Python bootstrap AST
-    tokens.py               # Python bootstrap tokens
-    errors.py               # Python bootstrap errors
-    runtime.js              # Auto-generated JS runtime shim
-
-  examples/                 # Example programs
-  editors/                  # Editor integrations (VS Code, TextMate, Linguist)
-  registry/                 # Package registry (Dockerfile + compose)
-  website/                  # Clarity-powered website
-  playground/               # Web playground
-  docs/                     # HTML documentation (index, reference, tutorial)
-  Formula/                  # Homebrew formula
-  .github/workflows/        # CI/CD (test, build, deploy-registry, pages)
-  install.sh                # Installation script
-  GAPS.md                   # Development roadmap
-  BEGINNERS_GUIDE.md        # Getting started guide
-  CONTRIBUTING.md           # Contribution guidelines
-```
-
----
-
-## Running Tests
-
-```bash
-# Run all tests
-clarity test stdlib/
-
-# Run specific test suites
-clarity run stdlib/test_features.clarity
-clarity run stdlib/test_type_checker_full.clarity
-clarity run stdlib/test_linter_full.clarity
-clarity run stdlib/test_debugger_full.clarity
-clarity run stdlib/test_profiler_full.clarity
-clarity run stdlib/test_docgen_full.clarity
-clarity run stdlib/test_shell.clarity
-
-# Smoke tests (verify the binary)
-clarity smoke
-
-# Performance benchmarks (interpreter vs bytecode)
-clarity bench
-```
-
-**430+ self-hosted tests** across 15 test files, all written in Clarity.
-
----
-
-## Roadmap
-
-See [GAPS.md](GAPS.md) for the full development history (Phases 24-48).
-
-Clarity reached **v1.0.0** — 100% self-hosted, zero Python dependency. The entire language, toolchain, and test suite are written in Clarity itself.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: write Clarity. Add a test. Run `clarity test stdlib/`. Open a PR. The toolchain is the dogfood — every contribution improves the language *and* the OS.
 
 ---
 
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE) for details.
+
+---
+
+<sub>Clarity is a self-hosted programming language. ClarityOS is the operating system written in it. Together, they're a bet that the simplest tools win — even at the level of an entire computer.</sub>
