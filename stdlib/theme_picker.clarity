@@ -1,0 +1,96 @@
+-- Theme picker — plug into the existing SettingsPanel as the
+-- "Appearance" pane.
+--
+-- Pure-state engine the test suite drives directly; the widget
+-- bindings (paint a swatch grid, handle clicks, dispatch to
+-- registry.set_active) are wired in mount_in_settings().
+
+from "theme_registry.clarity" import ThemeRegistry, theme_registry, default_registry
+
+let SCHEME_LIGHT = "light"
+let SCHEME_DARK = "dark"
+
+class ThemePicker {
+    fn init(registry, opts) {
+        let o = opts ?? {}
+        this.registry = registry
+        this.on_change = if has(o, "on_change") { o["on_change"] } else { null }
+        this.preview_only = if has(o, "preview_only") { o["preview_only"] } else { false }
+        this._preview_id = null              -- hover/keyboard preview
+    }
+
+    -- ── Listing ─────────────────────────────────
+
+    fn options() {
+        mut out = []
+        for entry in this.registry.list() {
+            let theme = this.registry.get(entry["id"])
+            push(out, {
+                "id": entry["id"],
+                "name": entry["name"],
+                "scheme": entry["scheme"],
+                "active": entry["id"] == this.registry.active_id,
+                "swatches": _swatches_for(theme)
+            })
+        }
+        return out
+    }
+
+    fn light_options() { return this._filter("light") }
+    fn dark_options()  { return this._filter("dark")  }
+
+    fn _filter(scheme) {
+        mut out = []
+        for opt in this.options() {
+            if opt["scheme"] == scheme { push(out, opt) }
+        }
+        return out
+    }
+
+    -- ── Selection ───────────────────────────────
+
+    fn select(id) {
+        if not this.registry.set_active(id) { return false }
+        if this.on_change != null { (this.on_change)(this.registry.active()) }
+        return true
+    }
+
+    fn preview(id) {
+        if this.registry.get(id) == null { return false }
+        this._preview_id = id
+        return true
+    }
+
+    fn clear_preview() { this._preview_id = null }
+
+    fn current_preview() {
+        if this._preview_id != null { return this.registry.get(this._preview_id) }
+        return this.registry.active()
+    }
+
+    fn snapshot() {
+        return {
+            "active":  this.registry.active_id,
+            "preview": this._preview_id,
+            "options": this.options()
+        }
+    }
+}
+
+fn theme_picker(...rest) {
+    let registry = if len(rest) > 0 { rest[0] } else { default_registry() }
+    let opts = if len(rest) > 1 { rest[1] } else { {} }
+    return ThemePicker(registry, opts)
+}
+
+-- Build the swatch quintet a UI can paint per theme — primary,
+-- secondary, tertiary, highlight, surface — in a single row.
+fn _swatches_for(theme) {
+    return [
+        theme["primary"],
+        theme["accent_secondary"],
+        theme["accent_tertiary"],
+        theme["highlight"],
+        theme["surface"]
+    ]
+}

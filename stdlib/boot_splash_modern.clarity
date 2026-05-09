@@ -1,0 +1,193 @@
+-- Modernised boot splash — Phase 76 design refresh.
+--
+-- Asymmetric layout (logo + wordmark left-aligned in upper half,
+-- progress + status footer at bottom) replaces the old centered-
+-- static splash. Single-colour wordmark, gradient lives only on
+-- the progress bar fill + the spinner ring.
+--
+-- Same external API as boot_splash.clarity — set_progress(pct,
+-- status) / fade_out(now) / tick(now) — so init.clarity doesn't
+-- need to change.
+
+from "wallpapers_spring.clarity" import paint_meadow_morning
+from "branding_modern.clarity" import paint_logo, paint_wordmark, BRAND_TAGLINE
+from "theme_meadow.clarity" import brand_gradient
+from "animations.clarity" import animation, EASE_OUT_CUBIC, EASE_IN_QUAD
+from "draw.clarity" import fill_rect, rect, line, circle, rounded_rect
+from "font.clarity" import builtin_font, draw_text, measure_text
+
+class ModernBootSplash {
+    fn init(fb, theme) {
+        this.fb = fb
+        this.theme = theme
+        this.progress = 0.0
+        this.status_text = "Starting up..."
+        this.start_ms = null
+        this.fade = null
+        this.spinner_anim = null
+        this.frames_painted = 0
+        this.captured_paint_ops = []
+        this.font = builtin_font()
+    }
+
+    fn start(now_ms) {
+        this.start_ms = now_ms
+        this.spinner_anim = animation({
+            "duration_ms": 1400, "easing": "linear", "from": 0.0, "to": 360.0
+        })
+        this.spinner_anim.start(now_ms)
+    }
+
+    fn set_progress(pct, status_text) {
+        if pct < 0.0 { pct = 0.0 }
+        if pct > 1.0 { pct = 1.0 }
+        this.progress = pct
+        if status_text != null { this.status_text = status_text }
+    }
+
+    fn fade_out(now_ms) {
+        this.fade = animation({
+            "duration_ms": 360, "easing": EASE_IN_QUAD, "from": 1.0, "to": 0.0
+        })
+        this.fade.start(now_ms)
+    }
+
+    fn done(now_ms) {
+        if this.fade == null { return false }
+        return this.fade.done(now_ms)
+    }
+
+    -- ── Paint a frame ─────────────────────────
+
+    fn tick(now_ms) {
+        let opacity = if this.fade != null { this.fade.value(now_ms) } else { 1.0 }
+        if opacity <= 0.01 { return false }
+
+        -- 1. Wallpaper — meadow asymmetric gradient
+        paint_meadow_morning(this.fb, this.theme, {})
+        this._record("background", null)
+
+        -- 2. Asymmetric logo + wordmark stack — left-aligned, upper third
+        let logo_x = int(this.fb.width * 0.18)
+        let logo_y = int(this.fb.height * 0.32)
+        let logo_size = 96
+        paint_logo(this.fb, logo_x, logo_y, logo_size, this.theme, null)
+        this._record("logo", {"x": logo_x, "y": logo_y, "size": logo_size})
+
+        -- 3. Wordmark below the logo
+        let wm_x = int(this.fb.width * 0.18) - 36
+        let wm_y = logo_y + 90
+        paint_wordmark(this.fb, wm_x, wm_y, "ClarityOS", this.theme, null)
+        this._record("wordmark", {"x": wm_x, "y": wm_y})
+
+        -- 4. Tagline — muted, smaller, just below the wordmark
+        let tag_y = wm_y + 28
+        draw_text(this.fb, wm_x, tag_y, BRAND_TAGLINE, this.font, this.theme["foreground_muted"])
+        this._record("tagline", {"y": tag_y})
+
+        -- 5. Footer status + progress bar — full width, bottom of screen
+        this._draw_footer(now_ms)
+
+        -- 6. Apply fade overlay if dimming out
+        if opacity < 1.0 { this._apply_fade(opacity) }
+
+        this.frames_painted = this.frames_painted + 1
+        return true
+    }
+
+    fn _draw_footer(now_ms) {
+        let footer_y = this.fb.height - 64
+        -- Status text — small, right-aligned to match left-aligned hero
+        let status_x = int(this.fb.width * 0.18) - 36
+        draw_text(this.fb, status_x, footer_y, this.status_text, this.font, this.theme["ink_soft"])
+        -- Spinner ring — sits to the right of the status text
+        let status_w = measure_text(this.font, this.status_text)
+        let spin_cx = status_x + status_w + 24
+        let spin_cy = footer_y + 4
+        let spin_r = 10
+        let angle = if this.spinner_anim != null { this.spinner_anim.value(now_ms) } else { 0.0 }
+        this._draw_spinner(spin_cx, spin_cy, spin_r, angle)
+
+        -- Progress bar — full-width strip at the very bottom
+        let bar_y = this.fb.height - 6
+        let bar_h = 3
+        fill_rect(this.fb, 0, bar_y, this.fb.width, bar_h, this.theme["border"])
+        let fill_w = int(this.fb.width * this.progress)
+        if fill_w > 0 {
+            -- Gradient fill — sample the brand gradient across the
+            -- bar so the colour represents progress.
+            let segments = 24
+            let seg_w = int(fill_w / segments)
+            mut s = 0
+            while s < segments {
+                let frac = s / segments
+                let color = brand_gradient(this.theme, frac)
+                let x0 = s * seg_w
+                let w = if s == segments - 1 { fill_w - x0 } else { seg_w }
+                fill_rect(this.fb, x0, bar_y, w, bar_h, color)
+                s = s + 1
+            }
+        }
+        this._record("footer", {"status": this.status_text, "progress": this.progress})
+    }
+
+    fn _draw_spinner(cx, cy, r, angle) {
+        -- Three short arcs, each sampling a different point on the
+        -- brand gradient. Drawn as small pixel clusters along the
+        -- ring (cheap + readable; no arc primitive needed).
+        let arcs = [
+            {"offset": 0,   "color": brand_gradient(this.theme, 0.0)},
+            {"offset": 120, "color": brand_gradient(this.theme, 0.5)},
+            {"offset": 240, "color": brand_gradient(this.theme, 1.0)}
+        ]
+        for arc in arcs {
+            mut step = 0
+            while step < 35 {
+                let a = (angle + arc["offset"] + step) * 3.14159 / 180.0
+                let xp = cx + int(r * _cos_a(a))
+                let yp = cy + int(r * _sin_a(a))
+                fill_rect(this.fb, xp - 1, yp - 1, 2, 2, arc["color"])
+                step = step + 1
+            }
+        }
+    }
+
+    fn _apply_fade(opacity) {
+        let alpha = int((1.0 - opacity) * 255)
+        let color = alpha * 16777216 + (this.theme["background"] & 0xFFFFFF)
+        fill_rect(this.fb, 0, 0, this.fb.width, this.fb.height, color)
+        this._record("fade_overlay", {"alpha": alpha})
+    }
+
+    fn _record(kind, payload) {
+        push(this.captured_paint_ops, {"kind": kind, "payload": payload})
+        if len(this.captured_paint_ops) > 64 {
+            mut next = []
+            mut i = 1
+            while i < len(this.captured_paint_ops) { push(next, this.captured_paint_ops[i]); i = i + 1 }
+            this.captured_paint_ops = next
+        }
+    }
+}
+
+fn modern_boot_splash(fb, theme) { return ModernBootSplash(fb, theme) }
+
+-- ── Tiny trig (same approximation as boot_splash.clarity) ──
+
+fn _cos_a(t) {
+    mut x = t
+    while x >= 6.28318 { x = x - 6.28318 }
+    while x < 0 { x = x + 6.28318 }
+    if x > 3.14159 { x = 6.28318 - x; return _cos_q(x) }
+    return _cos_q(x)
+}
+
+fn _sin_a(t) { return _cos_a(t - 1.5708) }
+
+fn _cos_q(x) {
+    let pi = 3.14159
+    if x > pi { return -_cos_q(x - pi) }
+    let num = pi * pi - 4.0 * x * x
+    let den = pi * pi + x * x
+    return num / den
+}

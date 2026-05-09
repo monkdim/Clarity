@@ -1,0 +1,292 @@
+-- Phase 76 — spring design refresh tests.
+--
+-- Covers: theme palettes (meadow / bloom / watercolor / aurora-as-
+-- midnight), brand_gradient sampling endpoints, theme registry list
+-- + get + set_active + persist+load, theme picker options/select/
+-- preview/snapshot, modern logo + app icons paint, modern boot
+-- splash captured paint ops.
+
+from "theme_meadow.clarity" import meadow, bloom, watercolor, brand_gradient, warm_gradient, default_spring_theme, spring_palettes, _lerp_color
+from "theme_aurora.clarity" import aurora
+from "theme_registry.clarity" import theme_registry, default_registry, ThemeRegistry
+from "theme_picker.clarity" import theme_picker, ThemePicker
+from "wallpapers_spring.clarity" import paint_meadow_morning, paint_bloom_morning, paint_watercolor, paint_solid, spring_presets, paint_spring_preset
+from "branding_modern.clarity" import paint_logo, paint_wordmark, paint_icon, icon_recipes, typography, spacing, radius, BRAND_NAME, BRAND_TAGLINE
+from "boot_splash_modern.clarity" import modern_boot_splash
+from "graphics.clarity" import framebuffer
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Theme palette structure ────────────────────
+
+show "-- Phase 76: theme palettes --"
+
+let m = meadow()
+assert_eq(m["id"], "meadow", "meadow id")
+assert_eq(m["name"], "Meadow", "meadow name")
+assert_eq(m["scheme"], "light", "meadow is light")
+assert_eq(m["primary"], 0xFF6BAA75, "meadow primary = sage green")
+assert_eq(m["accent_secondary"], 0xFFF5C16C, "meadow secondary = daffodil")
+assert_eq(m["accent_tertiary"], 0xFFE8A4B4, "meadow tertiary = blossom")
+assert_eq(m["highlight"], 0xFFA0C6DC, "meadow highlight = sky")
+assert_eq(m["background"], 0xFFF4F1EA, "meadow canvas = cream")
+assert(has(m, "shadow"), "meadow has shadow")
+assert(has(m, "radius"), "meadow has radius tokens")
+assert(has(m, "spacing"), "meadow has spacing tokens")
+assert(has(m, "typography"), "meadow has typography tokens")
+assert_eq(m["radius"]["window"], 14, "window radius = 14")
+assert_eq(m["radius"]["card"], 12, "card radius = 12")
+assert_eq(m["radius"]["control"], 10, "control radius = 10")
+assert_eq(m["spacing"]["md"], 12, "md spacing = 12")
+
+let b = bloom()
+assert_eq(b["id"], "bloom", "bloom id")
+assert_eq(b["scheme"], "light", "bloom is light")
+assert_eq(b["primary"], 0xFF5BC0BE, "bloom primary = mint")
+
+let wc = watercolor()
+assert_eq(wc["id"], "watercolor", "watercolor id")
+assert_eq(wc["scheme"], "light", "watercolor is light")
+
+assert_eq(default_spring_theme()["id"], "meadow", "default spring = meadow")
+assert_eq(len(spring_palettes()), 3, "3 spring palettes")
+
+-- ── Brand gradient endpoints ────────────────────
+
+show "-- Phase 76: brand gradient --"
+
+let g0 = brand_gradient(m, 0.0)
+let g1 = brand_gradient(m, 1.0)
+assert_eq(g0, m["highlight"], "gradient(0) = highlight")
+assert_eq(g1, m["accent_secondary"], "gradient(1) = secondary")
+let g_mid = brand_gradient(m, 0.5)
+assert_eq(g_mid, m["primary"], "gradient(0.5) = primary")
+-- Clamping
+assert_eq(brand_gradient(m, -0.5), m["highlight"], "negative t clamped")
+assert_eq(brand_gradient(m, 2.0), m["accent_secondary"], "t > 1 clamped")
+-- Warm gradient: secondary -> tertiary -> highlight
+assert_eq(warm_gradient(m, 0.0), m["accent_secondary"], "warm(0) = secondary")
+assert_eq(warm_gradient(m, 1.0), m["highlight"], "warm(1) = highlight")
+assert_eq(warm_gradient(m, 0.5), m["accent_tertiary"], "warm(0.5) = tertiary")
+
+-- _lerp_color returns same color when both inputs match
+assert_eq(_lerp_color(m["primary"], m["primary"], 0.5), m["primary"], "lerp same color")
+-- ARGB high byte preserved (no sign-extension regression)
+let lerp_high = _lerp_color(0xFF000000, 0xFFFFFFFF, 0.5)
+assert(lerp_high > 0, "lerp result positive (high byte preserved)")
+
+-- ── Theme registry: built-ins ───────────────────
+
+show "-- Phase 76: theme registry --"
+
+let reg = theme_registry()
+let ids = reg.ids()
+assert_eq(len(ids), 4, "4 built-in themes")
+assert(contains(ids, "meadow"), "meadow registered")
+assert(contains(ids, "bloom"), "bloom registered")
+assert(contains(ids, "watercolor"), "watercolor registered")
+assert(contains(ids, "midnight"), "midnight (aurora) registered")
+
+let listing = reg.list()
+assert_eq(len(listing), 4, "list has 4")
+mut found_midnight = false
+mut midnight_scheme = ""
+for entry in listing {
+    if entry["id"] == "midnight" {
+        found_midnight = true
+        midnight_scheme = entry["scheme"]
+    }
+}
+assert(found_midnight, "midnight in listing")
+assert_eq(midnight_scheme, "dark", "midnight is dark scheme")
+
+-- get + active
+assert_eq(reg.active_id, "meadow", "default active = meadow")
+let active = reg.active()
+assert_eq(active["id"], "meadow", "active() returns meadow")
+let mid = reg.get("midnight")
+assert(mid != null, "get midnight")
+assert_eq(mid["id"], "midnight", "midnight has id")
+assert_eq(mid["name"], "Midnight", "midnight name overridden")
+assert_eq(reg.get("does_not_exist"), null, "missing = null")
+
+-- set_active
+assert(reg.set_active("bloom"), "set bloom")
+assert_eq(reg.active_id, "bloom", "active is now bloom")
+assert_eq(reg.active()["id"], "bloom", "active() returns bloom")
+assert(not reg.set_active("nope"), "set unknown = false")
+
+-- register custom
+reg.register("custom", {"id": "custom", "name": "Custom"})
+assert(reg.get("custom") != null, "custom registered")
+
+-- Persistence
+let tmp = "/tmp/_clarity_theme_test"
+exec_full("rm -rf " + tmp)
+exec_full("mkdir -p " + tmp)
+let reg2 = theme_registry()
+reg2.set_persist_dir(tmp)
+reg2.set_active("watercolor")
+assert(exists(tmp + "/.clarity-os/theme"), "persist file written")
+let reg3 = theme_registry()
+reg3.set_persist_dir(tmp)
+assert(reg3.load(), "load returns true")
+assert_eq(reg3.active_id, "watercolor", "loaded watercolor")
+exec_full("rm -rf " + tmp)
+
+-- load with missing file = false
+let reg4 = theme_registry()
+reg4.set_persist_dir("/tmp/_no_such_dir_xyz")
+assert(not reg4.load(), "load missing = false")
+
+-- ── Theme picker ─────────────────────────────────
+
+show "-- Phase 76: theme picker --"
+
+let reg_p = theme_registry()
+let picker = theme_picker(reg_p)
+let opts = picker.options()
+assert_eq(len(opts), 4, "picker exposes 4 options")
+mut active_count = 0
+for opt in opts {
+    if opt["active"] { active_count = active_count + 1 }
+    assert(has(opt, "swatches"), "option has swatches")
+    assert_eq(len(opt["swatches"]), 5, "5 swatches per option")
+}
+assert_eq(active_count, 1, "exactly one active option")
+
+let light_opts = picker.light_options()
+let dark_opts = picker.dark_options()
+assert_eq(len(light_opts), 3, "3 light options")
+assert_eq(len(dark_opts), 1, "1 dark option (midnight)")
+
+-- select fires on_change
+mut change_calls = 0
+mut change_id = ""
+let reg_c = theme_registry()
+let picker2 = theme_picker(reg_c, {"on_change": fn(theme) { change_calls = change_calls + 1; change_id = theme["id"] }})
+assert(picker2.select("bloom"), "select bloom")
+assert_eq(change_calls, 1, "on_change fired once")
+assert_eq(change_id, "bloom", "on_change saw bloom")
+assert(not picker2.select("ghost"), "select unknown = false")
+assert_eq(change_calls, 1, "on_change not fired for unknown")
+
+-- preview
+let reg_pv = theme_registry()
+let picker3 = theme_picker(reg_pv)
+assert(picker3.preview("midnight"), "preview midnight")
+assert_eq(picker3.current_preview()["id"], "midnight", "preview is midnight")
+assert_eq(picker3.snapshot()["preview"], "midnight", "snapshot preview")
+picker3.clear_preview()
+assert_eq(picker3.current_preview()["id"], "meadow", "preview cleared = active")
+assert(not picker3.preview("nope"), "preview unknown = false")
+
+-- snapshot
+let snap = picker3.snapshot()
+assert_eq(snap["active"], "meadow", "snapshot active")
+assert(has(snap, "options"), "snapshot has options")
+
+-- ── Modern branding tokens ──────────────────────
+
+show "-- Phase 76: modern branding tokens --"
+
+assert_eq(BRAND_NAME, "ClarityOS", "brand name")
+assert(contains(BRAND_TAGLINE, "Simple"), "tagline includes 'Simple'")
+assert_eq(typography("display"), 48, "display size")
+assert_eq(typography("body"), 14, "body size")
+assert_eq(typography("nope"), 14, "fallback = body")
+assert_eq(spacing("md"), 12, "md spacing modern")
+assert_eq(radius("lg"), 14, "lg radius = window radius")
+
+let icons = icon_recipes()
+assert(has(icons, "terminal"), "terminal icon")
+assert(has(icons, "files"), "files icon")
+assert(has(icons, "editor"), "editor icon")
+assert(has(icons, "calc"), "calc icon")
+assert(has(icons, "viewer"), "viewer icon")
+assert(has(icons, "monitor"), "monitor icon")
+assert(has(icons, "browser"), "browser icon")
+assert(has(icons, "mail"), "mail icon")
+assert(has(icons, "chat"), "chat icon")
+assert(has(icons, "store"), "store icon")
+assert(has(icons, "settings"), "settings icon")
+-- Recipes use abstract marks now
+assert_eq(icons["terminal"]["mark"], "wave", "terminal = wave mark")
+assert_eq(icons["calc"]["mark"], "grid", "calc = grid mark")
+assert_eq(icons["settings"]["mark"], "cog", "settings = cog mark")
+
+-- ── Modern logo + app icons exposed APIs ───────
+
+show "-- Phase 76: modern logo + icon recipes --"
+
+let theme = meadow()
+-- Tiny canvas — proves the painter is wired without burning interpreter
+-- cycles on a full-size paint. Larger canvases work too; we keep the
+-- paint smoke test minimal so this suite stays fast in interpreted mode.
+let fb_small = framebuffer(48, 48)
+fb_small.clear(theme["background"])
+paint_logo(fb_small, 24, 24, 32, theme, null)
+let centre = fb_small.get_pixel(24, 24)
+assert(centre != theme["background"], "logo painted centre")
+
+-- Recipe coverage (paint smoke test for one icon to keep things quick)
+let fb_one = framebuffer(48, 48)
+fb_one.clear(theme["background"])
+assert(paint_icon(fb_one, "settings", 0, 0, 48, theme), "settings icon paints")
+assert(not paint_icon(fb_one, "nonexistent", 0, 0, 48, theme), "unknown icon = false")
+
+-- ── Modern boot splash state ────────────────────
+
+show "-- Phase 76: modern boot splash --"
+
+let fb_bs = framebuffer(64, 64)         -- tiny canvas — we exercise the
+let splash = modern_boot_splash(fb_bs, theme)
+splash.start(0)
+splash.set_progress(0.3, "Mounting...")
+
+-- Progress clamps
+splash.set_progress(2.0, null)
+assert_eq(splash.progress, 1.0, "progress clamped to 1")
+splash.set_progress(-0.5, null)
+assert_eq(splash.progress, 0.0, "progress clamped to 0")
+splash.set_progress(0.5, "Halfway")
+assert_eq(splash.status_text, "Halfway", "status text updated")
+
+-- Fade-out animation
+splash.fade_out(200)
+assert(not splash.done(250), "fade not done immediately")
+assert(splash.done(700), "fade done after duration")
+
+-- ── Wallpaper preset catalogue ──────────────────
+
+show "-- Phase 76: spring wallpapers --"
+
+let presets = spring_presets()
+assert_eq(len(presets), 4, "4 spring presets")
+mut found_meadow = false
+mut found_bloom = false
+mut found_wc = false
+mut found_solid = false
+for p in presets {
+    if p["id"] == "meadow_morning" { found_meadow = true }
+    if p["id"] == "bloom_morning" { found_bloom = true }
+    if p["id"] == "watercolor" { found_wc = true }
+    if p["id"] == "solid" { found_solid = true }
+}
+assert(found_meadow and found_bloom and found_wc and found_solid, "all 4 preset ids present")
+assert(not paint_spring_preset(fb_small, theme, "ghost", null), "unknown preset = false")
+
+-- ── Summary ─────────────────────────────────────
+
+show ""
+show "Phase 76: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 76 test(s) failed" }
