@@ -4,7 +4,7 @@
 
 A modern programming language and the operating system written in it. End to end, top to bottom — one syntax, one toolchain, one design vocabulary. From the moment you press the power button to the moment you press *Enter* in the REPL, it's all Clarity.
 
-![ClarityOS desktop — Meadow theme](website/screenshots/meadow_desktop.png)
+![ClarityOS desktop — Meadow theme](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/meadow_desktop.png)
 
 ---
 
@@ -78,15 +78,15 @@ Full instructions, the language tour, every CLI command, and the developer-tools
 
 Boot splash — asymmetric layout, logo + wordmark left-aligned in the upper third, full-width brand-gradient progress bar at the bottom:
 
-![ClarityOS boot splash — Meadow theme](website/screenshots/meadow_splash.png)
+![ClarityOS boot splash — Meadow theme](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/meadow_splash.png)
 
 Theme picker in **Settings → Appearance** — three light spring themes plus Midnight, switchable at runtime, persisted to `~/.clarity-os/theme`:
 
-![ClarityOS theme picker — all four built-ins](website/screenshots/meadow_themes.png)
+![ClarityOS theme picker — all four built-ins](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/meadow_themes.png)
 
 Marketing lockup — a single wordmark, a single brand stripe, no skeuomorphism:
 
-![ClarityOS lockup](website/screenshots/meadow_lockup.png)
+![ClarityOS lockup](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/meadow_lockup.png)
 
 ---
 
