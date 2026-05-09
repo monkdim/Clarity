@@ -47,34 +47,27 @@ After install, the `clarity` command is available globally.
 
 ## Boot ClarityOS
 
-ClarityOS is the operating system written in Clarity. It runs on bare metal, but the easiest way to try it is in QEMU.
+ClarityOS is at the developer-preview stage. The kernel (`kernel/`), the freestanding runtime (`runtime/freestanding/`), the pure-Clarity ISO9660 packer (`stdlib/iso9660.clarity`), the OS image builder (`stdlib/os_build.clarity`), and the macOS QEMU launcher (`stdlib/qemu_macos.clarity`) all exist and are tested in isolation. What's *not* yet wired is the `clarity os` CLI subcommand that orchestrates them into a single `build && run`.
 
-### macOS (with Homebrew)
-
-```bash
-brew install qemu zig
-git clone https://github.com/monkdim/Clarity.git
-cd Clarity
-clarity os build       # Build the kernel + freestanding runtime + ISO
-clarity os run         # Launch in QEMU with HVF acceleration
-```
-
-The first launch boots into the Meadow boot splash, fades into the cream-and-sage desktop, and pre-pins terminal / files / editor / calc / viewer / monitor to the dock. Theme picker is in **Settings → Appearance** (Meadow / Bloom / Watercolor / Midnight).
-
-### Linux
+Until that lands (tracked in [ROADMAP_OS.md](ROADMAP_OS.md) as the top path-forward item), booting is a from-source developer task:
 
 ```bash
-sudo apt install qemu-system-x86 ovmf zig    # or your distro's equivalent
-clarity os build && clarity os run
+# 1. Build the kernel
+cd kernel && zig build && cd ..
+
+# 2. Build the freestanding runtime
+cd runtime/freestanding && zig build && cd ..
+
+# 3. Assemble the ISO (Clarity script that calls os_image_builder)
+clarity run stdlib/os_build.clarity   # produces dist/claritos.iso
+
+# 4. Boot it (macOS, with HVF + auto-discovered OVMF)
+clarity run stdlib/qemu_macos.clarity --iso dist/claritos.iso
 ```
 
-### Just want the ISO?
+Linux: install `qemu-system-x86`, `ovmf`, and `zig` from your distro; the QEMU launcher above is macOS-specific today, so on Linux invoke `qemu-system-x86_64` directly against `dist/claritos.iso`. A cross-platform launcher is part of the same path-forward milestone.
 
-```bash
-clarity os build           # Produces dist/claritos-1.0.0.iso (~240 MB)
-```
-
-Burn it to a USB stick with Etcher, or boot it in any VM that supports BIOS or UEFI.
+The first successful boot lands you in the Meadow boot splash, fades into the cream-and-sage desktop, and pre-pins terminal / files / editor / calc / viewer / monitor to the dock. Theme picker is in **Settings → Appearance** (Meadow / Bloom / Watercolor / Midnight).
 
 ---
 
@@ -139,10 +132,9 @@ clarity gen-runtime             Regenerate native/runtime.js from spec
 clarity install-self            Install Clarity from source
 clarity bench                   Run performance benchmarks
 clarity lsp                     Start language server (for editors)
-clarity os build                Build the ClarityOS kernel + ISO
-clarity os run                  Boot ClarityOS in QEMU
-clarity os install              Install ClarityOS to a USB stick
 ```
+
+`clarity os build` / `clarity os run` / `clarity os install` are reserved for the orchestrator wiring tracked in [ROADMAP_OS.md](ROADMAP_OS.md). Until that lands, see the **Boot ClarityOS** section above for the from-source path.
 
 ---
 
@@ -689,7 +681,7 @@ Clarity/
     crash_recovery.clarity  # Journal + watchdog + crash dialog
     iso9660.clarity         # Pure-Clarity ISO9660 packer
     qemu_macos.clarity      # QEMU launcher with HVF
-    os_build.clarity        # `clarity os build` orchestrator
+    os_build.clarity        # OS image builder library (called by the future `clarity os build`)
     release.clarity         # Release pipeline (validate → gate → publish)
     website_gen.clarity     # ClarityOS website generator
     branding.clarity        # Brand tokens (typography, spacing, radius)
