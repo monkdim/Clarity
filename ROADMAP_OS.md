@@ -290,6 +290,22 @@
 
 ---
 
+## Phase 73 — Compositor on bare metal: framebuffer mmap, DisplayServer, DesktopSession
+
+> Brings the Phase 59–62 desktop chrome (Compositor + WindowManager + Wallpaper + StatusBar + Dock + Launcher + LockScreen) onto the bare-metal kernel framebuffer. After Phase 73, a userspace process can paint pixels that show up on the actual screen.
+
+| # | Task | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Framebuffer mmap** | Done | `kernel/drivers/framebuffer.zig` `map_into_user(space, virt)` maps the boot framebuffer's physical pages into a user AddressSpace with PAGE_USER+PAGE_WRITE and tracks the region for munmap/COW. `kernel/syscall/dispatch.zig` adds a graphics fast-path for `sys_mmap(fd=-2)` + `sys_ioctl(fd=-2, FB_GET_INFO=0x4600)` that returns a `FbInfoForUser` struct (width/height/pitch/bpp). Userspace flow: `ioctl(FB_FD, FB_GET_INFO, &info)` → `mmap(addr, info.size, RW, SHARED, FB_FD, 0)` → wrap as a Framebuffer. |
+| 2 | **DisplayServer** | Done | `stdlib/display_server.clarity` — frame loop on top of the existing Compositor + WindowManager. `frame()` calls `compositor.render()` only when there's dirty content; `_needs_full_paint` forces a one-shot full repaint after window changes. `tick()` drains input, dispatches mouse events with focus-on-press routing, dispatches key/text events to the focused window, then paints a frame. `step(n)` is the bare-metal main-loop helper. Cursor tracking + show/hide. Snapshot returns paint stats for tests. |
+| 3 | **DesktopSession** | Done | `stdlib/desktop_session.clarity` — top-level orchestrator. `boot(layout)` mounts wallpaper / statusbar / dock at the right z-order using injected factories (so tests run with stubs and bare-metal uses the real wallpaper.clarity / statusbar.clarity / dock.clarity widgets). `launch(app_id)` builds a Window from the app factory, places it offset from the previous window, focuses it; second `launch` of the same app returns the existing entry instead of spawning a duplicate. `close_app` removes from compositor + the running map. `show_launcher` / `hide_launcher` toggle the overlay; `lock` / `unlock` for the lock screen; `notify(title, body)` records a notification. Default pinned apps: terminal, files, editor, calc, viewer, monitor. |
+| 4 | **Input → focused window dispatch** | Done | `_drain_input` pulls `bus.drain()` (try/catch tolerant of older buses), `_dispatch_event` routes by `kind` (mouse/key/text). `_safe_call` looks up the handler on the target by dict key first (the stub-window shape) then by class method (the real Widget shape). Mouse press → focus changes; key + text events → focused window. WM hook (when present) intercepts mouse before the window. |
+| 5 | **App launching** | Done | DesktopSession's launch path covers it. The default app factories are wired to the existing Phase 63 apps (`app_terminal`, `app_files`, `app_editor`, `app_calc`, `app_viewer`, `app_monitor`); the test suite uses stub factories so the test path doesn't pull in the real widget tree. Real bare-metal init code in Phase 74 will plug in the production factories. |
+
+**Tests:** `stdlib/test_desktop_session.clarity` — 63 assertions: DisplayServer (first frame paints fully + bumps painted count + calls compositor.render; second frame with no dirty skips; add_window marks dirty + paints; mouse press at (150,150) routes focus to win_a + delivers the event to its on_mouse handler + cursor follows; mouse outside any window doesn't change focus; key + text events dispatch to the focused window's on_key / on_text; cursor visibility + setter); DesktopSession boot (3 baseline factories run, 3 widgets mounted, default pinned list = 6 apps); launch (factory runs, window count goes 3→4, calc focused; re-launch returns same entry; second app brings count to 5; unknown app throws); close_app (removes entry + window; closing already-closed returns false); launcher show/hide (idempotent; focus moves to launcher); lock/unlock (idempotent; focus moves to lockscreen); notification storage; cursor visibility + position setter.
+
+---
+
 ## Phase 75 — Polish & Ship ClarityOS 1.0
 
 > The release. (Renumbered from Phase 70; phases 70–74 finish the bare-metal port first.)
