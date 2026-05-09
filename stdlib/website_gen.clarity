@@ -1,0 +1,289 @@
+-- Website generator — Phase 75 task 4.
+--
+-- Static site for clarityos.dev. Single Clarity module that emits
+-- HTML + CSS into a target directory; no template engine, no node
+-- toolchain, just Clarity strings with a tiny layout helper.
+--
+-- Pages produced:
+--
+--   /index.html         landing — hero, features, screenshots,
+--                       download CTA
+--   /download.html      ISO + checksums + install instructions
+--   /docs/index.html    docs entry point (mirrors stdlib/docs_app)
+--   /community.html     GitHub + Discord + issue tracker links
+--   /css/style.css      shared stylesheet using the Aurora palette
+--   /og.html            shareable preview (twitter card / og:image)
+
+from "branding.clarity" import BRAND_NAME, BRAND_TAGLINE, BRAND_DOMAIN, typography, spacing, radius
+from "theme_aurora.clarity" import AURORA_INK, AURORA_TEAL, AURORA_VIOLET, AURORA_MAGENTA
+
+let DEFAULT_OUTPUT_DIR = "./website-out"
+
+class Website {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.output_dir = if has(o, "output") { o["output"] } else { DEFAULT_OUTPUT_DIR }
+        this.version = if has(o, "version") { o["version"] } else { "1.0.0" }
+        this.iso_url = if has(o, "iso_url") { o["iso_url"] } else { "https://" + BRAND_DOMAIN + "/download/claritos-1.0.0.iso" }
+        this.iso_sha256 = if has(o, "iso_sha256") { o["iso_sha256"] } else { "0000000000000000000000000000000000000000000000000000000000000000" }
+        this.iso_size_mb = if has(o, "iso_size_mb") { o["iso_size_mb"] } else { 240 }
+        this.github_url = if has(o, "github_url") { o["github_url"] } else { "https://github.com/monkdim/Clarity" }
+        this.discord_url = if has(o, "discord_url") { o["discord_url"] } else { null }
+        this.screenshots = if has(o, "screenshots") { o["screenshots"] } else { [] }
+    }
+
+    -- ── Build ──────────────────────────────
+
+    -- Returns a map of { path: html_or_css } for the entire site.
+    -- Pure: doesn't touch the filesystem. Lets tests assert the
+    -- shape; the build_to_dir helper writes them out.
+    fn build() {
+        return {
+            "/index.html":         this.render_index(),
+            "/download.html":      this.render_download(),
+            "/docs/index.html":    this.render_docs_index(),
+            "/community.html":     this.render_community(),
+            "/css/style.css":      this.render_css(),
+            "/og.html":            this.render_og()
+        }
+    }
+
+    fn build_to_dir() {
+        let pages = this.build()
+        for kv in entries(pages) {
+            let full = this.output_dir + kv[0]
+            this._mkdir_p(_dirname(full))
+            write(full, kv[1])
+        }
+        return this.output_dir
+    }
+
+    fn _mkdir_p(path) { exec_full("mkdir -p '" + path + "'") }
+
+    -- ── Pages ─────────────────────────────
+
+    fn render_index() {
+        let body = _h(this, "Home",
+            _hero(this) +
+            _features() +
+            _screenshots(this.screenshots) +
+            _cta(this))
+        return body
+    }
+
+    fn render_download() {
+        let body = _h(this, "Download",
+            "<section class='hero'>" +
+            "<h1>Get ClarityOS " + this.version + "</h1>" +
+            "<p class='tagline'>Boot it in QEMU on your Mac. Or write it to a USB stick and dual-boot.</p>" +
+            "</section>" +
+            "<section class='download-card'>" +
+            "<h2>ClarityOS " + this.version + "</h2>" +
+            "<p>" + str(this.iso_size_mb) + " MB ISO image · x86_64 · BIOS + UEFI</p>" +
+            "<a class='button' href='" + this.iso_url + "'>Download ISO</a>" +
+            "<details><summary>SHA256 + signature</summary><code>" + this.iso_sha256 + "</code></details>" +
+            "</section>" +
+            "<section class='install-steps'>" +
+            "<h2>Try it under QEMU</h2>" +
+            "<pre><code>brew install qemu\nqemu-system-x86_64 -m 1024 -cdrom claritos-" + this.version + ".iso</code></pre>" +
+            "<h2>Write to a USB stick (macOS)</h2>" +
+            "<pre><code>diskutil unmountDisk /dev/diskN\nsudo dd if=claritos-" + this.version + ".iso of=/dev/rdiskN bs=4m</code></pre>" +
+            "</section>")
+        return body
+    }
+
+    fn render_docs_index() {
+        let body = _h(this, "Documentation",
+            "<section class='docs'>" +
+            "<h1>Clarity + ClarityOS docs</h1>" +
+            "<ul class='doc-grid'>" +
+            "<li><a href='/docs/install.html'>Install</a></li>" +
+            "<li><a href='/docs/cli.html'>CLI reference</a></li>" +
+            "<li><a href='/docs/stdlib.html'>Standard library</a></li>" +
+            "<li><a href='/docs/apps.html'>Building apps</a></li>" +
+            "<li><a href='/docs/kernel.html'>Kernel internals</a></li>" +
+            "<li><a href='/docs/contributing.html'>Contributing</a></li>" +
+            "</ul>" +
+            "</section>")
+        return body
+    }
+
+    fn render_community() {
+        let body = _h(this, "Community",
+            "<section class='community'>" +
+            "<h1>Get involved</h1>" +
+            "<ul class='link-list'>" +
+            "<li><a href='" + this.github_url + "'>GitHub repository</a> — source, issues, PRs</li>" +
+            (if this.discord_url != null { "<li><a href='" + this.discord_url + "'>Discord</a> — chat with the team + community</li>" } else { "" }) +
+            "<li><a href='" + this.github_url + "/issues'>Open an issue</a> — bugs + feature requests</li>" +
+            "<li><a href='" + this.github_url + "/blob/main/CONTRIBUTING.md'>Contributing guide</a></li>" +
+            "</ul>" +
+            "</section>")
+        return body
+    }
+
+    fn render_og() {
+        return "<!doctype html>\n<html><head><meta charset='utf-8'>" +
+               "<meta property='og:title' content='" + BRAND_NAME + " — " + BRAND_TAGLINE + "'>" +
+               "<meta property='og:description' content='An operating system where 95% of the userspace is written in one readable language.'>" +
+               "<meta property='og:image' content='https://" + BRAND_DOMAIN + "/og.png'>" +
+               "<meta property='og:url' content='https://" + BRAND_DOMAIN + "/'>" +
+               "<meta name='twitter:card' content='summary_large_image'>" +
+               "</head><body><h1>" + BRAND_NAME + "</h1><p>" + BRAND_TAGLINE + "</p></body></html>"
+    }
+
+    fn render_css() {
+        return _css_template()
+    }
+
+    fn page_count() { return len(keys(this.build())) }
+}
+
+fn website(opts) { return Website(opts) }
+
+-- ── Page templates ────────────────────────
+
+fn _h(site, page_title, body) {
+    return "<!doctype html>\n<html lang='en'><head><meta charset='utf-8'>" +
+           "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
+           "<title>" + page_title + " · " + BRAND_NAME + "</title>" +
+           "<link rel='stylesheet' href='/css/style.css'>" +
+           "</head><body>" +
+           _nav() +
+           "<main>" + body + "</main>" +
+           _footer(site) +
+           "</body></html>"
+}
+
+fn _nav() {
+    return "<nav class='top-nav'>" +
+           "<a class='brand' href='/'>" + BRAND_NAME + "</a>" +
+           "<a href='/download.html'>Download</a>" +
+           "<a href='/docs/index.html'>Docs</a>" +
+           "<a href='/community.html'>Community</a>" +
+           "</nav>"
+}
+
+fn _footer(site) {
+    return "<footer><p>&copy; 2026 " + BRAND_NAME + " · " + BRAND_TAGLINE + " · <a href='" + site.github_url + "'>GitHub</a></p></footer>"
+}
+
+fn _hero(site) {
+    return "<section class='hero'>" +
+           "<h1 class='wordmark'>" + BRAND_NAME + "</h1>" +
+           "<p class='tagline'>" + BRAND_TAGLINE + "</p>" +
+           "<p class='lead'>An operating system where 95% of the userspace — kernel aside — is written in one language. Readable. Hackable. Yours.</p>" +
+           "<div class='hero-cta'>" +
+           "<a class='button primary' href='/download.html'>Download " + site.version + "</a>" +
+           "<a class='button ghost' href='" + site.github_url + "'>View source</a>" +
+           "</div>" +
+           "</section>"
+}
+
+fn _features() {
+    return "<section class='features'>" +
+           "<h2>What's in the box</h2>" +
+           "<div class='feature-grid'>" +
+           _feature("Self-hosted",       "The Clarity compiler, VM, debugger, LSP, and package manager are all written in Clarity.") +
+           _feature("Real micro-kernel", "Tiny Zig kernel handles boot, memory, scheduling, and syscalls. Everything above is Clarity.") +
+           _feature("Aurora desktop",    "Compositor + window manager + dock + apps, all in <30 KLOC of Clarity.") +
+           _feature("Apps included",     "Terminal, file manager, editor, image viewer, calculator, system monitor, browser, mail, chat — out of the box.") +
+           _feature("Hot reload",        "Edit a Clarity file, see your app update without restarting.") +
+           _feature("Boots in seconds",  "<5 s from kernel handoff to desktop.") +
+           "</div>" +
+           "</section>"
+}
+
+fn _feature(title, body) {
+    return "<article class='feature'><h3>" + title + "</h3><p>" + body + "</p></article>"
+}
+
+fn _screenshots(list) {
+    if len(list) == 0 {
+        return "<section class='screenshots'><h2>Screenshots</h2><p class='muted'>Coming with the 1.0 release — boot it under QEMU and submit yours.</p></section>"
+    }
+    mut shots = ""
+    for s in list {
+        shots = shots + "<figure><img src='" + s["url"] + "' alt='" + s["alt"] + "'><figcaption>" + s["caption"] + "</figcaption></figure>"
+    }
+    return "<section class='screenshots'><h2>Screenshots</h2><div class='shot-grid'>" + shots + "</div></section>"
+}
+
+fn _cta(site) {
+    return "<section class='cta'>" +
+           "<h2>Ready to try it?</h2>" +
+           "<p>Boots under QEMU on macOS, Linux, and Windows. Real hardware support is in progress.</p>" +
+           "<a class='button primary' href='/download.html'>Download " + site.version + "</a>" +
+           "</section>"
+}
+
+fn _css_template() {
+    return ":root {" +
+           "  --bg:     #0E0F14;" +
+           "  --surface:#161823;" +
+           "  --border: #2A2D3D;" +
+           "  --text:   #EDEEF5;" +
+           "  --muted:  #8B92A7;" +
+           "  --teal:   #38D6E0;" +
+           "  --violet: #8B5CF6;" +
+           "  --magenta:#E83A8B;" +
+           "}" +
+           "* { box-sizing: border-box; }" +
+           "html, body { margin: 0; padding: 0; }" +
+           "body {" +
+           "  background: linear-gradient(135deg, #0a0b10 0%, #11131c 60%, #0a0b10 100%);" +
+           "  color: var(--text);" +
+           "  font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;" +
+           "  min-height: 100vh;" +
+           "}" +
+           ".top-nav { display: flex; gap: 24px; padding: 20px 32px; align-items: center; border-bottom: 1px solid var(--border); }" +
+           ".top-nav a { color: var(--muted); text-decoration: none; }" +
+           ".top-nav a:hover { color: var(--text); }" +
+           ".top-nav .brand { font-weight: 600; color: var(--text); margin-right: auto; font-size: 18px; }" +
+           "main { max-width: 960px; margin: 0 auto; padding: 64px 32px; }" +
+           ".hero { text-align: center; padding: 80px 0 48px; }" +
+           ".wordmark { font-size: 72px; margin: 0; background: linear-gradient(90deg, var(--teal), var(--violet), var(--magenta)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }" +
+           ".tagline  { font-size: 20px; color: var(--muted); margin: 12px 0 32px; }" +
+           ".lead     { font-size: 18px; max-width: 640px; margin: 0 auto 32px; }" +
+           ".hero-cta { display: flex; gap: 16px; justify-content: center; }" +
+           ".button { display: inline-block; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 500; transition: transform 180ms ease-out, box-shadow 180ms ease-out; }" +
+           ".button.primary { background: linear-gradient(135deg, var(--teal), var(--violet)); color: var(--bg); box-shadow: 0 8px 24px rgba(56, 214, 224, 0.25); }" +
+           ".button.primary:hover { transform: translateY(-2px); box-shadow: 0 12px 32px rgba(139, 92, 246, 0.35); }" +
+           ".button.ghost { color: var(--text); border: 1px solid var(--border); }" +
+           ".button.ghost:hover { border-color: var(--teal); }" +
+           ".features { margin-top: 80px; }" +
+           ".features h2 { text-align: center; font-size: 32px; }" +
+           ".feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 32px; }" +
+           ".feature { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }" +
+           ".feature h3 { margin: 0 0 8px; color: var(--teal); font-size: 18px; }" +
+           ".feature p { margin: 0; color: var(--muted); }" +
+           ".cta { text-align: center; padding: 80px 0; }" +
+           ".muted { color: var(--muted); }" +
+           "footer { border-top: 1px solid var(--border); padding: 32px; text-align: center; color: var(--muted); margin-top: 80px; }" +
+           "footer a { color: var(--teal); }" +
+           ".download-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 32px; margin-top: 32px; }" +
+           ".download-card h2 { margin-top: 0; }" +
+           ".install-steps pre { background: var(--surface); border: 1px solid var(--border); padding: 16px; border-radius: 8px; overflow-x: auto; }" +
+           ".doc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; padding: 0; list-style: none; }" +
+           ".doc-grid li { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }" +
+           ".doc-grid a { color: var(--text); text-decoration: none; font-weight: 500; }" +
+           ".doc-grid a:hover { color: var(--teal); }" +
+           ".link-list { padding: 0; list-style: none; }" +
+           ".link-list li { padding: 12px 0; border-bottom: 1px solid var(--border); }" +
+           ".link-list a { color: var(--teal); text-decoration: none; font-weight: 500; }" +
+           ""
+}
+
+fn _dirname(path) {
+    let parts = split(path, "/")
+    if len(parts) <= 1 { return "." }
+    mut head = ""
+    mut i = 0
+    while i < len(parts) - 1 {
+        if i > 0 { head = head + "/" }
+        head = head + parts[i]
+        i = i + 1
+    }
+    if len(head) == 0 { return "/" }
+    return head
+}
