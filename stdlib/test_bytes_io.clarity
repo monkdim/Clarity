@@ -1,0 +1,68 @@
+-- Tests for read_bytes / write_bytes runtime builtins.
+-- The OS image builder relies on round-tripping arbitrary binary data
+-- (kernel ELF, runtime ELF, ISO bytes), so these need to preserve every
+-- byte value 0x00..0xFF without UTF-8 corruption.
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+let TMP = "/tmp/clarity_bytes_test_" + str(time()) + ".bin"
+
+-- ── ELF magic round-trip ─────────────────────
+
+show "-- read_bytes / write_bytes: ELF magic --"
+
+let elf_magic = [0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00]
+write_bytes(TMP, elf_magic)
+let r1 = read_bytes(TMP)
+assert_eq(len(r1), 8, "ELF magic length")
+assert_eq(r1[0], 0x7F, "ELF byte 0")
+assert_eq(r1[1], 0x45, "ELF byte 1 (E)")
+assert_eq(r1[2], 0x4C, "ELF byte 2 (L)")
+assert_eq(r1[3], 0x46, "ELF byte 3 (F)")
+assert_eq(r1[7], 0x00, "ELF NUL byte")
+
+-- ── Full byte range 0..255 ────────────────────
+
+show "-- read_bytes / write_bytes: full range --"
+
+mut all_bytes = []
+mut i = 0
+while i < 256 { push(all_bytes, i); i = i + 1 }
+write_bytes(TMP, all_bytes)
+let r2 = read_bytes(TMP)
+assert_eq(len(r2), 256, "256-byte length")
+mut ok = true
+mut j = 0
+while j < 256 {
+    if r2[j] != j { ok = false }
+    j = j + 1
+}
+assert(ok, "every byte value preserved 0..255")
+
+-- ── Empty file ────────────────────────────────
+
+show "-- read_bytes / write_bytes: empty --"
+write_bytes(TMP, [])
+let r3 = read_bytes(TMP)
+assert_eq(len(r3), 0, "empty file is empty list")
+
+-- ── Cleanup ───────────────────────────────────
+
+exec_full("rm -f " + TMP)
+
+show ""
+if FAILED == 0 {
+    show "  " + str(PASSED) + " passed, 0 failed"
+} else {
+    show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+    exit(1)
+}

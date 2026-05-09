@@ -156,16 +156,3 @@ fn _grub_cfg(cmdline, timeout) {
     return join(lines, "\n") + "\n"
 }
 
--- write_bytes is the runtime helper that writes a list of ints as
--- a binary file. Defined here as a thin wrapper so callers don't
--- need to know how the runtime exposes it.
-fn write_bytes(path, bytes) {
-    -- The host runtime writes a Buffer; the bare-metal runtime
-    -- uses sys_write through a fresh fd. Both are exposed as
-    -- `write` (string mode) plus a runtime-level binary helper.
-    -- For the host path: turn the byte list into a string and
-    -- write it. The runtime treats every char-code as one byte.
-    mut s = ""
-    for b in bytes { s = s + from_char_code(b) }
-    write(path, s)
-}

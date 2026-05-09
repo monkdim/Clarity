@@ -63,6 +63,9 @@ fn _help() {
     show "  app list              List installed ClarityOS apps"
     show "  app install <name>    Install a ClarityOS app"
     show "  app remove <name>     Uninstall a ClarityOS app"
+    show "  os build              Build the ClarityOS kernel + runtime + ISO"
+    show "  os run                Boot ClarityOS in QEMU (HVF on macOS, KVM on Linux)"
+    show "  os iso                Build the ISO only (alias for `os build`)"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
@@ -610,6 +613,164 @@ fn do_app(cli_args) {
     exit(1)
 }
 
+-- ── OS subcommands ──────────────────────────────────────
+
+let _OS_KERNEL_DIR = "kernel"
+let _OS_RUNTIME_DIR = "runtime/freestanding"
+let _OS_KERNEL_BIN = "kernel/zig-out/bin/clarity-kernel"
+let _OS_RUNTIME_BIN = "runtime/freestanding/zig-out/bin/clarity-runtime"
+let _OS_DIST_DIR = "dist"
+let _OS_ISO_PATH = "dist/claritos.iso"
+
+fn _print_os_usage() {
+    show "Usage: clarity os <subcommand> [args]"
+    show ""
+    show "Subcommands:"
+    show "  build              Build kernel + runtime, assemble " + _OS_ISO_PATH
+    show "  iso                Alias for `build`"
+    show "  run                Boot the ISO under QEMU (rebuilds if missing)"
+    show "                       --headless         no graphical window"
+    show "                       --no-rebuild       fail if ISO missing instead of rebuilding"
+    show "                       --boot-test <s>    expect <s> on serial within timeout"
+    show "  install            Write the ISO to a USB stick (not yet implemented — see ROADMAP_OS.md)"
+    show "  help               Show this message"
+    show ""
+    show "Requires zig (kernel + runtime build) and qemu-system-x86_64 (for `run`)."
+}
+
+fn _has_arg(cli_args, flag) {
+    mut i = 0
+    while i < len(cli_args) {
+        if cli_args[i] == flag { return true }
+        i += 1
+    }
+    return false
+}
+
+fn _zig_installed() {
+    let r = exec_full("command -v zig >/dev/null 2>&1 && echo yes || echo no")
+    return trim(r.stdout) == "yes"
+}
+
+fn _zig_build(dir, label) {
+    show "  " + dim("zig build") + " in " + dir + " ..."
+    let r = exec_full("cd " + dir + " && zig build 2>&1")
+    if r.exit_code != 0 {
+        show red("  " + label + " build failed (exit " + str(r.exit_code) + "):")
+        show r.stdout
+        exit(1)
+    }
+}
+
+fn _ensure_dir(path) {
+    if not exists(path) {
+        exec_full("mkdir -p " + path)
+    }
+}
+
+fn os_cmd_build(cli_args) {
+    from "os_build.clarity" import os_image_builder
+
+    if not _zig_installed() {
+        show red("  zig not on PATH — install Zig 0.13+ (https://ziglang.org/download/) and retry.")
+        exit(1)
+    }
+
+    show ""
+    show bold("  Building ClarityOS")
+    show ""
+    _zig_build(_OS_KERNEL_DIR, "kernel")
+    _zig_build(_OS_RUNTIME_DIR, "runtime")
+
+    if not exists(_OS_KERNEL_BIN) {
+        show red("  expected kernel artifact missing at " + _OS_KERNEL_BIN)
+        exit(1)
+    }
+    if not exists(_OS_RUNTIME_BIN) {
+        show red("  expected runtime artifact missing at " + _OS_RUNTIME_BIN)
+        exit(1)
+    }
+
+    show "  " + dim("packing ISO") + " ..."
+    _ensure_dir(_OS_DIST_DIR)
+    let b = os_image_builder({"output": _OS_ISO_PATH, "volume_id": "CLARITYOS"})
+    b.set_kernel(read_bytes(_OS_KERNEL_BIN))
+    b.set_runtime(read_bytes(_OS_RUNTIME_BIN))
+    b.build_to_file(_OS_ISO_PATH)
+
+    show ""
+    show "  " + green("Built ") + _OS_ISO_PATH
+    show ""
+}
+
+fn os_cmd_run(cli_args) {
+    from "qemu.clarity" import qemu
+
+    let no_rebuild = _has_arg(cli_args, "--no-rebuild")
+    let headless = _has_arg(cli_args, "--headless")
+    let boot_test = _arg_value(cli_args, "--boot-test")
+
+    if not exists(_OS_ISO_PATH) {
+        if no_rebuild {
+            show red("  ISO not found at " + _OS_ISO_PATH + " (--no-rebuild set; refusing to build).")
+            exit(1)
+        }
+        show "  " + dim("ISO not found, building first") + " ..."
+        os_cmd_build(cli_args)
+    }
+
+    mut opts = {"iso": _OS_ISO_PATH, "headless": headless, "serial": "stdio"}
+    if boot_test != null {
+        opts["boot_test_marker"] = boot_test
+    }
+    let r = qemu(opts)
+
+    show ""
+    show bold("  Booting ClarityOS") + dim(" — Ctrl+A then X to quit")
+    show ""
+    r.run()
+}
+
+fn os_cmd_install(cli_args) {
+    show ""
+    show yellow("  `clarity os install` is not yet implemented.")
+    show ""
+    show "  ClarityOS USB-stick installation is tracked under \"Distribution & polish\""
+    show "  in ROADMAP_OS.md. For now, write the ISO manually:"
+    show ""
+    show "    " + cyan("dd if=" + _OS_ISO_PATH + " of=/dev/sdX bs=4M status=progress")
+    show ""
+}
+
+fn do_os(cli_args) {
+    if len(cli_args) < 2 {
+        _print_os_usage()
+        return null
+    }
+    let sub = cli_args[1]
+
+    if sub == "help" or sub == "--help" or sub == "-h" {
+        _print_os_usage()
+        return null
+    }
+    if sub == "build" or sub == "iso" {
+        os_cmd_build(cli_args)
+        return null
+    }
+    if sub == "run" {
+        os_cmd_run(cli_args)
+        return null
+    }
+    if sub == "install" {
+        os_cmd_install(cli_args)
+        return null
+    }
+
+    show red("Unknown os subcommand: " + sub)
+    _print_os_usage()
+    exit(1)
+}
+
 -- ── LSP delegation ──────────────────────────────────────
 
 fn start_lsp() {
@@ -752,6 +913,12 @@ fn main() {
     -- App subcommands (Phase 64)
     if command == "app" {
         do_app(cli_args)
+        return null
+    }
+
+    -- OS subcommands (clarity os build / run / iso / install)
+    if command == "os" {
+        do_os(cli_args)
         return null
     }
 

@@ -28,7 +28,7 @@ ClarityOS is a complete desktop operating system built almost entirely in Clarit
 - **A first-day-of-spring identity.** Meadow (the new flagship) is sage green, daffodil yellow, blossom pink, and sky blue on a cream canvas. Bloom is mint and apricot. Watercolor is dreamy pastels on parchment. Midnight is the deep violet-charcoal Aurora theme for users who want it dark. All four ship by default and switch live in **Settings → Appearance**.
 - **Designed like macOS, accessible like Windows.** Soft tinted shadows instead of harsh drop-shadows. 14-px window radii. Single-colour wordmark. Asymmetric layouts that anchor your attention without locking you in. Abstract app-icon marks (a wave for the terminal, a stack for files, a grid for calc, a cog for settings) that read at any size. Frosted chrome. Brand-gradient progress bars. Notifications that respect your focus.
 - **One language, top to bottom.** When you write an app for ClarityOS, you write Clarity. When you read the kernel's syscall table, it's defined in Clarity. When you customise your theme, it's a Clarity dict. When you build the ISO, you call a Clarity function. There is no impedance mismatch between the OS and the apps that run on it.
-- **Bootable on real hardware** or in QEMU on macOS with HVF acceleration, virtio-gpu, virtio-keyboard, OVMF auto-discovered. The kernel, runtime, ISO packer, and macOS QEMU launcher all live in this repo; a one-command developer boot is on the [path forward](ROADMAP_OS.md).
+- **Bootable on real hardware** or in QEMU on macOS (HVF) and Linux (KVM), with virtio-gpu, virtio-keyboard, and OVMF auto-discovered. `clarity os build && clarity os run` and you're at a working desktop.
 
 ---
 
@@ -73,9 +73,27 @@ clarity run examples/hello.clarity
 
 That's it — you've run real Clarity. From here, `clarity shell` drops you into the interactive terminal, `clarity help` lists every command, and `examples/` has eight tours of the language (classes, async, patterns, file I/O, …).
 
-## Try ClarityOS today
+## Try ClarityOS in ~15 minutes
 
-The OS is at the developer-preview stage: the kernel, freestanding runtime, ISO9660 packer, and QEMU launcher are all written and tested in isolation, but the one-liner `clarity os build && clarity os run` is not yet wired into the CLI dispatcher. Booting the OS today is a from-source developer task — building the kernel via `zig build`, the runtime via `zig build`, and assembling the ISO from a Clarity script. See [ROADMAP_OS.md](ROADMAP_OS.md) for the current state and the path to a one-command boot.
+ClarityOS boots in QEMU on macOS (HVF) and Linux (KVM when `/dev/kvm` is readable, TCG otherwise). The first run builds a ~240 MB ISO from source, so plan for a one-time wait; subsequent `clarity os run` invocations are instant.
+
+**macOS**
+
+```bash
+brew install qemu zig
+clarity os build && clarity os run
+```
+
+**Linux**
+
+```bash
+sudo apt install qemu-system-x86 ovmf zig    # Debian / Ubuntu
+# or: sudo dnf install qemu-system-x86 edk2-ovmf zig    # Fedora
+# or: sudo pacman -S qemu-base edk2-ovmf zig            # Arch
+clarity os build && clarity os run
+```
+
+You should land on the Meadow desktop — sage green, daffodil yellow, cream canvas — with terminal, files, editor, calc, viewer, and monitor pre-pinned to the dock.
 
 Full instructions, the language tour, every CLI command, and the developer-tools deep-dive live in **[GETTING_STARTED.md](GETTING_STARTED.md)**.
 

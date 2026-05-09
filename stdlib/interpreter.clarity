@@ -421,6 +421,8 @@ class Interpreter {
         this.global_env.set("append", fn(p, c) { return append(p, c) }, true)
         this.global_env.set("exists", fn(p) { return exists(p) }, true)
         this.global_env.set("lines", fn(p) { return lines(p) }, true)
+        this.global_env.set("read_bytes", fn(p) { return read_bytes(p) }, true)
+        this.global_env.set("write_bytes", fn(p, b) { return write_bytes(p, b) }, true)
 
         -- Errors
         this.global_env.set("error", fn(msg) { return str(msg) }, true)
