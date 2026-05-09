@@ -1,0 +1,185 @@
+-- Animation primitives — Phase 74 UX track.
+--
+-- The compositor paints frames at ~60 Hz (Phase 73). Animations
+-- here are pure-state — given a duration + an easing function,
+-- Animation.value(now) returns the interpolated value the widget
+-- should paint at this frame. No threads, no async; the frame
+-- loop ticks animations forward and decides whether to redraw.
+--
+-- Designed for small, intentional motion: 180-220ms is the sweet
+-- spot for OS UI; longer feels sluggish, shorter feels jarring.
+--
+--     let a = animation({"duration_ms": 200, "easing": "ease_out_cubic", "from": 0, "to": 100})
+--     a.start(now_ms)
+--     a.value(now_ms + 100)        -- midway, eased
+--     a.done(now_ms + 250)         -- > duration, returns true
+
+let LINEAR = "linear"
+let EASE_IN_QUAD = "ease_in_quad"
+let EASE_OUT_QUAD = "ease_out_quad"
+let EASE_IN_OUT_QUAD = "ease_in_out_quad"
+let EASE_IN_CUBIC = "ease_in_cubic"
+let EASE_OUT_CUBIC = "ease_out_cubic"
+let EASE_IN_OUT_CUBIC = "ease_in_out_cubic"
+let EASE_OUT_BACK = "ease_out_back"
+let EASE_OUT_BOUNCE = "ease_out_bounce"
+
+-- ── Pure easing functions (input/output ∈ [0, 1]) ──
+
+fn ease(name, t) {
+    if name == LINEAR { return t }
+    if name == EASE_IN_QUAD     { return t * t }
+    if name == EASE_OUT_QUAD    { return 1.0 - (1.0 - t) * (1.0 - t) }
+    if name == EASE_IN_OUT_QUAD { return _in_out_quad(t) }
+    if name == EASE_IN_CUBIC    { return t * t * t }
+    if name == EASE_OUT_CUBIC   { let inv = 1.0 - t; return 1.0 - inv * inv * inv }
+    if name == EASE_IN_OUT_CUBIC { return _in_out_cubic(t) }
+    if name == EASE_OUT_BACK    { return _out_back(t) }
+    if name == EASE_OUT_BOUNCE  { return _out_bounce(t) }
+    return t
+}
+
+fn _in_out_quad(t) {
+    if t < 0.5 { return 2.0 * t * t }
+    let inv = 1.0 - t
+    return 1.0 - 2.0 * inv * inv
+}
+
+fn _in_out_cubic(t) {
+    if t < 0.5 { return 4.0 * t * t * t }
+    let inv = 1.0 - t
+    return 1.0 - 4.0 * inv * inv * inv
+}
+
+fn _out_back(t) {
+    let c1 = 1.70158
+    let c3 = c1 + 1.0
+    let inv = t - 1.0
+    return 1.0 + c3 * inv * inv * inv + c1 * inv * inv
+}
+
+fn _out_bounce(t) {
+    let n1 = 7.5625
+    let d1 = 2.75
+    if t < 1.0 / d1 {
+        return n1 * t * t
+    } elif t < 2.0 / d1 {
+        let t2 = t - 1.5 / d1
+        return n1 * t2 * t2 + 0.75
+    } elif t < 2.5 / d1 {
+        let t2 = t - 2.25 / d1
+        return n1 * t2 * t2 + 0.9375
+    } else {
+        let t2 = t - 2.625 / d1
+        return n1 * t2 * t2 + 0.984375
+    }
+}
+
+-- ── Animation ─────────────────────────────────
+
+class Animation {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.duration_ms = if has(o, "duration_ms") { o["duration_ms"] } else { 200 }
+        this.easing = if has(o, "easing") { o["easing"] } else { EASE_OUT_CUBIC }
+        this.from = if has(o, "from") { o["from"] } else { 0.0 }
+        this.to = if has(o, "to") { o["to"] } else { 1.0 }
+        this.start_ms = null
+        this._completed = false
+    }
+
+    fn start(now_ms) {
+        this.start_ms = now_ms
+        this._completed = false
+    }
+
+    fn _progress(now_ms) {
+        if this.start_ms == null { return 0.0 }
+        let elapsed = now_ms - this.start_ms
+        if elapsed <= 0 { return 0.0 }
+        if elapsed >= this.duration_ms { return 1.0 }
+        return elapsed / this.duration_ms
+    }
+
+    fn value(now_ms) {
+        let t = this._progress(now_ms)
+        let eased = ease(this.easing, t)
+        return this.from + (this.to - this.from) * eased
+    }
+
+    fn done(now_ms) {
+        return this._progress(now_ms) >= 1.0
+    }
+
+    fn cancel() {
+        this.start_ms = null
+        this._completed = true
+    }
+}
+
+fn animation(opts) { return Animation(opts) }
+
+-- ── Tween group ────────────────────────────
+
+-- A bag of named animations advanced together (e.g. a window open
+-- animation that scales + fades). values_at(now) returns a map of
+-- {name: value} for the frame; done_at(now) returns true once
+-- every member animation has finished.
+class TweenGroup {
+    fn init() {
+        this.tweens = {}
+        this._started = false
+    }
+
+    fn add(name, anim) { this.tweens[name] = anim; return anim }
+
+    fn start(now_ms) {
+        for kv in entries(this.tweens) { kv[1].start(now_ms) }
+        this._started = true
+    }
+
+    fn values_at(now_ms) {
+        mut out = {}
+        for kv in entries(this.tweens) { out[kv[0]] = kv[1].value(now_ms) }
+        return out
+    }
+
+    fn done_at(now_ms) {
+        if not this._started { return false }
+        for kv in entries(this.tweens) {
+            if not kv[1].done(now_ms) { return false }
+        }
+        return true
+    }
+}
+
+fn tween_group() { return TweenGroup() }
+
+-- ── Common preset animations ──────────────
+
+fn window_open_animation() {
+    let g = tween_group()
+    g.add("scale", animation({"duration_ms": 180, "easing": EASE_OUT_BACK, "from": 0.92, "to": 1.0}))
+    g.add("opacity", animation({"duration_ms": 160, "easing": EASE_OUT_QUAD, "from": 0.0, "to": 1.0}))
+    return g
+}
+
+fn window_close_animation() {
+    let g = tween_group()
+    g.add("scale", animation({"duration_ms": 140, "easing": EASE_IN_QUAD, "from": 1.0, "to": 0.94}))
+    g.add("opacity", animation({"duration_ms": 140, "easing": EASE_IN_QUAD, "from": 1.0, "to": 0.0}))
+    return g
+}
+
+fn dock_bounce_animation() {
+    let g = tween_group()
+    g.add("y_offset", animation({"duration_ms": 360, "easing": EASE_OUT_BOUNCE, "from": -8.0, "to": 0.0}))
+    return g
+}
+
+fn launcher_open_animation() {
+    let g = tween_group()
+    g.add("opacity", animation({"duration_ms": 200, "easing": EASE_OUT_CUBIC, "from": 0.0, "to": 1.0}))
+    g.add("scale", animation({"duration_ms": 220, "easing": EASE_OUT_CUBIC, "from": 0.96, "to": 1.0}))
+    return g
+}

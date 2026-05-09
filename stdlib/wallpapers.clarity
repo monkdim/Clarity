@@ -1,0 +1,149 @@
+-- Built-in ClarityOS wallpapers — Phase 74 UX track.
+--
+-- Procedural wallpapers that paint into a Framebuffer. No image
+-- assets shipped on disk — every default wallpaper is generated
+-- pixel-by-pixel from a small recipe, so the OS doesn't have to
+-- carry MB-scale binary blobs around. Custom wallpaper images go
+-- through the existing wallpaper.clarity widget once the user picks
+-- one.
+--
+-- Each preset takes (fb, theme, ?opts) and paints into fb.
+--
+--     paint_aurora_gradient(fb, theme)
+--     paint_grid(fb, theme, {"grid_step": 32})
+
+from "graphics.clarity" import Framebuffer, framebuffer
+from "theme_aurora.clarity" import aurora_gradient, warm_gradient, AURORA_INK, AURORA_TEAL, AURORA_VIOLET, AURORA_MAGENTA
+
+-- ── Aurora gradient — flagship wallpaper ──────
+
+-- Diagonal teal → violet → magenta with a subtle overlay glow at
+-- the top-left to suggest a virtual light source.
+fn paint_aurora_gradient(fb, theme) {
+    let w = fb.width
+    let h = fb.height
+    let denom = w + h
+    mut y = 0
+    while y < h {
+        mut x = 0
+        while x < w {
+            let t = (x + y) / denom
+            let base = aurora_gradient(t)
+            let glow = _glow_overlay(x, y, w, h)
+            fb.put_pixel(x, y, _blend(base, glow))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn _glow_overlay(x, y, w, h) {
+    -- Soft radial highlight at (w/4, h/4) — adds 0..30% white over
+    -- the gradient. Falls off quadratically with distance.
+    let cx = w / 4
+    let cy = h / 4
+    let dx = x - cx
+    let dy = y - cy
+    let max_d = w * w / 4 + h * h / 4
+    let d2 = dx * dx + dy * dy
+    if d2 >= max_d { return 0x00FFFFFF }
+    let strength = int((1.0 - d2 / max_d) * 76)         -- 0..76 = 30%
+    return (strength << 24) | 0xFFFFFF
+}
+
+fn _blend(base, overlay) {
+    let oa = (overlay >> 24) & 0xFF
+    if oa == 0 { return base }
+    let or_ = (overlay >> 16) & 0xFF; let og = (overlay >> 8) & 0xFF; let ob = overlay & 0xFF
+    let br = (base >> 16) & 0xFF;     let bg = (base >> 8) & 0xFF;    let bb = base & 0xFF
+    let nr = int((br * (255 - oa) + or_ * oa) / 255)
+    let ng = int((bg * (255 - oa) + og * oa) / 255)
+    let nb = int((bb * (255 - oa) + ob * oa) / 255)
+    return 0xFF000000 | (nr << 16) | (ng << 8) | nb
+}
+
+-- ── Aurora night — deeper, more contrast ────
+
+fn paint_aurora_night(fb, theme) {
+    let w = fb.width
+    let h = fb.height
+    fb.clear(AURORA_INK)
+    -- Three soft "aurora" bands at different y offsets
+    _band(fb, 0, h * 30 / 100, AURORA_TEAL,    100)
+    _band(fb, h * 35 / 100, h * 65 / 100, AURORA_VIOLET, 80)
+    _band(fb, h * 60 / 100, h * 90 / 100, AURORA_MAGENTA, 60)
+}
+
+fn _band(fb, top, bottom, color, max_alpha) {
+    let span = bottom - top
+    if span <= 0 { return }
+    mut y = top
+    while y < bottom {
+        let dist = if y < top + span / 2 { y - top } else { bottom - y }
+        let normalised = dist * 2 / span
+        let alpha = int(normalised * max_alpha)
+        let banded = (alpha << 24) | (color & 0xFFFFFF)
+        mut x = 0
+        while x < fb.width {
+            let cur = fb.get_pixel(x, y)
+            fb.put_pixel(x, y, _blend(cur, banded))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+-- ── Grid — minimal "developer" wallpaper ────
+
+fn paint_grid(fb, theme, opts) {
+    let o = opts ?? {}
+    let step = if has(o, "grid_step") { o["grid_step"] } else { 32 }
+    let bg = if has(o, "bg") { o["bg"] } else { theme["background"] }
+    let line_color = if has(o, "line") { o["line"] } else { 0x14_FF_FF_FF }
+    fb.clear(bg)
+    mut x = 0
+    while x < fb.width {
+        mut y = 0
+        while y < fb.height {
+            fb.put_pixel(x, y, _blend(bg, line_color))
+            y = y + 1
+        }
+        x = x + step
+    }
+    mut y2 = 0
+    while y2 < fb.height {
+        mut xx = 0
+        while xx < fb.width {
+            fb.put_pixel(xx, y2, _blend(bg, line_color))
+            xx = xx + 1
+        }
+        y2 = y2 + step
+    }
+}
+
+-- ── Solid — single color (used as a final fallback) ──
+
+fn paint_solid(fb, theme, opts) {
+    let o = opts ?? {}
+    let color = if has(o, "color") { o["color"] } else { theme["background"] }
+    fb.clear(color)
+}
+
+-- ── Catalogue ────────────────────────────────
+
+let WALLPAPER_PRESETS = [
+    {"id": "aurora",       "name": "Aurora",        "paint": "aurora"},
+    {"id": "aurora_night", "name": "Aurora Night",  "paint": "aurora_night"},
+    {"id": "grid",         "name": "Grid",          "paint": "grid"},
+    {"id": "solid",        "name": "Solid",         "paint": "solid"}
+]
+
+fn wallpaper_presets() { return WALLPAPER_PRESETS }
+
+fn paint_preset(fb, theme, preset_id, opts) {
+    if preset_id == "aurora" { paint_aurora_gradient(fb, theme); return true }
+    if preset_id == "aurora_night" { paint_aurora_night(fb, theme); return true }
+    if preset_id == "grid" { paint_grid(fb, theme, opts); return true }
+    if preset_id == "solid" { paint_solid(fb, theme, opts); return true }
+    return false
+}
