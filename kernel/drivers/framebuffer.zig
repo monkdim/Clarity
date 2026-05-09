@@ -60,3 +60,51 @@ pub fn clear(bgra: u32) void {
         }
     }
 }
+
+/// Map the framebuffer's physical pages into `space` at `user_virt`
+/// with PAGE_USER + PAGE_WRITE so a userspace compositor can blit
+/// directly. Returns the byte length of the framebuffer on success
+/// (caller-side: that's the size to mmap-track in its region list)
+/// or zero if the framebuffer hasn't been initialised yet.
+pub fn map_into_user(space: *vmm.AddressSpace, user_virt: u64) !u64 {
+    const fb_info = info orelse return 0;
+    const size = @as(u64, fb_info.pitch) * fb_info.height;
+    const pages = (size + 0xFFF) / 0x1000;
+    var i: u64 = 0;
+    while (i < pages) : (i += 1) {
+        const phys = fb_info.phys_addr + i * 0x1000;
+        const virt = user_virt + i * 0x1000;
+        try vmm.map_page(space, virt, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER);
+    }
+    // Track the mapping as a region so munmap + COW (later) work.
+    try space.regions.append(std.heap.page_allocator, .{
+        .start = user_virt,
+        .end = user_virt + pages * 0x1000,
+        .flags = vmm.PAGE_WRITE,
+        .backing = .{ .device = .{ .phys_base = fb_info.phys_addr } },
+    });
+    return size;
+}
+
+/// Geometry inquiry — userspace asks what the framebuffer looks
+/// like before mapping.
+pub const FbInfoForUser = extern struct {
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u8,
+    fb_type: u8,
+    pad: u16,
+};
+
+pub fn user_info() ?FbInfoForUser {
+    const fb_info = info orelse return null;
+    return .{
+        .width = fb_info.width,
+        .height = fb_info.height,
+        .pitch = fb_info.pitch,
+        .bpp = fb_info.bpp,
+        .fb_type = 1,
+        .pad = 0,
+    };
+}

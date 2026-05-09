@@ -1,0 +1,236 @@
+-- Desktop session — Phase 73 task 3.
+--
+-- Top-level orchestrator for "what shows up on screen after init."
+-- Builds a Z-stack of:
+--
+--   z=0 wallpaper       (desktop background)
+--   z=1 windows         (apps, managed by the window manager)
+--   z=2 dock            (bottom strip with pinned + running apps)
+--   z=3 statusbar       (top strip with clock + active app + audio + notifs)
+--   z=4 overlay         (launcher, lockscreen — only when invoked)
+--
+-- The DisplayServer paints them all per frame; this module owns the
+-- spawning + focus logic for apps, the dock state, and the
+-- launcher show/hide.
+
+let LAYER_WALLPAPER = "wallpaper"
+let LAYER_WINDOWS = "windows"
+let LAYER_DOCK = "dock"
+let LAYER_STATUSBAR = "statusbar"
+let LAYER_OVERLAY = "overlay"
+
+let DEFAULT_PINNED = ["terminal", "files", "editor", "calc", "viewer", "monitor"]
+
+let APP_TITLES = {
+    "terminal":  "Terminal",
+    "files":     "Files",
+    "editor":    "Editor",
+    "calc":      "Calculator",
+    "viewer":    "Image Viewer",
+    "monitor":   "System Monitor"
+}
+
+class DesktopSession {
+    fn init(display, theme, opts) {
+        let o = opts ?? {}
+        this.display = display
+        this.theme = theme
+        this.pinned = if has(o, "pinned") { o["pinned"] } else { DEFAULT_PINNED }
+        this.app_factories = if has(o, "factories") { o["factories"] } else { {} }
+        this.wallpaper = null
+        this.statusbar = null
+        this.dock = null
+        this.launcher = null
+        this.lockscreen = null
+        this.windows = {}                   -- app_id -> Window
+        this.running = {}                    -- app_id -> {window, app}
+        this.next_window_id = 1
+        this.notifications = []
+        this.locked = false
+    }
+
+    -- ── Boot ─────────────────────────────
+
+    fn boot(layout) {
+        let l = layout ?? {"width": this.display.width, "height": this.display.height}
+        this.statusbar_height = if has(l, "statusbar_h") { l["statusbar_h"] } else { 28 }
+        this.dock_height = if has(l, "dock_h") { l["dock_h"] } else { 56 }
+        this._mount_wallpaper(l)
+        this._mount_statusbar(l)
+        this._mount_dock(l)
+        this.display.mark_full()
+        return true
+    }
+
+    fn _mount_wallpaper(l) {
+        if has(this.app_factories, LAYER_WALLPAPER) {
+            this.wallpaper = (this.app_factories[LAYER_WALLPAPER])(this.theme)
+        } else {
+            this.wallpaper = _stub_widget("wallpaper", 0, 0, l["width"], l["height"])
+        }
+        this.display.add_window(this.wallpaper)
+    }
+
+    fn _mount_statusbar(l) {
+        if has(this.app_factories, LAYER_STATUSBAR) {
+            this.statusbar = (this.app_factories[LAYER_STATUSBAR])(this.theme)
+        } else {
+            this.statusbar = _stub_widget("statusbar", 0, 0, l["width"], this.statusbar_height)
+        }
+        this.display.add_window(this.statusbar)
+    }
+
+    fn _mount_dock(l) {
+        if has(this.app_factories, LAYER_DOCK) {
+            this.dock = (this.app_factories[LAYER_DOCK])(this.theme, this.pinned)
+        } else {
+            this.dock = _stub_widget("dock", 0, l["height"] - this.dock_height, l["width"], this.dock_height)
+        }
+        this.display.add_window(this.dock)
+    }
+
+    -- ── App launching ────────────────────
+
+    fn launch(app_id) {
+        if has(this.running, app_id) {
+            let entry = this.running[app_id]
+            this.display.compositor.focus(entry["window"])
+            return entry
+        }
+        if not has(this.app_factories, app_id) {
+            throw "DesktopSession: no factory for app '" + app_id + "'"
+        }
+        let factory = this.app_factories[app_id]
+        let app = factory(this.theme)
+        let title = if has(APP_TITLES, app_id) { APP_TITLES[app_id] } else { app_id }
+        let win = _make_window(this.next_window_id, title, app, this.statusbar_height + 16)
+        this.next_window_id = this.next_window_id + 1
+        this.windows[app_id] = win
+        this.running[app_id] = {"window": win, "app": app}
+        this.display.add_window(win)
+        this.display.compositor.focus(win)
+        return this.running[app_id]
+    }
+
+    fn close_app(app_id) {
+        if not has(this.running, app_id) { return false }
+        let entry = this.running[app_id]
+        this.display.remove_window(entry["window"])
+        mut next = {}
+        for kv in entries(this.running) {
+            if kv[0] != app_id { next[kv[0]] = kv[1] }
+        }
+        this.running = next
+        mut next_w = {}
+        for kv in entries(this.windows) {
+            if kv[0] != app_id { next_w[kv[0]] = kv[1] }
+        }
+        this.windows = next_w
+        return true
+    }
+
+    fn running_count() { return len(keys(this.running)) }
+
+    -- ── Launcher overlay ─────────────────
+
+    fn show_launcher() {
+        if this.launcher != null { return false }
+        if has(this.app_factories, "launcher") {
+            this.launcher = (this.app_factories["launcher"])(this.theme, this.pinned)
+        } else {
+            this.launcher = _stub_widget("launcher", 0, 0, this.display.width, this.display.height)
+        }
+        this.display.add_window(this.launcher)
+        this.display.compositor.focus(this.launcher)
+        return true
+    }
+
+    fn hide_launcher() {
+        if this.launcher == null { return false }
+        this.display.remove_window(this.launcher)
+        this.launcher = null
+        return true
+    }
+
+    -- ── Lock screen ─────────────────────
+
+    fn lock() {
+        if this.locked { return false }
+        if has(this.app_factories, "lockscreen") {
+            this.lockscreen = (this.app_factories["lockscreen"])(this.theme)
+        } else {
+            this.lockscreen = _stub_widget("lockscreen", 0, 0, this.display.width, this.display.height)
+        }
+        this.display.add_window(this.lockscreen)
+        this.display.compositor.focus(this.lockscreen)
+        this.locked = true
+        return true
+    }
+
+    fn unlock() {
+        if not this.locked { return false }
+        if this.lockscreen != null { this.display.remove_window(this.lockscreen) }
+        this.lockscreen = null
+        this.locked = false
+        return true
+    }
+
+    -- ── Notifications ────────────────────
+
+    fn notify(title, body) {
+        let n = {"title": title, "body": body, "ts": time()}
+        push(this.notifications, n)
+        return n
+    }
+
+    -- ── Introspection ───────────────────
+
+    fn snapshot() {
+        return {
+            "running": keys(this.running),
+            "running_count": this.running_count(),
+            "locked": this.locked,
+            "launcher_open": this.launcher != null,
+            "notifications": len(this.notifications),
+            "frames_painted": this.display.frames_painted
+        }
+    }
+}
+
+fn desktop_session(display, theme, ...rest) {
+    let opts = if len(rest) > 0 { rest[0] } else { {} }
+    return DesktopSession(display, theme, opts)
+}
+
+-- ── Helpers ──────────────────────────────
+
+fn _stub_widget(role, x, y, w, h) {
+    return {
+        "role": role,
+        "x": x, "y": y, "w": w, "h": h,
+        "bounds": {"x": x, "y": y, "w": w, "h": h},
+        "visible": true,
+        "focused": false,
+        "on_key": fn(event) { },
+        "on_mouse": fn(event) { },
+        "on_text": fn(event) { }
+    }
+}
+
+fn _make_window(id, title, app, top_offset) {
+    let initial_bounds = {"x": 80 + (id % 5) * 30, "y": top_offset + (id % 5) * 20, "w": 600, "h": 400}
+    return {
+        "id": id,
+        "role": "window",
+        "title": title,
+        "app": app,
+        "bounds": initial_bounds,
+        "x": initial_bounds["x"], "y": initial_bounds["y"],
+        "w": initial_bounds["w"], "h": initial_bounds["h"],
+        "visible": true,
+        "focused": false,
+        "on_key": fn(event) { if has(app, "on_key") { app.on_key(event) } },
+        "on_mouse": fn(event) { if has(app, "on_mouse") { app.on_mouse(event) } },
+        "on_text": fn(event) { if has(app, "on_text") { app.on_text(event) } }
+    }
+}

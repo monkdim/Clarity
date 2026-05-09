@@ -1,0 +1,217 @@
+-- Display server — Phase 73 task 2.
+--
+-- The bridge between the kernel framebuffer and the existing
+-- (Phase 59) Compositor + WindowManager + Workspace stack. On bare
+-- metal, userspace's clarity-compositor calls
+-- `mmap_framebuffer(fb_info)` once at startup, wraps the resulting
+-- byte range as a Framebuffer, and hands it to DisplayServer.
+--
+--     let info = fb_info()                         -- syscall: ioctl(FB_GET_INFO)
+--     let screen = framebuffer_from_mmap(addr, info.width, info.height)
+--     let comp = compositor(info.width, info.height)
+--     let wm   = window_manager(comp, bus)
+--     let display = display_server({"compositor": comp, "wm": wm,
+--                                    "screen": screen, "bus": bus})
+--     loop { display.tick() }
+--
+-- The `screen` parameter is what the existing compositor.render()
+-- paints into. On bare metal, screen is backed by mmap'd FB pages;
+-- in tests, it's an in-process Framebuffer. The display-server
+-- itself is platform-agnostic — same code, two backends.
+
+from "compositor.clarity" import Compositor
+
+let TARGET_FRAME_NS = 16_666_667     -- ~60 Hz
+
+class DisplayServer {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.compositor = o["compositor"]
+        this.wm = if has(o, "wm") { o["wm"] } else { null }
+        this.screen = o["screen"]                      -- Framebuffer (mmap-backed on bare metal)
+        this.bus = if has(o, "bus") { o["bus"] } else { null }
+        this.width = o["width"] ?? this.screen.width
+        this.height = o["height"] ?? this.screen.height
+        this.frame_ns = o["frame_ns"] ?? TARGET_FRAME_NS
+        this.frames_painted = 0
+        this.frames_skipped = 0
+        this.last_frame_ts = 0
+        this.cursor = {"x": this.width / 2, "y": this.height / 2, "visible": true}
+        this.event_log = []
+        this._needs_full_paint = true
+        this.background = 0xFF_18_18_18                 -- dark grey before wallpaper mounts
+    }
+
+    -- ── Frame loop ─────────────────────────────
+
+    -- Draw one frame if anything's dirty (or if we asked for a
+    -- full paint via mark_full()). Returns true if a frame was
+    -- painted, false if skipped.
+    fn frame() {
+        if this._needs_full_paint {
+            this.compositor.mark_all() ?? null
+            this.compositor.render()
+            this._needs_full_paint = false
+            this.frames_painted = this.frames_painted + 1
+            return true
+        }
+        if not this.compositor.has_dirty() {
+            this.frames_skipped = this.frames_skipped + 1
+            return false
+        }
+        this.compositor.render()
+        this.frames_painted = this.frames_painted + 1
+        return true
+    }
+
+    fn mark_full() { this._needs_full_paint = true }
+
+    -- One scheduler tick: drain input, route to the focused window
+    -- (via the WindowManager), paint a frame if dirty.
+    fn tick() {
+        this._drain_input()
+        let painted = this.frame()
+        return painted
+    }
+
+    -- Step `n` ticks; useful for tests + the bare-metal main loop.
+    fn step(n) {
+        mut painted = 0
+        mut i = 0
+        while i < n {
+            if this.tick() { painted = painted + 1 }
+            i = i + 1
+        }
+        return painted
+    }
+
+    -- ── Input routing ──────────────────────────
+
+    fn _drain_input() {
+        if this.bus == null { return }
+        try {
+            let events = this.bus.drain()
+            if events == null { return }
+            for ev in events { this._dispatch_event(ev) }
+        } catch e {
+            -- Bus doesn't expose drain() yet (e.g. older event_bus
+            -- shape). Phase 73's tests inject a stub that does;
+            -- the existing event_bus.clarity will gain it shortly.
+        }
+    }
+
+    fn _dispatch_event(event) {
+        push(this.event_log, event)
+        if len(this.event_log) > 256 {
+            mut next = []
+            mut i = 1
+            while i < len(this.event_log) { push(next, this.event_log[i]); i = i + 1 }
+            this.event_log = next
+        }
+        let kind = if has(event, "kind") { event["kind"] } else { null }
+        if kind == "mouse" { this._handle_mouse(event) }
+        elif kind == "key" { this._handle_key(event) }
+        elif kind == "text" { this._handle_text(event) }
+    }
+
+    fn _handle_mouse(event) {
+        if has(event, "x") { this.cursor["x"] = event["x"] }
+        if has(event, "y") { this.cursor["y"] = event["y"] }
+        let target = this.compositor.window_at(this.cursor["x"], this.cursor["y"])
+        if has(event, "press") and event["press"] == true and target != null {
+            this.compositor.focus(target)
+        }
+        if this.wm != null {
+            try { this.wm.on_mouse(event); return } catch e {}
+        }
+        if target != null { _safe_call(target, "on_mouse", event) }
+    }
+
+    fn _handle_key(event) {
+        let focused = this._focused_window()
+        if focused != null { _safe_call(focused, "on_key", event) }
+    }
+
+    fn _handle_text(event) {
+        let focused = this._focused_window()
+        if focused != null { _safe_call(focused, "on_text", event) }
+    }
+
+    fn _focused_window() {
+        try {
+            if this.compositor.focused != null { return this.compositor.focused }
+        } catch e {}
+        return null
+    }
+
+    -- ── Screen state ──────────────────────────
+
+    fn add_window(w) {
+        this.compositor.add(w)
+        this.mark_full()
+        return w
+    }
+
+    fn remove_window(w) {
+        this.compositor.remove(w)
+        this.mark_full()
+    }
+
+    fn set_cursor(x, y) {
+        this.cursor["x"] = x
+        this.cursor["y"] = y
+    }
+
+    fn show_cursor(visible) { this.cursor["visible"] = visible }
+
+    fn snapshot() {
+        return {
+            "frames_painted": this.frames_painted,
+            "frames_skipped": this.frames_skipped,
+            "windows": if has(this.compositor, "windows") { len(this.compositor.windows) } else { 0 },
+            "cursor": this.cursor,
+            "events_dispatched": len(this.event_log)
+        }
+    }
+}
+
+fn display_server(opts) { return DisplayServer(opts) }
+
+-- Call `target.method(arg)` if it exists. `target` may be a dict
+-- (handler stored as a key) or a class instance (handler bound as
+-- a method) — both are acceptable. Errors swallowed.
+fn _safe_call(target, method, arg) {
+    try {
+        if has(target, method) {
+            let handler = target[method]
+            handler(arg)
+            return true
+        }
+    } catch e {}
+    try {
+        -- Class instance method path
+        if method == "on_key" { target.on_key(arg); return true }
+        if method == "on_mouse" { target.on_mouse(arg); return true }
+        if method == "on_text" { target.on_text(arg); return true }
+    } catch e {}
+    return false
+}
+
+-- ── Framebuffer factory for bare-metal ─────────────
+
+-- On bare-metal, callers do something like:
+--
+--   let info = ioctl_fb_get_info()
+--   let addr = mmap(0x4000_0000, info.size, PROT_READ|PROT_WRITE,
+--                    MAP_SHARED, FB_FD, 0)
+--   let screen = framebuffer_from_mmap(addr, info.width, info.height)
+--
+-- On the host runtime / tests, callers can use the regular
+-- `framebuffer(w, h)` constructor from graphics.clarity directly.
+fn framebuffer_from_mmap(_addr, _width, _height) {
+    -- The bare-metal implementation imports Framebuffer.from_pointer
+    -- from graphics.clarity once we add it; for now, callers in
+    -- tests construct an in-process Framebuffer themselves and pass
+    -- it as `opts.screen`. This factory is the documented hook.
+    throw "DisplayServer: framebuffer_from_mmap not implemented yet (use a host Framebuffer for tests)"
+}
