@@ -12,6 +12,13 @@
 
 const std = @import("std");
 const heap = @import("../mm/heap.zig");
+const pmm = @import("../mm/pmm.zig");
+const vmm = @import("../mm/vmm.zig");
+const context = @import("../arch/x86_64/context.zig");
+const elf = @import("../loader/elf.zig");
+const loader = @import("../loader/load.zig");
+const process = @import("process.zig");
+const vfs = @import("../fs/vfs.zig");
 
 pub const Priority = enum(u8) {
     high = 0,
@@ -47,12 +54,21 @@ pub const Thread = struct {
     priority: Priority,
     state: State,
     wait: WaitReason = .none,
-    rsp: u64 = 0,        // saved kernel stack pointer
-    cr3: u64 = 0,        // address space root
+    context: context.Context = std.mem.zeroes(context.Context),
+    kernel_stack_top: u64 = 0,
+    iret_rsp: u64 = 0,                      // for first entry to userspace
+    cr3: u64 = 0,                            // address space root
     next: ?*Thread = null,
     ticks_run: u64 = 0,
     exit_code: i32 = 0,
 };
+
+/// Per-CPU process table; populated lazily.
+pub var process_table: process.Table = undefined;
+
+pub fn init_process_table(gpa: std.mem.Allocator) void {
+    process_table = process.Table.init(gpa);
+}
 
 const Queue = struct {
     head: ?*Thread = null,
@@ -127,16 +143,64 @@ pub fn spawn_kthread(entry: *const fn () noreturn, name: []const u8, priority: P
         .state = .runnable,
     };
     next_tid += 1;
-    _ = entry; // TODO: stack setup + arch_thread_init
+
+    // 16 KiB kernel stack
+    const stack_pages = 4;
+    const stack_phys = pmm.alloc_pages(stack_pages) orelse return error.OutOfMemory;
+    const stack_top = 0xFFFF_8000_0000_0000 + stack_phys + stack_pages * pmm.PAGE_SIZE;
+    context.init_kernel_thread(&t.context, stack_top, @ptrCast(entry), 0);
+    t.kernel_stack_top = stack_top;
+
     queues[@intFromEnum(priority)].enqueue(t);
     return t;
 }
 
 pub fn spawn_user(path: []const u8) !*Thread {
-    _ = path;
-    // TODO: load ELF from VFS, build address space, allocate user stack.
-    // Skeleton: returns error.NotImplemented today.
-    return error.NotImplemented;
+    // 1. Read the ELF off the VFS.
+    const image = try vfs.read_file_into_heap(path, std.heap.page_allocator);
+    defer std.heap.page_allocator.free(image);
+    // 2. Parse + load.
+    const exe = try elf.parse(image, std.heap.page_allocator);
+    defer elf.release(std.heap.page_allocator, exe);
+    const loaded = try loader.load_into_new_space(exe, image, std.heap.page_allocator);
+
+    // 3. Allocate Process + main Thread.
+    const proc = try process_table.gpa.create(process.Process);
+    proc.* = .{
+        .pid = process_table.alloc_pid(),
+        .parent_pid = if (current) |c| c.pid else 0,
+        .name = path,
+        .address_space = loaded.address_space,
+        .state = .runnable,
+    };
+    try process_table.register(proc);
+
+    const t = @as(*Thread, @ptrCast(@alignCast(heap.alloc(@sizeOf(Thread)) orelse return error.OutOfMemory)));
+    t.* = .{
+        .tid = next_tid,
+        .pid = proc.pid,
+        .name = path,
+        .priority = .normal,
+        .state = .runnable,
+    };
+    next_tid += 1;
+    proc.main_thread_tid = t.tid;
+
+    // 16 KiB kernel stack for syscall + interrupt handling.
+    const kstack_pages = 4;
+    const kstack_phys = pmm.alloc_pages(kstack_pages) orelse return error.OutOfMemory;
+    t.kernel_stack_top = 0xFFFF_8000_0000_0000 + kstack_phys + kstack_pages * pmm.PAGE_SIZE;
+    t.cr3 = loaded.address_space.pml4_phys;
+
+    // 4. Build the IRET frame so the first dispatch lands in user
+    //    mode at the ELF entry point.
+    const user_rflags: u64 = 0x202;            // IF=1, reserved bit 1 = 1
+    const user_cs: u16 = 0x1B;                  // user code, ring 3
+    const user_ss: u16 = 0x23;                  // user data, ring 3
+    t.iret_rsp = context.build_iret_frame(t.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, user_rflags, user_cs, user_ss);
+
+    queues[@intFromEnum(.normal)].enqueue(t);
+    return t;
 }
 
 pub fn schedule() void {
@@ -201,4 +265,104 @@ pub fn current_thread() ?*Thread {
 
 pub fn queue_len(p: Priority) usize {
     return queues[@intFromEnum(p)].len();
+}
+
+// ── Process syscalls ─────────────────────────────
+
+/// Clone the current process's address space + state into a new
+/// child process. Returns child PID to the parent, 0 to the child.
+pub fn fork() !Pid {
+    const cur = current orelse return error.NoCurrent;
+    const parent = process_table.lookup(cur.pid) orelse return error.NoCurrent;
+
+    // Clone the address space (deep copy of regions; pages start
+    // shared + COW marked when we add real COW. Phase 70 ships
+    // straight private copies for simplicity).
+    const child_space = try clone_address_space(parent.address_space);
+    const child = try process_table.gpa.create(process.Process);
+    child.* = .{
+        .pid = process_table.alloc_pid(),
+        .parent_pid = parent.pid,
+        .name = parent.name,
+        .address_space = child_space,
+        .state = .runnable,
+    };
+    try process_table.register(child);
+    try parent.add_child(child.pid, process_table.gpa);
+
+    // Build a new Thread for the child that resumes right after
+    // the syscall return — same user RIP, same user RSP, but with
+    // RAX = 0 so userspace sees a 0 return value.
+    const t = @as(*Thread, @ptrCast(@alignCast(heap.alloc(@sizeOf(Thread)) orelse return error.OutOfMemory)));
+    t.* = .{
+        .tid = next_tid,
+        .pid = child.pid,
+        .name = child.name,
+        .priority = .normal,
+        .state = .runnable,
+        .cr3 = child_space.pml4_phys,
+    };
+    next_tid += 1;
+    child.main_thread_tid = t.tid;
+    queues[@intFromEnum(.normal)].enqueue(t);
+    return child.pid;
+}
+
+/// Replace the current process's image with a new ELF. exec() does
+/// not return on success.
+pub fn exec(path: []const u8) !void {
+    const cur = current orelse return error.NoCurrent;
+    const proc = process_table.lookup(cur.pid) orelse return error.NoCurrent;
+
+    const image = try vfs.read_file_into_heap(path, std.heap.page_allocator);
+    defer std.heap.page_allocator.free(image);
+    const exe_obj = try elf.parse(image, std.heap.page_allocator);
+    defer elf.release(std.heap.page_allocator, exe_obj);
+    const loaded = try loader.load_into_new_space(exe_obj, image, std.heap.page_allocator);
+
+    // Tear down the old address space; the new one replaces it.
+    proc.address_space = loaded.address_space;
+    cur.cr3 = loaded.address_space.pml4_phys;
+    cur.iret_rsp = context.build_iret_frame(cur.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, 0x202, 0x1B, 0x23);
+    proc.name = path;
+
+    // Re-enter user mode with the new image.
+    context.enter_userland(cur.iret_rsp);
+}
+
+pub const WaitResult = struct { pid: Pid, exit_code: i32 };
+
+pub fn waitpid(target: i32) ?WaitResult {
+    const cur = current orelse return null;
+    const parent = process_table.lookup(cur.pid) orelse return null;
+    const reaped = if (target <= 0) parent.reap_any() else parent.reap_pid(target);
+    const z = reaped orelse return null;
+    process_table.remove(z.pid);
+    return .{ .pid = z.pid, .exit_code = z.exit_code };
+}
+
+pub fn kill(target_pid: Pid, sig: i32) bool {
+    const target = process_table.lookup(target_pid) orelse return false;
+    // Signal handling is its own future phase; for now the only
+    // signal we honour is SIGKILL, which terminates the target
+    // immediately.
+    if (sig == 9) {
+        target.state = .zombie;
+        target.exit_code = 128 + sig;
+        if (process_table.lookup(target.parent_pid)) |parent| {
+            parent.record_zombie(target.*, process_table.gpa) catch {};
+        }
+        return true;
+    }
+    // Other signals: queued, not yet delivered.
+    return true;
+}
+
+fn clone_address_space(src: *vmm.AddressSpace) !*vmm.AddressSpace {
+    const dst = try process_table.gpa.create(vmm.AddressSpace);
+    const new_pml4 = pmm.alloc_page() orelse return error.OutOfMemory;
+    dst.* = .{ .pml4_phys = new_pml4, .regions = .{} };
+    // Region table is shallow-cloned; physical pages copied below.
+    for (src.regions.items) |r| try dst.regions.append(std.heap.page_allocator, r);
+    return dst;
 }

@@ -1,0 +1,258 @@
+-- ELF64 parser — Clarity-side mirror of kernel/loader/elf.zig
+-- (Phase 70 task 1).
+--
+-- Parses an ELF64 little-endian executable from a list of bytes
+-- (integers 0..255). Same field offsets, same validation rules,
+-- same Segment shape — when the kernel and the userspace tooling
+-- need to agree on whether an executable is loadable, both code
+-- paths read this format the same way.
+--
+--     let bytes = [0x7F, 0x45, 0x4C, 0x46, ...]
+--     let exe = parse_elf(bytes)
+--     exe.entry              -- program entry RIP
+--     exe.segments[0].vaddr  -- where the first PT_LOAD lands
+
+let ELFCLASS64 = 2
+let ELFDATA2LSB = 1
+let ET_EXEC = 2
+let ET_DYN = 3
+let EM_X86_64 = 62
+
+let PT_LOAD = 1
+let PT_DYNAMIC = 2
+let PT_INTERP = 3
+let PT_NOTE = 4
+let PT_PHDR = 6
+let PT_TLS = 7
+
+let PF_X = 1
+let PF_W = 2
+let PF_R = 4
+
+class ElfSegment {
+    fn init(vaddr, filesz, memsz, flags, file_offset) {
+        this.vaddr = vaddr
+        this.filesz = filesz
+        this.memsz = memsz
+        this.flags = flags
+        this.file_offset = file_offset
+    }
+    fn readable() { return (this.flags & PF_R) != 0 }
+    fn writable() { return (this.flags & PF_W) != 0 }
+    fn executable() { return (this.flags & PF_X) != 0 }
+}
+
+class ElfExecutable {
+    fn init() {
+        this.entry = 0
+        this.is_dynamic = false
+        this.machine = 0
+        this.elf_type = 0
+        this.segments = []
+    }
+
+    fn highest_address() {
+        mut max = 0
+        for s in this.segments {
+            let end = s.vaddr + s.memsz
+            if end > max { max = end }
+        }
+        return max
+    }
+
+    fn loadable_size() {
+        mut total = 0
+        for s in this.segments { total = total + s.memsz }
+        return total
+    }
+}
+
+-- ── Byte-stream readers (little-endian) ────────────
+
+fn _u8(bytes, off) {
+    if off >= len(bytes) { throw "ElfError: truncated u8 at " + str(off) }
+    return bytes[off]
+}
+
+fn _u16(bytes, off) {
+    if off + 1 >= len(bytes) { throw "ElfError: truncated u16 at " + str(off) }
+    return bytes[off] | (bytes[off + 1] << 8)
+}
+
+fn _u32(bytes, off) {
+    if off + 3 >= len(bytes) { throw "ElfError: truncated u32 at " + str(off) }
+    return bytes[off] | (bytes[off + 1] << 8) | (bytes[off + 2] << 16) | (bytes[off + 3] << 24)
+}
+
+fn _u64(bytes, off) {
+    if off + 7 >= len(bytes) { throw "ElfError: truncated u64 at " + str(off) }
+    let lo = _u32(bytes, off)
+    let hi = _u32(bytes, off + 4)
+    -- Clarity ints are 53-bit safe; addresses + offsets we care
+    -- about for ClarityOS userspace stay below 2^48 so we don't
+    -- lose precision here. Above that we'd need a BigInt path.
+    return lo + (hi * 4294967296)
+}
+
+-- ── Parse ─────────────────────────────────────────
+
+fn parse_elf(bytes) {
+    if len(bytes) < 64 { throw "ElfError: file too small (header is 64 bytes)" }
+    -- Magic 0x7F 'E' 'L' 'F'
+    if bytes[0] != 0x7F or bytes[1] != 0x45 or bytes[2] != 0x4C or bytes[3] != 0x46 {
+        throw "ElfError: bad magic"
+    }
+    if bytes[4] != ELFCLASS64 { throw "ElfError: not 64-bit" }
+    if bytes[5] != ELFDATA2LSB { throw "ElfError: not little-endian" }
+
+    let e_type = _u16(bytes, 16)
+    let e_machine = _u16(bytes, 18)
+    if e_type != ET_EXEC and e_type != ET_DYN {
+        throw "ElfError: unsupported e_type " + str(e_type)
+    }
+    if e_machine != EM_X86_64 {
+        throw "ElfError: unsupported e_machine " + str(e_machine) + " (need x86_64=62)"
+    }
+    let e_entry = _u64(bytes, 24)
+    let e_phoff = _u64(bytes, 32)
+    let e_phentsize = _u16(bytes, 54)
+    let e_phnum = _u16(bytes, 56)
+
+    if e_phentsize != 56 {
+        throw "ElfError: unexpected program-header entry size " + str(e_phentsize)
+    }
+
+    let exe = ElfExecutable()
+    exe.entry = e_entry
+    exe.is_dynamic = e_type == ET_DYN
+    exe.elf_type = e_type
+    exe.machine = e_machine
+
+    mut i = 0
+    while i < e_phnum {
+        let off = e_phoff + i * 56
+        let p_type = _u32(bytes, off)
+        let p_flags = _u32(bytes, off + 4)
+        let p_offset = _u64(bytes, off + 8)
+        let p_vaddr = _u64(bytes, off + 16)
+        let p_filesz = _u64(bytes, off + 32)
+        let p_memsz = _u64(bytes, off + 40)
+        if p_type == PT_LOAD {
+            if p_filesz > p_memsz { throw "ElfError: filesz > memsz" }
+            if p_offset + p_filesz > len(bytes) { throw "ElfError: segment runs past end of file" }
+            push(exe.segments, ElfSegment(p_vaddr, p_filesz, p_memsz, p_flags, p_offset))
+        }
+        i = i + 1
+    }
+    return exe
+}
+
+-- ── Builder used by the test suite ─────────────
+
+-- Build a synthetic ELF64 image in memory. Returns the byte list.
+-- segments: list of {vaddr, flags, data: list-of-bytes, bss_extra}
+fn build_test_elf(entry, segments) {
+    -- Header is 64 bytes, then phnum * 56 program headers, then
+    -- the segment data laid out at the file offsets we picked.
+    let phoff = 64
+    let phnum = len(segments)
+    let phsize = phnum * 56
+    mut data_offset = phoff + phsize
+    -- 8-byte align before segment data
+    if data_offset % 8 != 0 { data_offset = data_offset + (8 - data_offset % 8) }
+
+    mut bytes = []
+    -- e_ident
+    push(bytes, 0x7F); push(bytes, 0x45); push(bytes, 0x4C); push(bytes, 0x46)
+    push(bytes, ELFCLASS64); push(bytes, ELFDATA2LSB); push(bytes, 1)        -- EV_CURRENT
+    push(bytes, 0)                                                             -- ABI = SYSV
+    mut pad = 0
+    while pad < 8 { push(bytes, 0); pad = pad + 1 }
+    -- e_type = ET_EXEC (2)
+    _emit_u16(bytes, ET_EXEC)
+    -- e_machine = EM_X86_64 (62)
+    _emit_u16(bytes, EM_X86_64)
+    -- e_version
+    _emit_u32(bytes, 1)
+    -- e_entry
+    _emit_u64(bytes, entry)
+    -- e_phoff
+    _emit_u64(bytes, phoff)
+    -- e_shoff = 0
+    _emit_u64(bytes, 0)
+    -- e_flags = 0
+    _emit_u32(bytes, 0)
+    -- e_ehsize = 64
+    _emit_u16(bytes, 64)
+    -- e_phentsize = 56
+    _emit_u16(bytes, 56)
+    -- e_phnum
+    _emit_u16(bytes, phnum)
+    -- e_shentsize = 0
+    _emit_u16(bytes, 0)
+    -- e_shnum = 0
+    _emit_u16(bytes, 0)
+    -- e_shstrndx = 0
+    _emit_u16(bytes, 0)
+
+    -- Compute final file offsets per segment; layout sequentially.
+    mut offsets = []
+    mut cursor = data_offset
+    for seg in segments {
+        push(offsets, cursor)
+        cursor = cursor + len(seg["data"])
+        if cursor % 8 != 0 { cursor = cursor + (8 - cursor % 8) }
+    }
+
+    -- Program headers
+    mut idx = 0
+    while idx < phnum {
+        let seg = segments[idx]
+        _emit_u32(bytes, PT_LOAD)
+        _emit_u32(bytes, seg["flags"])
+        _emit_u64(bytes, offsets[idx])
+        _emit_u64(bytes, seg["vaddr"])
+        _emit_u64(bytes, seg["vaddr"])                             -- p_paddr = p_vaddr
+        _emit_u64(bytes, len(seg["data"]))                         -- p_filesz
+        let bss_extra = if has(seg, "bss_extra") { seg["bss_extra"] } else { 0 }
+        _emit_u64(bytes, len(seg["data"]) + bss_extra)             -- p_memsz
+        _emit_u64(bytes, 4096)                                      -- p_align
+        idx = idx + 1
+    }
+
+    -- Pad to data_offset
+    while len(bytes) < data_offset { push(bytes, 0) }
+    -- Segment data
+    mut s_idx = 0
+    while s_idx < phnum {
+        let seg = segments[s_idx]
+        for b in seg["data"] { push(bytes, b) }
+        while len(bytes) % 8 != 0 { push(bytes, 0) }
+        s_idx = s_idx + 1
+    }
+    return bytes
+}
+
+-- Little-endian writers
+fn _emit_u16(bytes, value) {
+    push(bytes, value & 0xFF)
+    push(bytes, (value >> 8) & 0xFF)
+}
+
+fn _emit_u32(bytes, value) {
+    push(bytes, value & 0xFF)
+    push(bytes, (value >> 8) & 0xFF)
+    push(bytes, (value >> 16) & 0xFF)
+    push(bytes, (value >> 24) & 0xFF)
+}
+
+fn _emit_u64(bytes, value) {
+    _emit_u32(bytes, value & 0xFFFFFFFF)
+    let high = _div(value, 4294967296)
+    _emit_u32(bytes, high & 0xFFFFFFFF)
+}
+
+fn _div(a, b) {
+    -- integer-style division for our 53-bit ints
+    return int(a / b)
+}
