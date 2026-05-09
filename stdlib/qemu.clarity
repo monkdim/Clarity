@@ -1,0 +1,129 @@
+-- Cross-platform QEMU launcher.
+--
+-- Picks the right launcher for the current host: macOS gets HVF
+-- acceleration + Homebrew OVMF (via qemu_macos.clarity); Linux gets
+-- KVM (when /dev/kvm is readable) + distro-installed OVMF; everything
+-- else falls back to TCG.
+--
+--     let r = qemu({"iso": "claritos.iso", "ram_mb": 1024})
+--     r.run()                       -- launches QEMU; serial → terminal
+--     r.shell_command()             -- inspect the argv before running
+
+from "qemu_macos.clarity" import qemu_macos
+from "run_vm.clarity" import qemu_runner
+
+let DEFAULT_RAM_MB = 1024
+let DEFAULT_CORES = 4
+
+-- ── Linux launcher ─────────────────────────────
+
+class QemuLinuxLauncher {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.iso = if has(o, "iso") { o["iso"] } else { null }
+        this.kernel = if has(o, "kernel") { o["kernel"] } else { null }
+        this.ram_mb = if has(o, "ram_mb") { o["ram_mb"] } else { DEFAULT_RAM_MB }
+        this.cores = if has(o, "cores") { o["cores"] } else { DEFAULT_CORES }
+        this.headless = if has(o, "headless") { o["headless"] } else { false }
+        this.use_kvm = if has(o, "kvm") { o["kvm"] } else { _has_kvm() }
+        this.serial = if has(o, "serial") { o["serial"] } else { "stdio" }
+        this.disk_image = if has(o, "disk") { o["disk"] } else { null }
+        this.boot_test_marker = if has(o, "boot_test_marker") { o["boot_test_marker"] } else { null }
+        this.snapshot = if has(o, "snapshot") { o["snapshot"] } else { false }
+        this.timeout_seconds = if has(o, "timeout_seconds") { o["timeout_seconds"] } else { 60 }
+        this.ovmf_paths = _discover_ovmf_linux()
+    }
+
+    fn _runner_opts() {
+        return {
+            "iso": this.iso,
+            "kernel": this.kernel,
+            "memory_mb": this.ram_mb,
+            "cores": this.cores,
+            "headless": this.headless,
+            "kvm": this.use_kvm,
+            "uefi": this.ovmf_paths["found"],
+            "ovmf_code": this.ovmf_paths["code"],
+            "ovmf_vars": this.ovmf_paths["vars"],
+            "serial": this.serial,
+            "disk": this.disk_image,
+            "snapshot": this.snapshot,
+            "boot_test_marker": this.boot_test_marker,
+            "timeout_seconds": this.timeout_seconds,
+            "no_reboot": true,
+            "extra": this._linux_extras()
+        }
+    }
+
+    fn _linux_extras() {
+        mut extra = []
+        push(extra, "-device"); push(extra, "virtio-gpu-pci")
+        push(extra, "-device"); push(extra, "virtio-keyboard-pci")
+        push(extra, "-device"); push(extra, "virtio-tablet-pci")
+        push(extra, "-usb")
+        return extra
+    }
+
+    fn runner() { return qemu_runner(this._runner_opts()) }
+    fn shell_command() { return this.runner().shell_command() }
+
+    fn run() {
+        if not _qemu_installed() {
+            throw "QemuLinuxError: qemu-system-x86_64 not on PATH. Install via your distro: `apt install qemu-system-x86`, `dnf install qemu-system-x86`, or `pacman -S qemu-base`."
+        }
+        return this.runner().run()
+    }
+
+    fn validate() {
+        mut errors = this.runner().validate()
+        if not _qemu_installed() {
+            push(errors, "qemu-system-x86_64 not on PATH")
+        }
+        if this.ovmf_paths["found"] == false {
+            push(errors, "OVMF firmware not found — UEFI boot disabled. Install via `apt install ovmf`, `dnf install edk2-ovmf`, or `pacman -S edk2-ovmf`.")
+        }
+        return errors
+    }
+}
+
+fn qemu_linux(opts) { return QemuLinuxLauncher(opts) }
+
+-- ── Cross-platform front door ──────────────────
+
+fn qemu(opts) {
+    if _is_macos() {
+        return qemu_macos(opts)
+    }
+    return qemu_linux(opts)
+}
+
+-- ── Detection helpers ──────────────────────────
+
+fn _is_macos() {
+    let r = exec_full("uname -s")
+    return trim(r.stdout) == "Darwin"
+}
+
+fn _qemu_installed() {
+    let r = exec_full("command -v qemu-system-x86_64 >/dev/null 2>&1 && echo yes || echo no")
+    return trim(r.stdout) == "yes"
+}
+
+fn _has_kvm() {
+    return exists("/dev/kvm")
+}
+
+fn _discover_ovmf_linux() {
+    let candidates = [
+        ["/usr/share/OVMF/OVMF_CODE.fd",                  "/usr/share/OVMF/OVMF_VARS.fd"],
+        ["/usr/share/qemu/OVMF_CODE.fd",                  "/usr/share/qemu/OVMF_VARS.fd"],
+        ["/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",         "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"],
+        ["/usr/share/edk2/x64/OVMF_CODE.fd",              "/usr/share/edk2/x64/OVMF_VARS.fd"]
+    ]
+    for pair in candidates {
+        if exists(pair[0]) and exists(pair[1]) {
+            return {"found": true, "code": pair[0], "vars": pair[1]}
+        }
+    }
+    return {"found": false, "code": "", "vars": ""}
+}

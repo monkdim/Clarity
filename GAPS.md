@@ -16,18 +16,11 @@ The language is at the point where this document is short on purpose — what's 
 
 ## Concrete gaps surfaced during the 1.0 cycle
 
-The following are real and verifiable today; they should be the first things to land in 1.1.
-
-### Binary I/O builtins are missing
-`stdlib/os_build.clarity` documents a `read_bytes(path) → list[int]` API in its examples (used to load the compiled kernel ELF), but `read_bytes` and `write_bytes` are **not** registered in `native/runtime.js` or `stdlib/runtime_spec.clarity`. Only `read(path) → string` (UTF-8) and `write(path, content)` exist. Any caller that needs to round-trip arbitrary bytes (kernel images, ISO bytes, image decoders, FFI buffers) currently can't.
-
-**Action:** add `read_bytes` / `write_bytes` to the runtime spec; regenerate `native/runtime.js`; thread the byte-array type through the interpreter and bytecode VM unchanged (lists of ints already work).
-
-### `clarity os` CLI dispatcher is unwired
-The `os_build.clarity`, `iso9660.clarity`, and `qemu_macos.clarity` libraries are written and tested, but `stdlib/cli.clarity`'s command dispatcher has no `if command == "os"` branch. Running `clarity os build` returns `Unknown command: os`. Fixing this is part of the OS path forward (see [ROADMAP_OS.md](ROADMAP_OS.md)) but the wiring touches the language's CLI surface and so is shared between the two roadmaps.
-
 ### Brand-domain aspiration
 `stdlib/website_gen.clarity` bakes `https://clarityos.dev/` into `iso_url`, `og:image`, and `og:url` for the generated marketing site. The domain isn't registered; the site isn't deployed. No runtime breakage today (no CLI command fetches it), but if the site ships before the domain does, those links will 404. Also: `stdlib/test_polish.clarity:229` asserts the literal `"clarityos.dev"`, which will need to change in lockstep with any domain swap.
+
+### `clarity gen-runtime` drift
+`native/runtime.js` is documented as auto-generated from `stdlib/runtime_spec.clarity` ("Regenerate with: clarity gen-runtime"), but running the regenerator on the committed spec produces ~440 lines of diff against the committed file. Either the spec or the regenerator has drifted from the canonical runtime. Until that's reconciled, edits to runtime builtins must touch both files in lockstep by hand — fragile.
 
 ---
 
