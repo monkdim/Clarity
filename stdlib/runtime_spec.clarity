@@ -27,7 +27,9 @@ let IO_SECTION = {
         {name: "write", params: "path, content", body: "writeFileSync(path, display(content)); return true;"},
         {name: "append", params: "path, content", body: "appendFileSync(path, display(content)); return true;"},
         {name: "exists", params: "path", body: "return existsSync(path);"},
-        {name: "lines", params: "path", body: "return readFileSync(path, 'utf-8').split('\\n');"}
+        {name: "lines", params: "path", body: "return readFileSync(path, 'utf-8').split('\\n');"},
+        {name: "read_bytes", params: "path", body: "return Array.from(readFileSync(path));"},
+        {name: "write_bytes", params: "path, bytes", body: "writeFileSync(path, Buffer.from(bytes)); return true;"}
     ]
 }
 

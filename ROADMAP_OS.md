@@ -17,18 +17,18 @@ What this document is *not*: a phase-by-phase chronicle. The phase tables that u
 
 ---
 
-## Top milestone: developer workflow for the OS
+## CI smoke test (the last piece of the developer workflow)
 
-The biggest user-facing gap right now: **the `clarity os` CLI subcommand isn't wired.** The library code exists (`stdlib/os_build.clarity`, `stdlib/iso9660.clarity`, `stdlib/qemu_macos.clarity`), and `kernel/` + `runtime/freestanding/` build cleanly under `zig build`, but `stdlib/cli.clarity`'s dispatcher has no `os` branch. Today's developer-build path is four commands, three of them shelling into Zig projects directly. The README and GETTING_STARTED.md document that path honestly.
+The `clarity os` CLI subcommand is now wired (`build`, `run`, `iso`, `install`); `read_bytes`/`write_bytes` builtins exist; a cross-platform QEMU launcher in `stdlib/qemu.clarity` picks HVF on macOS and KVM on Linux. What's still missing is a **headless QEMU boot in CI** that greps the serial output for the `ClarityOS ready.` marker.
 
-Closing this is a single coordinated piece of work:
+The infrastructure is there: `clarity os run --headless --boot-test "ClarityOS ready."` does the right thing locally; `run_vm.clarity` already understands `boot_test_marker` + `timeout_seconds`. The remaining work is in `.github/workflows/ci.yml`:
 
-- **Add binary I/O builtins** (`read_bytes`, `write_bytes`) to `native/runtime.js` and `stdlib/runtime_spec.clarity`. Without these, the CLI can't load the compiled kernel ELF.
-- **Add a cross-platform QEMU launcher** in `stdlib/`. `qemu_macos.clarity` auto-detects HVF + Homebrew OVMF; the Linux sibling needs `/dev/kvm` detection, distro-OVMF discovery (`/usr/share/OVMF/`, `/usr/share/qemu/`), and a sane fallback to TCG.
-- **Wire `clarity os` in `stdlib/cli.clarity`** with `build`, `run`, `iso`, and `install` subcommands. Each is a thin orchestrator over the libraries above.
-- **CI smoke test.** A headless QEMU boot in CI that greps the serial output for the `ClarityOS ready.` marker. The infrastructure is there in `run_vm.clarity` (`boot_test_marker` option).
+- Install zig (the actions ecosystem has `goto-bus-stop/setup-zig` or equivalent).
+- Install qemu-system-x86 + ovmf via apt on Ubuntu, brew on macOS.
+- Run `./native/dist/clarity os build && ./native/dist/clarity os run --headless --boot-test "ClarityOS ready." --timeout 120` after the existing self-hosted tests.
+- Cache `kernel/zig-out` and `runtime/freestanding/zig-out` so subsequent runs are fast.
 
-Until this lands, the README's "Try ClarityOS" section points at the from-source path. Anything below this milestone in the document assumes it has shipped.
+Skipped today because (a) it adds 5–10 minutes to every PR, and (b) needs a cache strategy that's its own design call.
 
 ---
 

@@ -41,6 +41,8 @@ export function write(path, content) { writeFileSync(path, display(content)); re
 export function append(path, content) { appendFileSync(path, display(content)); return true; }
 export function exists(path) { return existsSync(path); }
 export function lines(path) { return readFileSync(path, 'utf-8').split('\n'); }
+export function read_bytes(path) { return Array.from(readFileSync(path)); }
+export function write_bytes(path, bytes) { writeFileSync(path, Buffer.from(bytes)); return true; }
 
 // ── Type conversions ─────────────────────────────────────
 

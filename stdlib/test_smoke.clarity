@@ -76,13 +76,13 @@ fn check_cmd(name, cmd, expect_pattern) {
 
 fn check_exit(name, cmd, expected_code) {
     let result = exec_full(cmd + " >/dev/null 2>&1")
-    if result.code == expected_code {
+    if result.exit_code == expected_code {
         PASSED += 1
         show "  " + _green("PASS") + "  " + name
     } else {
         FAILED += 1
         show "  " + _red("FAIL") + "  " + name
-        show "    " + _dim("Expected exit code: " + str(expected_code) + ", got: " + str(result.code))
+        show "    " + _dim("Expected exit code: " + str(expected_code) + ", got: " + str(result.exit_code))
     }
 }
 
@@ -172,6 +172,13 @@ fn run_smoke_tests() {
     exec("mkdir -p " + _quote(tmp_init_dir))
     check_cmd("init package", "cd " + _quote(tmp_init_dir) + " && " + clarity + " init", "Created clarity.toml")
     exec("rm -rf " + _quote(tmp_init_dir))
+
+    show "  " + _bold("-- os --")
+    check_cmd("os help",       clarity + " os help",      "Usage: clarity os")
+    check_cmd("os (no args)",  clarity + " os",           "Subcommands:")
+    check_cmd("os install",    clarity + " os install",   "not yet implemented")
+    check_exit("os bogus subcmd exits non-zero", clarity + " os bogus", 1)
+    check_cmd("os listed in top-level help", clarity + " help", "os build")
 
     -- ── Summary ─────────────────────────────────────────
     let total = PASSED + FAILED
