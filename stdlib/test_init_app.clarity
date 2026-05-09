@@ -1,0 +1,319 @@
+-- Phase 72 — userspace bootstrap tests.
+--
+-- /bin/clarity-init boot sequence (config read, mount tree, service
+-- supervision in topo order with restart policies + reaping +
+-- restart, shutdown reverses the order), procfs (top-level
+-- entries + per-PID), input pipeline (modifier tracking, scancode
+-- → key event dispatch, text-byte fast path).
+
+from "init_app.clarity" import InitApp, init_app, STATE_BOOT, STATE_RUNNING, STATE_SHUTDOWN
+from "procfs.clarity" import Procfs, procfs
+from "input_pipeline.clarity" import InputPipeline, input_pipeline, ScancodeSource, scancode_source
+from "keymap.clarity" import KEY_A, KEY_LEFTSHIFT, KEY_ENTER
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Fake syscall backend ─────────────────────────
+
+class FakeSyscall {
+    fn init() {
+        this.next_pid = 100
+        this.spawned = []        -- list of {pid, cmd}
+        this.killed = []
+        this.mounts = []
+        this.pending_zombies = []
+        this.fail_spawn_for = []
+        this.files = {}          -- path -> string
+        this.write_log = []
+        this.tty_input = []
+    }
+    fn getpid() { return 1 }
+    fn write(fd, line) { push(this.write_log, {"fd": fd, "line": line}); return len(line) }
+    fn read_file(path) {
+        if has(this.files, path) { return this.files[path] }
+        throw "ENOENT: " + path
+    }
+    fn mount(fs, target, flags) {
+        push(this.mounts, {"fs": fs, "target": target, "flags": flags})
+        return true
+    }
+    fn spawn(cmd) {
+        if contains(this.fail_spawn_for, cmd) { return -1 }
+        let pid = this.next_pid
+        this.next_pid = this.next_pid + 1
+        push(this.spawned, {"pid": pid, "cmd": cmd})
+        return pid
+    }
+    fn waitpid(target) {
+        if len(this.pending_zombies) == 0 { return null }
+        let z = this.pending_zombies[0]
+        mut next = []
+        mut i = 1
+        while i < len(this.pending_zombies) { push(next, this.pending_zombies[i]); i = i + 1 }
+        this.pending_zombies = next
+        return z
+    }
+    fn kill(pid, sig) { push(this.killed, {"pid": pid, "sig": sig}); return true }
+    fn read_tty() {
+        let out = this.tty_input
+        this.tty_input = []
+        return out
+    }
+    -- Test helpers
+    fn queue_zombie(pid, exit_code) {
+        push(this.pending_zombies, {"pid": pid, "exit_code": exit_code})
+    }
+}
+
+-- ── Fake event bus ─────────────────────────────
+
+class FakeBus {
+    fn init() { this.keys = []; this.text = [] }
+    fn on_key(event) { push(this.keys, event) }
+    fn on_text(event) { push(this.text, event) }
+    fn dispatch_byte(byte) { push(this.text, {"byte": byte}) }
+}
+
+-- ── Init app boot ───────────────────────────────
+
+show "-- Phase 72: init boot --"
+
+let sys = FakeSyscall()
+sys.files["/etc/clarity-os.toml"] = "[init]\nhostname = \"clarity-mbp\"\n"
+let bus = FakeBus()
+let init = init_app(sys, null, bus)
+assert_eq(init.state, STATE_BOOT, "starts in boot")
+
+let ok = init.boot()
+assert(ok, "boot returned true")
+assert_eq(init.state, STATE_RUNNING, "running after boot")
+assert(has(init.config, "init"), "config parsed")
+assert_eq(init.config["init"]["hostname"], "clarity-mbp", "hostname loaded")
+
+-- All four mounts happened in order
+assert_eq(len(init.mounted), 4, "4 mounts")
+assert_eq(init.mounted[0]["target"], "/", "/ first")
+assert_eq(init.mounted[1]["target"], "/dev", "/dev second")
+assert_eq(init.mounted[2]["target"], "/proc", "/proc third")
+assert_eq(init.mounted[3]["target"], "/tmp", "/tmp fourth")
+
+-- All six default services spawned
+assert_eq(len(sys.spawned), 6, "6 services spawned")
+
+-- Topo order: logger first, then input (deps logger), then
+-- compositor (deps input), etc. Verify ordering by name.
+fn _names_from_spawned(spawned) {
+    mut out = []
+    for s in spawned {
+        let parts = split(s["cmd"], "/")
+        push(out, parts[len(parts) - 1])
+    }
+    return out
+}
+let names = _names_from_spawned(sys.spawned)
+assert_eq(names[0], "clarity-logger", "logger first")
+assert_eq(names[1], "clarity-input", "input second")
+assert_eq(names[2], "clarity-compositor", "compositor third")
+assert(contains(names, "clarity-shell"), "shell spawned")
+assert(contains(names, "clarity-launcher"), "launcher spawned")
+
+-- Service registry populated
+assert(has(init.services, "logger"), "logger registered")
+assert_eq(init.services["logger"]["state"], "running", "logger running")
+
+-- Boot log captured
+assert(len(init.boot_log) > 0, "boot log populated")
+mut saw_ready = false
+for l in init.boot_log { if contains(l, "ready") { saw_ready = true } }
+assert(saw_ready, "boot log has 'ready'")
+
+-- ── Service supervision (reap + restart) ────────
+
+show "-- Phase 72: supervision --"
+
+-- "logger" exits with code 1 — restart=always so it should respawn
+let logger_pid = init.services["logger"]["pid"]
+sys.queue_zombie(logger_pid, 1)
+init.tick()
+assert_eq(init.services["logger"]["state"], "running", "logger restarted")
+assert_eq(init.services["logger"]["restarts"], 1, "restart count")
+assert(init.services["logger"]["pid"] != logger_pid, "new pid after restart")
+
+-- "launcher" exits with code 0 — restart=on-failure, should NOT
+-- respawn since exit was clean
+let launcher_pid = init.services["launcher"]["pid"]
+sys.queue_zombie(launcher_pid, 0)
+init.tick()
+assert_eq(init.services["launcher"]["state"], "exited", "launcher not restarted on clean exit")
+assert_eq(init.services["launcher"]["restarts"], 0, "no restart")
+
+-- A separate init: launcher crashes (exit_code=2) → on-failure
+-- policy should respawn it.
+let sys_crash = FakeSyscall()
+let init_crash = init_app(sys_crash, null, null)
+init_crash.boot()
+let crash_pid = init_crash.services["launcher"]["pid"]
+sys_crash.queue_zombie(crash_pid, 2)
+init_crash.tick()
+assert_eq(init_crash.services["launcher"]["state"], "running", "launcher restarted on crash")
+assert_eq(init_crash.services["launcher"]["restarts"], 1, "restart count = 1")
+
+-- ── Failed spawn at boot ────────────────────────
+
+let sys2 = FakeSyscall()
+sys2.fail_spawn_for = ["/bin/clarity-input"]
+let init2 = init_app(sys2, null, null)
+init2.boot()
+assert_eq(init2.services["input"]["state"], "failed", "failed-to-spawn service marked failed")
+
+-- ── Shutdown ────────────────────────────────
+
+let sys3 = FakeSyscall()
+let init3 = init_app(sys3, null, null)
+init3.boot()
+init3.shutdown()
+assert_eq(init3.state, STATE_SHUTDOWN, "shutdown state")
+assert_eq(len(sys3.killed), 6, "all 6 services SIGTERM'd")
+-- Reverse topo order: launcher first, logger last
+assert_eq(sys3.killed[0]["sig"], 15, "SIGTERM")
+
+-- ── Procfs ────────────────────────────────────
+
+show "-- Phase 72: procfs --"
+
+let table_snap = {
+    "1": {"name": "init", "state": "running", "ppid": 0, "vmrss_kb": 1024, "threads": 1, "cmdline": "/sbin/init"},
+    "100": {"name": "logger", "state": "running", "ppid": 1, "vmrss_kb": 512, "threads": 1, "cmdline": "/bin/clarity-logger"},
+    "101": {"name": "compositor", "state": "running", "ppid": 1, "vmrss_kb": 4096, "threads": 4, "cmdline": "/bin/clarity-compositor"}
+}
+let pf = procfs(table_snap, {
+    "uptime_seconds": 42,
+    "loadavg_1": 0.5, "loadavg_5": 0.25, "loadavg_15": 0.10,
+    "mem_total_kb": 524288, "mem_free_kb": 262144,
+    "kernel_version": "ClarityOS 0.1 (test)"
+})
+
+let info = pf.cpuinfo()
+assert(contains(info, "processor"), "cpuinfo has 'processor'")
+assert(contains(info, "ClarityOS Virtual CPU"), "cpuinfo has model name")
+
+let mem = pf.meminfo()
+assert(contains(mem, "MemTotal:    524288 kB"), "meminfo total")
+assert(contains(mem, "MemFree:     262144 kB"), "meminfo free")
+assert(contains(mem, "Used:        262144 kB"), "meminfo used = total - free")
+
+let up = pf.uptime()
+assert_eq(trim(up), "42 0", "uptime body")
+
+let load = pf.loadavg()
+assert(starts(load, "0.50 0.25 0.10"), "loadavg formatted to 2dp")
+assert(contains(load, "/3"), "loadavg total = 3 procs")
+
+let ver = pf.version()
+assert(contains(ver, "0.1 (test)"), "version body")
+
+-- Per-PID
+let status = pf.pid_status(100)
+assert(contains(status, "Name:    logger"), "pid status name")
+assert(contains(status, "Pid:     100"), "pid status pid")
+assert(contains(status, "PPid:    1"), "pid status ppid")
+assert(contains(status, "VmRSS:   512 kB"), "pid status vmrss")
+
+let cmdline = pf.pid_cmdline(101)
+assert_eq(cmdline, "/bin/clarity-compositor", "cmdline string")
+
+assert_eq(trim(pf.pid_comm(1)), "init", "comm name")
+
+-- Unknown pid → ENOENT
+mut threw_pid = false
+try { pf.pid_status(9999) } catch e { threw_pid = true; assert(contains(str(e), "ENOENT"), "ENOENT") }
+assert(threw_pid, "unknown pid throws")
+
+-- VFS-shaped read()
+let cpuinfo_via_path = pf.read("/proc/cpuinfo")
+assert(contains(cpuinfo_via_path, "processor"), "read(/proc/cpuinfo)")
+let status_via_path = pf.read("/proc/100/status")
+assert(contains(status_via_path, "Name:    logger"), "read(/proc/100/status)")
+mut threw_path = false
+try { pf.read("/proc/garbage") } catch e { threw_path = true }
+assert(threw_path, "unknown path throws")
+
+let pids = pf.list_pids()
+assert_eq(len(pids), 3, "list_pids count")
+
+-- ── Input pipeline ────────────────────────────
+
+show "-- Phase 72: input pipeline --"
+
+let src = scancode_source()
+let bus2 = FakeBus()
+let pipe = input_pipeline(src, bus2)
+
+-- Press "A" without shift → lowercase 'a'
+src.push(KEY_A, true)
+src.push(KEY_A, false)
+let drained = pipe.pump()
+assert_eq(drained, 2, "drained 2 events")
+assert_eq(len(bus2.keys), 2, "2 key events dispatched")
+let press = bus2.keys[0]
+assert(press["press"], "first event is press")
+assert_eq(press["char"], "a", "lowercase a (no shift)")
+assert(not bus2.keys[0]["shift"], "shift not held")
+
+-- Hold shift, press "A" → uppercase 'A'
+src.push(KEY_LEFTSHIFT, true)
+src.push(KEY_A, true)
+src.push(KEY_A, false)
+src.push(KEY_LEFTSHIFT, false)
+pipe.pump()
+mut found_upper = false
+for ev in bus2.keys {
+    if ev["press"] and ev["char"] == "A" and ev["shift"] { found_upper = true }
+}
+assert(found_upper, "uppercase A with shift held")
+
+-- Modifier-only events still get dispatched (with char=null)
+mut shift_events = 0
+for ev in bus2.keys {
+    if ev["code"] == KEY_LEFTSHIFT { shift_events = shift_events + 1 }
+}
+assert(shift_events >= 2, "shift press + release dispatched")
+
+-- Text-byte fast path bypasses keymap entirely
+pipe.dispatch_text_byte(65)         -- 'A'
+pipe.dispatch_text_byte(10)         -- '\n'
+assert_eq(len(bus2.text), 2, "2 text events")
+assert_eq(bus2.text[0]["char"], "A", "text byte 65 -> 'A'")
+assert_eq(bus2.text[1]["byte"], 10, "text byte 10")
+
+-- Empty pump returns 0
+let drained2 = pipe.pump()
+assert_eq(drained2, 0, "empty pump returns 0")
+
+-- ── End-to-end: init pumps input on tick ─────
+
+show "-- Phase 72: init e2e input --"
+
+let sys4 = FakeSyscall()
+let bus4 = FakeBus()
+let init4 = init_app(sys4, null, bus4)
+init4.boot()
+sys4.tty_input = [104, 105, 10]               -- "hi\n"
+init4.tick()
+assert_eq(len(bus4.text), 3, "init pumped 3 bytes")
+assert_eq(bus4.text[0]["byte"], 104, "first byte = 'h'")
+
+-- ── Summary ────────────────────────────────
+
+show ""
+show "Phase 72: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " phase 72 test(s) failed" }

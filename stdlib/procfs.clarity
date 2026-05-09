@@ -1,0 +1,165 @@
+-- procfs — synthesised /proc filesystem (Phase 72 task 5).
+--
+-- Read-only fs that materialises kernel state on each read():
+--
+--   /proc/cpuinfo        cpu topology summary
+--   /proc/meminfo        physical + virtual memory stats
+--   /proc/uptime         uptime_seconds + idle_seconds
+--   /proc/loadavg        1/5/15 min load + running/total + last_pid
+--   /proc/version        clarityos kernel banner
+--   /proc/<pid>/status   per-process: name, state, pid, ppid, vmrss
+--   /proc/<pid>/cmdline  per-process command line
+--   /proc/<pid>/comm     per-process short name
+--
+-- The kernel side hangs this off a real Fs in kernel/fs/procfs.zig;
+-- here we expose the same render functions so the test suite can
+-- read them deterministically.
+
+class Procfs {
+    fn init(process_table_snap, opts) {
+        let o = opts ?? {}
+        this.process_table = process_table_snap          -- {pid -> {name, state, ppid, vmrss_kb, cmdline}}
+        this.boot_time = if has(o, "boot_time") { o["boot_time"] } else { 0 }
+        this.uptime_seconds = if has(o, "uptime_seconds") { o["uptime_seconds"] } else { 0 }
+        this.idle_seconds = if has(o, "idle_seconds") { o["idle_seconds"] } else { 0 }
+        this.loadavg_1 = if has(o, "loadavg_1") { o["loadavg_1"] } else { 0.0 }
+        this.loadavg_5 = if has(o, "loadavg_5") { o["loadavg_5"] } else { 0.0 }
+        this.loadavg_15 = if has(o, "loadavg_15") { o["loadavg_15"] } else { 0.0 }
+        this.cpu_count = if has(o, "cpu_count") { o["cpu_count"] } else { 1 }
+        this.cpu_model = if has(o, "cpu_model") { o["cpu_model"] } else { "ClarityOS Virtual CPU" }
+        this.mem_total_kb = if has(o, "mem_total_kb") { o["mem_total_kb"] } else { 262144 }
+        this.mem_free_kb = if has(o, "mem_free_kb") { o["mem_free_kb"] } else { 200000 }
+        this.kernel_version = if has(o, "kernel_version") { o["kernel_version"] } else { "ClarityOS 0.1 #1 SMP" }
+    }
+
+    -- ── Top-level ──────────────────────────
+
+    fn cpuinfo() {
+        mut lines = []
+        mut i = 0
+        while i < this.cpu_count {
+            push(lines, "processor    : " + str(i))
+            push(lines, "vendor_id    : ClarityOS")
+            push(lines, "model name   : " + this.cpu_model)
+            push(lines, "cpu MHz      : 2400.000")
+            push(lines, "")
+            i = i + 1
+        }
+        return join(lines, "\n")
+    }
+
+    fn meminfo() {
+        let used = this.mem_total_kb - this.mem_free_kb
+        return "MemTotal:    " + str(this.mem_total_kb) + " kB\n" +
+               "MemFree:     " + str(this.mem_free_kb) + " kB\n" +
+               "MemAvailable: " + str(this.mem_free_kb) + " kB\n" +
+               "Used:        " + str(used) + " kB\n"
+    }
+
+    fn uptime() {
+        return str(this.uptime_seconds) + " " + str(this.idle_seconds) + "\n"
+    }
+
+    fn loadavg() {
+        let last_pid = _max_pid(this.process_table)
+        return _fmt_float(this.loadavg_1, 2) + " " +
+               _fmt_float(this.loadavg_5, 2) + " " +
+               _fmt_float(this.loadavg_15, 2) + " " +
+               str(_count_running(this.process_table)) + "/" + str(len(keys(this.process_table))) + " " +
+               str(last_pid) + "\n"
+    }
+
+    fn version() { return this.kernel_version + "\n" }
+
+    -- ── Per-PID ────────────────────────────
+
+    fn pid_status(pid) {
+        let entry = this._pid_entry(pid)
+        if entry == null { throw "ENOENT: /proc/" + str(pid) + "/status" }
+        return "Name:    " + entry["name"] + "\n" +
+               "State:   " + entry["state"] + "\n" +
+               "Pid:     " + str(pid) + "\n" +
+               "PPid:    " + str(entry["ppid"]) + "\n" +
+               "VmRSS:   " + str(if has(entry, "vmrss_kb") { entry["vmrss_kb"] } else { 0 }) + " kB\n" +
+               "Threads: " + str(if has(entry, "threads") { entry["threads"] } else { 1 }) + "\n"
+    }
+
+    fn pid_cmdline(pid) {
+        let entry = this._pid_entry(pid)
+        if entry == null { throw "ENOENT: /proc/" + str(pid) + "/cmdline" }
+        if has(entry, "cmdline") { return entry["cmdline"] }
+        return entry["name"]
+    }
+
+    fn pid_comm(pid) {
+        let entry = this._pid_entry(pid)
+        if entry == null { throw "ENOENT: /proc/" + str(pid) + "/comm" }
+        return entry["name"] + "\n"
+    }
+
+    fn list_pids() {
+        mut out = []
+        for kv in entries(this.process_table) { push(out, int(kv[0])) }
+        return out
+    }
+
+    -- ── VFS-shaped read() entrypoint ────────
+
+    fn read(path) {
+        if path == "/proc/cpuinfo"  { return this.cpuinfo()  }
+        if path == "/proc/meminfo"  { return this.meminfo()  }
+        if path == "/proc/uptime"   { return this.uptime()   }
+        if path == "/proc/loadavg"  { return this.loadavg()  }
+        if path == "/proc/version"  { return this.version()  }
+        let parts = split(path, "/")
+        -- /proc/<pid>/{status,cmdline,comm}
+        if len(parts) == 4 and parts[1] == "proc" {
+            let pid = int(parts[2])
+            if parts[3] == "status"  { return this.pid_status(pid)  }
+            if parts[3] == "cmdline" { return this.pid_cmdline(pid) }
+            if parts[3] == "comm"    { return this.pid_comm(pid)    }
+        }
+        throw "ENOENT: " + path
+    }
+
+    fn _pid_entry(pid) {
+        let key = str(pid)
+        if has(this.process_table, key) { return this.process_table[key] }
+        return null
+    }
+}
+
+fn procfs(process_table_snap, ...rest) {
+    let opts = if len(rest) > 0 { rest[0] } else { {} }
+    return Procfs(process_table_snap, opts)
+}
+
+fn _max_pid(table) {
+    mut max = 0
+    for kv in entries(table) {
+        let p = int(kv[0])
+        if p > max { max = p }
+    }
+    return max
+}
+
+fn _count_running(table) {
+    mut n = 0
+    for kv in entries(table) {
+        if kv[1]["state"] == "running" or kv[1]["state"] == "runnable" { n = n + 1 }
+    }
+    return n
+}
+
+fn _fmt_float(v, digits) {
+    -- Tiny float formatter — pads to N digits after the decimal.
+    mut scale = 10
+    if digits == 2 { scale = 100 }
+    elif digits == 3 { scale = 1000 }
+    let scaled = int(v * scale + 0.5)
+    let whole = int(scaled / scale)
+    let frac = scaled - whole * scale
+    mut frac_str = str(frac)
+    while len(frac_str) < digits { frac_str = "0" + frac_str }
+    return str(whole) + "." + frac_str
+}
