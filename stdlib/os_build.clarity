@@ -1,0 +1,171 @@
+-- End-to-end ClarityOS image builder — Phase 74 task 3.
+--
+-- One call (or one CLI command — `clarity os build`) takes the
+-- compiled kernel, the freestanding runtime, the bundled stdlib,
+-- the desktop apps, and the boot config and produces a bootable
+-- ISO. Uses the pure-Clarity ISO9660 packer (no grub-mkrescue, no
+-- xorriso) so it works on any host with a Clarity binary.
+--
+-- The complementary `clarity os run` launches the ISO under QEMU
+-- with sensible defaults for the host (HVF on macOS, KVM on Linux,
+-- TCG everywhere else).
+--
+--     let b = os_image_builder({"output": "claritos.iso"})
+--     b.set_kernel(read_bytes("kernel/zig-out/bin/clarity-kernel"))
+--     b.set_runtime(read_bytes("runtime/freestanding/zig-out/bin/clarity-runtime"))
+--     b.add_app("calc", read_bytes("apps/calc/main.clarity"))
+--     let image = b.build()                     -- list of bytes
+--     write_bytes("claritos.iso", image)
+
+from "iso9660.clarity" import Iso9660Builder, iso_builder
+
+let DEFAULT_VOLUME_ID = "CLARITYOS"
+let DEFAULT_OUTPUT = "claritos.iso"
+
+class OsImageBuilder {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.output = if has(o, "output") { o["output"] } else { DEFAULT_OUTPUT }
+        this.volume_id = if has(o, "volume_id") { o["volume_id"] } else { DEFAULT_VOLUME_ID }
+        this.cmdline = if has(o, "cmdline") { o["cmdline"] } else { "" }
+        this.timeout_s = if has(o, "timeout_s") { o["timeout_s"] } else { 5 }
+        this.kernel = null
+        this.runtime = null
+        this.uefi_loader = null
+        this.stdlib_files = {}        -- path-in-iso -> bytes
+        this.apps = {}                 -- name -> {entry: bytes}
+        this.config_text = null        -- /etc/clarity-os.toml
+        this.iso = iso_builder({"volume_id": this.volume_id, "system_id": this.volume_id, "publisher": "CLARITY-LANG.ORG", "app_id": "CLARITYOS-INSTALLER"})
+    }
+
+    fn set_kernel(bytes) { this.kernel = bytes }
+    fn set_runtime(bytes) { this.runtime = bytes }
+    fn set_uefi_loader(bytes) { this.uefi_loader = bytes }
+    fn set_config(text) { this.config_text = text }
+
+    fn add_stdlib_file(path_in_lib, bytes) {
+        this.stdlib_files["/lib/clarity/stdlib/" + path_in_lib] = bytes
+    }
+    fn add_app(name, entry_bytes) {
+        this.apps[name] = {"entry": entry_bytes}
+    }
+
+    -- ── Plan: list of file ops ────────────────────
+
+    fn plan() {
+        mut ops = []
+        if this.kernel != null { push(ops, {"kind": "file", "path": "/boot/clarity-kernel", "size": len(this.kernel)}) }
+        if this.runtime != null { push(ops, {"kind": "file", "path": "/bin/clarity-init", "size": len(this.runtime)}) }
+        if this.uefi_loader != null { push(ops, {"kind": "file", "path": "/EFI/BOOT/BOOTX64.EFI", "size": len(this.uefi_loader)}) }
+        if this.config_text != null { push(ops, {"kind": "file", "path": "/etc/clarity-os.toml", "size": len(this.config_text)}) }
+        for kv in entries(this.stdlib_files) {
+            push(ops, {"kind": "file", "path": kv[0], "size": len(kv[1])})
+        }
+        for kv in entries(this.apps) {
+            let name = kv[0]
+            push(ops, {"kind": "file", "path": "/lib/clarity/apps/" + name + "/main.clarity", "size": len(kv[1]["entry"])})
+        }
+        push(ops, {"kind": "grub_config", "path": "/boot/grub/grub.cfg"})
+        push(ops, {"kind": "iso", "image": this.output})
+        return ops
+    }
+
+    fn validate() {
+        mut errors = []
+        if this.kernel == null { push(errors, "missing kernel — call set_kernel(bytes)") }
+        if this.runtime == null { push(errors, "missing runtime — call set_runtime(bytes)") }
+        if not ends(this.output, ".iso") { push(errors, "output should end in .iso") }
+        return errors
+    }
+
+    -- ── Build ─────────────────────────────
+
+    fn build() {
+        let errs = this.validate()
+        if len(errs) > 0 { throw "OsImageBuildError: " + join(errs, "; ") }
+        if this.kernel != null {
+            this.iso.add_file("/boot/clarity-kernel", this.kernel)
+            this.iso.set_boot_image(this.kernel)
+        }
+        if this.runtime != null {
+            this.iso.add_file("/bin/clarity-init", this.runtime)
+        }
+        if this.uefi_loader != null {
+            this.iso.add_file("/EFI/BOOT/BOOTX64.EFI", this.uefi_loader)
+        }
+        if this.config_text != null {
+            this.iso.add_file("/etc/clarity-os.toml", _bytes_from_string(this.config_text))
+        }
+        let grub = _grub_cfg(this.cmdline, this.timeout_s)
+        this.iso.add_file("/boot/grub/grub.cfg", _bytes_from_string(grub))
+        for kv in entries(this.stdlib_files) {
+            this.iso.add_file(kv[0], kv[1])
+        }
+        for kv in entries(this.apps) {
+            this.iso.add_file("/lib/clarity/apps/" + kv[0] + "/main.clarity", kv[1]["entry"])
+        }
+        return this.iso.build()
+    }
+
+    fn build_to_file(path) {
+        let image = this.build()
+        write_bytes(path, image)
+        return path
+    }
+}
+
+fn os_image_builder(opts) { return OsImageBuilder(opts) }
+
+-- ── Helpers ───────────────────────────
+
+fn _bytes_from_string(s) {
+    mut out = []
+    mut i = 0
+    while i < len(s) {
+        push(out, _ord(char_at(s, i)))
+        i = i + 1
+    }
+    return out
+}
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0x20
+}
+
+fn _grub_cfg(cmdline, timeout) {
+    mut lines = []
+    push(lines, "# ClarityOS GRUB config")
+    push(lines, "set timeout=" + str(timeout))
+    push(lines, "set default=0")
+    push(lines, "")
+    push(lines, "menuentry 'ClarityOS' {")
+    if len(cmdline) > 0 {
+        push(lines, "    multiboot2 /boot/clarity-kernel " + cmdline)
+    } else {
+        push(lines, "    multiboot2 /boot/clarity-kernel")
+    }
+    push(lines, "    boot")
+    push(lines, "}")
+    push(lines, "")
+    push(lines, "menuentry 'ClarityOS installer' {")
+    push(lines, "    multiboot2 /boot/clarity-kernel boot=installer")
+    push(lines, "    boot")
+    push(lines, "}")
+    return join(lines, "\n") + "\n"
+}
+
+-- write_bytes is the runtime helper that writes a list of ints as
+-- a binary file. Defined here as a thin wrapper so callers don't
+-- need to know how the runtime exposes it.
+fn write_bytes(path, bytes) {
+    -- The host runtime writes a Buffer; the bare-metal runtime
+    -- uses sys_write through a fresh fd. Both are exposed as
+    -- `write` (string mode) plus a runtime-level binary helper.
+    -- For the host path: turn the byte list into a string and
+    -- write it. The runtime treats every char-code as one byte.
+    mut s = ""
+    for b in bytes { s = s + from_char_code(b) }
+    write(path, s)
+}
