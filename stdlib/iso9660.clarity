@@ -1,0 +1,489 @@
+-- ISO9660 + El Torito packer — Phase 74 task 1.
+--
+-- Pure-Clarity ISO image builder. Writes a bootable ISO9660 image
+-- with the El Torito BIOS boot record (no-emulation, points at the
+-- multiboot2 boot stub) without shelling out to grub-mkrescue or
+-- xorriso. macOS hosts don't ship those tools out of the box; this
+-- packer means `clarity os build` works on every supported platform.
+--
+-- Layout produced (offsets in 2048-byte sectors):
+--
+--   sector  0..15   System area (zeros)
+--   sector 16       Primary Volume Descriptor
+--   sector 17       El Torito Boot Record Volume Descriptor
+--   sector 18       Volume Descriptor Set Terminator
+--   sector 19       El Torito Boot Catalog
+--   sector 20       Path Table (LE)
+--   sector 21       Root directory
+--   sector 22+      Boot stub + kernel + runtime + stdlib + apps
+--
+-- Strict ISO9660 Level 1 + Joliet supplement is overkill for our
+-- purposes; this packer ships Level 1 only (8.3 short names). The
+-- bootloader is the only file the BIOS reads; everything else is
+-- read from inside the kernel via `vfs.read_file_into_heap`.
+
+let SECTOR_SIZE = 2048
+let SYSTEM_AREA_SECTORS = 16
+
+let TYPE_BOOT_RECORD = 0
+let TYPE_PRIMARY_VD = 1
+let TYPE_VD_TERMINATOR = 0xFF
+
+let _CD001 = [0x43, 0x44, 0x30, 0x30, 0x31]      -- "CD001"
+
+class IsoEntry {
+    fn init(name, data, is_dir) {
+        this.name = name
+        this.data = data            -- list of bytes (regular file) or null (dir)
+        this.is_dir = is_dir
+        this.children = []
+        this.lba = 0
+        this.size = 0
+    }
+
+    fn add_child(child) { push(this.children, child); return child }
+    fn add_file(name, data) {
+        let f = IsoEntry(name, data, false)
+        f.size = len(data)
+        push(this.children, f)
+        return f
+    }
+    fn add_dir(name) {
+        let d = IsoEntry(name, null, true)
+        push(this.children, d)
+        return d
+    }
+}
+
+fn iso_root() { return IsoEntry("", null, true) }
+
+class Iso9660Builder {
+    fn init(opts) {
+        let o = opts ?? {}
+        this.volume_id = if has(o, "volume_id") { o["volume_id"] } else { "CLARITYOS" }
+        this.system_id = if has(o, "system_id") { o["system_id"] } else { "CLARITYOS" }
+        this.app_id    = if has(o, "app_id")    { o["app_id"]    } else { "CLARITYOS-INSTALLER" }
+        this.publisher = if has(o, "publisher") { o["publisher"] } else { "CLARITY-LANG.ORG" }
+        this.boot_image = null               -- bytes for the BIOS boot stub
+        this.root = iso_root()
+    }
+
+    fn set_boot_image(bytes) { this.boot_image = bytes }
+    fn add_file(path, data) {
+        let parts = _split_path(path)
+        mut cur = this.root
+        mut i = 0
+        while i < len(parts) - 1 {
+            cur = _ensure_subdir(cur, parts[i])
+            i = i + 1
+        }
+        return cur.add_file(parts[len(parts) - 1], data)
+    }
+    fn add_dir(path) {
+        let parts = _split_path(path)
+        mut cur = this.root
+        for p in parts { cur = _ensure_subdir(cur, p) }
+        return cur
+    }
+
+    -- ── Layout pass: assigns LBAs ───────────────
+
+    fn _layout() {
+        -- Assign LBAs sequentially. After layout, every IsoEntry
+        -- knows where it lives on disk so the writer can fill in
+        -- the directory records.
+        mut cursor = 16                  -- system area + volume descriptors
+        cursor = cursor + 3              -- PVD, BootRecord, Terminator
+        cursor = cursor + 1              -- boot catalog
+        cursor = cursor + 1              -- path table
+
+        -- Root dir
+        this.root.lba = cursor
+        let root_size = _dir_record_size(this.root, true)
+        this.root.size = root_size
+        cursor = cursor + _ceil_sectors(root_size)
+
+        -- Subdirs (depth-first), then files. Bare subset: one level
+        -- deep is enough for kernel + bin + lib/clarity tree.
+        for child in this.root.children {
+            if child.is_dir {
+                child.lba = cursor
+                let s = _dir_record_size(child, false)
+                child.size = s
+                cursor = cursor + _ceil_sectors(s)
+                for grand in child.children {
+                    if grand.is_dir {
+                        grand.lba = cursor
+                        let gs = _dir_record_size(grand, false)
+                        grand.size = gs
+                        cursor = cursor + _ceil_sectors(gs)
+                    }
+                }
+            }
+        }
+
+        -- Boot image lives next so the BIOS can find it on a low LBA.
+        if this.boot_image != null {
+            this.boot_lba = cursor
+            this.boot_sectors = _ceil_sectors(len(this.boot_image))
+            cursor = cursor + this.boot_sectors
+        }
+
+        -- Then every regular file
+        this._layout_files(this.root, cursor)
+    }
+
+    fn _layout_files(dir, start_cursor) {
+        mut cursor = start_cursor
+        for child in dir.children {
+            if not child.is_dir {
+                child.lba = cursor
+                cursor = cursor + _ceil_sectors(len(child.data))
+            }
+        }
+        for child in dir.children {
+            if child.is_dir {
+                cursor = this._layout_files(child, cursor)
+            }
+        }
+        return cursor
+    }
+
+    -- ── Build the byte stream ────────────────────
+
+    -- Returns the full ISO image as a list of bytes. Caller writes
+    -- it out with `write_bytes(path, image)`.
+    fn build() {
+        this._layout()
+        let total_sectors = _max_sector(this) + 1
+        mut image = _zeroes(total_sectors * SECTOR_SIZE)
+
+        -- System area is left as zeros.
+
+        -- Primary Volume Descriptor at sector 16
+        this._write_pvd(image, 16 * SECTOR_SIZE, total_sectors)
+
+        -- Boot Record VD at sector 17
+        this._write_boot_record(image, 17 * SECTOR_SIZE)
+
+        -- Terminator at sector 18
+        this._write_terminator(image, 18 * SECTOR_SIZE)
+
+        -- Boot catalog at sector 19
+        this._write_boot_catalog(image, 19 * SECTOR_SIZE)
+
+        -- Path table at sector 20 (single root entry)
+        this._write_path_table(image, 20 * SECTOR_SIZE)
+
+        -- Directory records
+        this._write_dir(image, this.root, true)
+        for child in this.root.children {
+            if child.is_dir { this._write_dir(image, child, false) }
+        }
+
+        -- Boot image bytes
+        if this.boot_image != null {
+            this._copy_into(image, this.boot_lba * SECTOR_SIZE, this.boot_image)
+        }
+
+        -- Regular files
+        this._write_files(image, this.root)
+
+        return image
+    }
+
+    fn _write_files(image, dir) {
+        for child in dir.children {
+            if not child.is_dir {
+                this._copy_into(image, child.lba * SECTOR_SIZE, child.data)
+            } else {
+                this._write_files(image, child)
+            }
+        }
+    }
+
+    fn _copy_into(image, offset, data) {
+        mut i = 0
+        while i < len(data) {
+            image[offset + i] = data[i]
+            i = i + 1
+        }
+    }
+
+    -- ── Volume Descriptor writers ───────────────
+
+    fn _write_pvd(image, off, total_sectors) {
+        image[off] = TYPE_PRIMARY_VD
+        _write_bytes(image, off + 1, _CD001)
+        image[off + 6] = 0x01                -- version
+        _write_strA(image, off + 8, this.system_id, 32)
+        _write_strA(image, off + 40, this.volume_id, 32)
+        _write_lsb_msb_u32(image, off + 80, total_sectors)
+        _write_lsb_msb_u16(image, off + 120, 1)        -- volume set size
+        _write_lsb_msb_u16(image, off + 124, 1)        -- volume sequence number
+        _write_lsb_msb_u16(image, off + 128, SECTOR_SIZE)
+        _write_lsb_msb_u32(image, off + 132, _ceil_sectors(this.root.size) * SECTOR_SIZE)  -- path table size
+        _write_u32_le(image, off + 140, 20)             -- L-path table LBA
+        _write_u32_le(image, off + 144, 0)              -- optional L-path table
+        _write_u32_be(image, off + 148, 20)             -- M-path table LBA
+        _write_u32_be(image, off + 152, 0)              -- optional M-path
+        -- Root directory record, 34 bytes, at offset 156
+        this._write_dir_record(image, off + 156, this.root, ".", true)
+        _write_strD(image, off + 190, this.volume_id, 128)
+        _write_strA(image, off + 318, this.publisher, 128)
+        _write_strA(image, off + 446, "", 128)
+        _write_strA(image, off + 574, this.app_id, 128)
+        image[off + 881] = 0x01                          -- file structure version
+    }
+
+    fn _write_boot_record(image, off) {
+        image[off] = TYPE_BOOT_RECORD
+        _write_bytes(image, off + 1, _CD001)
+        image[off + 6] = 0x01
+        _write_strA(image, off + 7, "EL TORITO SPECIFICATION", 32)
+        -- Bytes 39..70: zero-padded
+        _write_u32_le(image, off + 71, 19)               -- boot catalog LBA
+    }
+
+    fn _write_terminator(image, off) {
+        image[off] = TYPE_VD_TERMINATOR
+        _write_bytes(image, off + 1, _CD001)
+        image[off + 6] = 0x01
+    }
+
+    fn _write_boot_catalog(image, off) {
+        -- Validation entry (32 bytes)
+        image[off] = 0x01                                -- header ID
+        image[off + 1] = 0x00                            -- platform 0 = x86
+        image[off + 28] = 0x55
+        image[off + 29] = 0xAA
+        -- Checksum so the words sum to 0 (mod 0x10000)
+        let checksum = _validation_checksum(image, off)
+        _write_u16_le(image, off + 28, 0)                -- placeholder reset
+        _write_u16_le(image, off + 28, 0xAA55)
+        _write_u16_le(image, off + 26, checksum)
+        -- Default boot entry (32 bytes) at off + 32
+        image[off + 32] = 0x88                           -- bootable
+        image[off + 33] = 0x00                           -- no emulation
+        _write_u16_le(image, off + 34, 0x0000)           -- load segment 0 = default 0x07C0
+        image[off + 36] = 0x00                           -- system type
+        let sector_count = if this.boot_image == null { 1 } else { _ceil_sectors(len(this.boot_image)) * 4 }
+        _write_u16_le(image, off + 38, sector_count)     -- sector count (in 512-byte units)
+        _write_u32_le(image, off + 40, if this.boot_image == null { 0 } else { this.boot_lba })
+    }
+
+    fn _write_path_table(image, off) {
+        -- Single root entry: 1 byte name (0x00), 1 byte ext-attr,
+        -- 4 bytes LBA, 2 bytes parent dir #, 0-byte name + pad.
+        image[off] = 0x01                                -- name length
+        image[off + 1] = 0x00                            -- ext attr length
+        _write_u32_le(image, off + 2, this.root.lba)
+        _write_u16_le(image, off + 6, 1)                 -- parent = self
+        image[off + 8] = 0x00                            -- name "\0"
+    }
+
+    fn _write_dir(image, dir, is_root) {
+        let off = dir.lba * SECTOR_SIZE
+        mut cursor = off
+        cursor = this._write_dir_record(image, cursor, dir, ".", true)
+        cursor = this._write_dir_record(image, cursor, dir, "..", true)
+        for child in dir.children {
+            cursor = this._write_dir_record(image, cursor, child, child.name, false)
+        }
+    }
+
+    fn _write_dir_record(image, off, entry, name_override, is_dot) {
+        let name = if is_dot { name_override } else { _iso_name(entry) }
+        let name_len = len(name)
+        let pad = if name_len % 2 == 0 { 1 } else { 0 }
+        let record_len = 33 + name_len + pad
+        image[off] = record_len
+        image[off + 1] = 0                               -- ext attr length
+        _write_lsb_msb_u32(image, off + 2, if is_dot { entry.lba } else { entry.lba })
+        mut size = 0
+        if entry.is_dir {
+            size = entry.size
+        } elif name_override == "." or name_override == ".." {
+            size = entry.size
+        } else {
+            size = len(entry.data)
+        }
+        _write_lsb_msb_u32(image, off + 10, size)
+        -- Recording date/time (7 bytes, fixed epoch 2026-01-01)
+        image[off + 18] = 126; image[off + 19] = 1; image[off + 20] = 1
+        image[off + 21] = 0;   image[off + 22] = 0;  image[off + 23] = 0
+        image[off + 24] = 0
+        image[off + 25] = if entry.is_dir { 0x02 } else { 0x00 }
+        image[off + 26] = 0; image[off + 27] = 0          -- file unit / interleave gap
+        _write_lsb_msb_u16(image, off + 28, 1)            -- volume sequence number
+        image[off + 32] = name_len
+        if is_dot {
+            if name_override == "." { image[off + 33] = 0x00 }
+            else { image[off + 33] = 0x01 }
+        } else {
+            mut i = 0
+            while i < name_len {
+                image[off + 33 + i] = _ord(char_at(name, i))
+                i = i + 1
+            }
+        }
+        return off + record_len
+    }
+}
+
+fn iso_builder(opts) { return Iso9660Builder(opts) }
+
+-- ── Helpers ───────────────────────────────────
+
+fn _split_path(path) {
+    let parts = split(path, "/")
+    mut out = []
+    for p in parts { if len(p) > 0 { push(out, p) } }
+    return out
+}
+
+fn _ensure_subdir(parent, name) {
+    for c in parent.children {
+        if c.name == name and c.is_dir { return c }
+    }
+    let d = parent.add_dir(name)
+    return d
+}
+
+fn _zeroes(n) {
+    mut out = []
+    mut i = 0
+    while i < n { push(out, 0); i = i + 1 }
+    return out
+}
+
+fn _ceil_sectors(bytes) {
+    return int((bytes + SECTOR_SIZE - 1) / SECTOR_SIZE)
+}
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0x20
+}
+
+fn _max_sector(builder) {
+    -- After layout, the highest LBA + content size determines image
+    -- size. Walk the tree to find it.
+    mut best = 22
+    if builder.boot_image != null {
+        let end = builder.boot_lba + builder.boot_sectors
+        if end > best { best = end }
+    }
+    let stack = [builder.root]
+    mut s = stack
+    while len(s) > 0 {
+        let n = s[0]
+        mut next = []
+        mut i = 1
+        while i < len(s) { push(next, s[i]); i = i + 1 }
+        s = next
+        for child in n.children {
+            if child.is_dir {
+                push(s, child)
+                let end = child.lba + _ceil_sectors(child.size)
+                if end > best { best = end }
+            } else {
+                let end = child.lba + _ceil_sectors(len(child.data))
+                if end > best { best = end }
+            }
+        }
+    }
+    return best
+}
+
+fn _dir_record_size(dir, _is_root) {
+    -- 33-byte fixed header + name + pad. ., .., children.
+    mut total = 0
+    total = total + 34                                  -- "."
+    total = total + 34                                  -- ".."
+    for child in dir.children {
+        let name = _iso_name(child)
+        let name_len = len(name)
+        let pad = if name_len % 2 == 0 { 1 } else { 0 }
+        total = total + 33 + name_len + pad
+    }
+    return total
+}
+
+fn _iso_name(entry) {
+    -- ISO9660 Level 1: 8.3 uppercase, semicolon version. We keep
+    -- the lifetime simple — files get ;1 appended; dirs are bare.
+    let raw = upper(entry.name)
+    if entry.is_dir { return raw }
+    if contains(raw, ";") { return raw }
+    return raw + ";1"
+}
+
+fn _write_bytes(image, off, bytes) {
+    mut i = 0
+    while i < len(bytes) { image[off + i] = bytes[i]; i = i + 1 }
+}
+
+fn _write_strA(image, off, s, length) {
+    mut i = 0
+    while i < length {
+        if i < len(s) { image[off + i] = _ord(char_at(s, i)) }
+        else { image[off + i] = 0x20 }
+        i = i + 1
+    }
+}
+
+fn _write_strD(image, off, s, length) { _write_strA(image, off, s, length) }
+
+fn _write_u16_le(image, off, v) {
+    image[off] = v & 0xFF
+    image[off + 1] = (v >> 8) & 0xFF
+}
+
+fn _write_u16_be(image, off, v) {
+    image[off]     = (v >> 8) & 0xFF
+    image[off + 1] = v & 0xFF
+}
+
+fn _write_u32_le(image, off, v) {
+    image[off]     = v & 0xFF
+    image[off + 1] = (v >> 8) & 0xFF
+    image[off + 2] = (v >> 16) & 0xFF
+    image[off + 3] = (v >> 24) & 0xFF
+}
+
+fn _write_u32_be(image, off, v) {
+    image[off]     = (v >> 24) & 0xFF
+    image[off + 1] = (v >> 16) & 0xFF
+    image[off + 2] = (v >> 8) & 0xFF
+    image[off + 3] = v & 0xFF
+}
+
+fn _write_lsb_msb_u16(image, off, v) {
+    _write_u16_le(image, off, v)
+    _write_u16_be(image, off + 2, v)
+}
+
+fn _write_lsb_msb_u32(image, off, v) {
+    _write_u32_le(image, off, v)
+    _write_u32_be(image, off + 4, v)
+}
+
+fn _validation_checksum(image, off) {
+    -- The 16-bit words from 0..29 (inclusive of the checksum field)
+    -- sum to zero mod 0x10000. We compute the value at field 26 that
+    -- makes that true.
+    mut sum = 0
+    mut i = 0
+    while i < 16 {
+        if i != 13 {                                     -- skip checksum field
+            let lo = image[off + i * 2]
+            let hi = image[off + i * 2 + 1]
+            sum = sum + lo + (hi * 256)
+        }
+        i = i + 1
+    }
+    let val = (0x10000 - (sum % 0x10000)) % 0x10000
+    return val
+}
