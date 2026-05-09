@@ -73,6 +73,7 @@ pub const Errno = enum(i32) {
     e2big = 7,
     enoexec = 8,
     ebadf = 9,
+    echild = 10,
     eagain = 11,
     enomem = 12,
     eacces = 13,
@@ -110,7 +111,12 @@ pub fn dispatch(nr: u64, args: Args) i64 {
         .open => return sys_open(args),
         .close => return sys_close(args),
         .exit => return sys_exit(args),
+        .fork => return sys_fork(),
+        .exec => return sys_exec(args),
+        .wait => return sys_wait(args),
+        .kill => return sys_kill(args),
         .getpid => return sys_getpid(),
+        .getppid => return sys_getppid(),
         .nanosleep => return sys_nanosleep(args),
         .clock_gettime => return sys_clock_gettime(args),
         else => return -@as(i64, @intFromEnum(Errno.enosys)),
@@ -175,3 +181,45 @@ fn sys_clock_gettime(args: Args) i64 {
     // TODO: read TSC + offset from boot epoch.
     return 0;
 }
+
+// ── Process syscalls ─────────────────────────────
+
+fn sys_fork() i64 {
+    return sched.fork() catch |err| switch (err) {
+        error.OutOfMemory => -@as(i64, @intFromEnum(Errno.enomem)),
+        else => -@as(i64, @intFromEnum(Errno.eagain)),
+    };
+}
+
+fn sys_exec(args: Args) i64 {
+    const path: [*:0]const u8 = @ptrFromInt(args.a0);
+    sched.exec(std.mem.span(path)) catch |err| switch (err) {
+        error.NotFound => return -@as(i64, @intFromEnum(Errno.enoent)),
+        error.OutOfMemory => return -@as(i64, @intFromEnum(Errno.enomem)),
+        else => return -@as(i64, @intFromEnum(Errno.enoexec)),
+    };
+    // exec() doesn't return on success (it replaces the image).
+    unreachable;
+}
+
+fn sys_wait(args: Args) i64 {
+    const wstatus_ptr: ?*i32 = if (args.a0 == 0) null else @ptrFromInt(args.a0);
+    const pid_arg: i32 = @bitCast(@as(i32, @intCast(args.a1)));
+    const result = sched.waitpid(pid_arg) orelse return -@as(i64, @intFromEnum(Errno.echild));
+    if (wstatus_ptr) |p| p.* = result.exit_code;
+    return result.pid;
+}
+
+fn sys_kill(args: Args) i64 {
+    const pid: i32 = @bitCast(@as(i32, @intCast(args.a0)));
+    const sig: i32 = @bitCast(@as(i32, @intCast(args.a1)));
+    return if (sched.kill(pid, sig)) 0 else -@as(i64, @intFromEnum(Errno.esrch));
+}
+
+fn sys_getppid() i64 {
+    if (sched.current_thread()) |t| {
+        if (sched.process_table.lookup(t.pid)) |p| return p.parent_pid;
+    }
+    return 0;
+}
+
