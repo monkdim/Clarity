@@ -1,0 +1,267 @@
+-- Performance profiler — Phase 75 task 1.
+--
+-- Measures the things ClarityOS 1.0 promises:
+--
+--   Boot time          target < 5 s     (kernel handoff → desktop ready)
+--   App launch         target < 250 ms  (click → first paint)
+--   Compositor FPS     target 60 fps    (16.67 ms / frame)
+--   Idle RAM           target < 256 MB
+--
+-- Three independent profile classes that can be combined into a
+-- ReleaseGate that says "yes, this build hits 1.0 quality bars" or
+-- "no, here's what regressed."
+
+let TARGET_BOOT_MS = 5000
+let TARGET_APP_LAUNCH_MS = 250
+let TARGET_FRAME_MS = 16.67           -- 60 fps
+let TARGET_IDLE_RAM_MB = 256
+
+-- ── Boot timeline ────────────────────────────
+
+class BootProfile {
+    fn init() {
+        this.phases = []                  -- ordered list of {name, start_ms, end_ms}
+        this.start_ms = 0
+        this.end_ms = 0
+    }
+
+    fn begin(now_ms) { this.start_ms = now_ms }
+
+    fn mark(name, now_ms) {
+        if len(this.phases) > 0 {
+            this.phases[len(this.phases) - 1]["end_ms"] = now_ms
+        }
+        push(this.phases, {"name": name, "start_ms": now_ms, "end_ms": now_ms})
+    }
+
+    fn ready(now_ms) {
+        if len(this.phases) > 0 {
+            this.phases[len(this.phases) - 1]["end_ms"] = now_ms
+        }
+        this.end_ms = now_ms
+    }
+
+    fn total_ms() { return this.end_ms - this.start_ms }
+
+    fn passes_target() { return this.total_ms() <= TARGET_BOOT_MS }
+
+    fn slowest_phase() {
+        mut slowest = null
+        mut max_ms = 0
+        for p in this.phases {
+            let dur = p["end_ms"] - p["start_ms"]
+            if dur > max_ms { max_ms = dur; slowest = p }
+        }
+        return slowest
+    }
+
+    fn summary() {
+        mut breakdown = []
+        for p in this.phases {
+            push(breakdown, {"name": p["name"], "ms": p["end_ms"] - p["start_ms"]})
+        }
+        return {
+            "total_ms": this.total_ms(),
+            "target_ms": TARGET_BOOT_MS,
+            "passes": this.passes_target(),
+            "phases": breakdown
+        }
+    }
+}
+
+fn boot_profile() { return BootProfile() }
+
+-- ── Frame profile ────────────────────────────
+
+class FrameProfile {
+    fn init() {
+        this.frames = []                  -- list of frame durations in ms
+        this.window_size = 240             -- last 4 seconds @ 60 fps
+        this.dropped = 0
+    }
+
+    fn observe(duration_ms) {
+        push(this.frames, duration_ms)
+        if len(this.frames) > this.window_size {
+            mut next = []
+            mut i = 1
+            while i < len(this.frames) { push(next, this.frames[i]); i = i + 1 }
+            this.frames = next
+        }
+        if duration_ms > TARGET_FRAME_MS * 2 { this.dropped = this.dropped + 1 }
+    }
+
+    fn average_ms() {
+        if len(this.frames) == 0 { return 0.0 }
+        mut total = 0.0
+        for f in this.frames { total = total + f }
+        return total / len(this.frames)
+    }
+
+    fn p99_ms() {
+        if len(this.frames) == 0 { return 0.0 }
+        let sorted = _sorted(this.frames)
+        let idx = int(len(sorted) * 99 / 100)
+        let pick = if idx >= len(sorted) { len(sorted) - 1 } else { idx }
+        return sorted[pick]
+    }
+
+    fn fps() {
+        let avg = this.average_ms()
+        if avg <= 0.0 { return 0.0 }
+        return 1000.0 / avg
+    }
+
+    fn passes_target() {
+        return this.average_ms() <= TARGET_FRAME_MS and this.p99_ms() <= TARGET_FRAME_MS * 2
+    }
+
+    fn summary() {
+        return {
+            "samples": len(this.frames),
+            "fps": this.fps(),
+            "avg_ms": this.average_ms(),
+            "p99_ms": this.p99_ms(),
+            "dropped": this.dropped,
+            "passes": this.passes_target(),
+            "target_ms": TARGET_FRAME_MS
+        }
+    }
+}
+
+fn frame_profile() { return FrameProfile() }
+
+-- ── Memory profile ───────────────────────────
+
+class MemoryProfile {
+    fn init() {
+        this.snapshots = []               -- list of {label, kb, ts}
+    }
+
+    fn snapshot(label, kb, ts) {
+        push(this.snapshots, {"label": label, "kb": kb, "ts": if ts == null { time() } else { ts }})
+    }
+
+    fn idle_snapshot() {
+        for s in this.snapshots { if s["label"] == "idle" { return s } }
+        return null
+    }
+
+    fn passes_target() {
+        let idle = this.idle_snapshot()
+        if idle == null { return false }
+        return idle["kb"] <= TARGET_IDLE_RAM_MB * 1024
+    }
+
+    fn summary() {
+        let idle = this.idle_snapshot()
+        return {
+            "snapshots": len(this.snapshots),
+            "idle_kb": if idle == null { null } else { idle["kb"] },
+            "target_kb": TARGET_IDLE_RAM_MB * 1024,
+            "passes": this.passes_target()
+        }
+    }
+}
+
+fn memory_profile() { return MemoryProfile() }
+
+-- ── App launch profile ─────────────────────
+
+class AppLaunchProfile {
+    fn init() {
+        this.launches = []                -- list of {app, click_ms, first_paint_ms}
+    }
+
+    fn observe(app, click_ms, first_paint_ms) {
+        push(this.launches, {"app": app, "click_ms": click_ms, "first_paint_ms": first_paint_ms,
+                              "duration_ms": first_paint_ms - click_ms})
+    }
+
+    fn slowest() {
+        mut slowest = null
+        mut max_dur = 0
+        for l in this.launches {
+            if l["duration_ms"] > max_dur { max_dur = l["duration_ms"]; slowest = l }
+        }
+        return slowest
+    }
+
+    fn average_ms() {
+        if len(this.launches) == 0 { return 0.0 }
+        mut total = 0.0
+        for l in this.launches { total = total + l["duration_ms"] }
+        return total / len(this.launches)
+    }
+
+    fn passes_target() {
+        for l in this.launches {
+            if l["duration_ms"] > TARGET_APP_LAUNCH_MS { return false }
+        }
+        return true
+    }
+
+    fn summary() {
+        let slow = this.slowest()
+        return {
+            "launches": len(this.launches),
+            "average_ms": this.average_ms(),
+            "slowest_app": if slow == null { null } else { slow["app"] },
+            "slowest_ms": if slow == null { 0 } else { slow["duration_ms"] },
+            "target_ms": TARGET_APP_LAUNCH_MS,
+            "passes": this.passes_target()
+        }
+    }
+}
+
+fn app_launch_profile() { return AppLaunchProfile() }
+
+-- ── Release gate ────────────────────────
+
+class ReleaseGate {
+    fn init(boot, frame, memory, app_launch) {
+        this.boot = boot
+        this.frame = frame
+        this.memory = memory
+        this.app_launch = app_launch
+    }
+
+    fn passes() {
+        return this.boot.passes_target() and
+               this.frame.passes_target() and
+               this.memory.passes_target() and
+               this.app_launch.passes_target()
+    }
+
+    fn report() {
+        return {
+            "boot": this.boot.summary(),
+            "frame": this.frame.summary(),
+            "memory": this.memory.summary(),
+            "app_launch": this.app_launch.summary(),
+            "ready_for_1_0": this.passes()
+        }
+    }
+}
+
+fn release_gate(boot, frame, memory, app_launch) { return ReleaseGate(boot, frame, memory, app_launch) }
+
+-- ── Helpers ─────────────────────────────
+
+fn _sorted(list) {
+    mut copy = []
+    for x in list { push(copy, x) }
+    -- Insertion sort
+    mut i = 1
+    while i < len(copy) {
+        let cur = copy[i]
+        mut j = i - 1
+        while j >= 0 and copy[j] > cur {
+            copy[j + 1] = copy[j]
+            j = j - 1
+        }
+        copy[j + 1] = cur
+        i = i + 1
+    }
+    return copy
+}

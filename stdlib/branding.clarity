@@ -1,0 +1,319 @@
+-- Branding kit — Phase 75 task 3.
+--
+-- Centralises everything that makes ClarityOS look like ClarityOS:
+-- logo (procedurally drawn from primitives so it's resolution-
+-- independent + ships zero binary assets), wordmark with the
+-- Aurora gradient applied to each glyph, design tokens (typography
+-- scale + spacing scale + corner radii), icon-set definitions for
+-- the Phase 63 default apps.
+--
+-- Every paint function takes a Framebuffer and sizes itself off
+-- the bounding box you pass — same call paints the boot splash
+-- logo at 96px and the about-screen logo at 256px without reaching
+-- for separate assets.
+
+from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline
+from "graphics.clarity" import Framebuffer
+from "theme_aurora.clarity" import aurora_gradient, AURORA_TEAL, AURORA_VIOLET, AURORA_MAGENTA, AURORA_INK
+
+-- ── Brand identity ────────────────────────────
+
+let BRAND_NAME = "ClarityOS"
+let BRAND_TAGLINE = "Simple code. Real power."
+let BRAND_DOMAIN = "clarityos.dev"
+
+-- ── Design tokens ─────────────────────────
+
+let TYPE_SCALE = {
+    "display": 48,
+    "title":   28,
+    "h1":      24,
+    "h2":      20,
+    "h3":      16,
+    "body":    14,
+    "caption": 12,
+    "micro":   10
+}
+
+let SPACING_SCALE = {
+    "xs":  2,
+    "sm":  4,
+    "md":  8,
+    "lg":  16,
+    "xl":  24,
+    "xxl": 40
+}
+
+let RADIUS_SCALE = {
+    "sm":   4,
+    "md":   8,
+    "lg":   12,
+    "pill": 9999
+}
+
+fn typography(token) {
+    if has(TYPE_SCALE, token) { return TYPE_SCALE[token] }
+    return TYPE_SCALE["body"]
+}
+
+fn spacing(token) {
+    if has(SPACING_SCALE, token) { return SPACING_SCALE[token] }
+    return SPACING_SCALE["md"]
+}
+
+fn radius(token) {
+    if has(RADIUS_SCALE, token) { return RADIUS_SCALE[token] }
+    return RADIUS_SCALE["md"]
+}
+
+-- ── Logo ─────────────────────────────────
+
+-- The ClarityOS mark: a downward-pointing arrow nested inside an
+-- open ring, suggesting "clarity = signal cutting through noise."
+-- Pure-procedural draw so it scales to any size.
+fn paint_logo(fb, cx, cy, size, opts) {
+    let o = opts ?? {}
+    let bg = if has(o, "bg") { o["bg"] } else { 0x00_00_00_00 }
+    let primary = if has(o, "primary") { o["primary"] } else { aurora_gradient(0.0) }
+    let secondary = if has(o, "secondary") { o["secondary"] } else { aurora_gradient(1.0) }
+    let stroke_w = if has(o, "stroke_w") { o["stroke_w"] } else { _max(2, size / 14) }
+
+    -- Outer ring (open at the bottom)
+    let r = size / 2
+    mut angle = 0.0
+    while angle < 6.28318 {
+        if angle < 0.95 * 3.14 or angle > 1.05 * 3.14 {
+            -- Skip a small arc at the bottom so the ring is "open"
+            let a_norm = (angle / 6.28318)
+            let color = aurora_gradient(a_norm)
+            mut t = 0
+            while t < stroke_w {
+                let xx = cx + int((r - t) * cos_approx(angle))
+                let yy = cy + int((r - t) * sin_approx(angle))
+                _put_safe(fb, xx, yy, color)
+                t = t + 1
+            }
+        }
+        angle = angle + 0.01
+    }
+
+    -- Inner downward arrow
+    let arrow_top = cy - r / 2
+    let arrow_bot = cy + r / 2
+    let arrow_w = r / 2
+    let half = arrow_w / 2
+    let arrow_color = secondary
+    polyline(fb, [
+        [cx, arrow_top], [cx, arrow_bot]
+    ], arrow_color)
+    polyline(fb, [
+        [cx - half, arrow_bot - half], [cx, arrow_bot], [cx + half, arrow_bot - half]
+    ], arrow_color)
+}
+
+fn paint_wordmark(fb, x, y, text, size, opts) {
+    let o = opts ?? {}
+    -- We don't have anti-aliased text rendering yet — use the
+    -- bitmap font module for a crisp draw + apply the Aurora
+    -- gradient by sampling the gradient at each glyph's x-position.
+    from "font.clarity" import draw_text, measure_text
+    from "font.clarity" import builtin_font
+    let font = if has(o, "font") { o["font"] } else { builtin_font() }
+    let total = measure_text(font, text)
+    mut cursor_x = x
+    mut i = 0
+    while i < len(text) {
+        let glyph = char_at(text, i)
+        let glyph_w = measure_text(font, glyph)
+        let frac = if total > 0 { (cursor_x - x) / total } else { 0.0 }
+        let color = aurora_gradient(frac)
+        draw_text(fb, font, glyph, cursor_x, y, color)
+        cursor_x = cursor_x + glyph_w
+        i = i + 1
+    }
+    return cursor_x - x
+}
+
+-- ── App icons ────────────────────────────
+
+-- Each icon is a recipe: function name + accent color. Painted into
+-- a square Framebuffer at any size. The dock + launcher reach for
+-- these by app id. All procedural, no PNG/BMP assets shipped.
+
+let APP_ICONS = {
+    "terminal":  {"paint": "terminal", "accent": 0xFF38D6E0},
+    "files":     {"paint": "files",    "accent": 0xFF8B5CF6},
+    "editor":    {"paint": "editor",   "accent": 0xFFE83A8B},
+    "calc":      {"paint": "calc",     "accent": 0xFFFFD166},
+    "viewer":    {"paint": "viewer",   "accent": 0xFFFF7E5F},
+    "monitor":   {"paint": "monitor",  "accent": 0xFF2EE6A6},
+    "browser":   {"paint": "browser",  "accent": 0xFF38D6E0},
+    "mail":      {"paint": "mail",     "accent": 0xFF8B5CF6},
+    "chat":      {"paint": "chat",     "accent": 0xFFE83A8B},
+    "store":     {"paint": "store",    "accent": 0xFFFFD166},
+    "settings":  {"paint": "settings", "accent": 0xFF8B92A7}
+}
+
+fn paint_icon(fb, app_id, x, y, size) {
+    if not has(APP_ICONS, app_id) { _draw_blank_icon(fb, x, y, size, AURORA_VIOLET); return false }
+    let recipe = APP_ICONS[app_id]
+    let accent = recipe["accent"]
+    -- Common: rounded rect background with the brand ink + a
+    -- subtle gradient stripe along the top.
+    rounded_rect(fb, x, y, size, size, radius("md"), AURORA_INK)
+    -- Top accent stripe
+    fill_rect(fb, x, y, size, _max(2, size / 16), accent)
+    let kind = recipe["paint"]
+    let foreground = 0xFFEDEEF5
+    let inset = size / 5
+    if kind == "terminal" { _draw_terminal_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "files"    { _draw_files_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "editor"   { _draw_editor_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "calc"     { _draw_calc_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "viewer"   { _draw_viewer_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "monitor"  { _draw_monitor_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "browser"  { _draw_browser_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "mail"     { _draw_mail_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "chat"     { _draw_chat_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "store"    { _draw_store_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    elif kind == "settings" { _draw_settings_glyph(fb, x + inset, y + inset, size - 2 * inset, foreground, accent) }
+    return true
+}
+
+fn icon_recipes() { return APP_ICONS }
+
+-- ── Glyph paint routines (small + intentional) ──
+
+fn _draw_terminal_glyph(fb, x, y, s, fg, accent) {
+    -- A "$_" prompt style
+    let h = s / 6
+    fill_rect(fb, x, y + s / 3, h, h, fg)              -- "$"
+    fill_rect(fb, x + h * 2, y + s / 3 + h / 2, s / 3, h / 2, fg)
+}
+
+fn _draw_files_glyph(fb, x, y, s, fg, accent) {
+    -- A file-folder tab + body
+    let tab_h = s / 4
+    fill_rect(fb, x, y + tab_h, s, s - tab_h, fg)
+    fill_rect(fb, x, y + tab_h - 2, s / 2, tab_h, fg)
+}
+
+fn _draw_editor_glyph(fb, x, y, s, fg, accent) {
+    -- Three ascending lines like text rows
+    let h = s / 6
+    fill_rect(fb, x, y + h, s, 2, fg)
+    fill_rect(fb, x, y + h * 3, s * 3 / 4, 2, fg)
+    fill_rect(fb, x, y + h * 5, s / 2, 2, fg)
+    -- Pencil tip
+    rect(fb, x + s - 4, y + h - 2, 4, 4, accent)
+}
+
+fn _draw_calc_glyph(fb, x, y, s, fg, accent) {
+    let pad = s / 8
+    rect(fb, x, y, s, s, fg)
+    -- Grid of buttons
+    mut i = 0
+    while i < 3 {
+        mut j = 0
+        while j < 3 {
+            fill_rect(fb, x + pad + j * s / 3, y + pad + i * s / 3, s / 3 - 2 * pad, s / 3 - 2 * pad, accent)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn _draw_viewer_glyph(fb, x, y, s, fg, accent) {
+    rect(fb, x, y, s, s, fg)
+    -- Mountains
+    polyline(fb, [
+        [x, y + s * 3 / 4], [x + s / 3, y + s / 2], [x + s * 2 / 3, y + s * 5 / 8], [x + s, y + s * 1 / 4], [x + s, y + s], [x, y + s]
+    ], accent)
+}
+
+fn _draw_monitor_glyph(fb, x, y, s, fg, accent) {
+    -- Bar chart
+    let bw = s / 5
+    fill_rect(fb, x,           y + s / 2, bw, s / 2, fg)
+    fill_rect(fb, x + bw + 2,  y + s / 4, bw, s * 3 / 4, accent)
+    fill_rect(fb, x + bw * 2 + 4, y + s / 3, bw, s * 2 / 3, fg)
+    fill_rect(fb, x + bw * 3 + 6, y + s / 8, bw, s * 7 / 8, accent)
+}
+
+fn _draw_browser_glyph(fb, x, y, s, fg, accent) {
+    -- Globe-ish
+    circle(fb, x + s / 2, y + s / 2, s / 2, fg)
+    line(fb, x, y + s / 2, x + s, y + s / 2, accent)
+    line(fb, x + s / 2, y, x + s / 2, y + s, accent)
+}
+
+fn _draw_mail_glyph(fb, x, y, s, fg, accent) {
+    rect(fb, x, y + s / 4, s, s / 2, fg)
+    polyline(fb, [[x, y + s / 4], [x + s / 2, y + s / 2], [x + s, y + s / 4]], accent)
+}
+
+fn _draw_chat_glyph(fb, x, y, s, fg, accent) {
+    rounded_rect(fb, x, y, s, s * 3 / 4, radius("sm"), fg)
+    -- Tail
+    polyline(fb, [[x + s / 4, y + s * 3 / 4], [x + s / 4 - 4, y + s], [x + s / 2, y + s * 3 / 4]], fg)
+}
+
+fn _draw_store_glyph(fb, x, y, s, fg, accent) {
+    -- Bag
+    rect(fb, x, y + s / 4, s, s * 3 / 4, fg)
+    -- Handle
+    line(fb, x + s / 4, y + s / 4, x + s / 4, y, accent)
+    line(fb, x + s * 3 / 4, y + s / 4, x + s * 3 / 4, y, accent)
+    line(fb, x + s / 4, y, x + s * 3 / 4, y, accent)
+}
+
+fn _draw_settings_glyph(fb, x, y, s, fg, accent) {
+    -- Gear approximation: ring + 4 teeth
+    circle(fb, x + s / 2, y + s / 2, s / 2 - 2, fg)
+    fill_rect(fb, x + s / 2 - 2, y, 4, s / 4, accent)
+    fill_rect(fb, x + s / 2 - 2, y + s * 3 / 4, 4, s / 4, accent)
+    fill_rect(fb, x, y + s / 2 - 2, s / 4, 4, accent)
+    fill_rect(fb, x + s * 3 / 4, y + s / 2 - 2, s / 4, 4, accent)
+    circle(fb, x + s / 2, y + s / 2, s / 6, accent)
+}
+
+fn _draw_blank_icon(fb, x, y, size, color) {
+    rounded_rect(fb, x, y, size, size, radius("md"), AURORA_INK)
+    rect(fb, x, y, size, size, color)
+}
+
+-- ── Helpers ──────────────────────────
+
+fn _max(a, b) { if a > b { return a }; return b }
+
+fn _put_safe(fb, x, y, color) {
+    if x >= 0 and y >= 0 and x < fb.width and y < fb.height {
+        fb.put_pixel(x, y, color)
+    }
+}
+
+-- Tiny sin/cos approximation good enough for the logo ring. We
+-- avoid pulling in math libs the host runtime may or may not
+-- expose; this is all we need at these sizes.
+fn cos_approx(t) {
+    -- Reduce to [0, 2π)
+    mut x = t
+    while x >= 6.28318 { x = x - 6.28318 }
+    while x < 0 { x = x + 6.28318 }
+    if x > 3.14159 { x = 6.28318 - x; return _cos_quadrant(x) }
+    return _cos_quadrant(x)
+}
+
+fn sin_approx(t) {
+    return cos_approx(t - 1.5708)
+}
+
+fn _cos_quadrant(x) {
+    -- Bhaskara approximation (good to ~0.5%)
+    let pi = 3.14159
+    if x > pi { return -_cos_quadrant(x - pi) }
+    let pi_minus_x = pi - x
+    let num = pi * pi - 4.0 * x * x
+    let den = pi * pi + x * x
+    return num / den
+}
