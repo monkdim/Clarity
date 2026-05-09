@@ -1,0 +1,179 @@
+-- TTY model — Clarity-side mirror of kernel/drivers/tty.zig
+-- (Phase 71 task 5).
+--
+-- Same line discipline + canonical/raw mode behaviour. The kernel's
+-- TTY drives a real keyboard ring buffer + console output; this
+-- mirror feeds bytes in via push_input() and lets the test suite
+-- assert what userspace would see come back through read().
+
+let MODE_CANONICAL = "canonical"
+let MODE_RAW = "raw"
+let LINE_BUFFER_SIZE = 256
+
+class Tty {
+    fn init() {
+        this.mode = MODE_CANONICAL
+        this.echo = true
+        this.line_buffer = ""           -- canonical mode accumulator
+        this.input_ring = []            -- bytes ready for read()
+        this.output = []                -- captured writes (for tests)
+    }
+
+    fn set_mode(mode) {
+        if mode == MODE_RAW { this.line_buffer = "" }
+        this.mode = mode
+    }
+
+    fn _emit_echo(byte) {
+        if this.echo { push(this.output, byte) }
+    }
+
+    -- Push one input byte (already keymap-translated to ASCII).
+    fn push_input(byte) {
+        if this.mode == MODE_RAW {
+            push(this.input_ring, byte)
+            return
+        }
+        -- Canonical mode: backspace deletes from line buffer; \r or
+        -- \n commits the line (with a trailing \n) to the ring.
+        if byte == 8 or byte == 0x7F {
+            if len(this.line_buffer) > 0 {
+                this.line_buffer = substring(this.line_buffer, 0, len(this.line_buffer) - 1)
+                this._emit_echo(8); this._emit_echo(32); this._emit_echo(8)
+            }
+            return
+        }
+        if byte == 13 or byte == 10 {
+            mut i = 0
+            while i < len(this.line_buffer) {
+                push(this.input_ring, _ord(char_at(this.line_buffer, i)))
+                i = i + 1
+            }
+            push(this.input_ring, 10)
+            this.line_buffer = ""
+            this._emit_echo(10)
+            return
+        }
+        if len(this.line_buffer) + 1 < LINE_BUFFER_SIZE {
+            this.line_buffer = this.line_buffer + from_char_code(byte)
+            this._emit_echo(byte)
+        }
+    }
+
+    fn input_available() { return len(this.input_ring) > 0 }
+    fn input_pending() { return len(this.input_ring) }
+
+    -- Pull up to `count` bytes off the input ring.
+    fn read(count) {
+        mut out = []
+        mut n = 0
+        while n < count and len(this.input_ring) > 0 {
+            push(out, this.input_ring[0])
+            mut next = []
+            mut i = 1
+            while i < len(this.input_ring) { push(next, this.input_ring[i]); i = i + 1 }
+            this.input_ring = next
+            n = n + 1
+        }
+        return out
+    }
+
+    fn read_string(count) {
+        let bytes = this.read(count)
+        mut s = ""
+        for b in bytes { s = s + from_char_code(b) }
+        return s
+    }
+
+    -- Write — appends to the captured `output` list. Real kernel
+    -- writes go to the framebuffer console / COM1.
+    fn write(buf) {
+        for b in buf { push(this.output, b) }
+        return len(buf)
+    }
+
+    fn write_string(s) {
+        mut n = 0
+        while n < len(s) {
+            push(this.output, _ord(char_at(s, n)))
+            n = n + 1
+        }
+        return n
+    }
+
+    fn output_string() {
+        mut s = ""
+        for b in this.output { s = s + from_char_code(b) }
+        return s
+    }
+
+    fn clear_output() { this.output = [] }
+}
+
+fn tty() { return Tty() }
+
+-- ── Per-process fd table ────────────────────────
+
+class FdTable {
+    fn init() {
+        this.fds = {}                   -- fd -> {inode, pos, flags}
+        this.next_fd = 3                 -- 0/1/2 reserved for stdio
+    }
+
+    fn install_stdio(stdin_inode, stdout_inode, stderr_inode) {
+        this.fds[0] = {"inode": stdin_inode, "pos": 0, "flags": 0}
+        this.fds[1] = {"inode": stdout_inode, "pos": 0, "flags": 1}
+        this.fds[2] = {"inode": stderr_inode, "pos": 0, "flags": 1}
+    }
+
+    fn alloc(inode, flags) {
+        let fd = this.next_fd
+        this.next_fd = this.next_fd + 1
+        this.fds[fd] = {"inode": inode, "pos": 0, "flags": flags}
+        return fd
+    }
+
+    fn close(fd) {
+        if not has(this.fds, fd) { throw "FdTableError: bad fd " + str(fd) }
+        mut next = {}
+        for kv in entries(this.fds) {
+            if str(kv[0]) != str(fd) { next[kv[0]] = kv[1] }
+        }
+        this.fds = next
+    }
+
+    fn lookup(fd) {
+        if not has(this.fds, fd) { return null }
+        return this.fds[fd]
+    }
+
+    fn count() { return len(keys(this.fds)) }
+
+    fn dup(old_fd, new_fd) {
+        if not has(this.fds, old_fd) { throw "FdTableError: dup of bad fd " + str(old_fd) }
+        this.fds[new_fd] = this.fds[old_fd]
+        return new_fd
+    }
+
+    -- fork() semantics: child gets a fresh table holding a shallow
+    -- copy of the parent's open files (real kernel would bump
+    -- refcounts on the underlying File structs).
+    fn clone() {
+        let copy = FdTable()
+        copy.next_fd = this.next_fd
+        for kv in entries(this.fds) {
+            copy.fds[kv[0]] = {"inode": kv[1]["inode"], "pos": kv[1]["pos"], "flags": kv[1]["flags"]}
+        }
+        return copy
+    }
+}
+
+fn fd_table() { return FdTable() }
+
+-- ── Helpers ──────────────────────────────
+
+fn _ord(c) {
+    mut i = 0
+    while i < 256 { if from_char_code(i) == c { return i }; i = i + 1 }
+    return 0
+}
