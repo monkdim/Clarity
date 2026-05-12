@@ -11,3 +11,6 @@ venv/
 clarity_modules/
 clarity.lock
 .clarity_history
+
+# Claude Code per-developer settings (may contain tokens)
+.claude/settings.local.json
