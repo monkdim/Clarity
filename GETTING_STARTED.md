@@ -147,7 +147,6 @@ clarity info <pkg>              Show package info from registry
 clarity transpile <file>        Transpile to JavaScript (-o, --bundle)
 clarity build                   Build native binary (--all, --target, --install)
 clarity smoke                   Run smoke tests on the binary
-clarity gen-runtime             Regenerate native/runtime.js from spec
 clarity install-self            Install Clarity from source
 clarity bench                   Run performance benchmarks
 clarity lsp                     Start language server (for editors)
@@ -660,8 +659,6 @@ Clarity/
     transpile.clarity       # Self-hosted Clarity-to-JS transpiler
     build.clarity           # Self-hosted build pipeline
     install.clarity         # Self-hosted installer
-    runtime_spec.clarity    # Runtime.js spec (single source of truth)
-    runtime_gen.clarity     # JS codegen from runtime spec
 
     -- ClarityOS userspace --
     graphics.clarity        # Framebuffer + 2D drawing primitives
@@ -719,7 +716,7 @@ Clarity/
   native/                   # Build tooling (Python bootstrap)
     transpile.py            # Clarity-to-JavaScript transpiler
     parser.py, lexer.py, ast_nodes.py, tokens.py, errors.py
-    runtime.js              # Auto-generated JS runtime shim
+    runtime.js              # JS runtime shim (hand-maintained)
 
   examples/                 # Example programs
   editors/                  # Editor integrations (VS Code, TextMate, Linguist)

@@ -19,9 +19,6 @@ The language is at the point where this document is short on purpose — what's 
 ### Brand-domain aspiration
 `stdlib/website_gen.clarity` bakes `https://clarityos.dev/` into `iso_url`, `og:image`, and `og:url` for the generated marketing site. The domain isn't registered; the site isn't deployed. No runtime breakage today (no CLI command fetches it), but if the site ships before the domain does, those links will 404. Also: `stdlib/test_polish.clarity:229` asserts the literal `"clarityos.dev"`, which will need to change in lockstep with any domain swap.
 
-### `clarity gen-runtime` drift
-`native/runtime.js` is documented as auto-generated from `stdlib/runtime_spec.clarity` ("Regenerate with: clarity gen-runtime"), but running the regenerator on the committed spec produces ~440 lines of diff against the committed file. Either the spec or the regenerator has drifted from the canonical runtime. Until that's reconciled, edits to runtime builtins must touch both files in lockstep by hand — fragile.
-
 ---
 
 ## v1.1 — Language hardening

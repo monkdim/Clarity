@@ -13,7 +13,6 @@ from "debugger.clarity" import debug_file
 from "profiler.clarity" import profile_file
 from "transpile.clarity" import transpile_with_runtime, transpile_bundle, STDLIB_FILES
 from "build.clarity" import build
-from "runtime_gen.clarity" import gen_runtime
 from "install.clarity" import install_self
 from "repl.clarity" import repl_start
 from "app_scaffold.clarity" import scaffold_app
@@ -69,7 +68,6 @@ fn _help() {
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
-    show "  gen-runtime           Regenerate native/runtime.js from spec"
     show "  install-self          Install Clarity from source (clone + build)"
     show "  bench                 Run performance benchmarks (interp vs bytecode)"
     show "  lsp                   Start language server (for editors)"
@@ -926,12 +924,6 @@ fn main() {
     if command == "smoke" {
         from "test_smoke.clarity" import run_smoke_tests
         run_smoke_tests()
-        return null
-    }
-
-    -- Generate runtime.js
-    if command == "gen-runtime" {
-        gen_runtime(cli_args)
         return null
     }
 
