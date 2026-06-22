@@ -799,7 +799,6 @@ def bundle(compile_native=False):
         'ide.clarity', 'ui_builder.clarity', 'docs_app.clarity', 'playground_app.clarity',
         'ffi.clarity',
         'build.clarity', 'test_smoke.clarity',
-        'runtime_spec.clarity', 'runtime_gen.clarity',
         'install.clarity',
         'cli.clarity',
     ]

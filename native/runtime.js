@@ -1,7 +1,7 @@
 /**
  * Clarity Runtime — JavaScript builtins for transpiled Clarity code.
- * AUTO-GENERATED from stdlib/runtime_spec.clarity — do not edit by hand.
- * Regenerate with: clarity gen-runtime
+ * Hand-maintained source of truth. Edit the builtins here directly; the
+ * transpiler copies this file into the bundle verbatim.
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, renameSync, statSync } from 'fs';
