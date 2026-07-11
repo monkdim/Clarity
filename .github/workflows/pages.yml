@@ -6,6 +6,8 @@ on:
     paths:
       - 'docs/**'
       - 'playground/**'
+      - 'web/index.html'
+      - 'web/kyanos.bundle.js'
 
 permissions:
   contents: read
@@ -33,6 +35,8 @@ jobs:
           mkdir -p _site
           cp -r docs/* _site/
           cp -r playground _site/playground
+          mkdir -p _site/os
+          cp web/index.html web/kyanos.bundle.js _site/os/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

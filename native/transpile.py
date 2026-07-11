@@ -801,6 +801,8 @@ def bundle(compile_native=False):
         'build.clarity', 'test_smoke.clarity',
         'runtime_spec.clarity', 'runtime_gen.clarity',
         'install.clarity',
+        'theme_kyan.clarity', 'branding_kyan.clarity', 'boot_splash_kyan.clarity',
+        'kyan_apps.clarity', 'kyan_desktop.clarity',
         'cli.clarity',
     ]
 

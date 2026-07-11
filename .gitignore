@@ -14,3 +14,14 @@ clarity.lock
 
 # Claude Code per-developer settings (may contain tokens)
 .claude/settings.local.json
+
+# stray single-file transpile artifacts (stdlib is .clarity only)
+stdlib/*.js
+
+# web browser build — derived intermediates & verification throwaways
+web/_verify*.png
+web/kyanos.iife.js
+web/kyanos_artifact.html
+!web/build/
+web/build/*.js
+!web/build/entry.js
