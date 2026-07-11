@@ -111,12 +111,76 @@ class KyanDesktop {
 
     -- ── Input (real WindowManager path) ─────────────
 
-    fn handle_mouse(me) { return this.wm.handle_mouse(me) }
+    -- Route a mouse event. The shell claims clicks on the dock and the
+    -- launcher; everything else goes to the WindowManager (focus/drag).
+    fn handle_mouse(me) {
+        if this.launcher_open {
+            if me.is_press { return this._launcher_click(me.x, me.y) }
+            return true
+        }
+        if me.is_press {
+            let hit = this._dock_hit(me.x, me.y)
+            if hit != null { this._activate(hit); return true }
+        }
+        return this.wm.handle_mouse(me)
+    }
+
     fn handle_key(ke) { return this.wm.handle_key(ke) }
 
     fn toggle_launcher() {
         this.launcher_open = not this.launcher_open
         return this.launcher_open
+    }
+
+    -- Open (or focus) an app by id at a cascaded default position.
+    fn _activate(app_id) {
+        if has(this.windows, app_id) {
+            this.comp.focus(this.windows[app_id])
+            return this.windows[app_id]
+        }
+        let b = this._default_bounds(app_id)
+        return this.open(app_id, b[0], b[1], b[2], b[3])
+    }
+
+    fn _default_bounds(app_id) {
+        let idx = len(keys(this.windows))
+        let bx = int(this.width * 0.12) + (idx % 5) * 40
+        let by = int(this.height * 0.14) + (idx % 5) * 30
+        if app_id == "prism"    { return [bx, by, 680, 460] }
+        if app_id == "files"    { return [bx, by, 420, 320] }
+        if app_id == "terminal" { return [bx, by, 460, 280] }
+        return [bx, by, 500, 340]
+    }
+
+    fn _in(px, py, x, y, w, h) {
+        return px >= x and px < x + w and py >= y and py < y + h
+    }
+
+    -- Dock geometry — shared by the painter and hit-testing so they
+    -- can never drift.
+    fn _dock_layout() {
+        let n = len(this.pinned)
+        if n == 0 { return null }
+        let dw = n * DOCK_ICON + (n - 1) * DOCK_GAP + 2 * DOCK_PAD
+        let dh = DOCK_ICON + 2 * DOCK_PAD
+        let dx = int(this.width / 2) - int(dw / 2)
+        let dy = this.height - dh - DOCK_MARGIN
+        mut icons = []
+        mut ix = dx + DOCK_PAD
+        for app in this.pinned {
+            push(icons, {"app": app, "x": ix, "y": dy + DOCK_PAD, "size": DOCK_ICON})
+            ix = ix + DOCK_ICON + DOCK_GAP
+        }
+        return {"x": dx, "y": dy, "w": dw, "h": dh, "icons": icons}
+    }
+
+    fn _dock_hit(px, py) {
+        let layout = this._dock_layout()
+        if layout == null { return null }
+        for ic in layout["icons"] {
+            if this._in(px, py, ic["x"], ic["y"], ic["size"], ic["size"]) { return ic["app"] }
+        }
+        return null
     }
 
     -- ── Composition ─────────────────────────────────
@@ -238,24 +302,21 @@ class KyanDesktop {
     }
 
     fn _paint_dock(fb) {
-        let n = len(this.pinned)
-        if n == 0 { return null }
-        let dw = n * DOCK_ICON + (n - 1) * DOCK_GAP + 2 * DOCK_PAD
-        let dh = DOCK_ICON + 2 * DOCK_PAD
-        let dx = int(this.width / 2) - int(dw / 2)
-        let dy = this.height - dh - DOCK_MARGIN
+        let layout = this._dock_layout()
+        if layout == null { return null }
+        let dx = layout["x"]
+        let dy = layout["y"]
+        let dw = layout["w"]
+        let dh = layout["h"]
         -- floating glass pill with a soft shadow
         drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7)
         rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205))
-        -- icons
-        mut ix = dx + DOCK_PAD
-        for app in this.pinned {
-            paint_kyan_icon(fb, app, ix, dy + DOCK_PAD, DOCK_ICON, this.theme)
-            -- running indicator dot
-            if has(this.windows, app) {
-                fill_rect(fb, ix + int(DOCK_ICON / 2) - 2, dy + dh - 5, 4, 4, this.theme["accent"])
+        -- icons + running indicators
+        for ic in layout["icons"] {
+            paint_kyan_icon(fb, ic["app"], ic["x"], ic["y"], ic["size"], this.theme)
+            if has(this.windows, ic["app"]) {
+                fill_rect(fb, ic["x"] + int(ic["size"] / 2) - 2, dy + dh - 5, 4, 4, this.theme["accent"])
             }
-            ix = ix + DOCK_ICON + DOCK_GAP
         }
     }
 
@@ -271,20 +332,46 @@ class KyanDesktop {
         rounded_rect_blend(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 235))
         linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h")
         draw_text(fb, bx + 18, by + 18, "Search apps, files, commands", this.font, t["foreground_muted"])
-        -- icon grid of pinned apps
+        -- icon grid of pinned apps (geometry shared with hit-testing)
+        let layout = this._launcher_layout()
+        let cell = layout["cell"]
+        let gy = layout["gy"]
+        for c in layout["cells"] {
+            paint_kyan_icon(fb, c["app"], c["x"] + int((cell - 52) / 2), gy, 52, t)
+            let label = if has(APP_TITLES, c["app"]) { APP_TITLES[c["app"]] } else { c["app"] }
+            let lw = measure_text(this.font, label)[0]
+            draw_text(fb, c["x"] + int((cell - lw) / 2), gy + 60, label, this.font, t["foreground"])
+        }
+    }
+
+    fn _launcher_layout() {
         let cols = len(this.pinned)
         let cell = 84
         let gw = cols * cell
         let gx = int(this.width / 2) - int(gw / 2)
+        let by = int(this.height * 0.24)
         let gy = by + 92
+        mut cells = []
         mut cx = gx
         for app in this.pinned {
-            paint_kyan_icon(fb, app, cx + int((cell - 52) / 2), gy, 52, t)
-            let label = if has(APP_TITLES, app) { APP_TITLES[app] } else { app }
-            let lw = measure_text(this.font, label)[0]
-            draw_text(fb, cx + int((cell - lw) / 2), gy + 60, label, this.font, t["foreground"])
+            push(cells, {"app": app, "x": cx, "y": gy - 6, "w": cell, "h": 80})
             cx = cx + cell
         }
+        return {"by": by, "gy": gy, "gx": gx, "cell": cell, "cells": cells}
+    }
+
+    fn _launcher_click(px, py) {
+        let layout = this._launcher_layout()
+        for c in layout["cells"] {
+            if this._in(px, py, c["x"], c["y"], c["w"], c["h"]) {
+                this.launcher_open = false
+                this._activate(c["app"])
+                return true
+            }
+        }
+        -- clicking outside a cell dismisses the launcher
+        this.launcher_open = false
+        return true
     }
 }
 

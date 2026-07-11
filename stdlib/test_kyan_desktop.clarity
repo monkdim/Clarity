@@ -114,6 +114,29 @@ assert(not d2.wm.is_dragging(), "release ends the drag")
 d2.handle_mouse(mk_mouse(5, 5, "press", 1))
 assert(not d2.wm.is_dragging(), "press on empty desktop starts no drag")
 
+-- ── Dock clicks launch apps ──────────────────────
+
+show "-- KyanDesktop: dock is interactive --"
+
+let d3 = kyan_desktop(1000, 640, theme)
+d3.boot(null)
+assert_eq(len(d3.running()), 0, "nothing running yet")
+-- the dock layout tells us where the first icon (prism) sits
+let dl = d3._dock_layout()
+let ic0 = dl["icons"][0]
+let cxp = ic0["x"] + int(ic0["size"] / 2)
+let cyp = ic0["y"] + int(ic0["size"] / 2)
+-- clicking it opens that app
+d3.handle_mouse(mk_mouse(cxp, cyp, "press", 1))
+d3.handle_mouse(mk_mouse(cxp, cyp, "release", 0))
+assert(contains(d3.running(), ic0["app"]), "clicking a dock icon opened its app")
+assert_eq(len(d3.running()), 1, "one app running after dock click")
+-- clicking the same icon again just focuses (no duplicate window)
+d3.handle_mouse(mk_mouse(cxp, cyp, "press", 1))
+assert_eq(len(d3.running()), 1, "re-clicking dock icon does not duplicate")
+-- a click on empty dock area (below the pill) starts no drag and opens nothing
+assert(d3._dock_hit(5, 5) == null, "dock hit-test misses empty space")
+
 -- ── Launcher overlay ─────────────────────────────
 
 show "-- KyanDesktop: launcher overlay --"
@@ -127,6 +150,21 @@ let scrimmed = sc2.get_pixel(850, 520)
 assert(scrimmed != glow_px, "launcher scrim changes the composited canvas")
 d.toggle_launcher()
 assert(not d.launcher_open, "toggle closes launcher")
+
+-- clicking a launcher cell opens that app and dismisses the launcher
+let d4 = kyan_desktop(1000, 640, theme)
+d4.boot(null)
+d4.toggle_launcher()
+let ll = d4._launcher_layout()
+let cell0 = ll["cells"][0]
+d4.handle_mouse(mk_mouse(cell0["x"] + 40, cell0["y"] + 30, "press", 1))
+assert(not d4.launcher_open, "picking a launcher app closes the launcher")
+assert(contains(d4.running(), cell0["app"]), "launcher pick opened the app")
+-- opening the launcher and clicking empty space just dismisses it
+d4.toggle_launcher()
+assert(d4.launcher_open, "launcher reopened")
+d4.handle_mouse(mk_mouse(2, 2, "press", 1))
+assert(not d4.launcher_open, "click outside dismisses launcher")
 
 -- ── close ────────────────────────────────────────
 
