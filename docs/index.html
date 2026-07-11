@@ -6,26 +6,29 @@
 <title>Clarity Language — Documentation</title>
 <style>
 :root {
-    --bg: #fafafa;
+    /* Kyan — Quartz (light) */
+    --bg: #F4F6FB;
     --surface: #ffffff;
-    --text: #1a1a2e;
-    --subtext: #666;
-    --accent: #4A90D9;
-    --accent2: #2d6cb4;
-    --code-bg: #f0f0f0;
-    --border: #e0e0e0;
+    --text: #0C1018;
+    --subtext: #5B6478;
+    --accent: #0891B2;
+    --accent2: #7C3AED;
+    --code-bg: #EEF1F8;
+    --border: #E2E7F2;
+    --sig: linear-gradient(100deg, #7C3AED, #4F46E5 45%, #22D3EE);
     --sidebar-w: 260px;
 }
 @media (prefers-color-scheme: dark) {
     :root {
-        --bg: #1e1e2e;
-        --surface: #181825;
-        --text: #cdd6f4;
-        --subtext: #a6adc8;
-        --accent: #89b4fa;
-        --accent2: #b4d0fb;
-        --code-bg: #313244;
-        --border: #45475a;
+        /* Kyan — Obsidian (dark) */
+        --bg: #05060A;
+        --surface: #0D111A;
+        --text: #E9EDF6;
+        --subtext: #8C96AC;
+        --accent: #2AD8F0;
+        --accent2: #8B5CF6;
+        --code-bg: #151B29;
+        --border: #242D42;
     }
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -34,6 +37,14 @@ body {
     background: var(--bg);
     color: var(--text);
     line-height: 1.7;
+}
+body::before {
+    content: "";
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--sig);
+    z-index: 100;
 }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -52,12 +63,15 @@ nav {
 nav .logo {
     font-size: 1.3rem;
     font-weight: 700;
-    color: var(--accent);
+    background: var(--sig);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
     padding: 0 1.25rem 1rem;
     border-bottom: 1px solid var(--border);
     margin-bottom: 1rem;
 }
-nav .logo span { color: var(--subtext); font-weight: 400; font-size: 0.85rem; }
+nav .logo span { -webkit-text-fill-color: var(--subtext); color: var(--subtext); font-weight: 400; font-size: 0.85rem; }
 nav ul { list-style: none; }
 nav li { margin: 0; }
 nav li a {

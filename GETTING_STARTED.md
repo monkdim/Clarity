@@ -1,11 +1,11 @@
-# Getting Started with Clarity & ClarityOS
+# Getting Started with Clarity & KyanOS
 
-This is the practical reference: how to install, write your first program, learn the language, and use the toolchain. If you're looking for the pitch — what Clarity and ClarityOS are and why they exist — see the [README](README.md).
+This is the practical reference: how to install, write your first program, learn the language, and use the toolchain. If you're looking for the pitch — what Clarity and KyanOS are and why they exist — see the [README](README.md).
 
 ## Table of Contents
 
 - [Install Clarity](#install-clarity)
-- [Boot ClarityOS](#boot-clarityos)
+- [Boot KyanOS](#boot-clarityos)
 - [Your first Clarity program](#your-first-clarity-program)
 - [The CLI](#the-cli)
 - [Language tour](#language-tour)
@@ -45,9 +45,9 @@ After install, the `clarity` command is available globally.
 
 ---
 
-## Boot ClarityOS
+## Boot KyanOS
 
-ClarityOS is the operating system written in Clarity. It runs on bare metal, but the easiest way to try it is in QEMU.
+KyanOS is the operating system written in Clarity. The developer workflow targets QEMU; real-hardware boot is a goal, not yet a verified claim. Expect rough edges — the boot-to-desktop path is still stabilizing.
 
 ### macOS (with Homebrew)
 
@@ -59,7 +59,7 @@ clarity os build       # Build the kernel + freestanding runtime + ISO
 clarity os run         # Launch in QEMU with HVF acceleration
 ```
 
-The first launch boots into the Meadow boot splash, fades into the cream-and-sage desktop, and pre-pins terminal / files / editor / calc / viewer / monitor to the dock. Theme picker is in **Settings → Appearance** (Meadow / Bloom / Watercolor / Midnight).
+The first launch boots into the void-black KyanOS splash, fades into the Obsidian desktop (dark glass, signature violet→cyan edge), and pre-pins terminal / files / editor / calc / viewer / monitor to the dock. Theme picker is in **Settings → Appearance** — Obsidian and Quartz are the two Kyan modes; the spring themes (Meadow / Bloom / Watercolor / Midnight) remain as legacy options.
 
 ### Linux
 
@@ -83,7 +83,7 @@ Burn it to a USB stick with Etcher, or boot it in any VM that supports BIOS or U
 ### Headless boot test
 
 ```bash
-clarity os run --headless --boot-test "ClarityOS ready."
+clarity os run --headless --boot-test "KyanOS ready."
 ```
 
 Boots without a graphical window, captures the serial output, and exits successfully when the kernel emits the marker (or non-zero on timeout). Useful for CI.
@@ -151,8 +151,8 @@ clarity gen-runtime             Regenerate native/runtime.js from spec
 clarity install-self            Install Clarity from source
 clarity bench                   Run performance benchmarks
 clarity lsp                     Start language server (for editors)
-clarity os build                Build the ClarityOS kernel + runtime + ISO
-clarity os run                  Boot ClarityOS in QEMU (HVF on macOS, KVM on Linux)
+clarity os build                Build the KyanOS kernel + runtime + ISO
+clarity os run                  Boot KyanOS in QEMU (HVF on macOS, KVM on Linux)
 clarity os iso                  Alias for `os build`
 clarity os install              Write ISO to USB stick (manual `dd` for now)
 ```
@@ -518,7 +518,7 @@ clarity run app.clarity --watch
 
 ### Bytecode compiler
 
-Clarity includes a stack-based bytecode compiler and VM with 48 opcodes:
+Clarity includes a stack-based bytecode compiler and VM with 58 opcodes:
 
 ```bash
 clarity compile program.clarity
@@ -556,7 +556,7 @@ Clarity is fully self-hosted. The entire toolchain has been rewritten in Clarity
 | Parser | `stdlib/parser.clarity` | Full recursive descent parser |
 | Interpreter | `stdlib/interpreter.clarity` | Tree-walking interpreter with full dispatch |
 | Runtime | `stdlib/runtime.clarity` | Module system (math, json, os, time) |
-| Bytecode | `stdlib/bytecode.clarity` | 48-opcode compiler + stack VM |
+| Bytecode | `stdlib/bytecode.clarity` | 58-opcode compiler + stack VM |
 | CLI | `stdlib/cli.clarity` | Full command dispatcher (25+ commands) |
 | LSP | `stdlib/lsp.clarity` | JSON-RPC language server |
 | Package Manager | `stdlib/package.clarity` | TOML parser, dependency management |
@@ -571,7 +571,7 @@ Clarity is fully self-hosted. The entire toolchain has been rewritten in Clarity
 
 The native binary runs the self-hosted toolchain directly — no Python dependency required.
 
-ClarityOS extends this further: the desktop environment, default apps, theme system, ISO packer, QEMU launcher, and release pipeline are all written in Clarity. The kernel is the only Zig component, and even the freestanding userspace runtime (QuickJS host) talks to it through Clarity-defined syscall stubs.
+KyanOS extends this further: the desktop environment, default apps, theme system, ISO packer, QEMU launcher, and release pipeline are all written in Clarity. The kernel is the only Zig component, and even the freestanding userspace runtime (QuickJS host) talks to it through Clarity-defined syscall stubs.
 
 ---
 
@@ -635,7 +635,7 @@ clarity smoke
 
 ```
 Clarity/
-  stdlib/                   # The language + ClarityOS — 100% Clarity
+  stdlib/                   # The language + KyanOS — 100% Clarity
     lexer.clarity           # Tokenizer
     parser.clarity          # Recursive descent parser
     ast_nodes.clarity       # 49 AST node types
@@ -663,7 +663,7 @@ Clarity/
     runtime_spec.clarity    # Runtime.js spec (single source of truth)
     runtime_gen.clarity     # JS codegen from runtime spec
 
-    -- ClarityOS userspace --
+    -- KyanOS userspace --
     graphics.clarity        # Framebuffer + 2D drawing primitives
     draw.clarity            # Higher-level shapes
     font.clarity            # Bitmap font + text measurement
@@ -690,14 +690,14 @@ Clarity/
     branding_modern.clarity     # Drop+Leaf logo, app icon recipes
     boot_splash_modern.clarity  # Asymmetric boot splash
 
-    -- ClarityOS apps --
+    -- KyanOS apps --
     app_terminal.clarity, app_files.clarity, app_editor.clarity,
     app_calc.clarity, app_viewer.clarity, app_monitor.clarity,
     app_store.clarity, app_manifest.clarity, app_sandbox.clarity,
     browser.clarity, mail.clarity, chat.clarity, ide.clarity,
     docs_app.clarity, playground_app.clarity
 
-    -- ClarityOS infrastructure --
+    -- KyanOS infrastructure --
     perf_profiler.clarity   # Boot / frame / memory profiles + release gate
     crash_recovery.clarity  # Journal + watchdog + crash dialog
     iso9660.clarity         # Pure-Clarity ISO9660 packer
@@ -705,7 +705,7 @@ Clarity/
     os_build.clarity        # OS image builder library (kernel + runtime → ISO)
     qemu.clarity            # Cross-platform QEMU launcher (macOS HVF / Linux KVM)
     release.clarity         # Release pipeline (validate → gate → publish)
-    website_gen.clarity     # ClarityOS website generator
+    website_gen.clarity     # KyanOS website generator
     branding.clarity        # Brand tokens (typography, spacing, radius)
 
     test_*.clarity          # Test suites (550+ tests)
@@ -730,7 +730,7 @@ Clarity/
   Formula/                  # Homebrew formula
   .github/workflows/        # CI / CD
   install.sh                # Installation script
-  ROADMAP_OS.md             # ClarityOS roadmap (Phases 56-76)
+  ROADMAP_OS.md             # KyanOS roadmap (Phases 56-76)
   GAPS.md                   # Language development history (Phases 24-48)
   CONTRIBUTING.md           # Contribution guidelines
 ```
@@ -752,7 +752,7 @@ clarity run stdlib/test_profiler_full.clarity
 clarity run stdlib/test_docgen_full.clarity
 clarity run stdlib/test_shell.clarity
 
-# ClarityOS tests
+# KyanOS tests
 clarity run stdlib/test_polish.clarity         # Phase 75 — perf, crash, release
 clarity run stdlib/test_spring_refresh.clarity # Phase 76 — themes, branding, picker
 

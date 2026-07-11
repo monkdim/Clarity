@@ -1,6 +1,6 @@
 # Clarity — Path Forward
 
-This document tracks **what's next for the Clarity language and toolchain**. The 1.0 development history (Phases 1–55) lives in git. ClarityOS-specific work lives in [ROADMAP_OS.md](ROADMAP_OS.md). This file covers the *language*: lexer, parser, interpreter, bytecode VM, type checker, stdlib, CLI, package manager, LSP, native binary.
+This document tracks **what's next for the Clarity language and toolchain**. The 1.0 development history (Phases 1–55) lives in git. KyanOS-specific work lives in [ROADMAP_OS.md](ROADMAP_OS.md). This file covers the *language*: lexer, parser, interpreter, bytecode VM, type checker, stdlib, CLI, package manager, LSP, native binary.
 
 ---
 
@@ -52,7 +52,7 @@ These are the only items that belong in a 2.0 conversation rather than 1.x. Each
 
 - **WebAssembly target.** A `clarity build --target wasm` that produces a `.wasm` module plus glue, so Clarity can run in browsers without the JavaScript transpile step.
 - **Native compilation.** Skip Bun. Compile Clarity → C or Clarity → LLVM IR → native binary. The bytecode VM (`runtime/native_vm/`) is the seed.
-- **C FFI maturity.** `stdlib/ffi.clarity` works for libc-shaped APIs; the rough edges are struct layout, callbacks across the boundary, and ownership semantics for arrays. Driven by what ClarityOS apps actually need.
+- **C FFI maturity.** `stdlib/ffi.clarity` works for libc-shaped APIs; the rough edges are struct layout, callbacks across the boundary, and ownership semantics for arrays. Driven by what KyanOS apps actually need.
 
 ---
 
