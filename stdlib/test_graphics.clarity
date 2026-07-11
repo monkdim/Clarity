@@ -2,7 +2,7 @@
 
 from "graphics.clarity" import Framebuffer, framebuffer, rgb, rgba, BLACK, WHITE, RED, GREEN, BLUE, red_of, green_of, blue_of, alpha_of
 from "ffi.clarity" import Pointer
-from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc
+from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc, fill_polygon
 
 mut PASSED = 0
 mut FAILED = 0
@@ -198,6 +198,29 @@ polyline(fb, [[0, 0], [10, 0], [10, 10]], BLUE)
 assert_eq(fb.get_pixel(0, 0), BLUE, "polyline start")
 assert_eq(fb.get_pixel(10, 0), BLUE, "polyline corner")
 assert_eq(fb.get_pixel(10, 10), BLUE, "polyline end")
+
+-- ── fill_polygon (scanline) ─────────────────────────────
+
+show "-- Draw: fill_polygon --"
+
+fb.clear(BLACK)
+-- a filled square 10..20 in both axes
+fill_polygon(fb, [[10, 10], [20, 10], [20, 20], [10, 20]], GREEN)
+assert_eq(fb.get_pixel(15, 15), GREEN, "fill_polygon interior filled")
+assert_eq(fb.get_pixel(11, 19), GREEN, "fill_polygon near corner filled")
+assert_eq(fb.get_pixel(5, 15), BLACK, "fill_polygon leaves exterior")
+assert_eq(fb.get_pixel(25, 15), BLACK, "fill_polygon bounded on right")
+
+fb.clear(BLACK)
+-- a filled triangle; apex at top, base at bottom
+fill_polygon(fb, [[20, 4], [32, 28], [8, 28]], RED)
+assert_eq(fb.get_pixel(20, 24), RED, "triangle interior near base filled")
+assert_eq(fb.get_pixel(20, 6), RED, "triangle interior near apex filled")
+assert_eq(fb.get_pixel(2, 26), BLACK, "triangle exterior left empty")
+
+-- degenerate input is a no-op, not a crash
+fill_polygon(fb, [[0, 0], [1, 1]], WHITE)
+assert(true, "fill_polygon tolerates < 3 points")
 
 -- ── arc (sampled) ───────────────────────────────────────
 

@@ -181,6 +181,65 @@ fn polygon(fb, points, color) {
     }
 }
 
+-- ── Polygon: filled (scanline, even-odd rule) ───────────
+-- Fills the area enclosed by `points` (a list of [x, y] pairs,
+-- auto-closed). Works for convex and simple concave polygons.
+-- Integer scanlines; pair up edge crossings left-to-right.
+fn fill_polygon(fb, points, color) {
+    let n = len(points)
+    if n < 3 { return null }
+    -- vertical extent
+    mut min_y = points[0][1]
+    mut max_y = points[0][1]
+    mut i = 1
+    while i < n {
+        let py = points[i][1]
+        if py < min_y { min_y = py }
+        if py > max_y { max_y = py }
+        i += 1
+    }
+    if min_y < 0 { min_y = 0 }
+    if max_y > fb.height - 1 { max_y = fb.height - 1 }
+
+    mut y = min_y
+    while y <= max_y {
+        -- collect x-crossings of all edges at this scanline
+        mut xs = []
+        mut e = 0
+        while e < n {
+            let a = points[e]
+            let b = points[(e + 1) % n]
+            let ay = a[1]
+            let by = b[1]
+            -- edge straddles the scanline (half-open to avoid double-count)
+            if (ay <= y and by > y) or (by <= y and ay > y) {
+                let t = (y - ay) / (by - ay)
+                let x = a[0] + (b[0] - a[0]) * t
+                push(xs, x)
+            }
+            e += 1
+        }
+        -- sort crossings ascending (small n — insertion sort)
+        mut a2 = 1
+        while a2 < len(xs) {
+            let key = xs[a2]
+            mut b2 = a2 - 1
+            while b2 >= 0 and xs[b2] > key { xs[b2 + 1] = xs[b2]; b2 -= 1 }
+            xs[b2 + 1] = key
+            a2 += 1
+        }
+        -- fill spans between crossing pairs
+        mut p = 0
+        while p + 1 < len(xs) {
+            let x0 = int(xs[p])
+            let x1 = int(xs[p + 1])
+            if x1 >= x0 { fill_rect(fb, x0, y, x1 - x0 + 1, 1, color) }
+            p += 2
+        }
+        y += 1
+    }
+}
+
 -- Open polyline (no closing segment).
 fn polyline(fb, points, color) {
     let n = len(points)

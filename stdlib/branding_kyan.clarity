@@ -10,7 +10,7 @@
 -- spring splash). App icons reuse the modern abstract-mark set and
 -- add "prism" — the game-hub hero mark.
 
-from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline
+from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline, fill_polygon
 from "theme_kyan.clarity" import kyan_gradient
 from "branding_modern.clarity" import paint_icon, icon_recipes
 from "font.clarity" import draw_text, measure_text, builtin_font
@@ -46,7 +46,8 @@ fn _kyan_facet(fb, cx, cy, size, pts, dx, dy, color) {
         let s = _kyan_pt(cx, cy, size, p[0], p[1])
         push(mapped, [s[0] + dx, s[1] + dy])
     }
-    polygon(fb, mapped, color)
+    fill_polygon(fb, mapped, color)
+    return mapped
 }
 
 -- Paint the faceted-K monogram. opts:
@@ -79,8 +80,10 @@ fn paint_monogram(fb, cx, cy, size, theme, opts) {
     _kyan_facet(fb, cx, cy, size, [[40,50],[82,10],[90,20],[50,56]], slack, 0 - slack, _FACET_DIAG_HI)
     -- lower diagonal shard (slides from lower-right)
     _kyan_facet(fb, cx, cy, size, [[48,58],[88,90],[74,94],[40,64]], slack, slack, _FACET_DIAG_LO)
-    -- the lit edge — signature gradient, settles last
-    _kyan_facet(fb, cx, cy, size, [[82,10],[90,20],[50,56],[46,48]], slack, 0 - slack, lit)
+    -- the lit edge — signature gradient facet, settles last, with a
+    -- crisp brighter stroke along it for the neon glow-line
+    let lit_pts = _kyan_facet(fb, cx, cy, size, [[82,10],[90,20],[50,56],[46,48]], slack, 0 - slack, lit)
+    polygon(fb, lit_pts, kyan_gradient(theme, 1.0))
 }
 
 -- Wordmark: "Kyan" in ink + "OS" in the signature cyan. Returns the
