@@ -1,0 +1,222 @@
+-- Kyan — the KyanOS flagship identity. "Obsidian & neon."
+--
+-- Phase K1 of the rebrand (see REBRAND.md). Retires the spring
+-- identity as the default; the spring themes live on in the
+-- registry as selectable legacy/community themes.
+--
+-- ONE identity, two adaptive modes:
+--   kyan-obsidian  (default) — dark volcanic glass, void black
+--   kyan-quartz    (light)   — pale mineral, the same signature
+--
+-- The brand is carried by a single signature gradient — violet →
+-- indigo → cyan (#7C3AED → #4F46E5 → #22D3EE) — used only where it
+-- means something: the logo edge, boot progress, focus rings,
+-- selection. Everything else stays quiet.
+--
+--     let t = kyan_obsidian()
+--     t["accent"]                 -- 0xFF2AD8F0 (kyan cyan)
+--     kyan_gradient(t, 0.5)       -- indigo, the gradient's midpoint
+--     t["radius"]["window"]       -- 12
+--
+-- Themes are plain mergeable dicts (same shape as theme_meadow /
+-- chrome), so every widget that already takes a theme accepts these
+-- with zero code changes. Unlike the spring themes, both Kyan modes
+-- carry a "font" key so they never silently fall back to the 8x8
+-- builtin.
+
+from "font.clarity" import builtin_font
+
+-- ── Shared design tokens (REBRAND.md §1) ──────────────
+
+let _RADIUS = {
+    "window":  12,
+    "card":    12,
+    "control": 8,
+    "pill":    9999,
+    "tag":     6
+}
+
+let _SPACING = {
+    "xs":  4, "sm":  8, "md":  12, "lg":  16, "xl":  24, "xxl":  40
+}
+
+-- Type ramp: 11 / 13 / 15 / 18 / 22 / 28 / 40, grotesk for UI.
+let _TYPE = {
+    "display": 40, "title": 28, "h1": 22, "h2": 18,
+    "h3": 15, "body": 15, "caption": 13, "micro": 11
+}
+
+let _MOTION = {
+    "fast_ms":   150,
+    "base_ms":   200,
+    "slow_ms":   320,
+    "easing":    "ease_out_cubic"
+}
+
+let _BASE_SHARED = {
+    "radius":       _RADIUS,
+    "spacing":      _SPACING,
+    "typography":   _TYPE,
+    "motion":       _MOTION,
+    "border_width": 1,
+    "shadow_blur":  24,
+    "shadow_dy":    8
+}
+
+fn _merge(a, b) {
+    mut out = {}
+    for kv in entries(a) { out[kv[0]] = kv[1] }
+    for kv in entries(b) { out[kv[0]] = kv[1] }
+    return out
+}
+
+-- ── The signature gradient ────────────────────────────
+--
+-- Violet → indigo → cyan. Mode-independent: the same three stops
+-- read beautifully on both void black and pale quartz, so the
+-- signature is identical in Obsidian and Quartz.
+
+let KYAN_VIOLET = 0xFF7C3AED
+let KYAN_INDIGO = 0xFF4F46E5
+let KYAN_CYAN   = 0xFF22D3EE
+
+fn kyan_gradient_stops() {
+    return [
+        {"t": 0.0, "color": KYAN_VIOLET},
+        {"t": 0.5, "color": KYAN_INDIGO},
+        {"t": 1.0, "color": KYAN_CYAN}
+    ]
+}
+
+-- Sample the signature at t in [0, 1]. Consumers: boot progress bar,
+-- focus rings, dock accent, splash monogram edge.
+fn kyan_gradient(theme, t) {
+    mut clamped = t
+    if clamped < 0.0 { clamped = 0.0 }
+    if clamped > 1.0 { clamped = 1.0 }
+    return _lerp_along(kyan_gradient_stops(), clamped)
+}
+
+fn _lerp_along(stops, t) {
+    mut i = 0
+    while i < len(stops) - 1 {
+        let a = stops[i]
+        let b = stops[i + 1]
+        if t >= a["t"] and t <= b["t"] {
+            let span = b["t"] - a["t"]
+            let local = if span == 0.0 { 0.0 } else { (t - a["t"]) / span }
+            return _lerp_color(a["color"], b["color"], local)
+        }
+        i = i + 1
+    }
+    return stops[len(stops) - 1]["color"]
+}
+
+fn _lerp_color(a, b, t) {
+    -- Unpack via division so the high byte of 0xFF...... ARGB
+    -- constants doesn't get sign-extended (Clarity's `>> 24`
+    -- treats the value as int32). Mirrors theme_meadow._lerp_color.
+    let aa = int(a / 16777216) & 0xFF
+    let ar = int(a / 65536) & 0xFF
+    let ag = int(a / 256) & 0xFF
+    let ab = a & 0xFF
+    let ba = int(b / 16777216) & 0xFF
+    let br = int(b / 65536) & 0xFF
+    let bg = int(b / 256) & 0xFF
+    let bb = b & 0xFF
+    let oa = int(aa + (ba - aa) * t)
+    let or_ = int(ar + (br - ar) * t)
+    let og = int(ag + (bg - ag) * t)
+    let ob = int(ab + (bb - ab) * t)
+    return oa * 16777216 + or_ * 65536 + og * 256 + ob
+}
+
+-- ── Obsidian (dark, default) ──────────────────────────
+
+let OBS_VOID       = 0xFF05060A   -- background
+let OBS_SURFACE    = 0xFF0D111A   -- obsidian glass
+let OBS_RAISED     = 0xFF151B29   -- graphite
+let OBS_HAIRLINE   = 0xFF242D42   -- 1px depth line
+let OBS_TEXT       = 0xFFE9EDF6
+let OBS_MUTED      = 0xFF8C96AC
+let OBS_INK_SOFT   = 0xFFC2CADB
+let OBS_ACCENT     = 0xFF2AD8F0   -- kyan cyan (interactive / primary)
+let OBS_SHADOW     = 0x66040610   -- 40% tinted void, deeper for dark
+
+fn kyan_obsidian() {
+    return _merge(_BASE_SHARED, {
+        "name":              "Obsidian",
+        "id":                "kyan-obsidian",
+        "background":        OBS_VOID,
+        "surface":           OBS_SURFACE,
+        "surface_elevated":  OBS_RAISED,
+        "border":            OBS_HAIRLINE,
+        "foreground":        OBS_TEXT,
+        "foreground_muted":  OBS_MUTED,
+        "ink_soft":          OBS_INK_SOFT,
+        "primary":           OBS_ACCENT,
+        "primary_dark":      0xFF1B9DB4,
+        "accent":            OBS_ACCENT,
+        "accent_secondary":  KYAN_VIOLET,
+        "accent_tertiary":   KYAN_INDIGO,
+        "highlight":         KYAN_CYAN,
+        "selection":         0x402AD8F0,     -- 25% cyan
+        "danger":            0xFFFB7185,
+        "warning":           0xFFFBBF24,
+        "success":           0xFF34D399,
+        "focus_ring":        OBS_ACCENT,
+        "disabled":          0xFF3A4256,
+        "shadow":            OBS_SHADOW,
+        "gradient_stops":    kyan_gradient_stops(),
+        "scheme":            "dark",
+        "font":              builtin_font()
+    })
+}
+
+-- ── Quartz (light) ────────────────────────────────────
+
+let QTZ_CANVAS     = 0xFFF4F6FB   -- pale mineral
+let QTZ_SURFACE    = 0xFFFFFFFF
+let QTZ_RAISED     = 0xFFFFFFFF
+let QTZ_HAIRLINE   = 0xFFE2E7F2
+let QTZ_TEXT       = 0xFF0C1018
+let QTZ_MUTED      = 0xFF5B6478
+let QTZ_INK_SOFT   = 0xFF2A3242
+let QTZ_ACCENT     = 0xFF0891B2   -- cyan, darkened to hold on white
+let QTZ_SHADOW     = 0x1A17203F   -- 10% tinted navy
+
+fn kyan_quartz() {
+    return _merge(_BASE_SHARED, {
+        "name":              "Quartz",
+        "id":                "kyan-quartz",
+        "background":        QTZ_CANVAS,
+        "surface":           QTZ_SURFACE,
+        "surface_elevated":  QTZ_RAISED,
+        "border":            QTZ_HAIRLINE,
+        "foreground":        QTZ_TEXT,
+        "foreground_muted":  QTZ_MUTED,
+        "ink_soft":          QTZ_INK_SOFT,
+        "primary":           QTZ_ACCENT,
+        "primary_dark":      0xFF066B84,
+        "accent":            QTZ_ACCENT,
+        "accent_secondary":  KYAN_VIOLET,
+        "accent_tertiary":   KYAN_INDIGO,
+        "highlight":         KYAN_CYAN,
+        "selection":         0x330891B2,     -- 20% cyan
+        "danger":            0xFFE11D48,
+        "warning":           0xFFD97706,
+        "success":           0xFF059669,
+        "focus_ring":        QTZ_ACCENT,
+        "disabled":          0xFFC4CBDA,
+        "shadow":            QTZ_SHADOW,
+        "gradient_stops":    kyan_gradient_stops(),
+        "scheme":            "light",
+        "font":              builtin_font()
+    })
+}
+
+-- ── Accessors ─────────────────────────────────────────
+
+fn default_kyan_theme() { return kyan_obsidian() }
+
+fn kyan_palettes() { return [kyan_obsidian(), kyan_quartz()] }

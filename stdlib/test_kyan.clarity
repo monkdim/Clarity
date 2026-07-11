@@ -1,0 +1,134 @@
+-- Kyan identity tests — rebrand phase K1.
+--
+-- Covers: Obsidian + Quartz palettes and their token shape, the
+-- signature gradient (violet → indigo → cyan) endpoints + midpoint,
+-- both modes carrying a real font, and the registry shipping Kyan
+-- as the flagship default alongside the legacy spring themes.
+
+from "theme_kyan.clarity" import kyan_obsidian, kyan_quartz, kyan_gradient, kyan_gradient_stops, kyan_palettes, default_kyan_theme
+from "theme_registry.clarity" import theme_registry
+from "theme_picker.clarity" import theme_picker
+from "font.clarity" import builtin_font
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Obsidian (dark, default) ────────────────────
+
+show "-- Kyan: Obsidian --"
+
+let o = kyan_obsidian()
+assert_eq(o["id"], "kyan-obsidian", "obsidian id")
+assert_eq(o["name"], "Obsidian", "obsidian name")
+assert_eq(o["scheme"], "dark", "obsidian is dark")
+assert_eq(o["background"], 0xFF05060A, "obsidian bg = void")
+assert_eq(o["surface"], 0xFF0D111A, "obsidian surface = glass")
+assert_eq(o["accent"], 0xFF2AD8F0, "obsidian accent = kyan cyan")
+assert_eq(o["accent_secondary"], 0xFF7C3AED, "obsidian secondary = violet")
+assert_eq(o["accent_tertiary"], 0xFF4F46E5, "obsidian tertiary = indigo")
+assert_eq(o["highlight"], 0xFF22D3EE, "obsidian highlight = cyan")
+assert_eq(o["primary"], o["accent"], "primary tracks accent")
+
+-- token shape (widgets/picker depend on these)
+assert(has(o, "radius"), "obsidian has radius tokens")
+assert(has(o, "spacing"), "obsidian has spacing tokens")
+assert(has(o, "typography"), "obsidian has typography tokens")
+assert(has(o, "motion"), "obsidian has motion tokens")
+assert(has(o, "shadow"), "obsidian has shadow")
+assert(has(o, "selection"), "obsidian has selection")
+assert_eq(o["radius"]["window"], 12, "window radius = 12")
+assert_eq(o["radius"]["control"], 8, "control radius = 8")
+assert_eq(o["typography"]["display"], 40, "display type = 40")
+assert_eq(o["typography"]["body"], 15, "body type = 15")
+
+-- both modes must carry a font (spring meadow's bug was omitting it)
+assert(has(o, "font"), "obsidian carries a font key")
+assert(o["font"] != null, "obsidian font is non-null (never falls back to 8x8)")
+
+-- swatch quintet the picker paints must resolve
+assert(has(o, "accent_secondary") and has(o, "accent_tertiary"), "obsidian swatch keys present")
+
+-- ── Quartz (light) ──────────────────────────────
+
+show "-- Kyan: Quartz --"
+
+let q = kyan_quartz()
+assert_eq(q["id"], "kyan-quartz", "quartz id")
+assert_eq(q["name"], "Quartz", "quartz name")
+assert_eq(q["scheme"], "light", "quartz is light")
+assert_eq(q["background"], 0xFFF4F6FB, "quartz bg = pale mineral")
+assert_eq(q["surface"], 0xFFFFFFFF, "quartz surface = white")
+assert_eq(q["accent"], 0xFF0891B2, "quartz accent = darkened cyan")
+assert(has(q, "font"), "quartz carries a font key")
+-- signature is mode-independent: same violet/indigo/cyan family
+assert_eq(q["accent_secondary"], 0xFF7C3AED, "quartz secondary = violet")
+assert_eq(q["highlight"], 0xFF22D3EE, "quartz highlight = cyan")
+-- shared tokens identical across modes
+assert_eq(q["radius"]["window"], o["radius"]["window"], "quartz shares window radius")
+assert_eq(q["typography"]["display"], o["typography"]["display"], "quartz shares type ramp")
+
+-- ── Signature gradient ──────────────────────────
+
+show "-- Kyan: signature gradient --"
+
+assert_eq(kyan_gradient(o, 0.0), 0xFF7C3AED, "gradient start = violet")
+assert_eq(kyan_gradient(o, 1.0), 0xFF22D3EE, "gradient end = cyan")
+assert_eq(kyan_gradient(o, 0.5), 0xFF4F46E5, "gradient mid = indigo")
+-- clamps out-of-range t
+assert_eq(kyan_gradient(o, -1.0), 0xFF7C3AED, "gradient clamps low")
+assert_eq(kyan_gradient(o, 2.0), 0xFF22D3EE, "gradient clamps high")
+-- interpolated points sit strictly between stops (no sign-extension blowup)
+let g25 = kyan_gradient(o, 0.25)
+assert(g25 != 0xFF7C3AED and g25 != 0xFF4F46E5, "quarter point interpolates")
+assert(g25 > 0xFF000000, "gradient stays in ARGB range (alpha high byte intact)")
+assert_eq(len(kyan_gradient_stops()), 3, "three signature stops")
+
+-- ── Accessors ───────────────────────────────────
+
+assert_eq(default_kyan_theme()["id"], "kyan-obsidian", "default kyan = obsidian")
+assert_eq(len(kyan_palettes()), 2, "two kyan palettes")
+
+-- ── Registry: Kyan is the flagship default ──────
+
+show "-- Kyan: registry integration --"
+
+let reg = theme_registry()
+assert_eq(reg.active_id, "kyan-obsidian", "registry default = obsidian")
+assert_eq(reg.active()["id"], "kyan-obsidian", "active() = obsidian")
+let ids = reg.ids()
+assert(contains(ids, "kyan-obsidian"), "obsidian registered")
+assert(contains(ids, "kyan-quartz"), "quartz registered")
+-- legacy themes preserved (nothing thrown away)
+assert(contains(ids, "meadow"), "meadow still registered (legacy)")
+assert(contains(ids, "midnight"), "midnight still registered (legacy)")
+assert_eq(len(ids), 6, "6 themes total (kyan x2 + 4 legacy)")
+
+-- switching to quartz works and persists in-memory
+assert(reg.set_active("kyan-quartz"), "set quartz active")
+assert_eq(reg.active()["scheme"], "light", "quartz active = light scheme")
+
+-- picker exposes both kyan modes with resolvable swatches
+let picker = theme_picker(reg)
+mut saw_obsidian = false
+mut saw_quartz = false
+for opt in picker.options() {
+    if opt["id"] == "kyan-obsidian" { saw_obsidian = true }
+    if opt["id"] == "kyan-quartz" { saw_quartz = true }
+    assert_eq(len(opt["swatches"]), 5, "5 swatches per option")
+}
+assert(saw_obsidian, "picker lists obsidian")
+assert(saw_quartz, "picker lists quartz")
+
+-- ── Summary ─────────────────────────────────────
+
+show ""
+show "Kyan: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " kyan test(s) failed" }
