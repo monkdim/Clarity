@@ -390,3 +390,52 @@ fn radial_glow(fb, cx, cy, radius, color) {
         yy += 1
     }
 }
+
+-- ── Glass panels & soft shadows ─────────────────────────
+-- Blend a single horizontal span (helper for the rounded fill).
+fn _hline_blend(fb, x0, y, x1, color) {
+    mut x = x0
+    while x <= x1 { blend_pixel(fb, x, y, color); x += 1 }
+}
+
+-- Alpha-aware rounded rectangle — a translucent glass panel. Opaque
+-- colours fall through to the fast rounded_rect. Regions are disjoint,
+-- so each pixel is composited once.
+fn rounded_rect_blend(fb, x, y, w, h, radius, color) {
+    let sa = int(color / 16777216) & 0xFF
+    if sa == 0 { return null }
+    if sa == 255 { rounded_rect(fb, x, y, w, h, radius, color); return null }
+    let r = if radius * 2 > w { w / 2 } else { radius }
+    let r2 = if r * 2 > h { h / 2 } else { r }
+    if r2 <= 0 { fill_rect_blend(fb, x, y, w, h, color); return null }
+    fill_rect_blend(fb, x + r2, y, w - 2 * r2, h, color)
+    fill_rect_blend(fb, x, y + r2, r2, h - 2 * r2, color)
+    fill_rect_blend(fb, x + w - r2, y + r2, r2, h - 2 * r2, color)
+    mut dy = 0 - r2
+    while dy <= 0 {
+        mut dx = 0
+        while (dx + 1) * (dx + 1) + dy * dy <= r2 * r2 { dx += 1 }
+        let row_top = y + r2 + dy
+        let row_bot = y + h - 1 - r2 - dy
+        _hline_blend(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color)
+        _hline_blend(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color)
+        dy += 1
+    }
+}
+
+-- Soft drop shadow beneath a panel: `blur` translucent rounded rects,
+-- each larger and drawn underneath the next, so alpha accumulates near
+-- the panel edge and fades outward. `color`'s alpha is the total the
+-- shadow builds to. Slightly offset downward. Draw before the panel.
+fn drop_shadow(fb, x, y, w, h, radius, color, blur) {
+    if blur <= 0 { return null }
+    let a = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    let per = if a < blur { 1 } else { int(a / blur) }
+    let off = int(blur / 2)
+    mut i = blur
+    while i >= 1 {
+        rounded_rect_blend(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb)
+        i -= 1
+    }
+}

@@ -2,7 +2,7 @@
 
 from "graphics.clarity" import Framebuffer, framebuffer, rgb, rgba, BLACK, WHITE, RED, GREEN, BLUE, red_of, green_of, blue_of, alpha_of
 from "ffi.clarity" import Pointer
-from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc, fill_polygon, blend_over, blend_pixel, fill_rect_blend, lerp_rgba, sample_stops, linear_gradient, radial_glow
+from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc, fill_polygon, blend_over, blend_pixel, fill_rect_blend, lerp_rgba, sample_stops, linear_gradient, radial_glow, rounded_rect_blend, drop_shadow
 
 mut PASSED = 0
 mut FAILED = 0
@@ -285,6 +285,33 @@ let edge = fb.get_pixel(30, 20)
 assert(blue_of(center) > blue_of(edge), "glow: brighter at centre than edge")
 assert_eq(fb.get_pixel(20, 20 + 13), BLACK, "glow: nothing beyond radius")
 assert_eq(alpha_of(center), 255, "glow composites to opaque")
+
+-- ── glass panel + drop shadow ───────────────────────────
+
+show "-- Draw: glass panel + shadow --"
+
+fb.clear(WHITE)
+-- translucent black glass over white → grey interior, opaque result
+rounded_rect_blend(fb, 10, 10, 30, 20, 6, rgba(0, 0, 0, 128))
+let g = fb.get_pixel(25, 20)
+assert(red_of(g) >= 126 and red_of(g) <= 129, "glass panel composited to grey")
+assert_eq(alpha_of(g), 255, "glass result opaque")
+-- rounded corner: the very corner pixel stays white (outside the radius)
+assert_eq(fb.get_pixel(10, 10), WHITE, "rounded corner clipped")
+-- opaque colour uses the fast path
+rounded_rect_blend(fb, 50, 10, 10, 10, 2, RED)
+assert_eq(fb.get_pixel(55, 15), RED, "opaque rounded_rect_blend fast path")
+
+fb.clear(WHITE)
+drop_shadow(fb, 30, 20, 20, 16, 5, rgba(0, 0, 0, 160), 6)
+-- just outside the panel edge is darkened by the shadow…
+let near = fb.get_pixel(28, 28)
+assert(red_of(near) < 255, "shadow darkens near the panel")
+-- …and far away is untouched white
+assert_eq(fb.get_pixel(2, 2), WHITE, "shadow fades to nothing far off")
+-- degenerate blur is a no-op
+drop_shadow(fb, 30, 20, 20, 16, 5, rgba(0, 0, 0, 160), 0)
+assert(true, "drop_shadow tolerates blur=0")
 
 -- ── arc (sampled) ───────────────────────────────────────
 
