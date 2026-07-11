@@ -26,6 +26,7 @@ from "graphics.clarity" import framebuffer, rgba
 from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "branding_kyan.clarity" import paint_kyan_icon
+from "kyan_apps.clarity" import app_painters
 from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
 
 let TITLE_H = 32
@@ -58,6 +59,7 @@ class KyanDesktop {
         this.font = builtin_font()
         this.pinned = DEFAULT_PINNED
         this.windows = {}          -- app_id -> Window
+        this.painters = app_painters()   -- app_id -> content painter
         this.launcher_open = false
         this.frames = 0
         this._wallpaper = null     -- painted once, then fast-blitted each frame
@@ -199,12 +201,37 @@ class KyanDesktop {
         draw_text(fb, tx, int(th / 2) - 4, win.title, this.font, tcol)
         -- hairline under the title bar
         fill_rect(fb, 0, th - 1, w, 1, t["border"])
-        -- content placeholder rows
+        -- app content in the area below the title bar
+        this._paint_content(win)
+    }
+
+    -- Draw the app's content into its content rect. Uses a registered
+    -- painter for the window's app when one exists; otherwise a neutral
+    -- placeholder so an unskinned app still reads as a window.
+    fn _paint_content(win) {
+        let fb = win.framebuffer
+        let t = this.theme
+        let cr = win.content_rect()
+        let cx = cr[0]
+        let cy = cr[1]
+        let cw = cr[2]
+        let ch = cr[3]
+        if cw <= 0 or ch <= 0 { return null }
+        -- reverse-lookup the app id for this window
+        mut app_id = null
+        for kv in entries(this.windows) {
+            if kv[1] == win { app_id = kv[0] }
+        }
+        if app_id != null and has(this.painters, app_id) {
+            (this.painters[app_id])(fb, cx, cy, cw, ch, t, win.focused)
+            return null
+        }
+        -- placeholder rows
         mut i = 0
         while i < 5 {
-            let ry = th + 22 + i * 22
-            if ry < h - 8 {
-                fill_rect(fb, 20, ry, int((w - 40) * (0.8 - i * 0.1)), 8, t["border"])
+            let ry = cy + 12 + i * 22
+            if ry < cy + ch - 8 {
+                fill_rect(fb, cx + 20, ry, int((cw - 40) * (0.8 - i * 0.1)), 8, t["border"])
             }
             i = i + 1
         }

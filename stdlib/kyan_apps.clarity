@@ -1,0 +1,159 @@
+-- KyanOS app content painters — rebrand phase K4.
+--
+-- Each painter draws an app's UI into a window's content rectangle
+-- (chrome is drawn by KyanDesktop). Signature: (fb, x, y, w, h,
+-- theme, focused). Built entirely from the K2 renderer primitives —
+-- gradients, glass, scalable text — so they look like the identity.
+--
+-- Prism is the flagship: the game hub where you play games built in
+-- Clarity and (later) build your own.
+
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, linear_gradient, line
+from "font.clarity" import builtin_font, draw_text, draw_text_scaled, measure_text
+from "graphics.clarity" import rgba
+from "theme_kyan.clarity" import kyan_gradient_stops
+
+-- ── Prism — the game hub ────────────────────────────────
+
+let _GAME_ARTS = [
+    [{"t": 0.0, "color": 0xFF7C3AED}, {"t": 1.0, "color": 0xFF22D3EE}],
+    [{"t": 0.0, "color": 0xFFFB7185}, {"t": 1.0, "color": 0xFF4F46E5}],
+    [{"t": 0.0, "color": 0xFF0EA5E9}, {"t": 1.0, "color": 0xFF34D399}],
+    [{"t": 0.0, "color": 0xFFFBBF24}, {"t": 1.0, "color": 0xFF7C3AED}]
+]
+let _GAME_NAMES = ["Hexfield", "Orbit Decay", "Verdant", "Ash Fable"]
+let _GAME_META = ["Strategy", "Arcade", "Puzzle", "RPG"]
+
+fn paint_prism(fb, x, y, w, h, theme, focused) {
+    let t = theme
+    let font = builtin_font()
+    -- sidebar
+    let sw = 132
+    fill_rect(fb, x, y, sw, h, t["surface_elevated"])
+    fill_rect(fb, x + sw - 1, y, 1, h, t["border"])
+    _prism_head(fb, x + 14, y + 16, "PLAY", t, font)
+    _prism_item(fb, x + 10, y + 32, sw - 20, "Library", t, font, true)
+    _prism_item(fb, x + 10, y + 56, sw - 20, "Store", t, font, false)
+    _prism_item(fb, x + 10, y + 80, sw - 20, "Friends", t, font, false)
+    _prism_head(fb, x + 14, y + 112, "BUILD", t, font)
+    _prism_item(fb, x + 10, y + 128, sw - 20, "Forge", t, font, false)
+    _prism_item(fb, x + 10, y + 152, sw - 20, "Assets", t, font, false)
+
+    -- main column
+    let mx = x + sw + 18
+    let mw = w - sw - 36
+    if mw < 40 { return null }
+    -- featured card
+    let fh = 120
+    let fy = y + 18
+    linear_gradient(fb, mx, fy, mw, fh, [
+        {"t": 0.0, "color": 0xFF131022},
+        {"t": 1.0, "color": 0xFF0B2440}
+    ], "h")
+    -- a signature bloom across the top of the card
+    linear_gradient(fb, mx, fy, mw, 3, kyan_gradient_stops(), "h")
+    draw_text(fb, mx + 18, fy + 16, "FEATURED - BUILT IN CLARITY", font, t["accent"])
+    draw_text_scaled(fb, mx + 18, fy + 34, "Voidrunner", font, 0xFFFFFFFF, 2, 1)
+    draw_text(fb, mx + 18, fy + 66, "Outrun the collapse of a dying star system.", font, t["foreground_muted"])
+    -- play pill
+    rounded_rect(fb, mx + 18, fy + fh - 34, 90, 24, 8, t["accent"])
+    draw_text(fb, mx + 34, fy + fh - 27, "> Play", font, 0xFF05060A)
+
+    -- game grid
+    let gy = fy + fh + 18
+    let cols = 4
+    let gap = 12
+    let cw = int((mw - (cols - 1) * gap) / cols)
+    let ch = 96
+    mut i = 0
+    while i < cols {
+        let gx = mx + i * (cw + gap)
+        if gy + ch < y + h {
+            _prism_game(fb, gx, gy, cw, ch, i, t, font)
+        }
+        i = i + 1
+    }
+}
+
+fn _prism_head(fb, x, y, text, t, font) {
+    draw_text(fb, x, y, text, font, t["foreground_muted"])
+}
+
+fn _prism_item(fb, x, y, w, text, t, font, active) {
+    if active {
+        rounded_rect(fb, x, y, w, 20, 6, t["accent_tertiary"])
+        draw_text(fb, x + 10, y + 6, text, font, 0xFFFFFFFF)
+    } else {
+        draw_text(fb, x + 10, y + 6, text, font, t["foreground_muted"])
+    }
+}
+
+fn _prism_game(fb, x, y, w, h, idx, t, font) {
+    let art_h = h - 26
+    linear_gradient(fb, x, y, w, art_h, _GAME_ARTS[idx], "h")
+    draw_text(fb, x + 4, y + art_h + 4, _GAME_NAMES[idx], font, t["foreground"])
+    draw_text(fb, x + 4, y + art_h + 16, _GAME_META[idx], font, t["foreground_muted"])
+}
+
+-- ── Terminal ────────────────────────────────────────────
+
+fn paint_terminal_content(fb, x, y, w, h, theme, focused) {
+    let t = theme
+    let font = builtin_font()
+    fill_rect(fb, x, y, w, h, 0xFF05060A)
+    let lines = [
+        "kyan > clarity os build",
+        "-> kernel: zig build ... ok",
+        "-> runtime: native vm ... ok",
+        "-> iso: kyanos-1.1.iso (238 MB) ok",
+        "kyan > clarity test stdlib/",
+        "42 passed, 0 failed"
+    ]
+    mut ly = y + 12
+    for ln in lines {
+        let col = if char_at(ln, 0) == "k" { t["accent"] } else { t["foreground_muted"] }
+        draw_text(fb, x + 12, ly, ln, font, col)
+        ly = ly + 16
+    }
+    -- cursor block
+    fill_rect(fb, x + 12, ly, 8, 12, t["accent"])
+}
+
+-- ── Files ───────────────────────────────────────────────
+
+let _FILE_ROWS = [
+    {"name": "clarity", "meta": "173 items", "dir": true},
+    {"name": "kyanos-themes", "meta": "12 items", "dir": true},
+    {"name": "theme_kyan.clarity", "meta": "8.2 KB", "dir": false},
+    {"name": "prism_library.clarity", "meta": "14.6 KB", "dir": false},
+    {"name": "voidrunner.clarity", "meta": "31.0 KB", "dir": false}
+]
+
+fn paint_files_content(fb, x, y, w, h, theme, focused) {
+    let t = theme
+    let font = builtin_font()
+    fill_rect(fb, x, y, w, h, t["surface"])
+    mut ry = y + 10
+    mut i = 0
+    for row in _FILE_ROWS {
+        if i == 1 { fill_rect(fb, x + 6, ry - 3, w - 12, 22, t["accent_tertiary"]) }
+        let ic = if row["dir"] { t["accent_secondary"] } else { t["accent"] }
+        fill_rect(fb, x + 12, ry + 2, 12, 10, ic)
+        let name_col = if i == 1 { 0xFFFFFFFF } else { t["foreground"] }
+        draw_text(fb, x + 32, ry + 2, row["name"], font, name_col)
+        let mw = measure_text(font, row["meta"])[0]
+        draw_text(fb, x + w - mw - 14, ry + 2, row["meta"], font, t["foreground_muted"])
+        ry = ry + 24
+        i = i + 1
+    }
+}
+
+-- ── Registry ────────────────────────────────────────────
+
+fn app_painters() {
+    return {
+        "prism": paint_prism,
+        "terminal": paint_terminal_content,
+        "files": paint_files_content
+    }
+}

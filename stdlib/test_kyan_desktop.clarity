@@ -74,7 +74,7 @@ assert_eq(screen.height, 640, "screen height")
 
 -- wallpaper: the aurora glow tints the background away from pure void
 let void = theme["background"]
-let glow_px = screen.get_pixel(220, 180)
+let glow_px = screen.get_pixel(850, 520)
 assert(glow_px != void, "wallpaper glow tints the canvas")
 
 -- an app window composited: terminal is on top at (120,90); its red
@@ -123,7 +123,7 @@ d.toggle_launcher()
 assert(d.launcher_open, "toggle opens launcher")
 let sc2 = d.compose()
 -- the scrim darkens a previously-bright glow pixel
-let scrimmed = sc2.get_pixel(220, 180)
+let scrimmed = sc2.get_pixel(850, 520)
 assert(scrimmed != glow_px, "launcher scrim changes the composited canvas")
 d.toggle_launcher()
 assert(not d.launcher_open, "toggle closes launcher")
