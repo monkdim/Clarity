@@ -14,7 +14,7 @@ from "theme_kyan.clarity" import kyan_gradient_stops
 from "animations.clarity" import animation, EASE_OUT_CUBIC, EASE_IN_QUAD
 from "draw.clarity" import fill_rect, linear_gradient, radial_glow
 from "graphics.clarity" import rgba
-from "font.clarity" import builtin_font, draw_text, measure_text
+from "font.clarity" import builtin_font, draw_text, measure_text, measure_text_scaled
 
 let _VOID = 0xFF05060A       -- boot is always void-black
 let _HAIRLINE = 0xFF242D42
@@ -82,17 +82,19 @@ class KyanBootSplash {
         paint_monogram(this.fb, mono_cx, mono_cy, mono_size, this.theme, {"assemble": assemble})
         this._record("monogram", {"cx": mono_cx, "cy": mono_cy, "size": mono_size, "assemble": assemble})
 
-        -- 3. Wordmark centred below the monogram
-        let wm_y = mono_cy + int(mono_size * 0.75)
-        let wm_w = measure_text(this.font, KYAN_BRAND_NAME)[0]
-        let wm_x = mono_cx - wm_w / 2
-        paint_kyan_wordmark(this.fb, wm_x, wm_y, this.theme, {"font": this.font})
+        -- 3. Wordmark centred below the monogram, rendered at 2x
+        let wm_scale = 2
+        let wm_track = 1
+        let wm_y = mono_cy + int(mono_size * 0.72)
+        let wm_w = measure_text_scaled(this.font, KYAN_BRAND_NAME, wm_scale, 0)[0] + (len(KYAN_BRAND_NAME) - 1) * wm_track
+        let wm_x = mono_cx - int(wm_w / 2)
+        paint_kyan_wordmark(this.fb, wm_x, wm_y, this.theme, {"font": this.font, "scale": wm_scale, "letter_spacing": wm_track})
         this._record("wordmark", {"x": wm_x, "y": wm_y})
 
         -- 4. Tagline — muted, centred under the wordmark
         let tag_w = measure_text(this.font, KYAN_TAGLINE)[0]
-        let tag_x = mono_cx - tag_w / 2
-        let tag_y = wm_y + 22
+        let tag_x = mono_cx - int(tag_w / 2)
+        let tag_y = wm_y + this.font.height * wm_scale + 12
         draw_text(this.fb, tag_x, tag_y, KYAN_TAGLINE, this.font, this.theme["foreground_muted"])
         this._record("tagline", {"y": tag_y})
 

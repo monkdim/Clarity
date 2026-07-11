@@ -13,7 +13,7 @@
 from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline, fill_polygon
 from "theme_kyan.clarity" import kyan_gradient
 from "branding_modern.clarity" import paint_icon, icon_recipes
-from "font.clarity" import draw_text, measure_text, builtin_font
+from "font.clarity" import draw_text, measure_text, draw_text_scaled, measure_text_scaled, builtin_font
 
 -- ── Brand identity ─────────────────────────────
 
@@ -95,14 +95,15 @@ fn paint_kyan_wordmark(fb, x, y, theme, opts) {
     let ink = if has(o, "color") { o["color"] } else { theme["foreground"] }
     let accent = if has(o, "accent") { o["accent"] } else { theme["accent"] }
     let split = if has(o, "split") { o["split"] } else { 4 }   -- "Kyan" | "OS"
+    let scale = if has(o, "scale") { o["scale"] } else { 1 }
     let letter_spacing = if has(o, "letter_spacing") { o["letter_spacing"] } else { 1 }
     mut cursor = x
     mut i = 0
     while i < len(text) {
         let glyph = char_at(text, i)
         let color = if i < split { ink } else { accent }
-        draw_text(fb, cursor, y, glyph, font, color)
-        cursor = cursor + measure_text(font, glyph)[0] + letter_spacing
+        draw_text_scaled(fb, cursor, y, glyph, font, color, scale, 0)
+        cursor = cursor + measure_text_scaled(font, glyph, scale, 0)[0] + letter_spacing
         i = i + 1
     }
     return cursor - x
