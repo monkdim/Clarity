@@ -1,0 +1,170 @@
+-- Kyan branding + boot splash tests — rebrand phase K1.
+--
+-- Covers: brand identity strings, the faceted monogram + wordmark
+-- painting real pixels, the Prism hero icon + recipe map, and the
+-- void-black boot splash (assemble intro, progress clamp, gradient
+-- bar, fade-out lifecycle, captured paint ops).
+
+from "branding_kyan.clarity" import paint_monogram, paint_kyan_wordmark, paint_prism_icon, paint_kyan_icon, kyan_icon_recipes, KYAN_BRAND_NAME, KYAN_LANG_NAME, KYAN_TAGLINE
+from "boot_splash_kyan.clarity" import kyan_boot_splash, KyanBootSplash
+from "theme_kyan.clarity" import kyan_obsidian, kyan_quartz
+from "graphics.clarity" import framebuffer
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- helper: does the framebuffer contain any non-background pixel?
+fn _painted_something(fb, bg) {
+    mut y = 0
+    while y < fb.height {
+        mut x = 0
+        while x < fb.width {
+            if fb.get_pixel(x, y) != bg { return true }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return false
+}
+
+-- ── Brand identity ──────────────────────────────
+
+show "-- Kyan brand: identity --"
+
+assert_eq(KYAN_BRAND_NAME, "KyanOS", "OS brand name = KyanOS")
+assert_eq(KYAN_LANG_NAME, "Clarity", "language keeps the name Clarity")
+assert(len(KYAN_TAGLINE) > 0, "tagline present")
+
+let theme = kyan_obsidian()
+
+-- ── Monogram ────────────────────────────────────
+
+show "-- Kyan brand: monogram --"
+
+let fb_m = framebuffer(120, 120)
+fb_m.clear(0xFF000000)
+paint_monogram(fb_m, 60, 60, 80, theme, null)
+assert(_painted_something(fb_m, 0xFF000000), "monogram paints pixels")
+
+-- the lit edge (cyan-leaning signature) must actually appear
+fn _has_cyanish(fb) {
+    mut y = 0
+    while y < fb.height {
+        mut x = 0
+        while x < fb.width {
+            let p = fb.get_pixel(x, y)
+            let b = p & 0xFF
+            let g = int(p / 256) & 0xFF
+            let r = int(p / 65536) & 0xFF
+            if b > 150 and g > 120 and r < 120 { return true }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return false
+}
+assert(_has_cyanish(fb_m), "monogram has a lit cyan edge")
+
+-- assemble=0 vs 1 produce different layouts (shards offset)
+let fb_a = framebuffer(120, 120)
+fb_a.clear(0xFF000000)
+paint_monogram(fb_a, 60, 60, 80, theme, {"assemble": 0.0})
+mut diff = 0
+mut yy = 0
+while yy < 120 {
+    mut xx = 0
+    while xx < 120 {
+        if fb_a.get_pixel(xx, yy) != fb_m.get_pixel(xx, yy) { diff = diff + 1 }
+        xx = xx + 1
+    }
+    yy = yy + 1
+}
+assert(diff > 0, "assemble intro shifts the shards")
+
+-- tile option paints a backing surface
+let fb_t = framebuffer(140, 140)
+fb_t.clear(0xFF000000)
+paint_monogram(fb_t, 70, 70, 80, theme, {"tile": true})
+assert(_painted_something(fb_t, 0xFF000000), "monogram tile paints")
+
+-- ── Wordmark ────────────────────────────────────
+
+show "-- Kyan brand: wordmark --"
+
+let fb_w = framebuffer(160, 32)
+fb_w.clear(0xFF000000)
+let width = paint_kyan_wordmark(fb_w, 4, 12, theme, null)
+assert(width > 0, "wordmark returns positive width")
+assert(_painted_something(fb_w, 0xFF000000), "wordmark paints pixels")
+
+-- ── Prism hero icon + recipes ───────────────────
+
+show "-- Kyan brand: prism + icons --"
+
+let fb_p = framebuffer(64, 64)
+fb_p.clear(0xFF000000)
+assert(paint_kyan_icon(fb_p, "prism", 8, 8, 48, theme), "prism icon paints")
+assert(_painted_something(fb_p, 0xFF000000), "prism produced pixels")
+
+let recipes = kyan_icon_recipes()
+assert(has(recipes, "prism"), "prism in recipes")
+assert(has(recipes, "terminal"), "terminal still in recipes")
+assert(has(recipes, "settings"), "settings still in recipes")
+-- delegates non-prism icons to the modern painter
+let fb_i = framebuffer(64, 64)
+fb_i.clear(0xFF000000)
+assert(paint_kyan_icon(fb_i, "terminal", 8, 8, 48, theme), "delegated icon paints")
+assert(not paint_kyan_icon(fb_i, "does_not_exist", 8, 8, 48, theme), "unknown icon = false")
+
+-- ── Boot splash ─────────────────────────────────
+
+show "-- Kyan brand: boot splash --"
+
+let fb_bs = framebuffer(120, 90)
+let splash = kyan_boot_splash(fb_bs, theme)
+splash.start(0)
+splash.set_progress(0.4, "Mounting filesystems...")
+assert_eq(splash.status_text, "Mounting filesystems...", "status text set")
+
+-- progress clamps
+splash.set_progress(2.0, null)
+assert_eq(splash.progress, 1.0, "progress clamps high")
+splash.set_progress(-1.0, null)
+assert_eq(splash.progress, 0.0, "progress clamps low")
+splash.set_progress(0.5, "Halfway")
+
+-- a tick paints a frame and records ops
+assert(splash.tick(120), "tick paints while visible")
+assert(splash.frames_painted >= 1, "frame counted")
+assert(_painted_something(fb_bs, 0xFF000000) or fb_bs.get_pixel(0,0) == 0xFF05060A, "splash filled the canvas")
+mut kinds = []
+for op in splash.captured_paint_ops { push(kinds, op["kind"]) }
+assert(contains(kinds, "monogram"), "recorded monogram op")
+assert(contains(kinds, "wordmark"), "recorded wordmark op")
+assert(contains(kinds, "progress"), "recorded progress op")
+
+-- fade-out lifecycle
+splash.fade_out(200)
+assert(not splash.done(250), "fade not done immediately")
+assert(splash.done(700), "fade done after duration")
+
+-- quartz mode also drives cleanly (splash stays void-black)
+let fb_q = framebuffer(120, 90)
+let splash_q = kyan_boot_splash(fb_q, kyan_quartz())
+splash_q.start(0)
+splash_q.set_progress(0.8, "Almost there")
+assert(splash_q.tick(80), "quartz splash ticks")
+
+-- ── Summary ─────────────────────────────────────
+
+show ""
+show "Kyan brand: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " kyan brand test(s) failed" }

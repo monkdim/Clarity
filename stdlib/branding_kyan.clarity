@@ -1,0 +1,149 @@
+-- Kyan branding kit — KyanOS identity (rebrand phase K1).
+--
+-- Replaces the Drop+Leaf spring branding with the faceted-K
+-- monogram: the letter K cut like a gem, its upper-right edge lit
+-- by the signature gradient. Wordmark is "KyanOS" — "Kyan" in ink,
+-- "OS" in the signature cyan. The gradient lives only on the lit
+-- edge and accent elements; everything else is quiet dark glass.
+--
+-- Parallel to branding_modern.clarity (which stays for the legacy
+-- spring splash). App icons reuse the modern abstract-mark set and
+-- add "prism" — the game-hub hero mark.
+
+from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline, fill_polygon
+from "theme_kyan.clarity" import kyan_gradient
+from "branding_modern.clarity" import paint_icon, icon_recipes
+from "font.clarity" import draw_text, measure_text, draw_text_scaled, measure_text_scaled, builtin_font
+
+-- ── Brand identity ─────────────────────────────
+
+let KYAN_BRAND_NAME = "KyanOS"
+let KYAN_LANG_NAME = "Clarity"
+let KYAN_TAGLINE = "Dark glass. One light."
+
+-- Fixed dark-glass facet tones — the monogram always sits on a dark
+-- tile (boot splash is void-black in both modes; the app tile is
+-- dark glass), so the shard colours don't track the theme; only the
+-- lit edge does, via the signature gradient.
+let _FACET_STEM_HI = 0xFF3B4258
+let _FACET_STEM_LO = 0xFF2A3044
+let _FACET_DIAG_HI = 0xFF454E68
+let _FACET_DIAG_LO = 0xFF333A50
+let _TILE_TOP      = 0xFF10151F
+let _TILE_BOTTOM   = 0xFF05060A
+
+-- Map a local design coord (0..104 box, matching the mockup SVG)
+-- to screen space centred on (cx, cy) at the given pixel size.
+fn _kyan_pt(cx, cy, size, lx, ly) {
+    let sx = cx - size / 2 + int(lx / 104.0 * size)
+    let sy = cy - size / 2 + int(ly / 104.0 * size)
+    return [sx, sy]
+}
+
+fn _kyan_facet(fb, cx, cy, size, pts, dx, dy, color) {
+    mut mapped = []
+    for p in pts {
+        let s = _kyan_pt(cx, cy, size, p[0], p[1])
+        push(mapped, [s[0] + dx, s[1] + dy])
+    }
+    fill_polygon(fb, mapped, color)
+    return mapped
+}
+
+-- Paint the faceted-K monogram. opts:
+--   "tile"     — draw the dark rounded tile behind it (default false)
+--   "assemble" — 0..1 intro progress; <1 offsets shards for the
+--                boot "assemble" moment (default 1.0, fully settled)
+fn paint_monogram(fb, cx, cy, size, theme, opts) {
+    let o = opts ?? {}
+    let assemble = if has(o, "assemble") { o["assemble"] } else { 1.0 }
+    let draw_tile = if has(o, "tile") { o["tile"] } else { false }
+
+    if draw_tile {
+        let t = size + int(size * 0.42)
+        let tx = cx - t / 2
+        let ty = cy - t / 2
+        -- Simple two-band tile (no gradient primitive yet — K2 adds it)
+        rounded_rect(fb, tx, ty, t, t, int(t / 4.6), _TILE_BOTTOM)
+        fill_rect(fb, tx + 2, ty + 2, t - 4, t / 2, _TILE_TOP)
+    }
+
+    -- Shard displacement during the assemble moment: each facet
+    -- slides in from a slightly different offset, easing to zero.
+    let slack = int((1.0 - assemble) * (size * 0.18))
+    let lit = kyan_gradient(theme, 0.82)   -- cyan-leaning edge
+
+    -- stem (two shards)
+    _kyan_facet(fb, cx, cy, size, [[22,12],[40,12],[36,52],[22,52]], 0 - slack, 0, _FACET_STEM_HI)
+    _kyan_facet(fb, cx, cy, size, [[22,52],[36,52],[40,92],[22,92]], 0 - slack, slack, _FACET_STEM_LO)
+    -- upper diagonal shard (slides from upper-right)
+    _kyan_facet(fb, cx, cy, size, [[40,50],[82,10],[90,20],[50,56]], slack, 0 - slack, _FACET_DIAG_HI)
+    -- lower diagonal shard (slides from lower-right)
+    _kyan_facet(fb, cx, cy, size, [[48,58],[88,90],[74,94],[40,64]], slack, slack, _FACET_DIAG_LO)
+    -- the lit edge — signature gradient facet, settles last, with a
+    -- crisp brighter stroke along it for the neon glow-line
+    let lit_pts = _kyan_facet(fb, cx, cy, size, [[82,10],[90,20],[50,56],[46,48]], slack, 0 - slack, lit)
+    polygon(fb, lit_pts, kyan_gradient(theme, 1.0))
+}
+
+-- Wordmark: "Kyan" in ink + "OS" in the signature cyan. Returns the
+-- total pixel width drawn.
+fn paint_kyan_wordmark(fb, x, y, theme, opts) {
+    let o = opts ?? {}
+    let font = if has(o, "font") { o["font"] } else { builtin_font() }
+    let text = if has(o, "text") { o["text"] } else { KYAN_BRAND_NAME }
+    let ink = if has(o, "color") { o["color"] } else { theme["foreground"] }
+    let accent = if has(o, "accent") { o["accent"] } else { theme["accent"] }
+    let split = if has(o, "split") { o["split"] } else { 4 }   -- "Kyan" | "OS"
+    let scale = if has(o, "scale") { o["scale"] } else { 1 }
+    let letter_spacing = if has(o, "letter_spacing") { o["letter_spacing"] } else { 1 }
+    mut cursor = x
+    mut i = 0
+    while i < len(text) {
+        let glyph = char_at(text, i)
+        let color = if i < split { ink } else { accent }
+        draw_text_scaled(fb, cursor, y, glyph, font, color, scale, 0)
+        cursor = cursor + measure_text_scaled(font, glyph, scale, 0)[0] + letter_spacing
+        i = i + 1
+    }
+    return cursor - x
+}
+
+-- ── App icons — modern set + the Prism hero mark ──
+
+-- Prism: the game hub. An upward triangle (a prism) split by a
+-- vertical line — light entering, refracting. Painted in the
+-- signature cyan on the theme surface.
+fn paint_prism_icon(fb, x, y, size, theme) {
+    let radius = int(size / 5)
+    rounded_rect(fb, x, y, size, size, radius, theme["surface"])
+    let edge = kyan_gradient(theme, 0.85)
+    fill_rect(fb, x, y, size, max(2, int(size / 16)), edge)
+    let cx = x + size / 2
+    let top = y + int(size * 0.24)
+    let bot = y + int(size * 0.74)
+    let half = int(size * 0.26)
+    -- prism triangle outline
+    polyline(fb, [
+        [cx, top], [cx + half, bot], [cx - half, bot], [cx, top]
+    ], edge)
+    -- refraction line down the centre
+    line(fb, cx, top, cx, bot, theme["accent_secondary"])
+}
+
+fn kyan_icon_recipes() {
+    mut out = {}
+    for kv in entries(icon_recipes()) { out[kv[0]] = kv[1] }
+    out["prism"] = {"mark": "prism", "accent": "accent"}
+    return out
+}
+
+-- Paint any app icon in the Kyan theme. "prism" is handled here;
+-- everything else delegates to the modern abstract-mark painter
+-- (which already pulls its accent from the passed theme).
+fn paint_kyan_icon(fb, app_id, x, y, size, theme) {
+    if app_id == "prism" { paint_prism_icon(fb, x, y, size, theme); return true }
+    return paint_icon(fb, app_id, x, y, size, theme)
+}
+
+fn max(a, b) { if a > b { return a }; return b }

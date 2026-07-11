@@ -181,6 +181,65 @@ fn polygon(fb, points, color) {
     }
 }
 
+-- ── Polygon: filled (scanline, even-odd rule) ───────────
+-- Fills the area enclosed by `points` (a list of [x, y] pairs,
+-- auto-closed). Works for convex and simple concave polygons.
+-- Integer scanlines; pair up edge crossings left-to-right.
+fn fill_polygon(fb, points, color) {
+    let n = len(points)
+    if n < 3 { return null }
+    -- vertical extent
+    mut min_y = points[0][1]
+    mut max_y = points[0][1]
+    mut i = 1
+    while i < n {
+        let py = points[i][1]
+        if py < min_y { min_y = py }
+        if py > max_y { max_y = py }
+        i += 1
+    }
+    if min_y < 0 { min_y = 0 }
+    if max_y > fb.height - 1 { max_y = fb.height - 1 }
+
+    mut y = min_y
+    while y <= max_y {
+        -- collect x-crossings of all edges at this scanline
+        mut xs = []
+        mut e = 0
+        while e < n {
+            let a = points[e]
+            let b = points[(e + 1) % n]
+            let ay = a[1]
+            let by = b[1]
+            -- edge straddles the scanline (half-open to avoid double-count)
+            if (ay <= y and by > y) or (by <= y and ay > y) {
+                let t = (y - ay) / (by - ay)
+                let x = a[0] + (b[0] - a[0]) * t
+                push(xs, x)
+            }
+            e += 1
+        }
+        -- sort crossings ascending (small n — insertion sort)
+        mut a2 = 1
+        while a2 < len(xs) {
+            let key = xs[a2]
+            mut b2 = a2 - 1
+            while b2 >= 0 and xs[b2] > key { xs[b2 + 1] = xs[b2]; b2 -= 1 }
+            xs[b2 + 1] = key
+            a2 += 1
+        }
+        -- fill spans between crossing pairs
+        mut p = 0
+        while p + 1 < len(xs) {
+            let x0 = int(xs[p])
+            let x1 = int(xs[p + 1])
+            if x1 >= x0 { fill_rect(fb, x0, y, x1 - x0 + 1, 1, color) }
+            p += 2
+        }
+        y += 1
+    }
+}
+
 -- Open polyline (no closing segment).
 fn polyline(fb, points, color) {
     let n = len(points)
@@ -191,5 +250,192 @@ fn polyline(fb, points, color) {
         let b = points[i + 1]
         line(fb, a[0], a[1], b[0], b[1], color)
         i += 1
+    }
+}
+
+-- ── Alpha compositing (source-over) ─────────────────────
+-- Colors are 0xAARRGGBB. Channels are unpacked by division (not `>>`)
+-- so the 0xFF alpha byte never sign-extends. The destination is
+-- treated as opaque, so results are opaque — exactly what a screen
+-- framebuffer wants.
+
+-- Composite `src` (possibly translucent) over an opaque `dst`.
+fn blend_over(dst, src) {
+    let sa = int(src / 16777216) & 0xFF
+    if sa == 255 { return src }
+    if sa == 0 { return dst }
+    let sr = int(src / 65536) & 0xFF
+    let sg = int(src / 256) & 0xFF
+    let sb = src & 0xFF
+    let dr = int(dst / 65536) & 0xFF
+    let dg = int(dst / 256) & 0xFF
+    let db = dst & 0xFF
+    let ia = 255 - sa
+    let orr = int((sr * sa + dr * ia) / 255)
+    let og  = int((sg * sa + dg * ia) / 255)
+    let ob  = int((sb * sa + db * ia) / 255)
+    return 255 * 16777216 + orr * 65536 + og * 256 + ob
+}
+
+-- Blend one translucent pixel onto the framebuffer.
+fn blend_pixel(fb, x, y, color) {
+    let sa = int(color / 16777216) & 0xFF
+    if sa == 255 { fb.put_pixel(x, y, color); return null }
+    if sa == 0 { return null }
+    fb.put_pixel(x, y, blend_over(fb.get_pixel(x, y), color))
+}
+
+-- Alpha-aware rectangle fill. Opaque colors take the fast FFI path;
+-- translucent colors composite per pixel (translucent panels, glass,
+-- scrims, soft shadows).
+fn fill_rect_blend(fb, x, y, w, h, color) {
+    let sa = int(color / 16777216) & 0xFF
+    if sa == 0 { return null }
+    if sa == 255 { fb.fill_rect(x, y, w, h, color); return null }
+    let y_end = y + h
+    let x_end = x + w
+    mut yy = y
+    while yy < y_end {
+        mut xx = x
+        while xx < x_end {
+            blend_pixel(fb, xx, yy, color)
+            xx += 1
+        }
+        yy += 1
+    }
+}
+
+-- ── Gradients ───────────────────────────────────────────
+-- Interpolate two 0xAARRGGBB colors (alpha included) at t in [0,1].
+fn lerp_rgba(a, b, t) {
+    let aa = int(a / 16777216) & 0xFF
+    let ar = int(a / 65536) & 0xFF
+    let ag = int(a / 256) & 0xFF
+    let ab = a & 0xFF
+    let ba = int(b / 16777216) & 0xFF
+    let br = int(b / 65536) & 0xFF
+    let bg = int(b / 256) & 0xFF
+    let bb = b & 0xFF
+    let oa = int(aa + (ba - aa) * t)
+    let orr = int(ar + (br - ar) * t)
+    let og = int(ag + (bg - ag) * t)
+    let ob = int(ab + (bb - ab) * t)
+    return oa * 16777216 + orr * 65536 + og * 256 + ob
+}
+
+-- Sample a stop list [{"t": f, "color": c}, ...] (ascending t) at t.
+fn sample_stops(stops, t) {
+    mut clamped = t
+    if clamped < 0.0 { clamped = 0.0 }
+    if clamped > 1.0 { clamped = 1.0 }
+    mut i = 0
+    while i < len(stops) - 1 {
+        let s0 = stops[i]
+        let s1 = stops[i + 1]
+        if clamped >= s0["t"] and clamped <= s1["t"] {
+            let span = s1["t"] - s0["t"]
+            let local = if span == 0.0 { 0.0 } else { (clamped - s0["t"]) / span }
+            return lerp_rgba(s0["color"], s1["color"], local)
+        }
+        i += 1
+    }
+    return stops[len(stops) - 1]["color"]
+}
+
+-- Fill a rect with a linear gradient across `stops`. dir "h"
+-- (left→right) or "v" (top→bottom). Alpha-aware: translucent stops
+-- composite, opaque stops take the fast per-line fill.
+fn linear_gradient(fb, x, y, w, h, stops, dir) {
+    if w <= 0 or h <= 0 { return null }
+    if dir == "v" {
+        mut yy = 0
+        while yy < h {
+            let t = if h <= 1 { 0.0 } else { yy / (h - 1) }
+            let c = sample_stops(stops, t)
+            fill_rect_blend(fb, x, y + yy, w, 1, c)
+            yy += 1
+        }
+    } else {
+        mut xx = 0
+        while xx < w {
+            let t = if w <= 1 { 0.0 } else { xx / (w - 1) }
+            let c = sample_stops(stops, t)
+            fill_rect_blend(fb, x + xx, y, 1, h, c)
+            xx += 1
+        }
+    }
+}
+
+-- Soft radial glow: `color`'s alpha is the peak at the centre, easing
+-- to zero at `radius` (squared falloff — no sqrt). The neon halo.
+fn radial_glow(fb, cx, cy, radius, color) {
+    if radius <= 0 { return null }
+    let peak = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    let r2 = radius * radius
+    mut yy = cy - radius
+    while yy <= cy + radius {
+        mut xx = cx - radius
+        while xx <= cx + radius {
+            let dx = xx - cx
+            let dy = yy - cy
+            let d2 = dx * dx + dy * dy
+            if d2 <= r2 {
+                let falloff = 1.0 - (d2 / r2)
+                let a = int(peak * falloff)
+                if a > 0 { blend_pixel(fb, xx, yy, a * 16777216 + rgb) }
+            }
+            xx += 1
+        }
+        yy += 1
+    }
+}
+
+-- ── Glass panels & soft shadows ─────────────────────────
+-- Blend a single horizontal span (helper for the rounded fill).
+fn _hline_blend(fb, x0, y, x1, color) {
+    mut x = x0
+    while x <= x1 { blend_pixel(fb, x, y, color); x += 1 }
+}
+
+-- Alpha-aware rounded rectangle — a translucent glass panel. Opaque
+-- colours fall through to the fast rounded_rect. Regions are disjoint,
+-- so each pixel is composited once.
+fn rounded_rect_blend(fb, x, y, w, h, radius, color) {
+    let sa = int(color / 16777216) & 0xFF
+    if sa == 0 { return null }
+    if sa == 255 { rounded_rect(fb, x, y, w, h, radius, color); return null }
+    let r = if radius * 2 > w { w / 2 } else { radius }
+    let r2 = if r * 2 > h { h / 2 } else { r }
+    if r2 <= 0 { fill_rect_blend(fb, x, y, w, h, color); return null }
+    fill_rect_blend(fb, x + r2, y, w - 2 * r2, h, color)
+    fill_rect_blend(fb, x, y + r2, r2, h - 2 * r2, color)
+    fill_rect_blend(fb, x + w - r2, y + r2, r2, h - 2 * r2, color)
+    mut dy = 0 - r2
+    while dy <= 0 {
+        mut dx = 0
+        while (dx + 1) * (dx + 1) + dy * dy <= r2 * r2 { dx += 1 }
+        let row_top = y + r2 + dy
+        let row_bot = y + h - 1 - r2 - dy
+        _hline_blend(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color)
+        _hline_blend(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color)
+        dy += 1
+    }
+}
+
+-- Soft drop shadow beneath a panel: `blur` translucent rounded rects,
+-- each larger and drawn underneath the next, so alpha accumulates near
+-- the panel edge and fades outward. `color`'s alpha is the total the
+-- shadow builds to. Slightly offset downward. Draw before the panel.
+fn drop_shadow(fb, x, y, w, h, radius, color, blur) {
+    if blur <= 0 { return null }
+    let a = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    let per = if a < blur { 1 } else { int(a / blur) }
+    let off = int(blur / 2)
+    mut i = blur
+    while i >= 1 {
+        rounded_rect_blend(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb)
+        i -= 1
     }
 }

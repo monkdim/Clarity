@@ -1,4 +1,4 @@
-# ClarityOS micro-kernel
+# KyanOS micro-kernel
 
 The only non-Clarity code in the operating system. About ~10 K lines
 of Zig (the target — current skeleton is ~2 K) covering boot, memory
@@ -65,7 +65,7 @@ Zig enums in `syscall/dispatch.zig` and `fs/vfs.zig` keep the same
 values so userspace and kernel agree on the wire format.
 
 `stdlib/syscall.clarity` is the userspace wrapper. On Linux/macOS it
-delegates to the host runtime (Bun's fs/process APIs). When ClarityOS
+delegates to the host runtime (Bun's fs/process APIs). When KyanOS
 is self-hosting, the same call signatures issue real `syscall`
 instructions instead — userspace code doesn't change.
 

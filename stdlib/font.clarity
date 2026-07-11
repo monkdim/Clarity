@@ -15,6 +15,7 @@
 --   measure_text(font, text)   → [width, height]
 
 from "ffi.clarity" import Pointer
+from "draw.clarity" import fill_rect_blend
 
 class Font {
     fn init(width, height, glyphs) {
@@ -44,6 +45,9 @@ fn measure_text(font, text) {
 fn draw_text(fb, x, y, text, font, color) {
     let fw = font.width
     let fh = font.height
+    -- Floor the origin so a fractional coord can't misalign the writes.
+    let bx = int(x)
+    let by = int(y)
     let chs = chars(text)
     mut col_offset = 0
     mut i = 0
@@ -58,7 +62,7 @@ fn draw_text(fb, x, y, text, font, color) {
                 while bit < fw {
                     let mask = 1 << (fw - 1 - bit)
                     if (byte & mask) != 0 {
-                        fb.put_pixel(x + col_offset + bit, y + row, color)
+                        fb.put_pixel(bx + col_offset + bit, by + row, color)
                     }
                     bit += 1
                 }
@@ -68,6 +72,62 @@ fn draw_text(fb, x, y, text, font, color) {
         col_offset += fw
         i += 1
     }
+}
+
+-- ── Scaled text ─────────────────────────────────────────
+--
+-- The builtin font is a single 8x8 strike, so headings and the
+-- wordmark render each set bit as a `scale`×`scale` block — crisp
+-- integer-scaled text at any size (2x, 3x, 4x …) without a second
+-- font. `tracking` adds extra pixels of letter-spacing (in device
+-- pixels). Translucent colours composite; opaque colours take the
+-- fast rect fill.
+
+fn measure_text_scaled(font, text, scale, tracking) {
+    let s = if scale == null or scale < 1 { 1 } else { scale }
+    let track = if tracking == null { 0 } else { tracking }
+    let n = len(text)
+    if n == 0 { return [0, 0] }
+    return [n * font.width * s + (n - 1) * track, font.height * s]
+}
+
+fn draw_text_scaled(fb, x, y, text, font, color, scale, tracking) {
+    let s = if scale == null or scale < 1 { 1 } else { scale }
+    let track = if tracking == null { 0 } else { tracking }
+    let fw = font.width
+    let fh = font.height
+    let sa = int(color / 16777216) & 0xFF
+    -- Floor the origin: fractional pixel coords would make the u32
+    -- colour writes land on a non-4-byte boundary and scramble channels.
+    let by = int(y)
+    let chs = chars(text)
+    mut cx = int(x)
+    mut i = 0
+    while i < len(chs) {
+        let code = char_code(chs[i])
+        let glyph = font.glyph(code)
+        if glyph != null {
+            mut row = 0
+            while row < fh {
+                let byte = glyph[row]
+                mut bit = 0
+                while bit < fw {
+                    let mask = 1 << (fw - 1 - bit)
+                    if (byte & mask) != 0 {
+                        let px = cx + bit * s
+                        let py = by + row * s
+                        if sa == 255 { fb.fill_rect(px, py, s, s, color) }
+                        else { fill_rect_blend(fb, px, py, s, s, color) }
+                    }
+                    bit += 1
+                }
+                row += 1
+            }
+        }
+        cx += fw * s + track
+        i += 1
+    }
+    return cx - x
 }
 
 -- ── Built-in 8x8 ASCII font ─────────────────────────────

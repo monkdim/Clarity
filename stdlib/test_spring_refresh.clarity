@@ -90,14 +90,14 @@ show "-- Phase 76: theme registry --"
 
 let reg = theme_registry()
 let ids = reg.ids()
-assert_eq(len(ids), 4, "4 built-in themes")
+assert_eq(len(ids), 6, "6 built-in themes (kyan x2 + 4 legacy)")
 assert(contains(ids, "meadow"), "meadow registered")
 assert(contains(ids, "bloom"), "bloom registered")
 assert(contains(ids, "watercolor"), "watercolor registered")
 assert(contains(ids, "midnight"), "midnight (aurora) registered")
 
 let listing = reg.list()
-assert_eq(len(listing), 4, "list has 4")
+assert_eq(len(listing), 6, "list has 6")
 mut found_midnight = false
 mut midnight_scheme = ""
 for entry in listing {
@@ -110,9 +110,9 @@ assert(found_midnight, "midnight in listing")
 assert_eq(midnight_scheme, "dark", "midnight is dark scheme")
 
 -- get + active
-assert_eq(reg.active_id, "meadow", "default active = meadow")
+assert_eq(reg.active_id, "kyan-obsidian", "default active = kyan-obsidian")
 let active = reg.active()
-assert_eq(active["id"], "meadow", "active() returns meadow")
+assert_eq(active["id"], "kyan-obsidian", "active() returns kyan-obsidian")
 let mid = reg.get("midnight")
 assert(mid != null, "get midnight")
 assert_eq(mid["id"], "midnight", "midnight has id")
@@ -155,7 +155,7 @@ show "-- Phase 76: theme picker --"
 let reg_p = theme_registry()
 let picker = theme_picker(reg_p)
 let opts = picker.options()
-assert_eq(len(opts), 4, "picker exposes 4 options")
+assert_eq(len(opts), 6, "picker exposes 6 options (kyan x2 + 4 legacy)")
 mut active_count = 0
 for opt in opts {
     if opt["active"] { active_count = active_count + 1 }
@@ -166,8 +166,8 @@ assert_eq(active_count, 1, "exactly one active option")
 
 let light_opts = picker.light_options()
 let dark_opts = picker.dark_options()
-assert_eq(len(light_opts), 3, "3 light options")
-assert_eq(len(dark_opts), 1, "1 dark option (midnight)")
+assert_eq(len(light_opts), 4, "4 light options (quartz + 3 spring)")
+assert_eq(len(dark_opts), 2, "2 dark options (obsidian + midnight)")
 
 -- select fires on_change
 mut change_calls = 0
@@ -187,12 +187,12 @@ assert(picker3.preview("midnight"), "preview midnight")
 assert_eq(picker3.current_preview()["id"], "midnight", "preview is midnight")
 assert_eq(picker3.snapshot()["preview"], "midnight", "snapshot preview")
 picker3.clear_preview()
-assert_eq(picker3.current_preview()["id"], "meadow", "preview cleared = active")
+assert_eq(picker3.current_preview()["id"], "kyan-obsidian", "preview cleared = active")
 assert(not picker3.preview("nope"), "preview unknown = false")
 
 -- snapshot
 let snap = picker3.snapshot()
-assert_eq(snap["active"], "meadow", "snapshot active")
+assert_eq(snap["active"], "kyan-obsidian", "snapshot active")
 assert(has(snap, "options"), "snapshot has options")
 
 -- ── Modern branding tokens ──────────────────────

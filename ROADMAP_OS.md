@@ -1,17 +1,17 @@
-# ClarityOS — Path Forward
+# KyanOS — Path Forward
 
-This document tracks **what's next for ClarityOS**. The 1.0 development history (Phases 56–76) lives in git. Language-side gaps live in [GAPS.md](GAPS.md). This file covers the OS: kernel, freestanding runtime, compositor, window manager, desktop shell, default apps, ISO packer, QEMU launcher, themes, and the release pipeline.
+This document tracks **what's next for KyanOS**. The 1.0 development history (Phases 56–76) lives in git. Language-side gaps live in [GAPS.md](GAPS.md). This file covers the OS: kernel, freestanding runtime, compositor, window manager, desktop shell, default apps, ISO packer, QEMU launcher, themes, and the release pipeline.
 
 ---
 
-## Where we are (May 2026)
+## Where we are (July 2026)
 
-ClarityOS 1.0 has shipped. The current state, verifiable in this repo:
+KyanOS is **experimental and under active development.** Here is the honest, in-repo state — see [AUDIT.md](AUDIT.md) for the file-by-file evidence behind each line:
 
-- **Boots in QEMU on macOS (HVF) and on bare metal.** Multiboot2 → ELF loader → ring switch → SYSCALL → page faults → fork/exec/wait/kill. Boot to desktop in under five seconds.
-- **One language, top to bottom.** ~50,000 lines of Clarity above the syscall boundary. The Zig kernel, freestanding QuickJS runtime, init, tmpfs/devfs/procfs, input pipeline, compositor, window manager, dock, launcher, settings panel, file manager, editor, terminal, calculator, image viewer, system monitor, app store, mail, chat, IDE, and docs viewer are all in this repo.
-- **Four themes.** Meadow (flagship — sage / daffodil / blossom / sky on cream), Bloom (mint + apricot), Watercolor (parchment pastels), Midnight (the deep violet-charcoal Aurora variant). Switchable live in **Settings → Appearance**.
-- **Performance gate green.** Boot under 5 s, frame target 60 fps, idle RAM under 256 MB, app launch under 250 ms cold.
+- **The layers exist; the boot path is not yet real.** The Zig micro-kernel, the freestanding runtime, init, the compositor, the window manager, and the apps are all written and in the tree — but boot-to-desktop has not been compiled, linked, or booted end to end, and the kernel does not yet build in CI. Multiboot2 → ELF loader → SYSCALL → fork/exec/wait are scaffolded, not wired. Bare-metal boot is a goal, not a verified claim.
+- **One language, top to bottom.** ~50,000 lines of Clarity above the syscall boundary. The kernel, runtime, init, tmpfs/devfs/procfs, input pipeline, compositor, window manager, dock, launcher, settings panel, and the default apps are all in this repo — well-built and unit-tested as modules, though the boundaries between them are still bridged by test stubs rather than a live desktop.
+- **The Kyan identity.** Obsidian (dark, default) and Quartz (light) are the two modes of the flagship identity, sharing one violet→cyan signature; the spring themes (Meadow, Bloom, Watercolor, Midnight) remain as selectable legacy palettes. Switchable live in **Settings → Appearance**.
+- **Performance targets, not yet gates.** Under-5 s boot, 60 fps, under-256 MB idle, under-250 ms app launch are the goals. None is verified — there is no booting desktop to measure yet.
 
 What this document is *not*: a phase-by-phase chronicle. The phase tables that used to live here are in git history at any commit before this rewrite.
 
@@ -19,13 +19,13 @@ What this document is *not*: a phase-by-phase chronicle. The phase tables that u
 
 ## CI smoke test (the last piece of the developer workflow)
 
-The `clarity os` CLI subcommand is now wired (`build`, `run`, `iso`, `install`); `read_bytes`/`write_bytes` builtins exist; a cross-platform QEMU launcher in `stdlib/qemu.clarity` picks HVF on macOS and KVM on Linux. What's still missing is a **headless QEMU boot in CI** that greps the serial output for the `ClarityOS ready.` marker.
+The `clarity os` CLI subcommand is now wired (`build`, `run`, `iso`, `install`); `read_bytes`/`write_bytes` builtins exist; a cross-platform QEMU launcher in `stdlib/qemu.clarity` picks HVF on macOS and KVM on Linux. What's still missing is a **headless QEMU boot in CI** that greps the serial output for the `KyanOS ready.` marker.
 
-The infrastructure is there: `clarity os run --headless --boot-test "ClarityOS ready."` does the right thing locally; `run_vm.clarity` already understands `boot_test_marker` + `timeout_seconds`. The remaining work is in `.github/workflows/ci.yml`:
+The infrastructure is there: `clarity os run --headless --boot-test "KyanOS ready."` does the right thing locally; `run_vm.clarity` already understands `boot_test_marker` + `timeout_seconds`. The remaining work is in `.github/workflows/ci.yml`:
 
 - Install zig (the actions ecosystem has `goto-bus-stop/setup-zig` or equivalent).
 - Install qemu-system-x86 + ovmf via apt on Ubuntu, brew on macOS.
-- Run `./native/dist/clarity os build && ./native/dist/clarity os run --headless --boot-test "ClarityOS ready." --timeout 120` after the existing self-hosted tests.
+- Run `./native/dist/clarity os build && ./native/dist/clarity os run --headless --boot-test "KyanOS ready." --timeout 120` after the existing self-hosted tests.
 - Cache `kernel/zig-out` and `runtime/freestanding/zig-out` so subsequent runs are fast.
 
 Skipped today because (a) it adds 5–10 minutes to every PR, and (b) needs a cache strategy that's its own design call.
@@ -86,7 +86,7 @@ The toolkit ships the widgets needed to build the eleven default apps. Filling o
 
 Decisions that should stay decisions.
 
-- **A second window-system protocol.** Wayland/X11 compatibility shims are not on the path. ClarityOS apps target the Clarity compositor protocol; cross-OS apps run in QEMU.
+- **A second window-system protocol.** Wayland/X11 compatibility shims are not on the path. KyanOS apps target the Clarity compositor protocol; cross-OS apps run in QEMU.
 - **POSIX userspace shim.** `bash`, `coreutils`, and the BSD utilities are not coming. The Clarity shell + the eleven default apps are the userspace.
 - **A separate kernel language.** The kernel stays in Zig. Self-hosting the kernel in Clarity is not a 1.x goal.
 

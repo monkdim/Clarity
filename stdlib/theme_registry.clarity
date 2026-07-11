@@ -1,28 +1,34 @@
--- Theme registry — Phase 76.
+-- Theme registry — KyanOS flagship (rebrand phase K1).
 --
--- Single source of truth for the four themes ClarityOS ships with:
+-- Single source of truth for the themes KyanOS ships with. The Kyan
+-- identity leads; the spring themes remain as selectable legacy
+-- options (the theme protocol is how community themes plug in, so
+-- nothing is thrown away):
 --
---   meadow      (default) — sage green + daffodil + blossom + sky
---   bloom       (variant) — mint sky + apricot peach + coral
---   watercolor  (variant) — parchment + dreamy pastels
---   midnight    (legacy)  — Aurora's deep violet-charcoal, kept
---                           for users who genuinely want a dark
---                           theme. Was Phase 74's flagship.
+--   kyan-obsidian (default) — dark volcanic glass, void black
+--   kyan-quartz   (light)   — pale mineral, same signature
+--   meadow        (legacy)  — sage green + daffodil + blossom + sky
+--   bloom         (legacy)  — mint sky + apricot peach + coral
+--   watercolor    (legacy)  — parchment + dreamy pastels
+--   midnight      (legacy)  — Aurora's deep violet-charcoal
 --
 -- The registry persists the user's choice to ~/.clarity-os/theme
 -- on the host runtime + reads it back on session start.
 
+from "theme_kyan.clarity" import kyan_obsidian, kyan_quartz, default_kyan_theme
 from "theme_meadow.clarity" import meadow, bloom, watercolor, default_spring_theme
 from "theme_aurora.clarity" import aurora
 
-let DEFAULT_THEME_ID = "meadow"
+let DEFAULT_THEME_ID = "kyan-obsidian"
 let PERSIST_PATH = "/.clarity-os/theme"
 
 let _BUILT_INS = [
-    {"id": "meadow",     "name": "Meadow",      "factory": "meadow",     "scheme": "light"},
-    {"id": "bloom",      "name": "Bloom",       "factory": "bloom",      "scheme": "light"},
-    {"id": "watercolor", "name": "Watercolor",  "factory": "watercolor", "scheme": "light"},
-    {"id": "midnight",   "name": "Midnight",    "factory": "aurora",     "scheme": "dark"}
+    {"id": "kyan-obsidian", "name": "Obsidian",   "factory": "kyan_obsidian", "scheme": "dark"},
+    {"id": "kyan-quartz",   "name": "Quartz",     "factory": "kyan_quartz",   "scheme": "light"},
+    {"id": "meadow",        "name": "Meadow",     "factory": "meadow",        "scheme": "light"},
+    {"id": "bloom",         "name": "Bloom",      "factory": "bloom",         "scheme": "light"},
+    {"id": "watercolor",    "name": "Watercolor", "factory": "watercolor",    "scheme": "light"},
+    {"id": "midnight",      "name": "Midnight",   "factory": "aurora",        "scheme": "dark"}
 ]
 
 class ThemeRegistry {
@@ -31,10 +37,12 @@ class ThemeRegistry {
         for entry in _BUILT_INS {
             let factory_name = entry["factory"]
             mut t = null
-            if factory_name == "meadow"     { t = meadow() }
-            elif factory_name == "bloom"     { t = bloom() }
-            elif factory_name == "watercolor"{ t = watercolor() }
-            elif factory_name == "aurora"    {
+            if factory_name == "kyan_obsidian" { t = kyan_obsidian() }
+            elif factory_name == "kyan_quartz"  { t = kyan_quartz() }
+            elif factory_name == "meadow"       { t = meadow() }
+            elif factory_name == "bloom"        { t = bloom() }
+            elif factory_name == "watercolor"   { t = watercolor() }
+            elif factory_name == "aurora"       {
                 t = aurora()
                 t["id"] = "midnight"
                 t["name"] = "Midnight"
