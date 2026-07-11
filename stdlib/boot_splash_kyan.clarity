@@ -1,0 +1,149 @@
+-- Kyan boot splash — KyanOS identity (rebrand phase K1).
+--
+-- One orchestrated moment: on void-black, the faceted-K monogram
+-- assembles (shards easing into place), the "KyanOS" wordmark sits
+-- below, and the signature gradient sweeps a full-width progress
+-- bar at the bottom. Boot stays dark in both modes.
+--
+-- Same external API as boot_splash_modern.clarity — start(now) /
+-- set_progress(pct, status) / fade_out(now) / done(now) / tick(now)
+-- — so an init path can swap splashes without other changes.
+
+from "branding_kyan.clarity" import paint_monogram, paint_kyan_wordmark, KYAN_TAGLINE, KYAN_BRAND_NAME
+from "theme_kyan.clarity" import kyan_gradient
+from "animations.clarity" import animation, EASE_OUT_CUBIC, EASE_IN_QUAD
+from "draw.clarity" import fill_rect
+from "font.clarity" import builtin_font, draw_text, measure_text
+
+let _VOID = 0xFF05060A       -- boot is always void-black
+let _HAIRLINE = 0xFF242D42
+
+class KyanBootSplash {
+    fn init(fb, theme) {
+        this.fb = fb
+        this.theme = theme
+        this.progress = 0.0
+        this.status_text = "Starting up..."
+        this.start_ms = null
+        this.intro = null
+        this.fade = null
+        this.frames_painted = 0
+        this.captured_paint_ops = []
+        this.font = builtin_font()
+    }
+
+    fn start(now_ms) {
+        this.start_ms = now_ms
+        this.intro = animation({
+            "duration_ms": 700, "easing": EASE_OUT_CUBIC, "from": 0.0, "to": 1.0
+        })
+        this.intro.start(now_ms)
+    }
+
+    fn set_progress(pct, status_text) {
+        if pct < 0.0 { pct = 0.0 }
+        if pct > 1.0 { pct = 1.0 }
+        this.progress = pct
+        if status_text != null { this.status_text = status_text }
+    }
+
+    fn fade_out(now_ms) {
+        this.fade = animation({
+            "duration_ms": 360, "easing": EASE_IN_QUAD, "from": 1.0, "to": 0.0
+        })
+        this.fade.start(now_ms)
+    }
+
+    fn done(now_ms) {
+        if this.fade == null { return false }
+        return this.fade.done(now_ms)
+    }
+
+    -- ── Paint a frame ─────────────────────────
+
+    fn tick(now_ms) {
+        let opacity = if this.fade != null { this.fade.value(now_ms) } else { 1.0 }
+        if opacity <= 0.01 { return false }
+
+        -- 1. Void-black canvas
+        fill_rect(this.fb, 0, 0, this.fb.width, this.fb.height, _VOID)
+        this._record("background", null)
+
+        -- 2. Faceted monogram, centred in the upper-middle, assembling
+        let assemble = if this.intro != null { this.intro.value(now_ms) } else { 1.0 }
+        let mono_cx = int(this.fb.width * 0.5)
+        let mono_cy = int(this.fb.height * 0.40)
+        let mono_size = int(this.fb.height * 0.34)
+        paint_monogram(this.fb, mono_cx, mono_cy, mono_size, this.theme, {"assemble": assemble})
+        this._record("monogram", {"cx": mono_cx, "cy": mono_cy, "size": mono_size, "assemble": assemble})
+
+        -- 3. Wordmark centred below the monogram
+        let wm_y = mono_cy + int(mono_size * 0.75)
+        let wm_w = measure_text(this.font, KYAN_BRAND_NAME)[0]
+        let wm_x = mono_cx - wm_w / 2
+        paint_kyan_wordmark(this.fb, wm_x, wm_y, this.theme, {"font": this.font})
+        this._record("wordmark", {"x": wm_x, "y": wm_y})
+
+        -- 4. Tagline — muted, centred under the wordmark
+        let tag_w = measure_text(this.font, KYAN_TAGLINE)[0]
+        let tag_x = mono_cx - tag_w / 2
+        let tag_y = wm_y + 22
+        draw_text(this.fb, tag_x, tag_y, KYAN_TAGLINE, this.font, this.theme["foreground_muted"])
+        this._record("tagline", {"y": tag_y})
+
+        -- 5. Full-width signature progress bar at the very bottom
+        this._draw_progress()
+
+        -- 6. Fade overlay if dimming out
+        if opacity < 1.0 { this._apply_fade(opacity) }
+
+        this.frames_painted = this.frames_painted + 1
+        return true
+    }
+
+    fn _draw_progress() {
+        let bar_y = this.fb.height - 4
+        let bar_h = 4
+        fill_rect(this.fb, 0, bar_y, this.fb.width, bar_h, _HAIRLINE)
+        let fill_w = int(this.fb.width * this.progress)
+        if fill_w > 0 {
+            -- Sample the violet→cyan signature across the filled width.
+            let segments = 24
+            let seg_w = max(1, int(fill_w / segments))
+            mut s = 0
+            while s < segments {
+                let frac = s / segments
+                let color = kyan_gradient(this.theme, frac)
+                let x0 = s * seg_w
+                if x0 >= fill_w { s = segments }
+                else {
+                    let w = if s == segments - 1 { fill_w - x0 } else { seg_w }
+                    fill_rect(this.fb, x0, bar_y, w, bar_h, color)
+                    s = s + 1
+                }
+            }
+        }
+        this._record("progress", {"status": this.status_text, "progress": this.progress})
+    }
+
+    fn _apply_fade(opacity) {
+        let alpha = int((1.0 - opacity) * 255)
+        let color = alpha * 16777216 + (_VOID & 0xFFFFFF)
+        fill_rect(this.fb, 0, 0, this.fb.width, this.fb.height, color)
+        this._record("fade_overlay", {"alpha": alpha})
+    }
+
+    fn _record(kind, payload) {
+        push(this.captured_paint_ops, {"kind": kind, "payload": payload})
+        if len(this.captured_paint_ops) > 64 {
+            mut next = []
+            mut i = 1
+            while i < len(this.captured_paint_ops) { push(next, this.captured_paint_ops[i]); i = i + 1 }
+            this.captured_paint_ops = next
+        }
+    }
+}
+
+fn kyan_boot_splash(fb, theme) { return KyanBootSplash(fb, theme) }
+
+fn max(a, b) { if a > b { return a }; return b }
