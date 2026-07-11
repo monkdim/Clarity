@@ -58,7 +58,10 @@ class Framebuffer {
         this.buffer = alloc(this.size)
     }
 
-    fn _offset(x, y) { return y * this.stride + x * 4 }
+    -- Byte offset of pixel (x, y). Coordinates are floored: a fractional
+    -- coordinate would otherwise land the 32-bit colour write on a
+    -- non-4-byte boundary and scramble channels across adjacent pixels.
+    fn _offset(x, y) { return int(y) * this.stride + int(x) * 4 }
 
     fn put_pixel(x, y, color) {
         if x < 0 or x >= this.width or y < 0 or y >= this.height {
@@ -81,15 +84,32 @@ class Framebuffer {
 
     -- Fill a rectangular region. Coordinates are clipped to the buffer.
     fn fill_rect(x0, y0, w, h, color) {
-        let x_start = if x0 < 0 { 0 } else { x0 }
-        let y_start = if y0 < 0 { 0 } else { y0 }
-        let x_end = if x0 + w > this.width { this.width } else { x0 + w }
-        let y_end = if y0 + h > this.height { this.height } else { y0 + h }
+        let x_start = if x0 < 0 { 0 } else { int(x0) }
+        let y_start = if y0 < 0 { 0 } else { int(y0) }
+        let x_end = if x0 + w > this.width { this.width } else { int(x0 + w) }
+        let y_end = if y0 + h > this.height { this.height } else { int(y0 + h) }
         if x_end <= x_start or y_end <= y_start { return null }
         let row_count = x_end - x_start
         mut y = y_start
         while y < y_end {
             _ffi_fill_u32(this.buffer._handle, this._offset(x_start, y), row_count, color)
+            y += 1
+        }
+    }
+
+    -- Source-over alpha-blend a solid color over a rectangular region.
+    -- Clipped to the buffer; each row goes through the native blend
+    -- builtin so translucent fills aren't an interpreted per-pixel loop.
+    fn blend_rect(x0, y0, w, h, color) {
+        let x_start = if x0 < 0 { 0 } else { int(x0) }
+        let y_start = if y0 < 0 { 0 } else { int(y0) }
+        let x_end = if x0 + w > this.width { this.width } else { int(x0 + w) }
+        let y_end = if y0 + h > this.height { this.height } else { int(y0 + h) }
+        if x_end <= x_start or y_end <= y_start { return null }
+        let count = x_end - x_start
+        mut y = y_start
+        while y < y_end {
+            _ffi_blend_u32(this.buffer._handle, this._offset(x_start, y), count, color)
             y += 1
         }
     }
@@ -104,15 +124,35 @@ class Framebuffer {
     }
 
     -- Copy a rectangular region from `src` into this framebuffer.
+    -- Clipped to both buffers, then copied one row at a time with an
+    -- FFI memcpy (`_ffi_copy`) instead of pixel-by-pixel — this is the
+    -- compositor's hot path, so it must not be an interpreted double
+    -- loop. Opaque copy (no per-pixel alpha); source pixels win.
     fn blit(src, src_x, src_y, dst_x, dst_y, w, h) {
+        mut sx = src_x
+        mut sy = src_y
+        mut dx = dst_x
+        mut dy = dst_y
+        mut cw = w
+        mut ch = h
+        -- clip top/left against the destination
+        if dx < 0 { sx = sx - dx; cw = cw + dx; dx = 0 }
+        if dy < 0 { sy = sy - dy; ch = ch + dy; dy = 0 }
+        -- clip top/left against the source
+        if sx < 0 { dx = dx - sx; cw = cw + sx; sx = 0 }
+        if sy < 0 { dy = dy - sy; ch = ch + sy; sy = 0 }
+        -- clip bottom/right against both
+        if dx + cw > this.width { cw = this.width - dx }
+        if dy + ch > this.height { ch = this.height - dy }
+        if sx + cw > src.width { cw = src.width - sx }
+        if sy + ch > src.height { ch = src.height - sy }
+        if cw <= 0 or ch <= 0 { return null }
+        let row_bytes = cw * 4
         mut row = 0
-        while row < h {
-            mut col = 0
-            while col < w {
-                let c = src.get_pixel(src_x + col, src_y + row)
-                this.put_pixel(dst_x + col, dst_y + row, c)
-                col += 1
-            }
+        while row < ch {
+            let s_off = (sy + row) * src.stride + sx * 4
+            let d_off = (dy + row) * this.stride + dx * 4
+            _ffi_copy(this.buffer._handle, d_off, src.buffer._handle, s_off, row_bytes)
             row += 1
         }
     }

@@ -1,0 +1,267 @@
+-- KyanDesktop — a real, composed desktop shell (rebrand phase K3).
+--
+-- The audit's #1 architectural gap was that no desktop composed
+-- outside a test: DesktopSession built plain-dict "windows" that the
+-- real Compositor can't blit, and only ever ran against a stub. This
+-- module builds the shell on the *solid* foundation instead — the
+-- real Compositor + Window + WindowManager — and paints it in the
+-- Kyan identity using the K2 renderer primitives (gradients, glow,
+-- glass, shadows, scalable text).
+--
+-- Layering, composed top-down in compose():
+--   wallpaper   — obsidian + aurora glows, painted onto the screen
+--   app windows — real Windows in the Compositor, Kyan glass chrome,
+--                 each dropped with a soft shadow so it floats
+--   dock        — a floating glass pill of app icons
+--   launcher    — a full-screen scrim + search + icon grid (optional)
+--
+-- The WindowManager attaches to the same Compositor, so real mouse
+-- events drive focus / drag / resize — the input path the old
+-- DisplayServer got wrong.
+
+from "compositor.clarity" import compositor
+from "window.clarity" import window
+from "window_manager.clarity" import window_manager
+from "graphics.clarity" import framebuffer, rgba
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line
+from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
+from "branding_kyan.clarity" import paint_kyan_icon
+from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
+
+let TITLE_H = 32
+let DOCK_ICON = 44
+let DOCK_GAP = 12
+let DOCK_PAD = 12
+let DOCK_MARGIN = 16
+
+let DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings"]
+
+let APP_TITLES = {
+    "prism":    "Prism",
+    "terminal": "Terminal",
+    "files":    "Files",
+    "editor":   "Editor",
+    "monitor":  "System Monitor",
+    "settings": "Settings",
+    "calc":     "Calculator",
+    "viewer":   "Image Viewer"
+}
+
+class KyanDesktop {
+    fn init(width, height, theme) {
+        this.width = width
+        this.height = height
+        this.theme = theme ?? kyan_obsidian()
+        this.comp = compositor(width, height)
+        this.comp.set_background(this.theme["background"])
+        this.wm = window_manager(this.comp)
+        this.font = builtin_font()
+        this.pinned = DEFAULT_PINNED
+        this.windows = {}          -- app_id -> Window
+        this.launcher_open = false
+        this.frames = 0
+        this._wallpaper = null     -- painted once, then fast-blitted each frame
+    }
+
+    fn boot(pinned) {
+        if pinned != null { this.pinned = pinned }
+        return true
+    }
+
+    -- ── App windows ─────────────────────────────────
+
+    fn open(app_id, x, y, w, h) {
+        if has(this.windows, app_id) {
+            let win = this.windows[app_id]
+            win.set_visible(true)
+            win.restore_from_min()
+            this.comp.focus(win)
+            return win
+        }
+        let title = if has(APP_TITLES, app_id) { APP_TITLES[app_id] } else { app_id }
+        let win = window(title, x, y, w, h)
+        win.title_h = TITLE_H
+        win.border_w = 0
+        this.windows[app_id] = win
+        this.comp.add(win)
+        this.comp.focus(win)
+        return win
+    }
+
+    fn close(app_id) {
+        if not has(this.windows, app_id) { return false }
+        this.comp.remove(this.windows[app_id])
+        mut next = {}
+        for kv in entries(this.windows) {
+            if kv[0] != app_id { next[kv[0]] = kv[1] }
+        }
+        this.windows = next
+        return true
+    }
+
+    fn focus(app_id) {
+        if not has(this.windows, app_id) { return false }
+        this.comp.focus(this.windows[app_id])
+        return true
+    }
+
+    fn running() { return keys(this.windows) }
+
+    -- ── Input (real WindowManager path) ─────────────
+
+    fn handle_mouse(me) { return this.wm.handle_mouse(me) }
+    fn handle_key(ke) { return this.wm.handle_key(ke) }
+
+    fn toggle_launcher() {
+        this.launcher_open = not this.launcher_open
+        return this.launcher_open
+    }
+
+    -- ── Composition ─────────────────────────────────
+
+    -- Paint the whole desktop onto the compositor's screen framebuffer
+    -- and return it. This is the "a real desktop actually paints" path
+    -- the audit found missing.
+    fn compose() {
+        let s = this.comp.screen
+        -- wallpaper: painted once (the aurora glows are expensive), then
+        -- fast-blitted every frame
+        if this._wallpaper == null {
+            this._wallpaper = framebuffer(this.width, this.height)
+            this._paint_wallpaper(this._wallpaper)
+        }
+        s.blit(this._wallpaper, 0, 0, 0, 0, this.width, this.height)
+        -- app windows, bottom-to-top, each floated with a soft shadow
+        for win in this.comp.windows {
+            if not win.visible or win.minimized { continue }
+            this._paint_chrome(win)
+            drop_shadow(s, win.x, win.y, win.width, win.height, 12, rgba(0, 0, 0, 150), 7)
+            s.blit(win.framebuffer, 0, 0, win.x, win.y, win.width, win.height)
+        }
+        this._paint_dock(s)
+        if this.launcher_open { this._paint_launcher(s) }
+        this.frames = this.frames + 1
+        return s
+    }
+
+    fn screenshot(path) {
+        this.compose()
+        this.comp.screen.save_bmp(path)
+        return path
+    }
+
+    -- ── Painters ────────────────────────────────────
+
+    fn _paint_wallpaper(fb) {
+        let t = this.theme
+        fb.clear(t["background"])
+        -- aurora wash: a violet bloom fading down from the top, and a
+        -- cyan bloom rising from the bottom — fast per-row blends.
+        let top_h = int(this.height * 0.62)
+        linear_gradient(fb, 0, 0, this.width, top_h, [
+            {"t": 0.0, "color": rgba(124, 58, 237, 64)},
+            {"t": 1.0, "color": rgba(124, 58, 237, 0)}
+        ], "v")
+        let bot_y = int(this.height * 0.45)
+        linear_gradient(fb, 0, bot_y, this.width, this.height - bot_y, [
+            {"t": 0.0, "color": rgba(34, 211, 238, 0)},
+            {"t": 1.0, "color": rgba(34, 211, 238, 48)}
+        ], "v")
+    }
+
+    -- Paint Kyan glass chrome + a content placeholder into a window's
+    -- own framebuffer. Focused windows get the signature gradient rail.
+    fn _paint_chrome(win) {
+        let fb = win.framebuffer
+        let t = this.theme
+        let w = win.width
+        let h = win.height
+        let th = win.title_h
+        -- opaque surface (square window — the compositor blit is opaque)
+        fb.clear(t["surface"])
+        -- title bar
+        fill_rect(fb, 0, 0, w, th, t["surface_elevated"])
+        -- top rail: signature gradient when focused, hairline otherwise
+        if win.focused {
+            linear_gradient(fb, 0, 0, w, 3, kyan_gradient_stops(), "h")
+        } else {
+            fill_rect(fb, 0, 0, w, 3, t["border"])
+        }
+        -- traffic dots
+        let dy = int(th / 2) - 5
+        fill_rect(fb, 14, dy, 10, 10, 0xFFFB7185)
+        fill_rect(fb, 30, dy, 10, 10, 0xFFFBBF24)
+        fill_rect(fb, 46, dy, 10, 10, 0xFF34D399)
+        -- title, centred
+        let tw = measure_text(this.font, win.title)[0]
+        let tx = int(w / 2) - int(tw / 2)
+        let tcol = if win.focused { t["foreground"] } else { t["foreground_muted"] }
+        draw_text(fb, tx, int(th / 2) - 4, win.title, this.font, tcol)
+        -- hairline under the title bar
+        fill_rect(fb, 0, th - 1, w, 1, t["border"])
+        -- content placeholder rows
+        mut i = 0
+        while i < 5 {
+            let ry = th + 22 + i * 22
+            if ry < h - 8 {
+                fill_rect(fb, 20, ry, int((w - 40) * (0.8 - i * 0.1)), 8, t["border"])
+            }
+            i = i + 1
+        }
+    }
+
+    fn _paint_dock(fb) {
+        let n = len(this.pinned)
+        if n == 0 { return null }
+        let dw = n * DOCK_ICON + (n - 1) * DOCK_GAP + 2 * DOCK_PAD
+        let dh = DOCK_ICON + 2 * DOCK_PAD
+        let dx = int(this.width / 2) - int(dw / 2)
+        let dy = this.height - dh - DOCK_MARGIN
+        -- floating glass pill with a soft shadow
+        drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7)
+        rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205))
+        -- icons
+        mut ix = dx + DOCK_PAD
+        for app in this.pinned {
+            paint_kyan_icon(fb, app, ix, dy + DOCK_PAD, DOCK_ICON, this.theme)
+            -- running indicator dot
+            if has(this.windows, app) {
+                fill_rect(fb, ix + int(DOCK_ICON / 2) - 2, dy + dh - 5, 4, 4, this.theme["accent"])
+            }
+            ix = ix + DOCK_ICON + DOCK_GAP
+        }
+    }
+
+    fn _paint_launcher(fb) {
+        let t = this.theme
+        -- dim scrim over everything
+        fill_rect_blend(fb, 0, 0, this.width, this.height, rgba(5, 6, 10, 170))
+        -- search bar
+        let bw = int(this.width * 0.5)
+        let bx = int(this.width / 2) - int(bw / 2)
+        let by = int(this.height * 0.24)
+        drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8)
+        rounded_rect_blend(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 235))
+        linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h")
+        draw_text(fb, bx + 18, by + 18, "Search apps, files, commands", this.font, t["foreground_muted"])
+        -- icon grid of pinned apps
+        let cols = len(this.pinned)
+        let cell = 84
+        let gw = cols * cell
+        let gx = int(this.width / 2) - int(gw / 2)
+        let gy = by + 92
+        mut cx = gx
+        for app in this.pinned {
+            paint_kyan_icon(fb, app, cx + int((cell - 52) / 2), gy, 52, t)
+            let label = if has(APP_TITLES, app) { APP_TITLES[app] } else { app }
+            let lw = measure_text(this.font, label)[0]
+            draw_text(fb, cx + int((cell - lw) / 2), gy + 60, label, this.font, t["foreground"])
+            cx = cx + cell
+        }
+    }
+}
+
+fn kyan_desktop(width, height, ...rest) {
+    let theme = if len(rest) > 0 { rest[0] } else { kyan_obsidian() }
+    return KyanDesktop(width, height, theme)
+}

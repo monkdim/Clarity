@@ -1,0 +1,141 @@
+-- KyanDesktop tests — rebrand phase K3.
+--
+-- Proves a real desktop composes and paints outside a test harness:
+-- wallpaper + real Compositor app windows with Kyan glass chrome +
+-- floating dock, and that mouse events drive the real WindowManager
+-- (the input path the old DisplayServer got wrong).
+
+from "kyan_desktop.clarity" import kyan_desktop, KyanDesktop
+from "theme_kyan.clarity" import kyan_obsidian
+from "graphics.clarity" import framebuffer
+from "mouse.clarity" import MouseEvent
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+fn mk_mouse(x, y, kind, button) {
+    let m = MouseEvent()
+    m.x = x
+    m.y = y
+    m.button = button
+    if kind == "press" { m.is_press = true }
+    if kind == "release" { m.is_release = true }
+    if kind == "motion" { m.is_motion = true }
+    return m
+}
+
+let theme = kyan_obsidian()
+
+-- ── Construction & app windows are real Windows ──
+
+show "-- KyanDesktop: windows are real --"
+
+let d = kyan_desktop(1000, 640, theme)
+d.boot(null)
+assert_eq(len(d.running()), 0, "no apps at boot")
+
+let term = d.open("terminal", 120, 90, 360, 240)
+-- a real Window, not a dict: has a framebuffer and methods
+assert(term.framebuffer != null, "app window owns a framebuffer")
+assert_eq(term.width, 360, "window width")
+assert(term.focused, "opened window is focused")
+assert_eq(len(d.running()), 1, "one app running")
+
+let files = d.open("files", 260, 160, 380, 260)
+assert(files.focused, "newly opened window focused")
+assert(not term.focused, "previous window blurred")
+-- z-order: top window is the most-recently focused
+assert_eq(d.comp.top_window(), files, "files on top")
+
+-- focus switches z-order through the real compositor
+d.focus("terminal")
+assert_eq(d.comp.top_window(), term, "focus brings terminal to top")
+assert(term.focused, "terminal focused")
+
+-- hit-testing goes through the compositor
+assert_eq(d.comp.window_at(300, 200), term, "window_at returns top window under point")
+assert(d.comp.window_at(5, 5) == null, "empty desktop area hits nothing")
+
+-- ── Composition actually paints ──────────────────
+
+show "-- KyanDesktop: composition paints --"
+
+let screen = d.compose()
+assert_eq(screen.width, 1000, "screen width")
+assert_eq(screen.height, 640, "screen height")
+
+-- wallpaper: the aurora glow tints the background away from pure void
+let void = theme["background"]
+let glow_px = screen.get_pixel(220, 180)
+assert(glow_px != void, "wallpaper glow tints the canvas")
+
+-- an app window composited: terminal is on top at (120,90); its red
+-- traffic dot sits at window-local (14, title_h/2-5)=(14,11)
+let dot = screen.get_pixel(120 + 16, 90 + 13)
+assert_eq(dot, 0xFFFB7185, "focused window's traffic dot painted on screen")
+
+-- focused window shows the signature rail (not the plain border) on top
+let rail = screen.get_pixel(120 + 180, 90 + 1)
+assert(rail != theme["border"], "focused window has a signature top rail")
+
+-- dock: the glass pill sits centred along the bottom; sample its band
+let dock_y = 640 - (44 + 24) - 16 + 20
+let dock_px = screen.get_pixel(500, dock_y)
+assert(dock_px != void, "dock band painted over the wallpaper")
+
+-- ── Mouse drives the real WindowManager ──────────
+
+show "-- KyanDesktop: input → WindowManager --"
+
+-- fresh desktop, single window so it's unambiguously on top
+let d2 = kyan_desktop(1000, 640, theme)
+d2.boot(null)
+let w = d2.open("editor", 200, 150, 300, 200)
+assert_eq(w.x, 200, "window starts at x=200")
+
+-- press on the title bar, then drag +60,+40
+d2.handle_mouse(mk_mouse(240, 160, "press", 1))     -- title bar (ly=10 < 32)
+assert(d2.wm.is_dragging(), "press on title starts a drag")
+d2.handle_mouse(mk_mouse(300, 200, "motion", 0))     -- dx=60, dy=40
+assert_eq(w.x, 260, "drag moved window x by 60")
+assert_eq(w.y, 190, "drag moved window y by 40")
+d2.handle_mouse(mk_mouse(300, 200, "release", 0))
+assert(not d2.wm.is_dragging(), "release ends the drag")
+
+-- a press in empty space doesn't start a drag
+d2.handle_mouse(mk_mouse(5, 5, "press", 1))
+assert(not d2.wm.is_dragging(), "press on empty desktop starts no drag")
+
+-- ── Launcher overlay ─────────────────────────────
+
+show "-- KyanDesktop: launcher overlay --"
+
+assert(not d.launcher_open, "launcher starts closed")
+d.toggle_launcher()
+assert(d.launcher_open, "toggle opens launcher")
+let sc2 = d.compose()
+-- the scrim darkens a previously-bright glow pixel
+let scrimmed = sc2.get_pixel(220, 180)
+assert(scrimmed != glow_px, "launcher scrim changes the composited canvas")
+d.toggle_launcher()
+assert(not d.launcher_open, "toggle closes launcher")
+
+-- ── close ────────────────────────────────────────
+
+assert(d.close("terminal"), "close terminal")
+assert_eq(len(d.running()), 1, "one app left after close")
+assert(not d.close("terminal"), "closing again is a no-op")
+
+-- ── Summary ──────────────────────────────────────
+
+show ""
+show "KyanDesktop: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " kyan desktop test(s) failed" }

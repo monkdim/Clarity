@@ -631,6 +631,41 @@ export function _ffi_fill_u32(p, byte_offset, count, value) {
   buf.fill(pattern, byte_offset, byte_offset + count * 4);
 }
 
+// Source-over alpha blend a solid color across `count` 32-bit BGRA
+// pixels starting at `byte_offset`. `color` is 0xAARRGGBB; the
+// destination is treated as opaque, so results are opaque. Native
+// loop — this is the compositor's translucent hot path (glass panels,
+// soft shadows, scrims), which must not be an interpreted per-pixel
+// loop in Clarity.
+export function _ffi_blend_u32(p, byte_offset, count, color) {
+  if (!p || !p._buffer) {
+    throw new Error('FFIError: blend_u32 requires a runtime-allocated pointer');
+  }
+  const buf = p._buffer;
+  const c = color >>> 0;
+  const sa = (c >>> 24) & 0xFF;
+  if (sa === 0) return;
+  if (sa === 255) {
+    const pattern = Buffer.alloc(4);
+    pattern.writeUInt32LE(c, 0);
+    buf.fill(pattern, byte_offset, byte_offset + count * 4);
+    return;
+  }
+  const sr = (c >>> 16) & 0xFF;
+  const sg = (c >>> 8) & 0xFF;
+  const sb = c & 0xFF;
+  const ia = 255 - sa;
+  let o = byte_offset;
+  for (let i = 0; i < count; i++) {
+    // memory order is B, G, R, A (little-endian 0xAARRGGBB)
+    buf[o]     = (sb * sa + buf[o]     * ia) / 255 | 0;
+    buf[o + 1] = (sg * sa + buf[o + 1] * ia) / 255 | 0;
+    buf[o + 2] = (sr * sa + buf[o + 2] * ia) / 255 | 0;
+    buf[o + 3] = 255;
+    o += 4;
+  }
+}
+
 // Bulk copy from one owned (or wrapped) pointer to an owned destination.
 export function _ffi_copy(dst, dst_offset, src, src_offset, length) {
   if (!dst || !dst._buffer) {

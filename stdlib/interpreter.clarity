@@ -401,6 +401,7 @@ class Interpreter {
         }, true)
         this.global_env.set("_ffi_callback_close", fn(h) { return _ffi_callback_close(h) }, true)
         this.global_env.set("_ffi_fill_u32", fn(p, o, c, v) { _ffi_fill_u32(p, o, c, v) }, true)
+        this.global_env.set("_ffi_blend_u32", fn(p, o, c, col) { _ffi_blend_u32(p, o, c, col) }, true)
         this.global_env.set("_ffi_copy", fn(dst, do_, src, so, n) { _ffi_copy(dst, do_, src, so, n) }, true)
         this.global_env.set("_ffi_write_buffer", fn(p, path) { _ffi_write_buffer(p, path) }, true)
         this.global_env.set("_ffi_read_buffer", fn(path) { return _ffi_read_buffer(path) }, true)

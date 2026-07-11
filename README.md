@@ -105,7 +105,11 @@ Full instructions, the language tour, every CLI command, and the developer-tools
 
 ## What KyanOS looks like
 
-> These are **real renders from Clarity's software framebuffer**, produced by `clarity run` against the theme + branding modules in `stdlib/` — not mockups. A full composited desktop screenshot is still on the way (see [ROADMAP_OS.md](ROADMAP_OS.md)); the renderer pieces that draw it are landing now.
+> These are **real renders from Clarity's software framebuffer**, produced by `clarity run` against the theme, branding, and compositor modules in `stdlib/` — not mockups.
+
+The desktop — the Obsidian identity composed live: an aurora wallpaper, real Compositor windows with Kyan glass chrome (the focused window carries the signature violet→cyan rail), soft drop shadows, and the floating glass dock with the Prism game hub pinned first:
+
+![KyanOS desktop — Obsidian](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/kyan_desktop.png)
 
 Boot splash — the faceted-K monogram on void black, the KyanOS wordmark ("Kyan" in ink, "OS" in signature cyan), and a full-width violet→cyan progress bar:
 
