@@ -111,6 +111,10 @@ The desktop — the Obsidian identity composed live: an aurora wallpaper, real C
 
 ![KyanOS desktop — Obsidian](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/kyan_desktop.png)
 
+**Voidrunner** — a playable game built in Clarity, launched from Prism. Dodge the neon debris (← → to move, R to restart); it runs in the composed desktop, native or in the browser:
+
+![KyanOS — Voidrunner](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/kyan_voidrunner.png)
+
 Boot splash — the faceted-K monogram on void black, the KyanOS wordmark ("Kyan" in ink, "OS" in signature cyan), and a full-width violet→cyan progress bar:
 
 ![KyanOS boot splash — Obsidian](https://raw.githubusercontent.com/monkdim/Clarity/main/website/screenshots/kyan_splash.png)

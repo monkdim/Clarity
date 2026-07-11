@@ -45,7 +45,17 @@ export function toggleLauncher(desk) {
   return desk.toggle_launcher();
 }
 
+// Feed key state (browser e.key) so live apps (Voidrunner) can read it.
+export function setKey(desk, name, down) {
+  desk.set_key(name, !!down);
+}
+
+// Advance time-based apps one frame; call before composeToBytes each rAF.
+export function tick(desk, nowMs) {
+  desk.tick(nowMs);
+}
+
 export { MouseEvent };
 
 // Browser global for a single-file (inlined) build.
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, MouseEvent };
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, MouseEvent };

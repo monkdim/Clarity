@@ -802,7 +802,7 @@ def bundle(compile_native=False):
         'runtime_spec.clarity', 'runtime_gen.clarity',
         'install.clarity',
         'theme_kyan.clarity', 'branding_kyan.clarity', 'boot_splash_kyan.clarity',
-        'kyan_apps.clarity', 'kyan_desktop.clarity',
+        'kyan_apps.clarity', 'kyan_game.clarity', 'kyan_desktop.clarity',
         'cli.clarity',
     ]
 

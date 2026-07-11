@@ -1,0 +1,94 @@
+-- Voidrunner game tests — rebrand phase K5 seed.
+
+from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
+from "theme_kyan.clarity" import kyan_obsidian
+from "graphics.clarity" import framebuffer
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(v, m) { if v { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + m } }
+fn assert_eq(a, e, m) { if a == e { PASSED += 1 } else { FAILED += 1; show "  FAIL: {m} (expected {e}, got {a})" } }
+
+let t = kyan_obsidian()
+
+-- ── initial state ──
+show "-- Voidrunner: init --"
+let s = new_voidrunner(400, 300)
+assert_eq(s["w"], 400, "width stored")
+assert(not s["dead"], "starts alive")
+assert_eq(len(s["obs"]), 0, "no debris yet")
+assert_eq(s["score"], 0.0, "score starts at 0")
+assert(s["ship_x"] > 0 and s["ship_x"] < 400, "ship centred in field")
+
+-- ── ship movement + clamp (isolated: no spawns reach the ship in a few frames) ──
+show "-- Voidrunner: movement --"
+let start_x = s["ship_x"]
+voidrunner_update(s, 16.0, {"ArrowRight": true})
+assert(s["ship_x"] > start_x, "ArrowRight moves ship right")
+voidrunner_update(s, 16.0, {"ArrowLeft": true})
+voidrunner_update(s, 16.0, {"ArrowLeft": true})
+assert(s["ship_x"] < start_x + 6, "ArrowLeft moves ship left")
+-- right clamp: start near the wall, a few nudges
+let sr = new_voidrunner(400, 300)
+sr["ship_x"] = 400 - 34 - 4
+voidrunner_update(sr, 16.0, {"d": true})
+voidrunner_update(sr, 16.0, {"d": true})
+assert_eq(sr["ship_x"], 400 - 34, "ship clamps to the right wall")
+-- left clamp: start near 0
+let sl = new_voidrunner(400, 300)
+sl["ship_x"] = 3
+voidrunner_update(sl, 16.0, {"a": true})
+voidrunner_update(sl, 16.0, {"a": true})
+assert_eq(sl["ship_x"], 0, "ship clamps to the left wall")
+
+-- ── score accrues while alive ──
+show "-- Voidrunner: scoring --"
+let s2 = new_voidrunner(400, 300)
+mut k = 0
+while k < 20 { voidrunner_update(s2, 16.0, {}); k = k + 1 }
+assert(s2["score"] > 0.0, "score climbs while alive")
+
+-- ── spawning ──
+show "-- Voidrunner: spawns debris --"
+let s3 = new_voidrunner(400, 300)
+mut n = 0
+while n < 20 and len(s3["obs"]) == 0 { voidrunner_update(s3, 60.0, {}); n = n + 1 }
+assert(len(s3["obs"]) >= 1, "debris spawns over time")
+
+-- ── collision ends the run ──
+show "-- Voidrunner: collision --"
+let s4 = new_voidrunner(400, 300)
+let ship_y = 300 - 22 - 8
+s4["obs"] = [{"x": s4["ship_x"], "y": 0.0 + ship_y}]
+voidrunner_update(s4, 16.0, {})
+assert(s4["dead"], "debris on the ship ends the run")
+-- dead state ignores movement
+let dx = s4["ship_x"]
+voidrunner_update(s4, 16.0, {"ArrowRight": true})
+assert_eq(s4["ship_x"], dx, "no movement while dead")
+
+-- ── restart ──
+show "-- Voidrunner: restart --"
+s4["score"] = 42.0
+voidrunner_update(s4, 16.0, {"r": true})
+assert(not s4["dead"], "R restarts the run")
+assert(s4["best"] >= 42, "best score is retained across restart")
+assert(s4["score"] < 5.0, "score resets on restart")
+
+-- ── paint ──
+show "-- Voidrunner: paint --"
+let fb = framebuffer(400, 300)
+fb.clear(0xFF000000)
+voidrunner_paint(fb, 0, 0, 400, 300, t, s2)
+mut painted = false
+mut yy = 0
+while yy < 300 and not painted {
+    mut xx = 0
+    while xx < 400 { if fb.get_pixel(xx, yy) != 0xFF000000 { painted = true }; xx = xx + 8 }
+    yy = yy + 8
+}
+assert(painted, "voidrunner paints the field")
+
+show ""
+show "Voidrunner: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " voidrunner test(s) failed" }

@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODS="branding_kyan branding_modern compositor draw event_bus ffi font graphics \
-      input keymap kyan_apps kyan_desktop mouse theme_kyan theme_meadow touch \
+      input keymap kyan_apps kyan_game kyan_desktop mouse theme_kyan theme_meadow touch \
       window window_manager"
 
 mkdir -p web/build

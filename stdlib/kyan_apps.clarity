@@ -24,6 +24,12 @@ let _GAME_ARTS = [
 let _GAME_NAMES = ["Hexfield", "Orbit Decay", "Verdant", "Ash Fable"]
 let _GAME_META = ["Strategy", "Arcade", "Puzzle", "RPG"]
 
+-- Absolute rect of the "Play" pill given Prism's content origin/size.
+-- Shared by paint_prism and the desktop's content-click hit-test.
+fn prism_play_rect(x, y, w, h) {
+    return [x + 168, y + 104, 90, 24]
+}
+
 fn paint_prism(fb, x, y, w, h, theme, focused) {
     let t = theme
     let font = builtin_font()
@@ -55,9 +61,10 @@ fn paint_prism(fb, x, y, w, h, theme, focused) {
     draw_text(fb, mx + 18, fy + 16, "FEATURED - BUILT IN CLARITY", font, t["accent"])
     draw_text_scaled(fb, mx + 18, fy + 34, "Voidrunner", font, 0xFFFFFFFF, 2, 1)
     draw_text(fb, mx + 18, fy + 66, "Outrun the collapse of a dying star system.", font, t["foreground_muted"])
-    -- play pill
-    rounded_rect(fb, mx + 18, fy + fh - 34, 90, 24, 8, t["accent"])
-    draw_text(fb, mx + 34, fy + fh - 27, "> Play", font, 0xFF05060A)
+    -- play pill (geometry shared with the desktop's click hit-test)
+    let pr = prism_play_rect(x, y, w, h)
+    rounded_rect(fb, pr[0], pr[1], pr[2], pr[3], 8, t["accent"])
+    draw_text(fb, pr[0] + 16, pr[1] + 7, "> Play", font, 0xFF05060A)
 
     -- game grid
     let gy = fy + fh + 18

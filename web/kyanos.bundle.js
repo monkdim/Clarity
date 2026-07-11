@@ -1258,6 +1258,69 @@ function polygon(fb, points, color) {
     i += 1;
   }
 }
+function fill_polygon(fb, points, color) {
+  let n = len(points);
+  if (truthy(n < 3)) {
+    return null;
+  }
+  let min_y = $index($index(points, 0), 1);
+  let max_y = $index($index(points, 0), 1);
+  let i = 1;
+  while (truthy(i < n)) {
+    let py = $index($index(points, i), 1);
+    if (truthy(py < min_y)) {
+      min_y = py;
+    }
+    if (truthy(py > max_y)) {
+      max_y = py;
+    }
+    i += 1;
+  }
+  if (truthy(min_y < 0)) {
+    min_y = 0;
+  }
+  if (truthy(max_y > fb.height - 1)) {
+    max_y = fb.height - 1;
+  }
+  let y = min_y;
+  while (truthy(y <= max_y)) {
+    let xs = [];
+    let e2 = 0;
+    while (truthy(e2 < n)) {
+      let a = $index(points, e2);
+      let b = $index(points, (e2 + 1) % n);
+      let ay = $index(a, 1);
+      let by = $index(b, 1);
+      if (truthy(ay <= y && by > y || by <= y && ay > y)) {
+        let t = (y - ay) / (by - ay);
+        let x = $index(a, 0) + ($index(b, 0) - $index(a, 0)) * t;
+        push(xs, x);
+      }
+      e2 += 1;
+    }
+    let a2 = 1;
+    while (truthy(a2 < len(xs))) {
+      let key = $index(xs, a2);
+      let b2 = a2 - 1;
+      while (truthy(b2 >= 0 && $index(xs, b2) > key)) {
+        xs[b2 + 1] = $index(xs, b2);
+        b2 -= 1;
+      }
+      xs[b2 + 1] = key;
+      a2 += 1;
+    }
+    let p = 0;
+    while (truthy(p + 1 < len(xs))) {
+      let x0 = $int($index(xs, p));
+      let x1 = $int($index(xs, p + 1));
+      if (truthy(x1 >= x0)) {
+        fill_rect(fb, x0, y, x1 - x0 + 1, 1, color);
+      }
+      p += 2;
+    }
+    y += 1;
+  }
+}
 function polyline(fb, points, color) {
   let n = len(points);
   if (truthy(n < 2)) {
@@ -1710,6 +1773,9 @@ function $max3(a, b) {
 var _GAME_ARTS = [[{ ["t"]: 0, ["color"]: 4286331629 }, { ["t"]: 1, ["color"]: 4280472558 }], [{ ["t"]: 0, ["color"]: 4294668677 }, { ["t"]: 1, ["color"]: 4283385573 }], [{ ["t"]: 0, ["color"]: 4279150057 }, { ["t"]: 1, ["color"]: 4281652121 }], [{ ["t"]: 0, ["color"]: 4294688548 }, { ["t"]: 1, ["color"]: 4286331629 }]];
 var _GAME_NAMES = ["Hexfield", "Orbit Decay", "Verdant", "Ash Fable"];
 var _GAME_META = ["Strategy", "Arcade", "Puzzle", "RPG"];
+function prism_play_rect(x, y, w, h) {
+  return [x + 168, y + 104, 90, 24];
+}
 function paint_prism(fb, x, y, w, h, theme, focused) {
   let t = theme;
   let font = builtin_font();
@@ -1735,8 +1801,9 @@ function paint_prism(fb, x, y, w, h, theme, focused) {
   draw_text(fb, mx + 18, fy + 16, "FEATURED - BUILT IN CLARITY", font, $index(t, "accent"));
   draw_text_scaled(fb, mx + 18, fy + 34, "Voidrunner", font, 4294967295, 2, 1);
   draw_text(fb, mx + 18, fy + 66, "Outrun the collapse of a dying star system.", font, $index(t, "foreground_muted"));
-  rounded_rect(fb, mx + 18, fy + fh - 34, 90, 24, 8, $index(t, "accent"));
-  draw_text(fb, mx + 34, fy + fh - 27, "> Play", font, 4278519306);
+  let pr = prism_play_rect(x, y, w, h);
+  rounded_rect(fb, $index(pr, 0), $index(pr, 1), $index(pr, 2), $index(pr, 3), 8, $index(t, "accent"));
+  draw_text(fb, $index(pr, 0) + 16, $index(pr, 1) + 7, "> Play", font, 4278519306);
   let gy = fy + fh + 18;
   let cols = 4;
   let gap = 12;
@@ -1806,6 +1873,113 @@ function app_painters() {
   return { ["prism"]: paint_prism, ["terminal"]: paint_terminal_content, ["files"]: paint_files_content };
 }
 
+// web/build/kyan_game.js
+var _SHIP_W = 34;
+var _SHIP_H = 22;
+var _OBST = 26;
+var _SPAWN_MS = 620;
+function new_voidrunner(w, h) {
+  return { ["w"]: w, ["h"]: h, ["ship_x"]: $int(w / 2) - $int(_SHIP_W / 2), ["obs"]: [], ["score"]: 0, ["best"]: 0, ["dead"]: false, ["seed"]: 2463534242, ["spawn_acc"]: 0, ["scroll"]: 0 };
+}
+function _rand01(s) {
+  let next = ($index(s, "seed") * 1664525 + 1013904223) % 4294967296;
+  s["seed"] = next;
+  return next / 4294967296;
+}
+function voidrunner_update(s, dt_ms, keys2) {
+  let dt = truthy(dt_ms > 60) ? 60 : dt_ms;
+  let restart = has(keys2, "r") && $index(keys2, "r");
+  if (truthy($index(s, "dead"))) {
+    if (truthy(restart)) {
+      let prev_best = $index(s, "best");
+      let prev_score = $int($index(s, "score"));
+      let ns = new_voidrunner($index(s, "w"), $index(s, "h"));
+      for (let kv of entries(ns)) {
+        s[$index(kv, 0)] = $index(kv, 1);
+      }
+      s["best"] = truthy(prev_score > prev_best) ? prev_score : prev_best;
+    }
+    return s;
+  }
+  let speed = 0.42 * dt;
+  let left = has(keys2, "ArrowLeft") && $index(keys2, "ArrowLeft") || has(keys2, "a") && $index(keys2, "a");
+  let right = has(keys2, "ArrowRight") && $index(keys2, "ArrowRight") || has(keys2, "d") && $index(keys2, "d");
+  if (truthy(left)) {
+    s["ship_x"] = $index(s, "ship_x") - $int(speed);
+  }
+  if (truthy(right)) {
+    s["ship_x"] = $index(s, "ship_x") + $int(speed);
+  }
+  if (truthy($index(s, "ship_x") < 0)) {
+    s["ship_x"] = 0;
+  }
+  if (truthy($index(s, "ship_x") > $index(s, "w") - _SHIP_W)) {
+    s["ship_x"] = $index(s, "w") - _SHIP_W;
+  }
+  let fall = (0.14 + $index(s, "score") * 0.00006) * dt;
+  let spawn_ms = truthy(_SPAWN_MS - $index(s, "score") * 0.9 < 200) ? 200 : _SPAWN_MS - $index(s, "score") * 0.9;
+  let ship_y = $index(s, "h") - _SHIP_H - 8;
+  let next_obs = [];
+  for (let o of $index(s, "obs")) {
+    let ny = $index(o, "y") + fall;
+    if (truthy(ny < $index(s, "h"))) {
+      if (truthy(ny + _OBST >= ship_y && ny <= ship_y + _SHIP_H && $index(o, "x") + _OBST >= $index(s, "ship_x") && $index(o, "x") <= $index(s, "ship_x") + _SHIP_W)) {
+        s["dead"] = true;
+      }
+      push(next_obs, { ["x"]: $index(o, "x"), ["y"]: ny });
+    }
+  }
+  s["obs"] = next_obs;
+  s["spawn_acc"] = $index(s, "spawn_acc") + dt;
+  if (truthy($index(s, "spawn_acc") >= spawn_ms)) {
+    s["spawn_acc"] = 0;
+    let ox = $int(_rand01(s) * ($index(s, "w") - _OBST));
+    push($index(s, "obs"), { ["x"]: ox, ["y"]: 0 - _OBST });
+  }
+  s["scroll"] = $index(s, "scroll") + fall;
+  if (truthy(!truthy($index(s, "dead")))) {
+    s["score"] = $index(s, "score") + dt * 0.03;
+  }
+  return s;
+}
+function voidrunner_paint(fb, x, y, w, h, theme, s) {
+  fill_rect(fb, x, y, w, h, 4278519306);
+  let band = $int($index(s, "scroll")) % 40;
+  let gy = y - 40 + band;
+  while (truthy(gy < y + h)) {
+    if (truthy(gy >= y)) {
+      fill_rect(fb, x, gy, w, 1, 4279244063);
+    }
+    gy = gy + 40;
+  }
+  for (let o of $index(s, "obs")) {
+    let ox = x + $index(o, "x");
+    let oy = y + $int($index(o, "y"));
+    rounded_rect(fb, ox, oy, _OBST, _OBST, 5, 4286331629);
+    fill_rect(fb, ox + 8, oy + 8, _OBST - 16, _OBST - 16, 4280472558);
+  }
+  let sx = x + $index(s, "ship_x");
+  let sy = y + h - _SHIP_H - 8;
+  fill_polygon(fb, [[sx + $int(_SHIP_W / 2), sy], [sx + _SHIP_W, sy + _SHIP_H], [sx + $int(_SHIP_W / 2), sy + _SHIP_H - 6], [sx, sy + _SHIP_H]], 4280998128);
+  fill_rect(fb, sx + $int(_SHIP_W / 2) - 3, sy + _SHIP_H - 4, 6, 5, 4287323382);
+  let font = builtin_font();
+  draw_text(fb, x + 10, y + 10, "SCORE " + str($int($index(s, "score"))), font, 4280998128);
+  let best = truthy($int($index(s, "score")) > $index(s, "best")) ? $int($index(s, "score")) : $index(s, "best");
+  let bstr = "BEST " + str(best);
+  draw_text(fb, x + w - $index(measure_text(font, bstr), 0) - 10, y + 10, bstr, font, $index(theme, "foreground_muted"));
+  if (truthy($index(s, "dead"))) {
+    fill_rect(fb, x, y + $int(h / 2) - 34, w, 68, rgba(5, 6, 10, 210));
+    let over = "VOIDRUNNER DOWN";
+    let ow = measure_text_scaled_w(font, over, 2);
+    draw_text_scaled(fb, x + $int(w / 2) - $int(ow / 2), y + $int(h / 2) - 26, over, font, 4294668677, 2, 1);
+    let hint = "press R to run again";
+    draw_text(fb, x + $int(w / 2) - $int($index(measure_text(font, hint), 0) / 2), y + $int(h / 2) + 8, hint, font, $index(theme, "foreground"));
+  }
+}
+function measure_text_scaled_w(font, text, scale) {
+  return len(text) * font.width * scale + (len(text) - 1);
+}
+
 // web/build/kyan_desktop.js
 var TITLE_H = 32;
 var DOCK_ICON = 44;
@@ -1830,6 +2004,9 @@ class KyanDesktop {
     this.launcher_open = false;
     this.frames = 0;
     this._wallpaper = null;
+    this.app_state = {};
+    this.keys = {};
+    this._last_tick = null;
   }
   boot(pinned) {
     if (truthy($ne(pinned, null))) {
@@ -1852,6 +2029,10 @@ class KyanDesktop {
     this.windows[app_id] = win;
     this.comp.add(win);
     this.comp.focus(win);
+    if (truthy($eq(app_id, "voidrunner"))) {
+      let cr = win.content_rect();
+      this.app_state["voidrunner"] = new_voidrunner($index(cr, 2), $index(cr, 3));
+    }
     return win;
   }
   close(app_id) {
@@ -1866,6 +2047,15 @@ class KyanDesktop {
       }
     }
     this.windows = next;
+    if (truthy(has(this.app_state, app_id))) {
+      let ns = {};
+      for (let kv of entries(this.app_state)) {
+        if (truthy($ne($index(kv, 0), app_id))) {
+          ns[$index(kv, 0)] = $index(kv, 1);
+        }
+      }
+      this.app_state = ns;
+    }
     return true;
   }
   focus(app_id) {
@@ -1891,11 +2081,49 @@ class KyanDesktop {
         this._activate(hit);
         return true;
       }
+      if (truthy(this._content_click(me.x, me.y))) {
+        return true;
+      }
     }
     return this.wm.handle_mouse(me);
   }
+  _content_click(px, py) {
+    let top = this.comp.top_window();
+    if (truthy($eq(top, null))) {
+      return false;
+    }
+    let app_id = null;
+    for (let kv of entries(this.windows)) {
+      if (truthy($eq($index(kv, 1), top))) {
+        app_id = $index(kv, 0);
+      }
+    }
+    if (truthy($ne(app_id, "prism"))) {
+      return false;
+    }
+    let cr = top.content_rect();
+    let r = prism_play_rect(top.x + $index(cr, 0), top.y + $index(cr, 1), $index(cr, 2), $index(cr, 3));
+    if (truthy(this._in(px, py, $index(r, 0), $index(r, 1), $index(r, 2), $index(r, 3)))) {
+      this._activate("voidrunner");
+      return true;
+    }
+    return false;
+  }
   handle_key(ke) {
     return this.wm.handle_key(ke);
+  }
+  set_key(name, down) {
+    this.keys[name] = down;
+  }
+  tick(now_ms) {
+    if (truthy($ne(this._last_tick, null))) {
+      let dt = now_ms - this._last_tick;
+      if (truthy(has(this.windows, "voidrunner") && has(this.app_state, "voidrunner"))) {
+        voidrunner_update($index(this.app_state, "voidrunner"), dt, this.keys);
+      }
+    }
+    this._last_tick = now_ms;
+    return true;
   }
   toggle_launcher() {
     this.launcher_open = !truthy(this.launcher_open);
@@ -1921,6 +2149,9 @@ class KyanDesktop {
     }
     if (truthy($eq(app_id, "terminal"))) {
       return [bx, by, 460, 280];
+    }
+    if (truthy($eq(app_id, "voidrunner"))) {
+      return [bx, by, 560, 440];
     }
     return [bx, by, 500, 340];
   }
@@ -2031,6 +2262,10 @@ class KyanDesktop {
       if (truthy($eq($index(kv, 1), win))) {
         app_id = $index(kv, 0);
       }
+    }
+    if (truthy($eq(app_id, "voidrunner") && has(this.app_state, "voidrunner"))) {
+      voidrunner_paint(fb, cx, cy, cw, ch, t, $index(this.app_state, "voidrunner"));
+      return null;
     }
     if (truthy($ne(app_id, null) && has(this.painters, app_id))) {
       $index(this.painters, app_id)(fb, cx, cy, cw, ch, t, win.focused);
@@ -2147,9 +2382,17 @@ function openApp(desk, appId, x, y, w, h) {
 function toggleLauncher(desk) {
   return desk.toggle_launcher();
 }
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, MouseEvent };
+function setKey(desk, name, down) {
+  desk.set_key(name, !!down);
+}
+function tick(desk, nowMs) {
+  desk.tick(nowMs);
+}
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, MouseEvent };
 export {
   toggleLauncher,
+  tick,
+  setKey,
   sendMouse,
   openApp,
   createDesktop,

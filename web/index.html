@@ -43,16 +43,16 @@
       <canvas id="screen" width="1280" height="800"></canvas>
     </div>
     <div class="bar">
+      <button id="play">▶ Play Voidrunner</button>
       <button id="launcher">Toggle launcher</button>
       <button id="open-terminal">Open Terminal</button>
-      <button id="open-monitor">Open Monitor</button>
-      <span class="hint">Click the dock at the bottom of the screen, or drag windows by their title bars.</span>
+      <span class="hint">Click the dock, drag windows by their title bars, press Space for the launcher. In Voidrunner: ← → to move, R to restart.</span>
     </div>
   </div>
 
   <script type="module">
     import {
-      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher
+      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick
     } from './kyanos.bundle.js';
 
     const W = 1280, H = 800;
@@ -65,6 +65,7 @@
     // Open a couple of apps so it looks alive on first paint.
     openApp(desk, 'prism', 150, 96, 680, 460);
     openApp(desk, 'files', 470, 300, 420, 320);
+    window.__kyan = { desk };
 
     window.__kyan = { desk, sendMouse, composeToBytes }; // for verification hooks
 
@@ -80,8 +81,16 @@
       ctx.putImageData(image, 0, 0);
     }
 
-    function loop() { present(); requestAnimationFrame(loop); }
+    function loop(now) { tick(desk, now); present(); requestAnimationFrame(loop); }
     requestAnimationFrame(loop);
+
+    // ── Keyboard → live apps (Voidrunner) ──
+    const GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','a','d','r',' ']);
+    window.addEventListener('keydown', (e) => {
+      setKey(desk, e.key, true);
+      if (GAME_KEYS.has(e.key)) e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => setKey(desk, e.key, false));
 
     // ── Mouse routing: canvas CSS px → desktop px ──
     function toDesktop(ev) {
@@ -100,12 +109,9 @@
       const { x, y } = toDesktop(ev); sendMouse(desk, x, y, 'release', ev.button);
     });
 
+    document.getElementById('play').onclick = () => { openApp(desk, 'voidrunner', 300, 110, 600, 500); canvas.focus(); };
     document.getElementById('launcher').onclick = () => toggleLauncher(desk);
     document.getElementById('open-terminal').onclick = () => openApp(desk, 'terminal', 220, 140, 460, 300);
-    document.getElementById('open-monitor').onclick = () => openApp(desk, 'monitor', 360, 180, 500, 340);
-    window.addEventListener('keydown', (e) => {
-      if (e.key === ' ' || e.key === 'Super') { toggleLauncher(desk); e.preventDefault(); }
-    });
 
     console.log('KyanOS booted:', W + 'x' + H, 'windows=', Object.keys(desk.windows).join(','));
   </script>

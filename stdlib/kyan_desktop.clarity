@@ -26,7 +26,8 @@ from "graphics.clarity" import framebuffer, rgba
 from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters
+from "kyan_apps.clarity" import app_painters, prism_play_rect
+from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
 
 let TITLE_H = 32
@@ -63,6 +64,9 @@ class KyanDesktop {
         this.launcher_open = false
         this.frames = 0
         this._wallpaper = null     -- painted once, then fast-blitted each frame
+        this.app_state = {}        -- app_id -> per-app live state (games)
+        this.keys = {}             -- key name -> down? (browser/native fed)
+        this._last_tick = null
     }
 
     fn boot(pinned) {
@@ -87,6 +91,11 @@ class KyanDesktop {
         this.windows[app_id] = win
         this.comp.add(win)
         this.comp.focus(win)
+        -- live apps get their state seeded to the content size
+        if app_id == "voidrunner" {
+            let cr = win.content_rect()
+            this.app_state["voidrunner"] = new_voidrunner(cr[2], cr[3])
+        }
         return win
     }
 
@@ -98,6 +107,11 @@ class KyanDesktop {
             if kv[0] != app_id { next[kv[0]] = kv[1] }
         }
         this.windows = next
+        if has(this.app_state, app_id) {
+            mut ns = {}
+            for kv in entries(this.app_state) { if kv[0] != app_id { ns[kv[0]] = kv[1] } }
+            this.app_state = ns
+        }
         return true
     }
 
@@ -121,11 +135,48 @@ class KyanDesktop {
         if me.is_press {
             let hit = this._dock_hit(me.x, me.y)
             if hit != null { this._activate(hit); return true }
+            if this._content_click(me.x, me.y) { return true }
         }
         return this.wm.handle_mouse(me)
     }
 
+    -- Clicks inside an app's content that the shell handles (e.g. the
+    -- Prism "Play" button launches Voidrunner).
+    fn _content_click(px, py) {
+        let top = this.comp.top_window()
+        if top == null { return false }
+        mut app_id = null
+        for kv in entries(this.windows) {
+            if kv[1] == top { app_id = kv[0] }
+        }
+        if app_id != "prism" { return false }
+        let cr = top.content_rect()
+        let r = prism_play_rect(top.x + cr[0], top.y + cr[1], cr[2], cr[3])
+        if this._in(px, py, r[0], r[1], r[2], r[3]) {
+            this._activate("voidrunner")
+            return true
+        }
+        return false
+    }
+
     fn handle_key(ke) { return this.wm.handle_key(ke) }
+
+    -- Track key state by name (browser feeds e.key; native feeds the
+    -- same). Live apps read this each tick.
+    fn set_key(name, down) { this.keys[name] = down }
+
+    -- Advance time-based apps one frame. The host loop calls this with a
+    -- monotonic ms clock before compose(); dt is derived here.
+    fn tick(now_ms) {
+        if this._last_tick != null {
+            let dt = now_ms - this._last_tick
+            if has(this.windows, "voidrunner") and has(this.app_state, "voidrunner") {
+                voidrunner_update(this.app_state["voidrunner"], dt, this.keys)
+            }
+        }
+        this._last_tick = now_ms
+        return true
+    }
 
     fn toggle_launcher() {
         this.launcher_open = not this.launcher_open
@@ -146,9 +197,10 @@ class KyanDesktop {
         let idx = len(keys(this.windows))
         let bx = int(this.width * 0.12) + (idx % 5) * 40
         let by = int(this.height * 0.14) + (idx % 5) * 30
-        if app_id == "prism"    { return [bx, by, 680, 460] }
-        if app_id == "files"    { return [bx, by, 420, 320] }
-        if app_id == "terminal" { return [bx, by, 460, 280] }
+        if app_id == "prism"      { return [bx, by, 680, 460] }
+        if app_id == "files"      { return [bx, by, 420, 320] }
+        if app_id == "terminal"   { return [bx, by, 460, 280] }
+        if app_id == "voidrunner" { return [bx, by, 560, 440] }
         return [bx, by, 500, 340]
     }
 
@@ -285,6 +337,11 @@ class KyanDesktop {
         mut app_id = null
         for kv in entries(this.windows) {
             if kv[1] == win { app_id = kv[0] }
+        }
+        -- live (stateful) apps paint from their own state
+        if app_id == "voidrunner" and has(this.app_state, "voidrunner") {
+            voidrunner_paint(fb, cx, cy, cw, ch, t, this.app_state["voidrunner"])
+            return null
         }
         if app_id != null and has(this.painters, app_id) {
             (this.painters[app_id])(fb, cx, cy, cw, ch, t, win.focused)

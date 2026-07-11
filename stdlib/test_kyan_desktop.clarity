@@ -166,6 +166,36 @@ assert(d4.launcher_open, "launcher reopened")
 d4.handle_mouse(mk_mouse(2, 2, "press", 1))
 assert(not d4.launcher_open, "click outside dismisses launcher")
 
+-- ── Voidrunner: launch, tick, Prism Play button ──
+
+show "-- KyanDesktop: game integration --"
+
+let dg = kyan_desktop(1000, 640, theme)
+dg.boot(null)
+-- opening voidrunner seeds live state
+let vw = dg.open("voidrunner", 100, 100, 560, 440)
+assert(has(dg.app_state, "voidrunner"), "voidrunner state seeded on open")
+assert(not dg.app_state["voidrunner"]["dead"], "game starts alive")
+-- keys + tick advance the game
+dg.set_key("ArrowRight", true)
+let sx0 = dg.app_state["voidrunner"]["ship_x"]
+dg.tick(0)
+dg.tick(16)
+dg.tick(32)
+assert(dg.app_state["voidrunner"]["ship_x"] > sx0, "tick + key state moves the ship")
+-- closing clears the state
+dg.close("voidrunner")
+assert(not has(dg.app_state, "voidrunner"), "close clears game state")
+
+-- Prism's Play button launches Voidrunner
+let dp = kyan_desktop(1000, 640, theme)
+dp.boot(null)
+let pw = dp.open("prism", 120, 80, 680, 460)
+let cr = pw.content_rect()
+-- click the centre of the play pill (see prism_play_rect: content + [168,104,90,24])
+dp.handle_mouse(mk_mouse(pw.x + cr[0] + 168 + 45, pw.y + cr[1] + 104 + 12, "press", 1))
+assert(contains(dp.running(), "voidrunner"), "Prism Play button launched Voidrunner")
+
 -- ── close ────────────────────────────────────────
 
 assert(d.close("terminal"), "close terminal")
