@@ -2,7 +2,7 @@
 
 from "graphics.clarity" import Framebuffer, framebuffer, rgb, rgba, BLACK, WHITE, RED, GREEN, BLUE, red_of, green_of, blue_of, alpha_of
 from "ffi.clarity" import Pointer
-from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc, fill_polygon
+from "draw.clarity" import line, hline, vline, rect, fill_rect, circle, circle_outline, rounded_rect, polygon, polyline, arc, fill_polygon, blend_over, blend_pixel, fill_rect_blend, lerp_rgba, sample_stops, linear_gradient, radial_glow
 
 mut PASSED = 0
 mut FAILED = 0
@@ -221,6 +221,70 @@ assert_eq(fb.get_pixel(2, 26), BLACK, "triangle exterior left empty")
 -- degenerate input is a no-op, not a crash
 fill_polygon(fb, [[0, 0], [1, 1]], WHITE)
 assert(true, "fill_polygon tolerates < 3 points")
+
+-- ── alpha compositing ───────────────────────────────────
+
+show "-- Draw: alpha blending --"
+
+-- opaque src replaces dst
+assert_eq(blend_over(BLACK, WHITE), WHITE, "opaque src wins")
+-- fully transparent src leaves dst
+assert_eq(blend_over(WHITE, rgba(0, 0, 0, 0)), WHITE, "transparent src is a no-op")
+-- 50% white over black ≈ mid grey (127/128 either side of rounding)
+let half = blend_over(BLACK, rgba(255, 255, 255, 128))
+assert(red_of(half) >= 126 and red_of(half) <= 129, "50% white over black ≈ grey")
+assert_eq(alpha_of(half), 255, "blend result is opaque")
+-- 50% red over blue: red and blue channels both ~half
+let rb = blend_over(BLUE, rgba(255, 0, 0, 128))
+assert(red_of(rb) >= 126 and red_of(rb) <= 129, "red channel half")
+assert(blue_of(rb) >= 126 and blue_of(rb) <= 129, "blue channel half")
+
+fb.clear(BLACK)
+blend_pixel(fb, 5, 5, rgba(255, 255, 255, 128))
+assert(red_of(fb.get_pixel(5, 5)) >= 126, "blend_pixel composited")
+blend_pixel(fb, 6, 6, rgba(0, 0, 0, 0))
+assert_eq(fb.get_pixel(6, 6), BLACK, "transparent blend_pixel left dst")
+
+fb.clear(BLACK)
+fill_rect_blend(fb, 0, 0, 10, 10, rgba(255, 255, 255, 128))
+assert(red_of(fb.get_pixel(5, 5)) >= 126, "fill_rect_blend translucent")
+fill_rect_blend(fb, 20, 0, 5, 5, WHITE)
+assert_eq(fb.get_pixel(22, 2), WHITE, "fill_rect_blend opaque fast path")
+
+-- ── gradients ───────────────────────────────────────────
+
+show "-- Draw: gradients --"
+
+assert_eq(lerp_rgba(BLACK, WHITE, 0.0), BLACK, "lerp start")
+assert_eq(lerp_rgba(BLACK, WHITE, 1.0), WHITE, "lerp end")
+assert(red_of(lerp_rgba(BLACK, WHITE, 0.5)) >= 126, "lerp midpoint ≈ grey")
+
+let stops = [{"t": 0.0, "color": rgb(124, 58, 237)}, {"t": 0.5, "color": rgb(79, 70, 229)}, {"t": 1.0, "color": rgb(34, 211, 238)}]
+assert_eq(sample_stops(stops, 0.0), rgb(124, 58, 237), "stops start = violet")
+assert_eq(sample_stops(stops, 1.0), rgb(34, 211, 238), "stops end = cyan")
+assert_eq(sample_stops(stops, 0.5), rgb(79, 70, 229), "stops mid = indigo")
+assert_eq(sample_stops(stops, 2.0), rgb(34, 211, 238), "stops clamps high")
+
+fb.clear(BLACK)
+linear_gradient(fb, 0, 0, 40, 8, stops, "h")
+-- left edge violet-ish (more red than blue), right edge cyan-ish (more blue+green)
+let leftpx = fb.get_pixel(0, 3)
+let rightpx = fb.get_pixel(39, 3)
+assert(red_of(leftpx) > red_of(rightpx), "gradient: red decreases left→right")
+assert(blue_of(rightpx) > blue_of(leftpx), "gradient: blue increases left→right")
+assert(green_of(rightpx) > green_of(leftpx), "gradient: cyan end greener")
+
+-- ── radial glow ─────────────────────────────────────────
+
+show "-- Draw: radial glow --"
+
+fb.clear(BLACK)
+radial_glow(fb, 20, 20, 12, rgba(34, 211, 238, 220))
+let center = fb.get_pixel(20, 20)
+let edge = fb.get_pixel(30, 20)
+assert(blue_of(center) > blue_of(edge), "glow: brighter at centre than edge")
+assert_eq(fb.get_pixel(20, 20 + 13), BLACK, "glow: nothing beyond radius")
+assert_eq(alpha_of(center), 255, "glow composites to opaque")
 
 -- ── arc (sampled) ───────────────────────────────────────
 

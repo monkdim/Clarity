@@ -252,3 +252,141 @@ fn polyline(fb, points, color) {
         i += 1
     }
 }
+
+-- ── Alpha compositing (source-over) ─────────────────────
+-- Colors are 0xAARRGGBB. Channels are unpacked by division (not `>>`)
+-- so the 0xFF alpha byte never sign-extends. The destination is
+-- treated as opaque, so results are opaque — exactly what a screen
+-- framebuffer wants.
+
+-- Composite `src` (possibly translucent) over an opaque `dst`.
+fn blend_over(dst, src) {
+    let sa = int(src / 16777216) & 0xFF
+    if sa == 255 { return src }
+    if sa == 0 { return dst }
+    let sr = int(src / 65536) & 0xFF
+    let sg = int(src / 256) & 0xFF
+    let sb = src & 0xFF
+    let dr = int(dst / 65536) & 0xFF
+    let dg = int(dst / 256) & 0xFF
+    let db = dst & 0xFF
+    let ia = 255 - sa
+    let orr = int((sr * sa + dr * ia) / 255)
+    let og  = int((sg * sa + dg * ia) / 255)
+    let ob  = int((sb * sa + db * ia) / 255)
+    return 255 * 16777216 + orr * 65536 + og * 256 + ob
+}
+
+-- Blend one translucent pixel onto the framebuffer.
+fn blend_pixel(fb, x, y, color) {
+    let sa = int(color / 16777216) & 0xFF
+    if sa == 255 { fb.put_pixel(x, y, color); return null }
+    if sa == 0 { return null }
+    fb.put_pixel(x, y, blend_over(fb.get_pixel(x, y), color))
+}
+
+-- Alpha-aware rectangle fill. Opaque colors take the fast FFI path;
+-- translucent colors composite per pixel (translucent panels, glass,
+-- scrims, soft shadows).
+fn fill_rect_blend(fb, x, y, w, h, color) {
+    let sa = int(color / 16777216) & 0xFF
+    if sa == 0 { return null }
+    if sa == 255 { fb.fill_rect(x, y, w, h, color); return null }
+    let y_end = y + h
+    let x_end = x + w
+    mut yy = y
+    while yy < y_end {
+        mut xx = x
+        while xx < x_end {
+            blend_pixel(fb, xx, yy, color)
+            xx += 1
+        }
+        yy += 1
+    }
+}
+
+-- ── Gradients ───────────────────────────────────────────
+-- Interpolate two 0xAARRGGBB colors (alpha included) at t in [0,1].
+fn lerp_rgba(a, b, t) {
+    let aa = int(a / 16777216) & 0xFF
+    let ar = int(a / 65536) & 0xFF
+    let ag = int(a / 256) & 0xFF
+    let ab = a & 0xFF
+    let ba = int(b / 16777216) & 0xFF
+    let br = int(b / 65536) & 0xFF
+    let bg = int(b / 256) & 0xFF
+    let bb = b & 0xFF
+    let oa = int(aa + (ba - aa) * t)
+    let orr = int(ar + (br - ar) * t)
+    let og = int(ag + (bg - ag) * t)
+    let ob = int(ab + (bb - ab) * t)
+    return oa * 16777216 + orr * 65536 + og * 256 + ob
+}
+
+-- Sample a stop list [{"t": f, "color": c}, ...] (ascending t) at t.
+fn sample_stops(stops, t) {
+    mut clamped = t
+    if clamped < 0.0 { clamped = 0.0 }
+    if clamped > 1.0 { clamped = 1.0 }
+    mut i = 0
+    while i < len(stops) - 1 {
+        let s0 = stops[i]
+        let s1 = stops[i + 1]
+        if clamped >= s0["t"] and clamped <= s1["t"] {
+            let span = s1["t"] - s0["t"]
+            let local = if span == 0.0 { 0.0 } else { (clamped - s0["t"]) / span }
+            return lerp_rgba(s0["color"], s1["color"], local)
+        }
+        i += 1
+    }
+    return stops[len(stops) - 1]["color"]
+}
+
+-- Fill a rect with a linear gradient across `stops`. dir "h"
+-- (left→right) or "v" (top→bottom). Alpha-aware: translucent stops
+-- composite, opaque stops take the fast per-line fill.
+fn linear_gradient(fb, x, y, w, h, stops, dir) {
+    if w <= 0 or h <= 0 { return null }
+    if dir == "v" {
+        mut yy = 0
+        while yy < h {
+            let t = if h <= 1 { 0.0 } else { yy / (h - 1) }
+            let c = sample_stops(stops, t)
+            fill_rect_blend(fb, x, y + yy, w, 1, c)
+            yy += 1
+        }
+    } else {
+        mut xx = 0
+        while xx < w {
+            let t = if w <= 1 { 0.0 } else { xx / (w - 1) }
+            let c = sample_stops(stops, t)
+            fill_rect_blend(fb, x + xx, y, 1, h, c)
+            xx += 1
+        }
+    }
+}
+
+-- Soft radial glow: `color`'s alpha is the peak at the centre, easing
+-- to zero at `radius` (squared falloff — no sqrt). The neon halo.
+fn radial_glow(fb, cx, cy, radius, color) {
+    if radius <= 0 { return null }
+    let peak = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    let r2 = radius * radius
+    mut yy = cy - radius
+    while yy <= cy + radius {
+        mut xx = cx - radius
+        while xx <= cx + radius {
+            let dx = xx - cx
+            let dy = yy - cy
+            let d2 = dx * dx + dy * dy
+            if d2 <= r2 {
+                let falloff = 1.0 - (d2 / r2)
+                let a = int(peak * falloff)
+                if a > 0 { blend_pixel(fb, xx, yy, a * 16777216 + rgb) }
+            }
+            xx += 1
+        }
+        yy += 1
+    }
+}

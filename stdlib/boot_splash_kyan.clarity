@@ -10,9 +10,10 @@
 -- — so an init path can swap splashes without other changes.
 
 from "branding_kyan.clarity" import paint_monogram, paint_kyan_wordmark, KYAN_TAGLINE, KYAN_BRAND_NAME
-from "theme_kyan.clarity" import kyan_gradient
+from "theme_kyan.clarity" import kyan_gradient_stops
 from "animations.clarity" import animation, EASE_OUT_CUBIC, EASE_IN_QUAD
-from "draw.clarity" import fill_rect
+from "draw.clarity" import fill_rect, linear_gradient, radial_glow
+from "graphics.clarity" import rgba
 from "font.clarity" import builtin_font, draw_text, measure_text
 
 let _VOID = 0xFF05060A       -- boot is always void-black
@@ -74,6 +75,10 @@ class KyanBootSplash {
         let mono_cx = int(this.fb.width * 0.5)
         let mono_cy = int(this.fb.height * 0.40)
         let mono_size = int(this.fb.height * 0.34)
+        -- Neon halo behind the monogram — brightens as it assembles
+        let glow_a = int(52 * assemble)
+        radial_glow(this.fb, mono_cx, mono_cy, int(mono_size * 0.95), rgba(34, 211, 238, glow_a))
+        this._record("glow", {"alpha": glow_a})
         paint_monogram(this.fb, mono_cx, mono_cy, mono_size, this.theme, {"assemble": assemble})
         this._record("monogram", {"cx": mono_cx, "cy": mono_cy, "size": mono_size, "assemble": assemble})
 
@@ -107,21 +112,8 @@ class KyanBootSplash {
         fill_rect(this.fb, 0, bar_y, this.fb.width, bar_h, _HAIRLINE)
         let fill_w = int(this.fb.width * this.progress)
         if fill_w > 0 {
-            -- Sample the violet→cyan signature across the filled width.
-            let segments = 24
-            let seg_w = max(1, int(fill_w / segments))
-            mut s = 0
-            while s < segments {
-                let frac = s / segments
-                let color = kyan_gradient(this.theme, frac)
-                let x0 = s * seg_w
-                if x0 >= fill_w { s = segments }
-                else {
-                    let w = if s == segments - 1 { fill_w - x0 } else { seg_w }
-                    fill_rect(this.fb, x0, bar_y, w, bar_h, color)
-                    s = s + 1
-                }
-            }
+            -- Smooth violet→indigo→cyan signature across the filled width.
+            linear_gradient(this.fb, 0, bar_y, fill_w, bar_h, kyan_gradient_stops(), "h")
         }
         this._record("progress", {"status": this.status_text, "progress": this.progress})
     }
