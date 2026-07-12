@@ -86,59 +86,57 @@ tell the computer to run them.
 
 ## Installing Clarity
 
+> **Heads up — Clarity is early.** A one-click download is on the roadmap, but
+> it's not ready yet. For now, installing means **building Clarity from source**.
+> It's a handful of commands, laid out step by step below. If you've never used a
+> terminal before, that's okay — just copy each command exactly.
+
 ### What You Need
 
 - A computer (Windows, Mac, or Linux)
-- Python 3.8 or newer (most computers already have this)
+- [Bun](https://bun.sh) — the tool that turns Clarity into a runnable program
+- Python 3 — used once, to bootstrap the very first build
+- `git` — to download the source code
 
-### Step 1: Check if Python is installed
-
-Open your **terminal** (also called command line, command prompt, or shell):
+### Step 1: Open your terminal
 
 - **Windows:** Press `Win + R`, type `cmd`, press Enter
 - **Mac:** Press `Cmd + Space`, type "Terminal", press Enter
 - **Linux:** Press `Ctrl + Alt + T`
 
-Type this and press Enter:
+### Step 2: Install Bun
+
+Bun compiles Clarity into a single program. Install it with the one-liner from
+[bun.sh](https://bun.sh):
 
 ```bash
-python3 --version
+# Mac / Linux
+curl -fsSL https://bun.sh/install | bash
+
+# Windows (PowerShell)
+powershell -c "irm bun.sh/install.ps1 | iex"
 ```
 
-You should see something like `Python 3.10.4`. Any version 3.8 or higher works.
-
-If you get an error, you need to install Python first. Go to https://python.org and
-download it. During installation, **check the box that says "Add Python to PATH"**.
-
-### Step 2: Install Clarity
-
-In your terminal, type:
+### Step 3: Download and build Clarity
 
 ```bash
-pip install clarity-lang
+git clone https://github.com/monkdim/Clarity.git
+cd Clarity
+python3 native/transpile.py --bundle
+bun build --compile native/dist/clarity-entry.js --outfile clarity
 ```
 
-That's it. Clarity is now installed.
+That last command produces a `clarity` program in the folder. Move it somewhere on
+your `PATH` (e.g. `sudo mv clarity /usr/local/bin/` on Mac/Linux) so you can run it
+from anywhere — or just run it as `./clarity` from inside the folder.
 
-### Step 3: Verify it works
-
-Type:
+### Step 4: Verify it works
 
 ```bash
 clarity version
 ```
 
-You should see `clarity 0.4.0` (or similar). You're ready to go.
-
-### Alternative: Install from source
-
-If you prefer to install from the source code:
-
-```bash
-git clone https://github.com/monkdim/Clarity.git
-cd Clarity
-pip install -e .
-```
+You should see a version line. You're ready to go.
 
 ---
 
@@ -1667,4 +1665,4 @@ feature documented.
 
 ---
 
-*Written for Clarity v0.4.0. Happy coding!*
+*Happy coding!*

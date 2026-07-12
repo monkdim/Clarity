@@ -161,6 +161,17 @@ assert_single("try catch", "try {\n  throw \"oops\"\n} catch e {\n  show \"caugh
 
 assert_single("try no throw", "mut x = 0\ntry { x = 42 } catch e { x = -1 }\nshow x", "42")
 
+-- Engine-raised errors must be catchable too (they used to blow straight
+-- past the VM's try/catch — only explicit `throw` was caught).
+assert_single("catch divide by zero", "mut c = false\ntry { let x = 1 / 0 } catch e { c = true }\nshow c", "true")
+assert_single("catch undefined variable", "mut c = false\ntry { show missingvar } catch e { c = true }\nshow c", "true")
+assert_single("catch bad index", "mut c = false\ntry { let a = [1]\nshow a[9][0] } catch e { c = true }\nshow c", "true")
+assert_single("engine error binds to catch var", "mut m = \"\"\ntry { let x = 1 / 0 } catch e { m = e }\nshow contains(m, \"Division by zero\")", "true")
+-- an engine error in a called function unwinds to the caller's handler
+assert_single("catch error across a call", "fn f() { return 1 / 0 }\nmut c = false\ntry { show f() } catch e { c = true }\nshow c", "true")
+-- the inner handler wins for a nested try
+assert_single("nested try catches at inner", "mut r = \"none\"\ntry { try { let x = 1 / 0 } catch e { r = \"inner\" } } catch e { r = \"outer\" }\nshow r", "inner")
+
 -- ── Section 11: Null Coalesce ────────────────────────────
 
 show "Section 11: Null Coalesce"

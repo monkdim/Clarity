@@ -69,7 +69,7 @@ The toolkit ships the widgets needed to build the eleven default apps. Filling o
 
 - **PTY.** The terminal app uses pipes today, which works for line-buffered output and is wrong for anything that wants raw mode (vim, less, ncurses apps). Adding `forkpty()` to the freestanding runtime closes this.
 - **Hot reload.** The app framework supports module reload at the protocol level; the runtime hook that actually swaps modules in a live process is the gap.
-- **Native bytecode VM.** `runtime/native_vm/` is a Zig implementation of the Clarity bytecode VM that would let the runtime ditch QuickJS. 10 of 58 opcodes are implemented; the rest return `error.NotImplemented`. Treat as a stretch goal for 1.x.
+- **Native bytecode VM.** `runtime/native_vm/` is a Zig implementation of the Clarity bytecode VM that would let the runtime ditch QuickJS. Roughly half of its ~54 opcodes are implemented; the rest return `error.NotImplemented`, and `load_bundle` is still a stub. Treat as a stretch goal for 1.x.
 
 ---
 

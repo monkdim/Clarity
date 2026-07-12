@@ -20,28 +20,31 @@ This is the practical reference: how to install, write your first program, learn
 
 ## Install Clarity
 
-### Pre-built binary (recommended)
-
-Download the latest release for your platform from [Releases](https://github.com/monkdim/Clarity/releases), or build from source:
-
-```bash
-git clone https://github.com/monkdim/Clarity.git
-cd Clarity
-clarity build --install
-```
+> Clarity is early — a pre-built download for each platform is on the roadmap,
+> but not ready yet. For now, build from source; it's a few commands.
 
 ### Build from source
 
-Requires [Bun](https://bun.sh):
+Requires [Bun](https://bun.sh) (plus Python 3 and `git` for the first bootstrap build):
 
 ```bash
-curl -fsSL https://bun.sh/install | bash
-cd Clarity/native
-python3 transpile.py --bundle --compile
-# Binary is in native/dist/clarity
+curl -fsSL https://bun.sh/install | bash        # install Bun
+git clone https://github.com/monkdim/Clarity.git
+cd Clarity
+python3 native/transpile.py --bundle             # bootstrap the toolchain
+bun build --compile native/dist/clarity-entry.js --outfile clarity
 ```
 
-After install, the `clarity` command is available globally.
+This produces a `clarity` binary in the repo root. Move it onto your `PATH`
+(e.g. `sudo mv clarity /usr/local/bin/`) so the `clarity` command is available
+globally.
+
+Once you already have a working `clarity`, you can rebuild and reinstall it in one
+step:
+
+```bash
+clarity build --install
+```
 
 ---
 
@@ -518,7 +521,7 @@ clarity run app.clarity --watch
 
 ### Bytecode compiler
 
-Clarity includes a stack-based bytecode compiler and VM with 58 opcodes:
+Clarity includes a stack-based bytecode compiler and VM with 56 opcodes:
 
 ```bash
 clarity compile program.clarity
@@ -708,7 +711,7 @@ Clarity/
     website_gen.clarity     # KyanOS website generator
     branding.clarity        # Brand tokens (typography, spacing, radius)
 
-    test_*.clarity          # Test suites (550+ tests)
+    test_*.clarity          # Test suites (50 files, ~2,750 assertions)
 
   kernel/                   # Zig micro-kernel (multiboot2, x86_64 long mode)
     boot.zig, kernel.zig, paging.zig, gdt.zig, idt.zig,
@@ -763,7 +766,7 @@ clarity smoke
 clarity bench
 ```
 
-**550+ self-hosted tests**, all written in Clarity.
+**~2,750 self-hosted assertions across 50 test files**, all written in Clarity.
 
 ---
 
