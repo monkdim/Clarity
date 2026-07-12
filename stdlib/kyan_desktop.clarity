@@ -67,6 +67,20 @@ class KyanDesktop {
         this.app_state = {}        -- app_id -> per-app live state (games)
         this.keys = {}             -- key name -> down? (browser/native fed)
         this._last_tick = null
+        this._icon_cache = {}      -- "app:size:bg" -> pre-rendered icon fb
+    }
+
+    -- Anti-aliased icons are supersampled (expensive), so render each
+    -- once over its backing colour and cache it; later frames just blit.
+    fn _icon(app, size, bg) {
+        let key = app + ":" + str(size) + ":" + str(bg)
+        if not has(this._icon_cache, key) {
+            let f = framebuffer(size, size)
+            f.clear(bg)
+            paint_kyan_icon(f, app, 0, 0, size, this.theme)
+            this._icon_cache[key] = f
+        }
+        return this._icon_cache[key]
     }
 
     fn boot(pinned) {
@@ -368,9 +382,10 @@ class KyanDesktop {
         -- floating glass pill with a soft shadow
         drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7)
         rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205))
-        -- icons + running indicators
+        -- icons (cached, AA) + running indicators
         for ic in layout["icons"] {
-            paint_kyan_icon(fb, ic["app"], ic["x"], ic["y"], ic["size"], this.theme)
+            let bg = fb.get_pixel(ic["x"], ic["y"])   -- the glass under this icon
+            fb.blit(this._icon(ic["app"], ic["size"], bg), 0, 0, ic["x"], ic["y"], ic["size"], ic["size"])
             if has(this.windows, ic["app"]) {
                 fill_rect(fb, ic["x"] + int(ic["size"] / 2) - 2, dy + dh - 5, 4, 4, this.theme["accent"])
             }
@@ -394,7 +409,9 @@ class KyanDesktop {
         let cell = layout["cell"]
         let gy = layout["gy"]
         for c in layout["cells"] {
-            paint_kyan_icon(fb, c["app"], c["x"] + int((cell - 52) / 2), gy, 52, t)
+            let ix = c["x"] + int((cell - 52) / 2)
+            let bg = fb.get_pixel(ix, gy)
+            fb.blit(this._icon(c["app"], 52, bg), 0, 0, ix, gy, 52, 52)
             let label = if has(APP_TITLES, c["app"]) { APP_TITLES[c["app"]] } else { c["app"] }
             let lw = measure_text(this.font, label)[0]
             draw_text(fb, c["x"] + int((cell - lw) / 2), gy + 60, label, this.font, t["foreground"])

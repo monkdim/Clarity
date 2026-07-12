@@ -93,6 +93,11 @@ function has(obj, key) {
     return obj.includes(key);
   return obj != null && key in obj;
 }
+function contains(s, sub) {
+  if (Array.isArray(s))
+    return s.includes(sub);
+  return s.includes(sub);
+}
 function chars(s) {
   return s.split("");
 }
@@ -1169,40 +1174,10 @@ function window_manager(compositor2) {
 }
 
 // web/build/draw.js
-function line(fb, x0, y0, x1, y1, color) {
-  let x = x0;
-  let y = y0;
-  let dx = truthy(x1 > x0) ? x1 - x0 : x0 - x1;
-  let dy = truthy(y1 > y0) ? y1 - y0 : y0 - y1;
-  let sx = truthy(x0 < x1) ? 1 : -1;
-  let sy = truthy(y0 < y1) ? 1 : -1;
-  let nd = -dy;
-  let err = dx + nd;
-  let done = false;
-  while (truthy(!truthy(done))) {
-    fb.put_pixel(x, y, color);
-    if (truthy($eq(x, x1) && $eq(y, y1))) {
-      done = true;
-    } else {
-      let e2 = 2 * err;
-      if (truthy(e2 >= nd)) {
-        err += nd;
-        x += sx;
-      }
-      if (truthy(e2 <= dx)) {
-        err += dx;
-        y += sy;
-      }
-    }
-  }
-}
 function hline(fb, x0, y, x1, color) {
   let xa = truthy(x0 < x1) ? x0 : x1;
   let xb = truthy(x0 < x1) ? x1 : x0;
   fb.fill_rect(xa, y, xb - xa + 1, 1, color);
-}
-function rect(fb, x, y, w, h, color) {
-  fb.stroke_rect(x, y, w, h, color);
 }
 function fill_rect(fb, x, y, w, h, color) {
   fb.fill_rect(x, y, w, h, color);
@@ -1243,19 +1218,6 @@ function rounded_rect(fb, x, y, w, h, radius, color) {
     hline(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color);
     hline(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color);
     dy += 1;
-  }
-}
-function polygon(fb, points, color) {
-  let n = len(points);
-  if (truthy(n < 2)) {
-    return null;
-  }
-  let i = 0;
-  while (truthy(i < n)) {
-    let a = $index(points, i);
-    let b = $index(points, (i + 1) % n);
-    line(fb, $index(a, 0), $index(a, 1), $index(b, 0), $index(b, 1), color);
-    i += 1;
   }
 }
 function fill_polygon(fb, points, color) {
@@ -1321,18 +1283,36 @@ function fill_polygon(fb, points, color) {
     y += 1;
   }
 }
-function polyline(fb, points, color) {
-  let n = len(points);
-  if (truthy(n < 2)) {
+function blend_over(dst, src) {
+  let sa = $int(src / 16777216) & 255;
+  if (truthy($eq(sa, 255))) {
+    return src;
+  }
+  if (truthy($eq(sa, 0))) {
+    return dst;
+  }
+  let sr = $int(src / 65536) & 255;
+  let sg = $int(src / 256) & 255;
+  let sb = src & 255;
+  let dr = $int(dst / 65536) & 255;
+  let dg = $int(dst / 256) & 255;
+  let db = dst & 255;
+  let ia = 255 - sa;
+  let orr = $int((sr * sa + dr * ia) / 255);
+  let og = $int((sg * sa + dg * ia) / 255);
+  let ob = $int((sb * sa + db * ia) / 255);
+  return 255 * 16777216 + orr * 65536 + og * 256 + ob;
+}
+function blend_pixel(fb, x, y, color) {
+  let sa = $int(color / 16777216) & 255;
+  if (truthy($eq(sa, 255))) {
+    fb.put_pixel(x, y, color);
     return null;
   }
-  let i = 0;
-  while (truthy(i < n - 1)) {
-    let a = $index(points, i);
-    let b = $index(points, i + 1);
-    line(fb, $index(a, 0), $index(a, 1), $index(b, 0), $index(b, 1), color);
-    i += 1;
+  if (truthy($eq(sa, 0))) {
+    return null;
   }
+  fb.put_pixel(x, y, blend_over(fb.get_pixel(x, y), color));
 }
 function fill_rect_blend(fb, x, y, w, h, color) {
   let sa = $int(color / 16777216) & 255;
@@ -1545,6 +1525,76 @@ function draw_text_scaled(fb, x, y, text, font, color, scale, tracking) {
   }
   return cx - x;
 }
+function _glyph_cover(glyph, col, row, fw, fh) {
+  if (truthy(col < 0 || col >= fw || row < 0 || row >= fh)) {
+    return 0;
+  }
+  let mask = 1 << fw - 1 - col;
+  if (truthy($ne($index(glyph, row) & mask, 0))) {
+    return 1;
+  }
+  return 0;
+}
+function _floor_i(v) {
+  let i = $int(v);
+  if (truthy(v < 0 && i > v)) {
+    return i - 1;
+  }
+  return i;
+}
+function draw_text_smooth(fb, x, y, text, font, color, scale, tracking) {
+  let s = truthy($eq(scale, null) || scale < 1) ? 1 : scale;
+  let track = truthy($eq(tracking, null)) ? 0 : tracking;
+  if (truthy($eq(s, 1))) {
+    return draw_text_scaled(fb, x, y, text, font, color, 1, track);
+  }
+  let fw = font.width;
+  let fh = font.height;
+  let base_a = $int(color / 16777216) & 255;
+  let rgb2 = color & 16777215;
+  let bx = $int(x);
+  let by = $int(y);
+  let chs = chars(text);
+  let dw = fw * s;
+  let dh = fh * s;
+  let cx = bx;
+  let ci = 0;
+  while (truthy(ci < len(chs))) {
+    let glyph = font.glyph(char_code($index(chs, ci)));
+    if (truthy($ne(glyph, null))) {
+      let j = 0;
+      while (truthy(j < dh)) {
+        let fy = (j + 0.5) / s - 0.5;
+        let r0 = _floor_i(fy);
+        let ty = fy - r0;
+        let i = 0;
+        while (truthy(i < dw)) {
+          let fx = (i + 0.5) / s - 0.5;
+          let c0 = _floor_i(fx);
+          let tx = fx - c0;
+          let v00 = _glyph_cover(glyph, c0, r0, fw, fh);
+          let v10 = _glyph_cover(glyph, c0 + 1, r0, fw, fh);
+          let v01 = _glyph_cover(glyph, c0, r0 + 1, fw, fh);
+          let v11 = _glyph_cover(glyph, c0 + 1, r0 + 1, fw, fh);
+          let top = v00 + (v10 - v00) * tx;
+          let bot = v01 + (v11 - v01) * tx;
+          let cov = top + (bot - top) * ty;
+          if (truthy(cov > 0.03)) {
+            let a = $int(cov * base_a);
+            if (truthy(a > 0)) {
+              blend_pixel(fb, cx + i, by + j, a * 16777216 + rgb2);
+            }
+          }
+          i += 1;
+        }
+        j += 1;
+      }
+    }
+    cx += fw * s + track;
+    ci += 1;
+  }
+  return cx - bx;
+}
 var _BUILTIN_GLYPHS = { ["32"]: [0, 0, 0, 0, 0, 0, 0, 0], ["33"]: [24, 24, 24, 24, 24, 0, 24, 0], ["34"]: [54, 54, 0, 0, 0, 0, 0, 0], ["35"]: [54, 54, 127, 54, 127, 54, 54, 0], ["36"]: [24, 62, 96, 60, 6, 124, 24, 0], ["37"]: [102, 108, 24, 48, 102, 102, 0, 0], ["38"]: [56, 108, 104, 118, 108, 110, 54, 0], ["39"]: [24, 24, 0, 0, 0, 0, 0, 0], ["40"]: [12, 24, 48, 48, 48, 24, 12, 0], ["41"]: [48, 24, 12, 12, 12, 24, 48, 0], ["42"]: [0, 102, 60, 255, 60, 102, 0, 0], ["43"]: [0, 24, 24, 126, 24, 24, 0, 0], ["44"]: [0, 0, 0, 0, 0, 24, 24, 48], ["45"]: [0, 0, 0, 126, 0, 0, 0, 0], ["46"]: [0, 0, 0, 0, 0, 0, 24, 0], ["47"]: [6, 12, 24, 48, 96, 192, 128, 0], ["48"]: [60, 102, 110, 118, 102, 102, 60, 0], ["49"]: [24, 56, 24, 24, 24, 24, 126, 0], ["50"]: [60, 102, 6, 12, 24, 48, 126, 0], ["51"]: [60, 102, 6, 28, 6, 102, 60, 0], ["52"]: [6, 14, 30, 102, 127, 6, 6, 0], ["53"]: [126, 96, 124, 6, 6, 102, 60, 0], ["54"]: [60, 102, 96, 124, 102, 102, 60, 0], ["55"]: [126, 102, 6, 12, 24, 24, 24, 0], ["56"]: [60, 102, 102, 60, 102, 102, 60, 0], ["57"]: [60, 102, 102, 62, 6, 102, 60, 0], ["58"]: [0, 24, 24, 0, 0, 24, 24, 0], ["59"]: [0, 24, 24, 0, 0, 24, 24, 48], ["60"]: [14, 24, 48, 96, 48, 24, 14, 0], ["61"]: [0, 0, 126, 0, 126, 0, 0, 0], ["62"]: [112, 24, 12, 6, 12, 24, 112, 0], ["63"]: [60, 102, 6, 12, 24, 0, 24, 0], ["64"]: [60, 102, 110, 110, 96, 102, 60, 0], ["65"]: [24, 60, 102, 102, 126, 102, 102, 0], ["66"]: [124, 102, 102, 124, 102, 102, 124, 0], ["67"]: [60, 102, 96, 96, 96, 102, 60, 0], ["68"]: [120, 108, 102, 102, 102, 108, 120, 0], ["69"]: [126, 96, 96, 120, 96, 96, 126, 0], ["70"]: [126, 96, 96, 120, 96, 96, 96, 0], ["71"]: [60, 102, 96, 110, 102, 102, 60, 0], ["72"]: [102, 102, 102, 126, 102, 102, 102, 0], ["73"]: [60, 24, 24, 24, 24, 24, 60, 0], ["74"]: [30, 12, 12, 12, 12, 108, 56, 0], ["75"]: [102, 108, 120, 112, 120, 108, 102, 0], ["76"]: [96, 96, 96, 96, 96, 96, 126, 0], ["77"]: [99, 119, 127, 107, 99, 99, 99, 0], ["78"]: [102, 118, 126, 126, 110, 102, 102, 0], ["79"]: [60, 102, 102, 102, 102, 102, 60, 0], ["80"]: [124, 102, 102, 124, 96, 96, 96, 0], ["81"]: [60, 102, 102, 102, 102, 60, 14, 0], ["82"]: [124, 102, 102, 124, 120, 108, 102, 0], ["83"]: [60, 102, 96, 60, 6, 102, 60, 0], ["84"]: [126, 24, 24, 24, 24, 24, 24, 0], ["85"]: [102, 102, 102, 102, 102, 102, 60, 0], ["86"]: [102, 102, 102, 102, 102, 60, 24, 0], ["87"]: [99, 99, 99, 107, 127, 119, 99, 0], ["88"]: [102, 102, 60, 24, 60, 102, 102, 0], ["89"]: [102, 102, 102, 60, 24, 24, 24, 0], ["90"]: [126, 6, 12, 24, 48, 96, 126, 0], ["91"]: [60, 48, 48, 48, 48, 48, 60, 0], ["92"]: [192, 96, 48, 24, 12, 6, 2, 0], ["93"]: [60, 12, 12, 12, 12, 12, 60, 0], ["94"]: [24, 60, 102, 0, 0, 0, 0, 0], ["95"]: [0, 0, 0, 0, 0, 0, 0, 255], ["96"]: [48, 24, 12, 0, 0, 0, 0, 0], ["97"]: [0, 0, 60, 6, 62, 102, 62, 0], ["98"]: [96, 96, 124, 102, 102, 102, 124, 0], ["99"]: [0, 0, 60, 102, 96, 102, 60, 0], ["100"]: [6, 6, 62, 102, 102, 102, 62, 0], ["101"]: [0, 0, 60, 102, 126, 96, 60, 0], ["102"]: [28, 54, 48, 120, 48, 48, 48, 0], ["103"]: [0, 0, 62, 102, 102, 62, 6, 124], ["104"]: [96, 96, 124, 102, 102, 102, 102, 0], ["105"]: [24, 0, 56, 24, 24, 24, 60, 0], ["106"]: [6, 0, 6, 6, 6, 6, 102, 60], ["107"]: [96, 96, 102, 108, 120, 108, 102, 0], ["108"]: [56, 24, 24, 24, 24, 24, 60, 0], ["109"]: [0, 0, 102, 127, 127, 107, 99, 0], ["110"]: [0, 0, 124, 102, 102, 102, 102, 0], ["111"]: [0, 0, 60, 102, 102, 102, 60, 0], ["112"]: [0, 0, 124, 102, 102, 124, 96, 96], ["113"]: [0, 0, 62, 102, 102, 62, 6, 6], ["114"]: [0, 0, 124, 102, 96, 96, 96, 0], ["115"]: [0, 0, 62, 96, 60, 6, 124, 0], ["116"]: [48, 48, 120, 48, 48, 54, 28, 0], ["117"]: [0, 0, 102, 102, 102, 102, 62, 0], ["118"]: [0, 0, 102, 102, 102, 60, 24, 0], ["119"]: [0, 0, 99, 107, 127, 127, 54, 0], ["120"]: [0, 0, 102, 60, 24, 60, 102, 0], ["121"]: [0, 0, 102, 102, 102, 62, 6, 124], ["122"]: [0, 0, 126, 12, 24, 48, 126, 0], ["123"]: [14, 24, 24, 112, 24, 24, 14, 0], ["124"]: [24, 24, 24, 24, 24, 24, 24, 0], ["125"]: [112, 24, 24, 14, 24, 24, 112, 0], ["126"]: [118, 220, 0, 0, 0, 0, 0, 0] };
 function builtin_font() {
   return new Font(8, 8, _BUILTIN_GLYPHS);
@@ -1572,45 +1622,6 @@ var KYAN_CYAN = 4280472558;
 function kyan_gradient_stops() {
   return [{ ["t"]: 0, ["color"]: KYAN_VIOLET }, { ["t"]: 0.5, ["color"]: KYAN_INDIGO }, { ["t"]: 1, ["color"]: KYAN_CYAN }];
 }
-function kyan_gradient(theme, t) {
-  let clamped = t;
-  if (truthy(clamped < 0)) {
-    clamped = 0;
-  }
-  if (truthy(clamped > 1)) {
-    clamped = 1;
-  }
-  return _lerp_along(kyan_gradient_stops(), clamped);
-}
-function _lerp_along(stops, t) {
-  let i = 0;
-  while (truthy(i < len(stops) - 1)) {
-    let a = $index(stops, i);
-    let b = $index(stops, i + 1);
-    if (truthy(t >= $index(a, "t") && t <= $index(b, "t"))) {
-      let span = $index(b, "t") - $index(a, "t");
-      let local = truthy($eq(span, 0)) ? 0 : (t - $index(a, "t")) / span;
-      return _lerp_color($index(a, "color"), $index(b, "color"), local);
-    }
-    i = i + 1;
-  }
-  return $index($index(stops, len(stops) - 1), "color");
-}
-function _lerp_color(a, b, t) {
-  let aa = $int(a / 16777216) & 255;
-  let ar = $int(a / 65536) & 255;
-  let ag = $int(a / 256) & 255;
-  let ab = a & 255;
-  let ba = $int(b / 16777216) & 255;
-  let br = $int(b / 65536) & 255;
-  let bg = $int(b / 256) & 255;
-  let bb = b & 255;
-  let oa = $int(aa + (ba - aa) * t);
-  let or_ = $int(ar + (br - ar) * t);
-  let og = $int(ag + (bg - ag) * t);
-  let ob = $int(ab + (bb - ab) * t);
-  return oa * 16777216 + or_ * 65536 + og * 256 + ob;
-}
 var OBS_VOID = 4278519306;
 var OBS_SURFACE = 4279046426;
 var OBS_RAISED = 4279573289;
@@ -1624,145 +1635,166 @@ function kyan_obsidian() {
   return _merge(_BASE_SHARED, { ["name"]: "Obsidian", ["id"]: "kyan-obsidian", ["background"]: OBS_VOID, ["surface"]: OBS_SURFACE, ["surface_elevated"]: OBS_RAISED, ["border"]: OBS_HAIRLINE, ["foreground"]: OBS_TEXT, ["foreground_muted"]: OBS_MUTED, ["ink_soft"]: OBS_INK_SOFT, ["primary"]: OBS_ACCENT, ["primary_dark"]: 4279999924, ["accent"]: OBS_ACCENT, ["accent_secondary"]: KYAN_VIOLET, ["accent_tertiary"]: KYAN_INDIGO, ["highlight"]: KYAN_CYAN, ["selection"]: 1076549872, ["danger"]: 4294668677, ["warning"]: 4294688548, ["success"]: 4281652121, ["focus_ring"]: OBS_ACCENT, ["disabled"]: 4282008150, ["shadow"]: OBS_SHADOW, ["gradient_stops"]: kyan_gradient_stops(), ["scheme"]: "dark", ["font"]: builtin_font() });
 }
 
-// web/build/branding_modern.js
-var APP_ICONS = { ["terminal"]: { ["mark"]: "wave", ["accent"]: "primary" }, ["files"]: { ["mark"]: "stack", ["accent"]: "secondary" }, ["editor"]: { ["mark"]: "stripes", ["accent"]: "tertiary" }, ["calc"]: { ["mark"]: "grid", ["accent"]: "highlight" }, ["viewer"]: { ["mark"]: "frame", ["accent"]: "primary_dark" }, ["monitor"]: { ["mark"]: "pulse", ["accent"]: "secondary" }, ["browser"]: { ["mark"]: "ring", ["accent"]: "highlight" }, ["mail"]: { ["mark"]: "envelope", ["accent"]: "tertiary" }, ["chat"]: { ["mark"]: "bubble", ["accent"]: "primary" }, ["store"]: { ["mark"]: "diamond", ["accent"]: "secondary" }, ["settings"]: { ["mark"]: "cog", ["accent"]: "ink_soft" } };
-function _accent_color(theme, key) {
-  if (truthy(has(theme, key))) {
-    return $index(theme, key);
+// web/build/branding_kyan.js
+var _ICON_SS = 3;
+var _KNOWN_ICONS = ["prism", "voidrunner", "terminal", "files", "editor", "monitor", "settings", "calc", "viewer", "mail", "chat", "store"];
+function paint_kyan_icon(fb, app_id, x, y, size, theme) {
+  let matched = contains(_KNOWN_ICONS, app_id);
+  let ss = _ICON_SS;
+  let n = size * ss;
+  let tmp = framebuffer(n, n);
+  let yy = 0;
+  while (truthy(yy < n)) {
+    let sy = y + $int(yy / ss);
+    let xx = 0;
+    while (truthy(xx < n)) {
+      tmp.put_pixel(xx, yy, fb.get_pixel(x + $int(xx / ss), sy));
+      xx = xx + 1;
+    }
+    yy = yy + 1;
   }
-  return $index(theme, "primary");
-}
-function paint_icon(fb, app_id, x, y, size, theme) {
-  if (truthy(!truthy(has(APP_ICONS, app_id)))) {
-    _draw_blank(fb, x, y, size, theme);
-    return false;
+  _kyan_mark(tmp, app_id, 0, 0, n, theme);
+  let cnt = ss * ss;
+  let dy = 0;
+  while (truthy(dy < size)) {
+    let dx = 0;
+    while (truthy(dx < size)) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let oy = 0;
+      while (truthy(oy < ss)) {
+        let ox = 0;
+        while (truthy(ox < ss)) {
+          let p = tmp.get_pixel(dx * ss + ox, dy * ss + oy);
+          r = r + ($int(p / 65536) & 255);
+          g = g + ($int(p / 256) & 255);
+          b = b + (p & 255);
+          ox = ox + 1;
+        }
+        oy = oy + 1;
+      }
+      fb.put_pixel(x + dx, y + dy, 4278190080 + $int(r / cnt) * 65536 + $int(g / cnt) * 256 + $int(b / cnt));
+      dx = dx + 1;
+    }
+    dy = dy + 1;
   }
-  let recipe = $index(APP_ICONS, app_id);
-  let accent = _accent_color(theme, $index(recipe, "accent"));
-  let radius = $int(size / 5);
-  rounded_rect(fb, x, y, size, size, radius, $index(theme, "surface"));
-  fill_rect(fb, x, y, size, $max2(2, $int(size / 16)), accent);
-  let inset = $int(size * 0.22);
-  let cx = x + size / 2;
-  let cy = y + size / 2;
-  let r = $int((size - inset * 2) / 2);
-  let mark = $index(recipe, "mark");
-  if (truthy($eq(mark, "wave"))) {
-    _mark_wave(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "stack"))) {
-    _mark_stack(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "stripes"))) {
-    _mark_stripes(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "grid"))) {
-    _mark_grid(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "frame"))) {
-    _mark_frame(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "pulse"))) {
-    _mark_pulse(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "ring"))) {
-    _mark_ring(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "envelope"))) {
-    _mark_envelope(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "bubble"))) {
-    _mark_bubble(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "diamond"))) {
-    _mark_diamond(fb, cx, cy, r, accent);
-  } else if (truthy($eq(mark, "cog"))) {
-    _mark_cog(fb, cx, cy, r, accent);
+  return matched;
+}
+function _kyan_mark(fb, app, x, y, s, theme) {
+  let cyan = $index(theme, "accent");
+  let violet = $index(theme, "accent_secondary");
+  let indigo = $index(theme, "accent_tertiary");
+  let ink = $index(theme, "foreground");
+  let muted = $index(theme, "foreground_muted");
+  let glass = $index(theme, "surface_elevated");
+  let pad = $int(s * 0.14);
+  let iw = s - 2 * pad;
+  let cx = x + $int(s / 2);
+  let cy = y + $int(s / 2);
+  if (truthy($eq(app, "prism") || $eq(app, "voidrunner"))) {
+    let top = y + $int(s * 0.2);
+    let bot = y + $int(s * 0.8);
+    let half = $int(s * 0.3);
+    fill_polygon(fb, [[cx, top], [cx + half, bot], [cx - half, bot]], violet);
+    fill_polygon(fb, [[cx, top], [cx + $int(half / 2), $int((top + bot) / 2)], [cx, bot]], cyan);
+    fill_rect(fb, cx - $max2(1, $int(s / 32)), top, $max2(2, $int(s / 16)), bot - top, 4293588735);
+    return null;
   }
-  return true;
-}
-function _draw_blank(fb, x, y, size, theme) {
-  rounded_rect(fb, x, y, size, size, $int(size / 5), $index(theme, "surface"));
-  fill_rect(fb, x, y, size, $max2(2, $int(size / 16)), $index(theme, "accent"));
-}
-function _mark_wave(fb, cx, cy, r, color) {
-  fill_rect(fb, cx - r, cy - r / 2 - 4, r * 2, 4, color);
-  fill_rect(fb, cx - r + r / 3, cy - 2, r * 2 - r / 3, 4, color);
-  fill_rect(fb, cx - r, cy + r / 2 - 4, r * 2 - r / 3, 4, color);
-}
-function _mark_stack(fb, cx, cy, r, color) {
-  fill_rect(fb, cx - r + 2, cy - r + 2, r * 2 - 4, r * 2 / 3, color);
-  fill_rect(fb, cx - r, cy - r + r / 3, r * 2, r * 2 / 3, color);
-  fill_rect(fb, cx - r + 2, cy - r + r * 2 / 3 - 2, r * 2 - 4, r * 2 / 3, color);
-}
-function _mark_stripes(fb, cx, cy, r, color) {
-  fill_rect(fb, cx - r, cy - r, r * 2, 3, color);
-  fill_rect(fb, cx - r, cy - 1, r * 7 / 4, 3, color);
-  fill_rect(fb, cx - r, cy + r - 4, r * 6 / 4, 3, color);
-}
-function _mark_grid(fb, cx, cy, r, color) {
-  let d = $max2(3, r / 3);
-  fill_rect(fb, cx - r, cy - r, d, d, color);
-  fill_rect(fb, cx + r - d, cy - r, d, d, color);
-  fill_rect(fb, cx - r, cy + r - d, d, d, color);
-  fill_rect(fb, cx + r - d, cy + r - d, d, d, color);
-  fill_rect(fb, cx - d / 2, cy - d / 2, d, d, color);
-}
-function _mark_frame(fb, cx, cy, r, color) {
-  rect(fb, cx - r, cy - r, r * 2, r * 2, color);
-  fill_rect(fb, cx - r + 4, cy + r / 2, r * 2 - 8, 2, color);
-  circle(fb, cx + r / 3, cy - r / 4, $max2(2, r / 5), color);
-}
-function _mark_pulse(fb, cx, cy, r, color) {
-  fill_rect(fb, cx - r, cy - 1, r / 2, 3, color);
-  fill_rect(fb, cx - r / 2, cy - r, 3, r * 2, color);
-  fill_rect(fb, cx - r / 2, cy - r, r / 3, 3, color);
-  fill_rect(fb, cx - r / 6, cy + r - 3, 3, 3, color);
-  fill_rect(fb, cx - r / 6, cy + r - 3, r * 5 / 6, 3, color);
-}
-function _mark_ring(fb, cx, cy, r, color) {
-  circle(fb, cx, cy, r, color);
-}
-function _mark_envelope(fb, cx, cy, r, color) {
-  rect(fb, cx - r, cy - r * 2 / 3, r * 2, r * 4 / 3, color);
-  line(fb, cx - r, cy - r * 2 / 3, cx, cy + r / 4, color);
-  line(fb, cx + r, cy - r * 2 / 3, cx, cy + r / 4, color);
-}
-function _mark_bubble(fb, cx, cy, r, color) {
-  rounded_rect(fb, cx - r, cy - r, r * 2, r * 5 / 4, $max2(3, r / 3), color);
-  polygon(fb, [[cx - r / 2 + 2, cy + r / 4], [cx - r + 2, cy + r], [cx, cy + r / 4]], color);
-}
-function _mark_diamond(fb, cx, cy, r, color) {
-  polygon(fb, [[cx, cy - r], [cx + r, cy], [cx, cy + r], [cx - r, cy]], color);
-}
-function _mark_cog(fb, cx, cy, r, color) {
-  circle(fb, cx, cy, r, color);
-  let tooth_w = $max2(3, r / 4);
-  let tooth_h = $max2(3, r / 3);
-  fill_rect(fb, cx - tooth_w / 2, cy - r - tooth_h, tooth_w, tooth_h, color);
-  fill_rect(fb, cx - tooth_w / 2, cy + r, tooth_w, tooth_h, color);
-  fill_rect(fb, cx - r - tooth_h, cy - tooth_w / 2, tooth_h, tooth_w, color);
-  fill_rect(fb, cx + r, cy - tooth_w / 2, tooth_h, tooth_w, color);
+  if (truthy($eq(app, "terminal"))) {
+    rounded_rect(fb, x + pad, y + pad, iw, iw, $int(s * 0.14), 4278914840);
+    fill_rect(fb, x + pad, y + pad, iw, $int(s * 0.16), glass);
+    let bx = x + $int(s * 0.3);
+    let by = cy;
+    let cw = $int(s * 0.16);
+    fill_polygon(fb, [[bx, by - cw], [bx + cw, by], [bx, by + cw], [bx - $int(cw / 2), by + cw], [bx + $int(cw / 2), by], [bx - $int(cw / 2), by - cw]], cyan);
+    fill_rect(fb, cx + $int(s * 0.02), by + $int(cw * 0.6), $int(s * 0.22), $max2(2, $int(s / 22)), cyan);
+    return null;
+  }
+  if (truthy($eq(app, "files"))) {
+    let fw = iw;
+    let fy = y + $int(s * 0.3);
+    rounded_rect(fb, x + pad, fy - $int(s * 0.1), $int(fw * 0.5), $int(s * 0.14), $int(s * 0.05), violet);
+    rounded_rect(fb, x + pad, fy, fw, $int(s * 0.42), $int(s * 0.06), cyan);
+    return null;
+  }
+  if (truthy($eq(app, "editor"))) {
+    rounded_rect(fb, x + pad, y + pad, iw, iw, $int(s * 0.1), 4293586679);
+    fill_polygon(fb, [[x + s - pad - $int(iw * 0.34), y + pad], [x + s - pad, y + pad], [x + s - pad, y + pad + $int(iw * 0.34)]], glass);
+    let lx = x + pad + $int(s * 0.1);
+    let lw = iw - $int(s * 0.2);
+    fill_rect(fb, lx, cy - $int(s * 0.1), lw, $max2(2, $int(s / 24)), violet);
+    fill_rect(fb, lx, cy, $int(lw * 0.75), $max2(2, $int(s / 24)), muted);
+    fill_rect(fb, lx, cy + $int(s * 0.1), $int(lw * 0.5), $max2(2, $int(s / 24)), muted);
+    return null;
+  }
+  if (truthy($eq(app, "monitor"))) {
+    let base = y + s - pad;
+    let bw = $int(s * 0.16);
+    let gap = $int(s * 0.08);
+    let x0 = cx - $int((3 * bw + 2 * gap) / 2);
+    rounded_rect(fb, x0, base - $int(s * 0.28), bw, $int(s * 0.28), $int(bw / 3), indigo);
+    rounded_rect(fb, x0 + bw + gap, base - $int(s * 0.46), bw, $int(s * 0.46), $int(bw / 3), violet);
+    rounded_rect(fb, x0 + 2 * (bw + gap), base - $int(s * 0.62), bw, $int(s * 0.62), $int(bw / 3), cyan);
+    return null;
+  }
+  if (truthy($eq(app, "settings"))) {
+    let rows = [{ ["y"]: 0.34, ["kx"]: 0.66, ["c"]: cyan }, { ["y"]: 0.5, ["kx"]: 0.38, ["c"]: violet }, { ["y"]: 0.66, ["kx"]: 0.58, ["c"]: indigo }];
+    for (let row of rows) {
+      let ry = y + $int(s * $index(row, "y"));
+      fill_rect(fb, x + pad, ry - $max2(1, $int(s / 40)), iw, $max2(2, $int(s / 20)), glass);
+      circle(fb, x + pad + $int(iw * $index(row, "kx")), ry, $int(s * 0.075), $index(row, "c"));
+    }
+    return null;
+  }
+  if (truthy($eq(app, "calc"))) {
+    rounded_rect(fb, x + pad, y + pad, iw, iw, $int(s * 0.12), glass);
+    fill_rect(fb, x + pad + $int(s * 0.08), y + pad + $int(s * 0.08), iw - $int(s * 0.16), $int(s * 0.16), 4278914840);
+    let gy2 = y + pad + $int(s * 0.34);
+    let ri = 0;
+    while (truthy(ri < 2)) {
+      let cxi = x + pad + $int(s * 0.1);
+      let cc = 0;
+      while (truthy(cc < 3)) {
+        let col = truthy($eq(ri, 0) && $eq(cc, 2)) ? cyan : muted;
+        circle(fb, cxi, gy2, $int(s * 0.045), col);
+        cxi = cxi + $int(s * 0.24);
+        cc = cc + 1;
+      }
+      gy2 = gy2 + $int(s * 0.2);
+      ri = ri + 1;
+    }
+    return null;
+  }
+  if (truthy($eq(app, "viewer"))) {
+    rounded_rect(fb, x + pad, y + pad, iw, iw, $int(s * 0.1), glass);
+    circle(fb, x + pad + $int(iw * 0.72), y + pad + $int(iw * 0.28), $int(s * 0.07), 4294688548);
+    fill_polygon(fb, [[x + pad, y + s - pad], [x + pad + $int(iw * 0.4), cy], [x + pad + $int(iw * 0.7), y + s - pad]], cyan);
+    fill_polygon(fb, [[x + pad + $int(iw * 0.45), y + s - pad], [x + pad + $int(iw * 0.75), y + $int(s * 0.5)], [x + s - pad, y + s - pad]], violet);
+    return null;
+  }
+  if (truthy($eq(app, "mail"))) {
+    rounded_rect(fb, x + pad, y + $int(s * 0.28), iw, $int(s * 0.44), $int(s * 0.06), cyan);
+    fill_polygon(fb, [[x + pad, y + $int(s * 0.3)], [cx, cy], [x + s - pad, y + $int(s * 0.3)]], 4278916388);
+    return null;
+  }
+  if (truthy($eq(app, "chat"))) {
+    rounded_rect(fb, x + pad, y + pad, iw, $int(iw * 0.72), $int(s * 0.14), violet);
+    fill_polygon(fb, [[x + pad + $int(iw * 0.2), y + pad + $int(iw * 0.66)], [x + pad + $int(iw * 0.14), y + s - pad], [x + pad + $int(iw * 0.44), y + pad + $int(iw * 0.66)]], violet);
+    circle(fb, cx - $int(s * 0.14), y + pad + $int(iw * 0.34), $int(s * 0.035), 4293588735);
+    circle(fb, cx, y + pad + $int(iw * 0.34), $int(s * 0.035), 4293588735);
+    circle(fb, cx + $int(s * 0.14), y + pad + $int(iw * 0.34), $int(s * 0.035), 4293588735);
+    return null;
+  }
+  if (truthy($eq(app, "store"))) {
+    fill_polygon(fb, [[cx, y + pad], [x + s - pad, cy], [cx, y + s - pad], [x + pad, cy]], violet);
+    fill_polygon(fb, [[cx, y + $int(s * 0.3)], [x + s - $int(s * 0.34), cy], [cx, y + $int(s * 0.7)], [x + $int(s * 0.34), cy]], cyan);
+    return null;
+  }
+  rounded_rect(fb, x + pad, y + pad, iw, iw, $int(s * 0.12), glass);
+  circle(fb, cx, cy, $int(s * 0.16), cyan);
 }
 function $max2(a, b) {
-  if (truthy(a > b)) {
-    return a;
-  }
-  return b;
-}
-
-// web/build/branding_kyan.js
-function paint_prism_icon(fb, x, y, size, theme) {
-  let radius = $int(size / 5);
-  rounded_rect(fb, x, y, size, size, radius, $index(theme, "surface"));
-  let edge = kyan_gradient(theme, 0.85);
-  fill_rect(fb, x, y, size, $max3(2, $int(size / 16)), edge);
-  let cx = x + size / 2;
-  let top = y + $int(size * 0.24);
-  let bot = y + $int(size * 0.74);
-  let half = $int(size * 0.26);
-  polyline(fb, [[cx, top], [cx + half, bot], [cx - half, bot], [cx, top]], edge);
-  line(fb, cx, top, cx, bot, $index(theme, "accent_secondary"));
-}
-function paint_kyan_icon(fb, app_id, x, y, size, theme) {
-  if (truthy($eq(app_id, "prism"))) {
-    paint_prism_icon(fb, x, y, size, theme);
-    return true;
-  }
-  return paint_icon(fb, app_id, x, y, size, theme);
-}
-function $max3(a, b) {
   if (truthy(a > b)) {
     return a;
   }
@@ -1799,7 +1831,7 @@ function paint_prism(fb, x, y, w, h, theme, focused) {
   linear_gradient(fb, mx, fy, mw, fh, [{ ["t"]: 0, ["color"]: 4279439394 }, { ["t"]: 1, ["color"]: 4278920256 }], "h");
   linear_gradient(fb, mx, fy, mw, 3, kyan_gradient_stops(), "h");
   draw_text(fb, mx + 18, fy + 16, "FEATURED - BUILT IN CLARITY", font, $index(t, "accent"));
-  draw_text_scaled(fb, mx + 18, fy + 34, "Voidrunner", font, 4294967295, 2, 1);
+  draw_text_smooth(fb, mx + 18, fy + 34, "Voidrunner", font, 4294967295, 2, 1);
   draw_text(fb, mx + 18, fy + 66, "Outrun the collapse of a dying star system.", font, $index(t, "foreground_muted"));
   let pr = prism_play_rect(x, y, w, h);
   rounded_rect(fb, $index(pr, 0), $index(pr, 1), $index(pr, 2), $index(pr, 3), 8, $index(t, "accent"));
@@ -1971,7 +2003,7 @@ function voidrunner_paint(fb, x, y, w, h, theme, s) {
     fill_rect(fb, x, y + $int(h / 2) - 34, w, 68, rgba(5, 6, 10, 210));
     let over = "VOIDRUNNER DOWN";
     let ow = measure_text_scaled_w(font, over, 2);
-    draw_text_scaled(fb, x + $int(w / 2) - $int(ow / 2), y + $int(h / 2) - 26, over, font, 4294668677, 2, 1);
+    draw_text_smooth(fb, x + $int(w / 2) - $int(ow / 2), y + $int(h / 2) - 26, over, font, 4294668677, 2, 1);
     let hint = "press R to run again";
     draw_text(fb, x + $int(w / 2) - $int($index(measure_text(font, hint), 0) / 2), y + $int(h / 2) + 8, hint, font, $index(theme, "foreground"));
   }
@@ -2007,6 +2039,17 @@ class KyanDesktop {
     this.app_state = {};
     this.keys = {};
     this._last_tick = null;
+    this._icon_cache = {};
+  }
+  _icon(app, size, bg) {
+    let key = app + ":" + str(size) + ":" + str(bg);
+    if (truthy(!truthy(has(this._icon_cache, key)))) {
+      let f = framebuffer(size, size);
+      f.clear(bg);
+      paint_kyan_icon(f, app, 0, 0, size, this.theme);
+      this._icon_cache[key] = f;
+    }
+    return $index(this._icon_cache, key);
   }
   boot(pinned) {
     if (truthy($ne(pinned, null))) {
@@ -2292,7 +2335,8 @@ class KyanDesktop {
     drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7);
     rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205));
     for (let ic of $index(layout, "icons")) {
-      paint_kyan_icon(fb, $index(ic, "app"), $index(ic, "x"), $index(ic, "y"), $index(ic, "size"), this.theme);
+      let bg = fb.get_pixel($index(ic, "x"), $index(ic, "y"));
+      fb.blit(this._icon($index(ic, "app"), $index(ic, "size"), bg), 0, 0, $index(ic, "x"), $index(ic, "y"), $index(ic, "size"), $index(ic, "size"));
       if (truthy(has(this.windows, $index(ic, "app")))) {
         fill_rect(fb, $index(ic, "x") + $int($index(ic, "size") / 2) - 2, dy + dh - 5, 4, 4, $index(this.theme, "accent"));
       }
@@ -2312,7 +2356,9 @@ class KyanDesktop {
     let cell = $index(layout, "cell");
     let gy = $index(layout, "gy");
     for (let c of $index(layout, "cells")) {
-      paint_kyan_icon(fb, $index(c, "app"), $index(c, "x") + $int((cell - 52) / 2), gy, 52, t);
+      let ix = $index(c, "x") + $int((cell - 52) / 2);
+      let bg = fb.get_pixel(ix, gy);
+      fb.blit(this._icon($index(c, "app"), 52, bg), 0, 0, ix, gy, 52, 52);
       let label = truthy(has(APP_TITLES, $index(c, "app"))) ? $index(APP_TITLES, $index(c, "app")) : $index(c, "app");
       let lw = $index(measure_text(this.font, label), 0);
       draw_text(fb, $index(c, "x") + $int((cell - lw) / 2), gy + 60, label, this.font, $index(t, "foreground"));

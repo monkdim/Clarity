@@ -11,7 +11,7 @@
 --   voidrunner_paint(fb, x, y, w, h, theme, s)
 
 from "draw.clarity" import fill_rect, rounded_rect, fill_polygon, linear_gradient, polygon
-from "font.clarity" import builtin_font, draw_text, draw_text_scaled, measure_text
+from "font.clarity" import builtin_font, draw_text, draw_text_scaled, draw_text_smooth, measure_text
 from "graphics.clarity" import rgba
 
 let _SHIP_W = 34
@@ -136,7 +136,7 @@ fn voidrunner_paint(fb, x, y, w, h, theme, s) {
         fill_rect(fb, x, y + int(h / 2) - 34, w, 68, rgba(5, 6, 10, 210))
         let over = "VOIDRUNNER DOWN"
         let ow = measure_text_scaled_w(font, over, 2)
-        draw_text_scaled(fb, x + int(w / 2) - int(ow / 2), y + int(h / 2) - 26, over, font, 0xFFFB7185, 2, 1)
+        draw_text_smooth(fb, x + int(w / 2) - int(ow / 2), y + int(h / 2) - 26, over, font, 0xFFFB7185, 2, 1)
         let hint = "press R to run again"
         draw_text(fb, x + int(w / 2) - int(measure_text(font, hint)[0] / 2), y + int(h / 2) + 8, hint, font, theme["foreground"])
     }

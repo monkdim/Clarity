@@ -9,7 +9,7 @@
 -- Clarity and (later) build your own.
 
 from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, linear_gradient, line
-from "font.clarity" import builtin_font, draw_text, draw_text_scaled, measure_text
+from "font.clarity" import builtin_font, draw_text, draw_text_scaled, draw_text_smooth, measure_text
 from "graphics.clarity" import rgba
 from "theme_kyan.clarity" import kyan_gradient_stops
 
@@ -59,7 +59,7 @@ fn paint_prism(fb, x, y, w, h, theme, focused) {
     -- a signature bloom across the top of the card
     linear_gradient(fb, mx, fy, mw, 3, kyan_gradient_stops(), "h")
     draw_text(fb, mx + 18, fy + 16, "FEATURED - BUILT IN CLARITY", font, t["accent"])
-    draw_text_scaled(fb, mx + 18, fy + 34, "Voidrunner", font, 0xFFFFFFFF, 2, 1)
+    draw_text_smooth(fb, mx + 18, fy + 34, "Voidrunner", font, 0xFFFFFFFF, 2, 1)
     draw_text(fb, mx + 18, fy + 66, "Outrun the collapse of a dying star system.", font, t["foreground_muted"])
     -- play pill (geometry shared with the desktop's click hit-test)
     let pr = prism_play_rect(x, y, w, h)
