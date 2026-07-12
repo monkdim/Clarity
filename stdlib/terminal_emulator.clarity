@@ -1,0 +1,324 @@
+-- Terminal emulator — the VT100/xterm state machine, split out from the
+-- terminal app so it can be reused without pulling in the UI toolkit
+-- (the desktop's live PTY terminal needs the grid, not the Widget).
+--
+-- Turns a byte stream (`feed`) into a grid of Cells with fg/bg/bold
+-- attributes: control chars, CSI cursor moves + erase, SGR colour
+-- (16/256/truecolor), and a scrollback buffer. Its only dependency is
+-- rgb() for colour packing.
+
+from "graphics.clarity" import rgb
+
+-- ── Cell + attributes ─────────────────────────────────
+
+class Cell {
+    fn init(ch, fg, bg, bold) {
+        this.ch = ch
+        this.fg = fg
+        this.bg = bg
+        this.bold = bold
+    }
+}
+
+let _DEFAULT_FG = 0xFFE6E6E6
+let _DEFAULT_BG = 0xFF1A1A1A
+
+-- 16-color ANSI palette (xterm style)
+let _ANSI_PALETTE = [
+    0xFF000000, 0xFFCD3131, 0xFF0DBC79, 0xFFE5E510,
+    0xFF2472C8, 0xFFBC3FBC, 0xFF11A8CD, 0xFFE5E5E5,
+    0xFF666666, 0xFFF14C4C, 0xFF23D18B, 0xFFF5F543,
+    0xFF3B8EEA, 0xFFD670D6, 0xFF29B8DB, 0xFFFFFFFF
+]
+
+-- ── Terminal grid ────────────────────────────────────
+
+class Terminal {
+    fn init(cols, rows) {
+        this.cols = cols
+        this.rows = rows
+        this.cursor_row = 0
+        this.cursor_col = 0
+        this.fg = _DEFAULT_FG
+        this.bg = _DEFAULT_BG
+        this.bold = false
+        this.scrollback_limit = 1000
+        this._grid = []         -- list of row-lists of Cell
+        this._scrollback = []   -- list of row-lists (rows that scrolled off)
+        this._scroll_offset = 0 -- 0 = following live; >0 = looking at scrollback
+        this._blank_row = []
+        mut i = 0
+        while i < cols { push(this._blank_row, Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false)); i += 1 }
+        mut r = 0
+        while r < rows { push(this._grid, this._make_blank_row()); r += 1 }
+        this._parse_state = "normal"   -- normal | esc | csi
+        this._csi_buffer = ""
+    }
+
+    fn _make_blank_row() {
+        mut row = []
+        mut i = 0
+        while i < this.cols {
+            push(row, Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false))
+            i += 1
+        }
+        return row
+    }
+
+    -- ── Public read/write ────────────────────────────
+
+    -- Feed a string of bytes/characters into the parser.
+    fn feed(text) {
+        let chs = chars(text)
+        for c in chs { this._consume(c) }
+    }
+
+    fn cell_at(row, col) {
+        if row < 0 or row >= this.rows or col < 0 or col >= this.cols { return null }
+        return this._grid[row][col]
+    }
+
+    fn line_text(row) {
+        if row < 0 or row >= this.rows { return "" }
+        mut s = ""
+        for cell in this._grid[row] { s = s + cell.ch }
+        return s
+    }
+
+    fn scroll_back(n)    { this._scroll_offset += n }
+    fn scroll_forward(n) {
+        this._scroll_offset -= n
+        if this._scroll_offset < 0 { this._scroll_offset = 0 }
+    }
+    fn jump_to_live() { this._scroll_offset = 0 }
+
+    -- ── Parser state machine ────────────────────────
+
+    fn _consume(c) {
+        if this._parse_state == "esc" {
+            if c == "[" {
+                this._parse_state = "csi"
+                this._csi_buffer = ""
+                return null
+            }
+            this._parse_state = "normal"
+            return null
+        }
+        if this._parse_state == "csi" {
+            -- Final byte: 0x40..0x7E
+            let code = char_code(c)
+            if code >= 0x40 and code <= 0x7E {
+                this._dispatch_csi(c, this._csi_buffer)
+                this._parse_state = "normal"
+                this._csi_buffer = ""
+                return null
+            }
+            this._csi_buffer = this._csi_buffer + c
+            return null
+        }
+        -- Normal state — dispatch on char code rather than string compare
+        -- because Clarity literals don't include the C-style \x / \b escapes.
+        let cc = char_code(c)
+        if cc == 27 { this._parse_state = "esc"; return null }    -- ESC
+        if cc == 10 { this._line_feed(); return null }            -- LF (\n)
+        if cc == 13 { this.cursor_col = 0; return null }          -- CR (\r)
+        if cc == 8 {                                              -- BS (\b)
+            if this.cursor_col > 0 { this.cursor_col -= 1 }
+            return null
+        }
+        if cc == 9 {                                              -- HT (\t)
+            this.cursor_col = ((this.cursor_col / 8) + 1) * 8
+            if this.cursor_col >= this.cols { this.cursor_col = this.cols - 1 }
+            return null
+        }
+        if cc < 0x20 { return null }
+        this._put_glyph(c)
+    }
+
+    fn _put_glyph(ch) {
+        if this.cursor_col >= this.cols { this._line_feed(); this.cursor_col = 0 }
+        this._grid[this.cursor_row][this.cursor_col] = Cell(ch, this.fg, this.bg, this.bold)
+        this.cursor_col += 1
+    }
+
+    fn _line_feed() {
+        this.cursor_row += 1
+        if this.cursor_row >= this.rows {
+            this.cursor_row = this.rows - 1
+            -- Scroll: pop top, push new blank at bottom; archive top in scrollback
+            push(this._scrollback, this._grid[0])
+            mut new_grid = []
+            mut i = 1
+            while i < this.rows { push(new_grid, this._grid[i]); i += 1 }
+            push(new_grid, this._make_blank_row())
+            this._grid = new_grid
+            -- Trim scrollback
+            while len(this._scrollback) > this.scrollback_limit {
+                mut sb = []
+                mut j = 1
+                while j < len(this._scrollback) { push(sb, this._scrollback[j]); j += 1 }
+                this._scrollback = sb
+            }
+        }
+    }
+
+    -- ── CSI dispatcher ──────────────────────────────
+
+    fn _dispatch_csi(final_byte, params_str) {
+        let params = _parse_csi_params(params_str)
+        if final_byte == "A" {     -- cursor up
+            let n = if len(params) > 0 and params[0] > 0 { params[0] } else { 1 }
+            this.cursor_row -= n
+            if this.cursor_row < 0 { this.cursor_row = 0 }
+            return null
+        }
+        if final_byte == "B" {     -- cursor down
+            let n = if len(params) > 0 and params[0] > 0 { params[0] } else { 1 }
+            this.cursor_row += n
+            if this.cursor_row >= this.rows { this.cursor_row = this.rows - 1 }
+            return null
+        }
+        if final_byte == "C" {     -- cursor right
+            let n = if len(params) > 0 and params[0] > 0 { params[0] } else { 1 }
+            this.cursor_col += n
+            if this.cursor_col >= this.cols { this.cursor_col = this.cols - 1 }
+            return null
+        }
+        if final_byte == "D" {     -- cursor left
+            let n = if len(params) > 0 and params[0] > 0 { params[0] } else { 1 }
+            this.cursor_col -= n
+            if this.cursor_col < 0 { this.cursor_col = 0 }
+            return null
+        }
+        if final_byte == "H" or final_byte == "f" {
+            let row = if len(params) > 0 and params[0] > 0 { params[0] - 1 } else { 0 }
+            let col = if len(params) > 1 and params[1] > 0 { params[1] - 1 } else { 0 }
+            this.cursor_row = row
+            this.cursor_col = col
+            if this.cursor_row >= this.rows { this.cursor_row = this.rows - 1 }
+            if this.cursor_col >= this.cols { this.cursor_col = this.cols - 1 }
+            return null
+        }
+        if final_byte == "K" {     -- erase in line
+            let mode = if len(params) > 0 { params[0] } else { 0 }
+            this._erase_in_line(mode)
+            return null
+        }
+        if final_byte == "J" {     -- erase in display
+            let mode = if len(params) > 0 { params[0] } else { 0 }
+            this._erase_in_display(mode)
+            return null
+        }
+        if final_byte == "m" {     -- SGR (color / attribute)
+            this._apply_sgr(if len(params) == 0 { [0] } else { params })
+            return null
+        }
+        -- Unsupported sequences are silently dropped — matches xterm.
+    }
+
+    fn _erase_in_line(mode) {
+        let row = this.cursor_row
+        if mode == 0 {
+            mut c = this.cursor_col
+            while c < this.cols { this._grid[row][c] = Cell(" ", this.fg, this.bg, false); c += 1 }
+        } elif mode == 1 {
+            mut c = 0
+            while c <= this.cursor_col { this._grid[row][c] = Cell(" ", this.fg, this.bg, false); c += 1 }
+        } elif mode == 2 {
+            this._grid[row] = this._make_blank_row()
+        }
+    }
+
+    fn _erase_in_display(mode) {
+        if mode == 2 {
+            mut r = 0
+            while r < this.rows { this._grid[r] = this._make_blank_row(); r += 1 }
+            this.cursor_row = 0
+            this.cursor_col = 0
+            return null
+        }
+        if mode == 0 {
+            this._erase_in_line(0)
+            mut r = this.cursor_row + 1
+            while r < this.rows { this._grid[r] = this._make_blank_row(); r += 1 }
+            return null
+        }
+        if mode == 1 {
+            this._erase_in_line(1)
+            mut r = 0
+            while r < this.cursor_row { this._grid[r] = this._make_blank_row(); r += 1 }
+        }
+    }
+
+    fn _apply_sgr(params) {
+        mut i = 0
+        while i < len(params) {
+            let p = params[i]
+            if p == 0 {
+                this.fg = _DEFAULT_FG
+                this.bg = _DEFAULT_BG
+                this.bold = false
+            } elif p == 1 {
+                this.bold = true
+            } elif p == 22 {
+                this.bold = false
+            } elif p >= 30 and p <= 37 {
+                this.fg = _ANSI_PALETTE[p - 30]
+            } elif p == 39 {
+                this.fg = _DEFAULT_FG
+            } elif p >= 40 and p <= 47 {
+                this.bg = _ANSI_PALETTE[p - 40]
+            } elif p == 49 {
+                this.bg = _DEFAULT_BG
+            } elif p >= 90 and p <= 97 {
+                this.fg = _ANSI_PALETTE[8 + (p - 90)]
+            } elif p >= 100 and p <= 107 {
+                this.bg = _ANSI_PALETTE[8 + (p - 100)]
+            } elif p == 38 or p == 48 {
+                -- Extended color: 38;5;N (256-color) or 38;2;R;G;B (truecolor)
+                if i + 1 < len(params) and params[i + 1] == 5 {
+                    if i + 2 < len(params) {
+                        let color = _xterm_256(params[i + 2])
+                        if p == 38 { this.fg = color } else { this.bg = color }
+                        i += 2
+                    }
+                } elif i + 1 < len(params) and params[i + 1] == 2 {
+                    if i + 4 < len(params) {
+                        let color = rgb(params[i + 2], params[i + 3], params[i + 4])
+                        if p == 38 { this.fg = color } else { this.bg = color }
+                        i += 4
+                    }
+                }
+            }
+            i += 1
+        }
+    }
+}
+
+-- Parse a CSI parameter list like "1;31" → [1, 31]. Empty entries
+-- become 0 (the xterm default).
+fn _parse_csi_params(s) {
+    if len(s) == 0 { return [] }
+    mut out = []
+    for tok in split(s, ";") {
+        let t = trim(tok)
+        if len(t) == 0 { push(out, 0) } else { push(out, int(t)) }
+    }
+    return out
+}
+
+-- xterm 256-color cube: 0-15 are the ANSI palette, 16-231 form a
+-- 6×6×6 RGB cube, 232-255 are a grayscale ramp.
+fn _xterm_256(n) {
+    if n < 16 { return _ANSI_PALETTE[n] }
+    if n < 232 {
+        let i = n - 16
+        let r = (i / 36) % 6
+        let g = (i / 6) % 6
+        let b = i % 6
+        let levels = [0, 95, 135, 175, 215, 255]
+        return rgb(levels[r], levels[g], levels[b])
+    }
+    let v = 8 + (n - 232) * 10
+    return rgb(v, v, v)
+}

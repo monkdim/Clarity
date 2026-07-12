@@ -708,6 +708,8 @@ def transpile_with_runtime(path):
         '  _ffi_write_f32, _ffi_write_f64,\n'
         '  _ffi_callback, _ffi_callback_close,\n'
         '  _ffi_fill_u32, _ffi_blend_u32, _ffi_box_blur, _ffi_blit_scaled_alpha, _ffi_copy, _ffi_write_buffer, _ffi_read_buffer,\n'
+        '  _pty_supported, _pty_spawn, _pty_read, _pty_write, _pty_resize, _pty_poll, _pty_close,\n'
+        '  _host_supported, _host_open, _host_present, _host_poll, _host_ticks, _host_delay, _host_close,\n'
         '  formatClarityError, clarityMain\n'
         '} from "./runtime.js";\n\n'
     )
@@ -754,7 +756,8 @@ def bundle(compile_native=False):
     stdlib_files = [
         'tokens.clarity', 'lexer.clarity', 'ast_nodes.clarity',
         'parser.clarity', 'interpreter.clarity', 'terminal.clarity',
-        'process.clarity', 'shell.clarity', 'repl.clarity',
+        'terminal_emulator.clarity',
+        'process.clarity', 'pty.clarity', 'shell.clarity', 'repl.clarity',
         'package.clarity', 'lsp.clarity', 'bytecode.clarity',
         'runtime.clarity',
         'linter.clarity', 'formatter.clarity', 'type_checker.clarity',
@@ -782,7 +785,7 @@ def bundle(compile_native=False):
         'elf.clarity', 'process_model.clarity',
         'tty.clarity',
         'init_app.clarity', 'procfs.clarity', 'input_pipeline.clarity',
-        'display_server.clarity', 'desktop_session.clarity',
+        'display_server.clarity', 'desktop_session.clarity', 'host.clarity',
         'iso9660.clarity', 'qemu_macos.clarity', 'qemu.clarity', 'os_build.clarity',
         'theme_aurora.clarity', 'wallpapers.clarity', 'animations.clarity', 'boot_splash.clarity',
         'theme_meadow.clarity', 'wallpapers_spring.clarity', 'branding_modern.clarity',
@@ -807,12 +810,37 @@ def bundle(compile_native=False):
         'cli.clarity',
     ]
 
+    # De-collision: a Clarity `fn max` transpiles to `export function $max`
+    # while the header also imports `$max` from the runtime — a redeclaration
+    # that ESM bundlers reject once the file is reachable from the compile
+    # entry. The local definition shadows the builtin anyway, so drop the
+    # colliding name from the runtime import. (build_web.sh does the same for
+    # the browser bundle.)
+    import re as _re
+    def _decollide(txt):
+        locals_ = set(_re.findall(r'^export\s+function\s+(\$?\w+)', txt, _re.M))
+        locals_ |= set(_re.findall(r'^function\s+(\$?\w+)', txt, _re.M))
+        m = _re.search(r"import\s*\{([^}]*)\}\s*from\s*['\"]\./runtime\.js['\"]", txt)
+        if not m:
+            return txt
+        kept = []
+        for part in m.group(1).split(','):
+            p = part.strip()
+            if not p:
+                continue
+            name = p.split(' as ')[-1].strip() if ' as ' in p else p
+            if name in locals_:
+                continue
+            kept.append(p)
+        new_import = 'import { ' + ', '.join(kept) + ' } from "./runtime.js"'
+        return txt[:m.start()] + new_import + txt[m.end():]
+
     print('  Transpiling stdlib...')
     for fname in stdlib_files:
         src = os.path.join(stdlib_dir, fname)
         if os.path.exists(src):
             try:
-                js = transpile_with_runtime(src)
+                js = _decollide(transpile_with_runtime(src))
                 out = os.path.join(dist_dir, fname.replace('.clarity', '.js'))
                 with open(out, 'w') as f:
                     f.write(js)

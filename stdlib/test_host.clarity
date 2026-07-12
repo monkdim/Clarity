@@ -1,0 +1,84 @@
+-- Host window event routing — the translation from OS events to desktop
+-- actions. The SDL boundary (opening a real window) can't run without a
+-- display, so it's verified separately under the dummy video driver; here
+-- we unit-test the pure routing that turns events into desktop calls,
+-- including live typing into the PTY terminal (Linux-gated).
+
+from "host.clarity" import route_event, host_supported
+from "kyan_desktop.clarity" import kyan_desktop
+from "theme_kyan.clarity" import kyan_obsidian
+from "pty.clarity" import pty_supported
+from "platform.clarity" import os_name
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn grid_has(term, needle) {
+    mut r = 0
+    while r < term.rows {
+        if contains(term.line_text(r), needle) { return true }
+        r += 1
+    }
+    return false
+}
+
+show "-- Host window: event routing --"
+
+assert(host_supported() == true or host_supported() == false, "host_supported() returns a bool")
+
+let d = kyan_desktop(1000, 640, kyan_obsidian())
+d.boot(null)
+d.tick(1000.0)
+
+-- quit event asks the loop to stop
+assert(route_event(d, {"type": "quit"}) == "quit", "quit event stops the loop")
+
+-- a key event sets desktop key state (the games/modifier path)
+route_event(d, {"type": "key", "name": "ArrowLeft", "down": true})
+assert(d.keys["ArrowLeft"] == true, "key-down sets key state")
+route_event(d, {"type": "key", "name": "ArrowLeft", "down": false})
+assert(d.keys["ArrowLeft"] == false, "key-up clears key state")
+
+-- a mouse press on a dock icon opens that app
+let layout = d._dock_layout()
+let icon = layout["icons"][0]
+let cx = icon["x"] + int(icon["size"] / 2)
+let cy = icon["y"] + int(icon["size"] / 2)
+route_event(d, {"type": "mouse", "kind": "down", "x": cx, "y": cy, "button": 0})
+assert(contains(d.running(), icon["app"]), "mouse press on a dock icon opens the app")
+
+-- an unknown event is a harmless no-op
+assert(route_event(d, {"type": "other", "code": 999}) == null, "unknown events are ignored")
+-- (pump_events / the SDL window loop are exercised under the dummy video
+-- driver out-of-band, not here: they'd dlopen SDL2, which isn't present on
+-- the CI runners.)
+
+-- ── Live typing routes into the Terminal's shell (Linux) ──
+if os_name() == "linux" and pty_supported() {
+    let dt = kyan_desktop(1000, 640, kyan_obsidian())
+    dt.boot(null)
+    dt.tick(1000.0)
+    dt.open("terminal", 80, 60, 520, 320)      -- terminal is focused (top)
+    let sess = dt.terminal_session("terminal")
+    -- let the shell start
+    mut i = 0
+    while i < 15 { dt.tick(1030.0 + i * 30.0); sleep(0.03); i += 1 }
+    -- "type" a command as the host would: text events + Enter key
+    for ch in chars("echo HOSTKEY_5m") {
+        route_event(dt, {"type": "text", "text": ch})
+    }
+    route_event(dt, {"type": "key", "name": "Enter", "down": true})
+    i = 0
+    while i < 30 { dt.tick(2000.0 + i * 30.0); sleep(0.03); i += 1 }
+    assert(grid_has(sess["term"], "HOSTKEY_5m"), "typed keystrokes reach the shell and echo back")
+    dt.close("terminal")
+} else {
+    show "  (PTY unsupported — live-typing routing test skipped)"
+}
+
+show ""
+show "Host: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " host test(s) failed" }

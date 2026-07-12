@@ -230,6 +230,25 @@ export function exec_full(cmd) { return { stdout: '', stderr: '', exit_code: 0 }
 
 export function exit(code = 0) { /* no-op in browser */ }
 export function sleep(secs) { /* no-op in browser */ }
+
+// ── PTY: unavailable in the browser build ────────────────
+export function _pty_supported() { return false; }
+function _pty_unavailable() { throw new Error('PtyError: pseudo-terminals are not available in the browser build'); }
+export function _pty_spawn() { _pty_unavailable(); }
+export function _pty_read() { _pty_unavailable(); }
+export function _pty_write() { _pty_unavailable(); }
+export function _pty_resize() { _pty_unavailable(); }
+export function _pty_poll() { return false; }
+export function _pty_close() { return true; }
+
+// ── Host window: not applicable in the browser (the page IS the host) ──
+export function _host_supported() { return false; }
+export function _host_open() { return false; }
+export function _host_present() { return false; }
+export function _host_poll() { return null; }
+export function _host_ticks() { return 0; }
+export function _host_delay() {}
+export function _host_close() { return true; }
 export function time() { return Date.now() / 1000; }
 export function env(name) { return null; }
 export function args() { return []; }

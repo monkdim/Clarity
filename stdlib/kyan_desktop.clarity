@@ -29,6 +29,8 @@ from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_te
 from "branding_kyan.clarity" import paint_kyan_icon
 from "kyan_apps.clarity" import app_painters, prism_play_rect
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
+from "terminal_emulator.clarity" import Terminal
+from "pty.clarity" import pty_spawn_shell, pty_supported
 from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
 
 let TITLE_H = 32
@@ -91,6 +93,7 @@ class KyanDesktop {
         this._dirty = true         -- recompose only when state changed (frost is costly)
         this._anim = {}            -- app_id -> open-anim start ms (-1 = pending stamp)
         this._launcher_t0 = -1.0   -- launcher open-anim start ms (-1 = pending / closed)
+        this._terminals = {}       -- app_id -> {term, pty, dead}: live PTY-backed shells
     }
 
     -- Whether the next frame needs a fresh compose. A discrete change
@@ -162,6 +165,18 @@ class KyanDesktop {
             let cr = win.content_rect()
             this.app_state["voidrunner"] = new_voidrunner(cr[2], cr[3])
         }
+        -- a real Terminal spawns a shell on a PTY where the host supports it;
+        -- otherwise (e.g. the browser build) it falls back to the mockup painter
+        if app_id == "terminal" and pty_supported() and not has(this._terminals, "terminal") {
+            let cr = win.content_rect()
+            let cols = int(cr[2] / 8)
+            let rows = int(cr[3] / 16)
+            this._terminals["terminal"] = {
+                "term": Terminal(cols, rows),
+                "pty": pty_spawn_shell(cols, rows),
+                "dead": false
+            }
+        }
         return win
     }
 
@@ -183,6 +198,12 @@ class KyanDesktop {
             mut ns = {}
             for kv in entries(this.app_state) { if kv[0] != app_id { ns[kv[0]] = kv[1] } }
             this.app_state = ns
+        }
+        if has(this._terminals, app_id) {
+            this._terminals[app_id]["pty"].close()
+            mut nt = {}
+            for kv in entries(this._terminals) { if kv[0] != app_id { nt[kv[0]] = kv[1] } }
+            this._terminals = nt
         }
         return true
     }
@@ -239,6 +260,21 @@ class KyanDesktop {
     -- same). Live apps read this each tick.
     fn set_key(name, down) { this.keys[name] = down; this._dirty = true }
 
+    -- Send raw input to the live terminal's shell (a typed line, a
+    -- keystroke). Returns false when there's no PTY-backed terminal.
+    fn terminal_input(text) {
+        if not has(this._terminals, "terminal") { return false }
+        this._terminals["terminal"]["pty"].write(text)
+        this._dirty = true
+        return true
+    }
+
+    -- The live terminal session for an app id, or null (for tests/hosts).
+    fn terminal_session(app_id) {
+        if has(this._terminals, app_id) { return this._terminals[app_id] }
+        return null
+    }
+
     -- Advance time-based apps one frame. The host loop calls this with a
     -- monotonic ms clock before compose(); dt is derived here.
     fn tick(now_ms) {
@@ -246,6 +282,17 @@ class KyanDesktop {
             let dt = now_ms - this._last_tick
             if has(this.windows, "voidrunner") and has(this.app_state, "voidrunner") {
                 voidrunner_update(this.app_state["voidrunner"], dt, this.keys)
+            }
+        }
+        -- pump live PTY terminals: drain any new output into their emulator
+        for kv in entries(this._terminals) {
+            let sess = kv[1]
+            let out = sess["pty"].read()
+            if out == null {
+                sess["dead"] = true
+            } elif len(out) > 0 {
+                sess["term"].feed(out)
+                this._dirty = true
             }
         }
         -- stamp pending animation starts against the real clock
@@ -472,6 +519,12 @@ class KyanDesktop {
             voidrunner_paint(fb, cx, cy, cw, ch, t, this.app_state["voidrunner"])
             return null
         }
+        -- a live PTY terminal renders its real character grid; without a
+        -- session (unsupported host) it falls through to the mockup painter
+        if app_id == "terminal" and has(this._terminals, "terminal") {
+            this._render_terminal(fb, cx, cy, cw, ch, this._terminals["terminal"])
+            return null
+        }
         if app_id != null and has(this.painters, app_id) {
             (this.painters[app_id])(fb, cx, cy, cw, ch, t, win.focused)
             return null
@@ -484,6 +537,40 @@ class KyanDesktop {
                 fill_rect(fb, cx + 20, ry, int((cw - 40) * (0.8 - i * 0.1)), 8, t["border"])
             }
             i = i + 1
+        }
+    }
+
+    -- Render a live terminal's character grid in classic monospace: an
+    -- 8×16 cell grid drawn with the bitmap font, per-cell fg/bg from the
+    -- emulator, and the signature cursor. Repainted only on new output.
+    fn _render_terminal(fb, x, y, w, h, sess) {
+        let term = sess["term"]
+        fill_rect(fb, x, y, w, h, 0xFF05060A)
+        let cw = 8
+        let chh = 16
+        mut r = 0
+        while r < term.rows {
+            mut c = 0
+            while c < term.cols {
+                let cell = term.cell_at(r, c)
+                if cell != null {
+                    let gx = x + c * cw
+                    let gy = y + r * chh
+                    if gx + cw <= x + w and gy + chh <= y + h {
+                        if cell.bg != 0xFF1A1A1A { fill_rect(fb, gx, gy, cw, chh, cell.bg) }
+                        if cell.ch != " " { draw_text(fb, gx, gy + 4, cell.ch, this.font, cell.fg) }
+                    }
+                }
+                c = c + 1
+            }
+            r = r + 1
+        }
+        if term._scroll_offset == 0 {
+            let curx = x + term.cursor_col * cw
+            let cury = y + term.cursor_row * chh
+            if curx + cw <= x + w and cury + chh <= y + h {
+                fill_rect(fb, curx, cury + chh - 2, cw, 2, this.theme["accent"])
+            }
         }
     }
 

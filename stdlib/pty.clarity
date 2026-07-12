@@ -1,0 +1,100 @@
+-- PTY — a real pseudo-terminal backend for the terminal emulator.
+--
+-- The terminal EMULATOR (app_terminal.clarity) turns a byte stream into a
+-- character grid but is deliberately agnostic about where the bytes come
+-- from — its entry point is `feed(bytes)`. This module is the other half:
+-- it spawns a child process (a shell) on a pseudo-terminal so raw-mode
+-- programs work, and streams the child's output for `feed()` while sending
+-- keystrokes back. Pipes only ever gave line-buffered output; a PTY is what
+-- makes an interactive shell, colours, and cursor control real.
+--
+--   let s = pty_spawn_shell(80, 24)
+--   s.write("echo hi\n")
+--   let out = s.drain(500)        -- read for up to 500ms
+--   term.feed(out)
+--   s.close()
+--
+-- Backed by native builtins (openpty + posix_spawn via FFI). Supported on
+-- Linux today; pty_supported() reports whether the host can do it, so a
+-- caller can fall back gracefully (e.g. the browser build, where it can't).
+
+fn pty_supported() {
+    return _pty_supported()
+}
+
+class PtySession {
+    -- Spawn `cmd` (argv a list of strings) on a fresh PTY of cols×rows.
+    fn init(cmd, argv, cols, rows) {
+        this.cols = cols
+        this.rows = rows
+        this.closed = false
+        this.exited = false
+        let h = _pty_spawn(cmd, argv, cols, rows)
+        this.master = h["master"]
+        this.pid = h["pid"]
+    }
+
+    -- Non-blocking read of whatever output is ready. Returns a string
+    -- (possibly ""), or null once the child has closed the PTY (EOF).
+    fn read() {
+        if this.closed { return null }
+        return _pty_read(this.master, 65536)
+    }
+
+    -- Send input (keystrokes / a command line) to the child.
+    fn write(text) {
+        if this.closed { return 0 }
+        return _pty_write(this.master, text)
+    }
+
+    -- Tell the child the window changed size (SIGWINCH via TIOCSWINSZ).
+    fn resize(cols, rows) {
+        this.cols = cols
+        this.rows = rows
+        if not this.closed { _pty_resize(this.master, cols, rows) }
+    }
+
+    -- Is the child still running? (Reaps it once it exits.)
+    fn alive() {
+        if this.closed or this.exited { return false }
+        let running = _pty_poll(this.master)
+        if not running { this.exited = true }
+        return running
+    }
+
+    -- Read for up to `budget_ms`, concatenating everything that arrives.
+    -- Handy for tests and for pumping a burst of output. Stops early on EOF.
+    fn drain(budget_ms) {
+        mut out = ""
+        mut waited = 0.0
+        let step = 15.0
+        while waited < budget_ms {
+            let chunk = this.read()
+            if chunk == null { break }
+            if len(chunk) > 0 {
+                out = out + chunk
+            } else {
+                sleep(step / 1000.0)
+                waited = waited + step
+            }
+        }
+        return out
+    }
+
+    fn close() {
+        if this.closed { return true }
+        this.closed = true
+        _pty_close(this.master)
+        return true
+    }
+}
+
+-- Spawn the system shell interactively on a PTY.
+fn pty_spawn_shell(cols, rows) {
+    return PtySession("/bin/sh", ["/bin/sh", "-i"], cols, rows)
+}
+
+-- Spawn an arbitrary command on a PTY (argv[0] should be the program).
+fn pty_spawn(cmd, argv, cols, rows) {
+    return PtySession(cmd, argv, cols, rows)
+}

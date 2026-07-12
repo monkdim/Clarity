@@ -235,6 +235,251 @@ export function exec_full(cmd) {
 export function exit(code = 0) { process.exit(code); }
 export function sleep(secs) { execSync(`sleep ${secs}`); }
 export function time() { return Date.now() / 1000; }
+
+// ── PTY: a real pseudo-terminal for the terminal app ─────
+// Spawns a child (a shell) on a pseudo-terminal so the terminal emulator
+// can drive raw-mode programs, not just line-buffered pipes. Uses
+// openpty (libutil) + posix_spawn — posix_spawn never runs JS in the
+// child (unlike forkpty), so the Bun runtime is never left forked.
+// These builtins are NOT in runtime_spec.clarity (they carry module
+// state); runtime.js is the canonical, build-copied runtime.
+let _ptyLib = null;
+function _pty_lib() {
+  if (_ptyLib) return _ptyLib;
+  const plat = process.platform;
+  let cfg;
+  if (plat === 'linux') {
+    cfg = { util: 'libutil.so.1', libc: 'libc.so.6', TIOCSWINSZ: 0x5414, O_NONBLOCK: 0o4000, F_SETFL: 4 };
+  } else if (plat === 'darwin') {
+    cfg = { util: 'libutil.dylib', libc: 'libSystem.dylib', TIOCSWINSZ: 0x80087467, O_NONBLOCK: 0x0004, F_SETFL: 4 };
+  } else {
+    throw new Error('PtyError: pseudo-terminals are not supported on ' + plat);
+  }
+  const util = dlopen(cfg.util, { openpty: { args: ['ptr', 'ptr', 'ptr', 'ptr', 'ptr'], returns: 'int' } });
+  const libc = dlopen(cfg.libc, {
+    posix_spawn: { args: ['ptr', 'cstring', 'ptr', 'ptr', 'ptr', 'ptr'], returns: 'int' },
+    posix_spawn_file_actions_init: { args: ['ptr'], returns: 'int' },
+    posix_spawn_file_actions_adddup2: { args: ['ptr', 'int', 'int'], returns: 'int' },
+    read: { args: ['int', 'ptr', 'u64'], returns: 'i64' },
+    write: { args: ['int', 'ptr', 'u64'], returns: 'i64' },
+    close: { args: ['int'], returns: 'int' },
+    fcntl: { args: ['int', 'int', 'int'], returns: 'int' },
+    ioctl: { args: ['int', 'u64', 'ptr'], returns: 'int' },
+    waitpid: { args: ['int', 'ptr', 'int'], returns: 'int' },
+    kill: { args: ['int', 'int'], returns: 'int' },
+  });
+  _ptyLib = { util, libc, cfg };
+  return _ptyLib;
+}
+
+// PTY support is verified on Linux; macOS constants are wired but gated
+// pending a run on real hardware, so callers can degrade gracefully.
+export function _pty_supported() { return process.platform === 'linux'; }
+
+const _ptySessions = new Map();   // master fd -> { pid, exited, status }
+function _pty_enc(s) { const bb = Buffer.from(String(s), 'utf-8'); const u = new Uint8Array(bb.length + 1); u.set(bb); return u; }
+
+// Spawn `path` (argv a list, cols×rows the window size). Returns
+// { master, pid }. `master` is a non-blocking fd to read/write.
+export function _pty_spawn(path, argv, cols, rows) {
+  const L = _pty_lib();
+  const { util, libc } = L;
+  const mfd = new Int32Array(1), sfd = new Int32Array(1);
+  const ws = new Uint16Array(4); ws[0] = (rows | 0) || 24; ws[1] = (cols | 0) || 80;
+  if (util.symbols.openpty(bunPtr(mfd), bunPtr(sfd), 0, 0, bunPtr(ws)) !== 0) {
+    throw new Error('PtyError: openpty failed');
+  }
+  const master = mfd[0], slave = sfd[0];
+  const fa = new Uint8Array(1024);
+  libc.symbols.posix_spawn_file_actions_init(bunPtr(fa));
+  libc.symbols.posix_spawn_file_actions_adddup2(bunPtr(fa), slave, 0);
+  libc.symbols.posix_spawn_file_actions_adddup2(bunPtr(fa), slave, 1);
+  libc.symbols.posix_spawn_file_actions_adddup2(bunPtr(fa), slave, 2);
+  const args = (argv && argv.length) ? argv : [path];
+  const argBufs = args.map(_pty_enc);
+  const argvArr = new BigUint64Array(argBufs.length + 1);
+  argBufs.forEach((b, i) => { argvArr[i] = BigInt(bunPtr(b)); });
+  const envList = ['TERM=xterm-256color'];
+  for (const k of ['PATH', 'HOME', 'LANG', 'USER', 'SHELL']) if (process.env[k]) envList.push(k + '=' + process.env[k]);
+  const envBufs = envList.map(_pty_enc);
+  const envArr = new BigUint64Array(envBufs.length + 1);
+  envBufs.forEach((b, i) => { envArr[i] = BigInt(bunPtr(b)); });
+  const pathBuf = _pty_enc(path);
+  const pidbuf = new Int32Array(1);
+  const rc = libc.symbols.posix_spawn(bunPtr(pidbuf), bunPtr(pathBuf), bunPtr(fa), 0, bunPtr(argvArr), bunPtr(envArr));
+  libc.symbols.close(slave);
+  if (rc !== 0) { libc.symbols.close(master); throw new Error('PtyError: posix_spawn failed (rc=' + rc + ')'); }
+  libc.symbols.fcntl(master, L.cfg.F_SETFL, L.cfg.O_NONBLOCK);
+  _ptySessions.set(master, { pid: pidbuf[0], exited: false, status: 0 });
+  return { master, pid: pidbuf[0] };
+}
+
+// Read available bytes without blocking. Returns a string of new output,
+// "" if nothing is ready yet, or null once the child has closed the PTY.
+export function _pty_read(master, maxlen) {
+  const L = _pty_lib();
+  const n = Math.max(1, Math.min((maxlen | 0) || 65536, 1 << 20));
+  const buf = new Uint8Array(n);
+  const got = Number(L.libc.symbols.read(master, bunPtr(buf), BigInt(n)));
+  if (got > 0) return Buffer.from(buf.subarray(0, got)).toString('utf-8');
+  if (got === 0) return null;
+  return '';
+}
+
+export function _pty_write(master, text) {
+  const L = _pty_lib();
+  const bb = Buffer.from(String(text), 'utf-8');
+  const u = new Uint8Array(bb.length); u.set(bb);
+  return Number(L.libc.symbols.write(master, bunPtr(u), BigInt(u.length)));
+}
+
+export function _pty_resize(master, cols, rows) {
+  const L = _pty_lib();
+  const ws = new Uint16Array(4); ws[0] = rows | 0; ws[1] = cols | 0;
+  return L.libc.symbols.ioctl(master, BigInt(L.cfg.TIOCSWINSZ), bunPtr(ws));
+}
+
+// Non-blocking reap: returns true while the child runs, false once it has
+// exited (and reaps it so it doesn't linger as a zombie).
+export function _pty_poll(master) {
+  const L = _pty_lib();
+  const s = _ptySessions.get(master);
+  if (!s || s.exited) return false;
+  const st = new Int32Array(1);
+  const r = L.libc.symbols.waitpid(s.pid, bunPtr(st), 1 /* WNOHANG */);
+  if (r === s.pid) { s.exited = true; s.status = st[0]; return false; }
+  return true;
+}
+
+export function _pty_close(master) {
+  const L = _pty_lib();
+  const s = _ptySessions.get(master);
+  if (s && !s.exited) { L.libc.symbols.kill(s.pid, 9); }
+  L.libc.symbols.close(master);
+  _ptySessions.delete(master);
+  return true;
+}
+
+// ── Host window: run KyanOS in a real OS window (SDL2) ───
+// Opens a native window, uploads the composed framebuffer to a streaming
+// texture, and turns SDL input into desktop events. The framebuffer is
+// BGRA in memory, which is exactly SDL_PIXELFORMAT_ARGB8888 on a
+// little-endian host — so pixels upload with no conversion. Encapsulated
+// as builtins (like PTY) so the app loop stays in Clarity.
+let _hostState = null;
+function _host_sdl() {
+  if (_hostState && _hostState.S) return _hostState;
+  let name;
+  if (process.platform === 'linux') name = 'libSDL2-2.0.so.0';
+  else if (process.platform === 'darwin') name = 'libSDL2-2.0.dylib';
+  else if (process.platform === 'win32') name = 'SDL2.dll';
+  else throw new Error('HostError: no SDL2 for platform ' + process.platform);
+  const S = dlopen(name, {
+    SDL_Init: { args: ['u32'], returns: 'int' },
+    SDL_Quit: { args: [], returns: 'void' },
+    SDL_GetError: { args: [], returns: 'cstring' },
+    SDL_CreateWindow: { args: ['cstring', 'int', 'int', 'int', 'int', 'u32'], returns: 'ptr' },
+    SDL_CreateRenderer: { args: ['ptr', 'int', 'u32'], returns: 'ptr' },
+    SDL_CreateTexture: { args: ['ptr', 'u32', 'int', 'int', 'int'], returns: 'ptr' },
+    SDL_UpdateTexture: { args: ['ptr', 'ptr', 'ptr', 'int'], returns: 'int' },
+    SDL_RenderClear: { args: ['ptr'], returns: 'int' },
+    SDL_RenderCopy: { args: ['ptr', 'ptr', 'ptr', 'ptr'], returns: 'int' },
+    SDL_RenderPresent: { args: ['ptr'], returns: 'void' },
+    SDL_PollEvent: { args: ['ptr'], returns: 'int' },
+    SDL_StartTextInput: { args: [], returns: 'void' },
+    SDL_GetTicks: { args: [], returns: 'u32' },
+    SDL_Delay: { args: ['u32'], returns: 'void' },
+    SDL_DestroyTexture: { args: ['ptr'], returns: 'void' },
+    SDL_DestroyRenderer: { args: ['ptr'], returns: 'void' },
+    SDL_DestroyWindow: { args: ['ptr'], returns: 'void' },
+  });
+  _hostState = { S, win: null, ren: null, tex: null, w: 0, h: 0, ev: new Uint8Array(64) };
+  return _hostState;
+}
+
+export function _host_supported() {
+  return process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32';
+}
+
+// SDL keycode → the name the desktop/games expect (mirrors browser e.key).
+function _host_key_name(sym) {
+  switch (sym) {
+    case 0x4000004F: return 'ArrowRight';
+    case 0x40000050: return 'ArrowLeft';
+    case 0x40000051: return 'ArrowDown';
+    case 0x40000052: return 'ArrowUp';
+    case 13: return 'Enter';
+    case 27: return 'Escape';
+    case 8: return 'Backspace';
+    case 9: return 'Tab';
+    case 32: return ' ';
+  }
+  if (sym >= 33 && sym <= 126) return String.fromCharCode(sym);
+  return '';
+}
+
+export function _host_open(title, w, h) {
+  const st = _host_sdl();
+  if (st.win) return true;
+  if (st.S.symbols.SDL_Init(0x20 /* VIDEO */) !== 0) throw new Error('HostError: SDL_Init: ' + st.S.symbols.SDL_GetError().toString());
+  const t = _pty_enc(String(title || 'KyanOS'));
+  const CENTERED = 0x2FFF0000;
+  st.win = st.S.symbols.SDL_CreateWindow(bunPtr(t), CENTERED, CENTERED, w | 0, h | 0, 0x4 /* SHOWN */);
+  if (!st.win) throw new Error('HostError: CreateWindow: ' + st.S.symbols.SDL_GetError().toString());
+  st.ren = st.S.symbols.SDL_CreateRenderer(st.win, -1, 0);
+  st.tex = st.S.symbols.SDL_CreateTexture(st.ren, 0x16362004 /* ARGB8888 */, 1 /* STREAMING */, w | 0, h | 0);
+  st.w = w | 0; st.h = h | 0;
+  st.S.symbols.SDL_StartTextInput();
+  return true;
+}
+
+export function _host_present(fbHandle, w, h) {
+  const st = _host_sdl();
+  if (!st.tex || !fbHandle || !fbHandle._buffer) return false;
+  st.S.symbols.SDL_UpdateTexture(st.tex, 0, bunPtr(fbHandle._buffer), (w | 0) * 4);
+  st.S.symbols.SDL_RenderClear(st.ren);
+  st.S.symbols.SDL_RenderCopy(st.ren, st.tex, 0, 0);
+  st.S.symbols.SDL_RenderPresent(st.ren);
+  return true;
+}
+
+// Pop one pending event as a plain object, or null when the queue is empty.
+export function _host_poll() {
+  const st = _host_sdl();
+  const ev = st.ev;
+  if (st.S.symbols.SDL_PollEvent(bunPtr(ev)) === 0) return null;
+  const dv = new DataView(ev.buffer);
+  const type = dv.getUint32(0, true);
+  if (type === 0x100) return { type: 'quit' };
+  if (type === 0x300 || type === 0x301) {
+    const sym = dv.getInt32(20, true);
+    return { type: 'key', down: type === 0x300, name: _host_key_name(sym), sym };
+  }
+  if (type === 0x303) {                                   // SDL_TEXTINPUT
+    let s = ''; let i = 12;
+    while (i < 44 && ev[i] !== 0) { s += String.fromCharCode(ev[i]); i++; }
+    return { type: 'text', text: Buffer.from(s, 'binary').toString('utf-8') };
+  }
+  if (type === 0x400) return { type: 'mouse', kind: 'motion', x: dv.getInt32(20, true), y: dv.getInt32(24, true), button: 0 };
+  if (type === 0x401 || type === 0x402) {
+    return { type: 'mouse', kind: type === 0x401 ? 'down' : 'up', x: dv.getInt32(20, true), y: dv.getInt32(24, true), button: ev[16] };
+  }
+  return { type: 'other', code: type };
+}
+
+export function _host_ticks() { return _host_sdl().S.symbols.SDL_GetTicks(); }
+export function _host_delay(ms) { _host_sdl().S.symbols.SDL_Delay(ms | 0); }
+
+export function _host_close() {
+  const st = _hostState;
+  if (!st || !st.S) return true;
+  if (st.tex) st.S.symbols.SDL_DestroyTexture(st.tex);
+  if (st.ren) st.S.symbols.SDL_DestroyRenderer(st.ren);
+  if (st.win) st.S.symbols.SDL_DestroyWindow(st.win);
+  st.S.symbols.SDL_Quit();
+  _hostState = null;
+  return true;
+}
 export function env(name) { return process.env[name] || null; }
 export function args() { return process.argv.slice(2); }
 export function cwd() { return process.cwd(); }

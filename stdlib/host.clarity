@@ -1,0 +1,115 @@
+-- Host window — run the KyanOS desktop in a real OS window.
+--
+-- The compositor produces a software framebuffer; this module is the
+-- bridge to the screen: it opens a native window (SDL2 via FFI builtins),
+-- uploads the composed frame to a streaming texture each frame, and turns
+-- real keyboard/mouse events into desktop actions — including live typing
+-- into the PTY-backed Terminal. This is the demoable native form of
+-- KyanOS on Mac/PC.
+--
+--   let d = kyan_desktop(1280, 800)
+--   d.open("prism", 120, 90, 680, 460)
+--   host_run(d, {"title": "KyanOS"})     -- blocks until the window closes
+--
+-- The event routing (route_event) is a pure translation from an event
+-- object to a desktop call, so it is unit-tested without a display; the
+-- SDL boundary is the thin _host_* builtin layer.
+
+from "mouse.clarity" import MouseEvent
+
+let ESC = from_char_code(27)
+let DEL = from_char_code(127)
+
+fn host_supported() {
+    return _host_supported()
+}
+
+-- Is the KyanOS Terminal the focused (top) window? Typed text and control
+-- keys go to its shell only when it's the one in front.
+fn _terminal_focused(desktop) {
+    let top = desktop.comp.top_window()
+    if top == null { return false }
+    for kv in entries(desktop.windows) {
+        if kv[1] == top and kv[0] == "terminal" { return true }
+    }
+    return false
+}
+
+-- Translate one host event into a desktop action. Returns "quit" when the
+-- window should close, otherwise null. Pure enough to test headlessly:
+-- it only calls back into the desktop's public input methods.
+fn route_event(desktop, ev) {
+    if ev == null { return null }
+    let ty = ev["type"]
+    if ty == "quit" { return "quit" }
+    if ty == "mouse" {
+        let me = MouseEvent()
+        me.x = ev["x"]
+        me.y = ev["y"]
+        me.button = ev["button"]
+        if ev["kind"] == "down" { me.is_press = true }
+        elif ev["kind"] == "up" { me.is_release = true }
+        else { me.is_motion = true }
+        desktop.handle_mouse(me)
+        return null
+    }
+    if ty == "text" {
+        -- printable characters go to the focused terminal's shell
+        if _terminal_focused(desktop) { desktop.terminal_input(ev["text"]) }
+        return null
+    }
+    if ty == "key" {
+        let name = ev["name"]
+        -- key state drives games and modifiers (mirrors the browser path)
+        desktop.set_key(name, ev["down"])
+        -- special keys the shell needs, on key-down, when it's focused
+        if ev["down"] and _terminal_focused(desktop) {
+            if name == "Enter" { desktop.terminal_input("\n") }
+            elif name == "Backspace" { desktop.terminal_input(DEL) }
+            elif name == "Tab" { desktop.terminal_input("\t") }
+            elif name == "Escape" { desktop.terminal_input(ESC) }
+            elif name == "ArrowUp" { desktop.terminal_input(ESC + "[A") }
+            elif name == "ArrowDown" { desktop.terminal_input(ESC + "[B") }
+            elif name == "ArrowRight" { desktop.terminal_input(ESC + "[C") }
+            elif name == "ArrowLeft" { desktop.terminal_input(ESC + "[D") }
+        }
+        return null
+    }
+    return null
+}
+
+-- Drain every pending event this frame, routing each. Returns true while
+-- the window should stay open, false once a quit event arrives.
+fn pump_events(desktop) {
+    mut alive = true
+    mut ev = _host_poll()
+    while ev != null {
+        if route_event(desktop, ev) == "quit" { alive = false }
+        ev = _host_poll()
+    }
+    return alive
+}
+
+-- Open the window and run the desktop until it's closed. `opts` may set
+-- "title" and "max_frames" (a bound for headless/CI runs; omit for a real
+-- interactive session).
+fn host_run(desktop, opts) {
+    let o = opts ?? {}
+    let title = if has(o, "title") { o["title"] } else { "KyanOS" }
+    let max_frames = if has(o, "max_frames") { o["max_frames"] } else { -1 }
+    if not _host_supported() { return false }
+    _host_open(title, desktop.width, desktop.height)
+    mut alive = true
+    mut frames = 0
+    while alive {
+        alive = pump_events(desktop)
+        desktop.tick(_host_ticks() * 1.0)
+        let screen = desktop.compose()
+        _host_present(screen.buffer._handle, desktop.width, desktop.height)
+        _host_delay(16)
+        frames = frames + 1
+        if max_frames >= 0 and frames >= max_frames { alive = false }
+    }
+    _host_close()
+    return true
+}

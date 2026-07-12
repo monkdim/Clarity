@@ -46,6 +46,8 @@ import { show as $show, ask as $ask, read, write, append, exists, lines, read_by
   _ffi_write_f32, _ffi_write_f64,
   _ffi_callback, _ffi_callback_close,
   _ffi_fill_u32, _ffi_blend_u32, _ffi_box_blur, _ffi_blit_scaled_alpha, _ffi_copy, _ffi_write_buffer, _ffi_read_buffer,
+  _pty_supported, _pty_spawn, _pty_read, _pty_write, _pty_resize, _pty_poll, _pty_close,
+  _host_supported, _host_open, _host_present, _host_poll, _host_ticks, _host_delay, _host_close,
   formatClarityError, clarityMain
 } from "./runtime.js";
 

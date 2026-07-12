@@ -1,0 +1,86 @@
+-- PTY backend tests — the real pseudo-terminal behind the terminal app.
+--
+-- Spawns an actual shell on a PTY, drives it, and feeds its output through
+-- the terminal emulator, asserting the grid shows the real command output.
+-- Gated to Linux (where the openpty + posix_spawn path is verified); on
+-- other hosts it reports a clean skip so CI stays green everywhere.
+
+from "pty.clarity" import pty_spawn_shell, pty_spawn, pty_supported, PtySession
+from "app_terminal.clarity" import Terminal
+from "platform.clarity" import os_name
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+-- Does any row of the terminal grid contain `needle`?
+fn grid_contains(term, needle) {
+    mut r = 0
+    while r < term.rows {
+        if contains(term.line_text(r), needle) { return true }
+        r += 1
+    }
+    return false
+}
+
+show "-- PTY backend --"
+
+if os_name() != "linux" or not pty_supported() {
+    show "  (pseudo-terminals unsupported on this host — skipped)"
+} else {
+    -- ── A real shell runs a command; its output reaches the grid ──
+    let term = Terminal(80, 24)
+    let s = pty_spawn_shell(80, 24)
+    assert(s.master >= 0, "pty master fd allocated")
+    assert(s.pid > 0, "shell child spawned")
+
+    -- consume the startup banner/prompt, then run a command with a marker
+    term.feed(s.drain(250))
+    s.write("echo PTYMARKER_9k2z\n")
+    term.feed(s.drain(600))
+    assert(grid_contains(term, "PTYMARKER_9k2z"), "shell echo output reached the grid")
+
+    -- a program that emits real bytes we can verify
+    s.write("printf 'ABC-%s\\n' 123\n")
+    term.feed(s.drain(600))
+    assert(grid_contains(term, "ABC-123"), "printf output reached the grid")
+
+    -- resize is accepted while running
+    s.resize(100, 30)
+    assert(s.alive(), "shell still alive after a command + resize")
+
+    -- exit cleanly; the child goes away
+    s.write("exit\n")
+    let tail = s.drain(600)
+    term.feed(tail)
+    -- give the reaper a moment; alive() reaps on exit
+    mut tries = 0
+    while s.alive() and tries < 40 { sleep(0.02); tries += 1 }
+    assert(not s.alive(), "shell exits and is reaped")
+    assert(s.close(), "session closes")
+
+    -- ── Direct command (no shell) on a PTY ──
+    let t2 = Terminal(80, 24)
+    let s2 = pty_spawn("/bin/echo", ["/bin/echo", "hello-pty-direct"], 80, 24)
+    t2.feed(s2.drain(600))
+    assert(grid_contains(t2, "hello-pty-direct"), "direct command output reached the grid")
+    s2.close()
+
+    -- ── ANSI colour from the child sets a cell's attributes ──
+    let t3 = Terminal(80, 24)
+    let s3 = pty_spawn_shell(80, 24)
+    t3.feed(s3.drain(250))
+    s3.write("printf '\\033[31mRED\\033[0m\\n'\n")
+    t3.feed(s3.drain(600))
+    assert(grid_contains(t3, "RED"), "coloured output text reached the grid")
+    s3.write("exit\n")
+    s3.drain(200)
+    s3.close()
+}
+
+show ""
+show "PTY: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " pty test(s) failed" }

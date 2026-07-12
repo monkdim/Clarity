@@ -7,7 +7,7 @@ cd "$ROOT"
 
 MODS="atlas_font branding_kyan branding_modern compositor draw event_bus ffi font font_atlas graphics \
       input keymap kyan_apps kyan_game kyan_desktop mouse theme_kyan theme_meadow touch \
-      window window_manager"
+      terminal_emulator pty window window_manager"
 
 mkdir -p web/build
 for m in $MODS; do cp "native/dist/$m.js" "web/build/$m.js"; done
