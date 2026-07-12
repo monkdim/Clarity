@@ -2,6 +2,8 @@
 -- Records calls/lines on a Profiler instance and inspects the resulting stats.
 
 from "profiler.clarity" import Profiler
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
 
 mut PASSED = 0
 mut FAILED = 0
@@ -96,6 +98,27 @@ prof4.record_line(10, 0.003)
 
 assert_eq(prof4.line_stats["5"]["hits"], 2, "line 5 hits")
 assert_eq(prof4.line_stats["10"]["hits"], 1, "line 10 hits")
+
+-- ── Real execution path (regression: execute_stmt → execute) ──
+-- profile_stmts must actually run each statement through the interpreter.
+-- This is the path that was silently broken: it called a nonexistent
+-- Interpreter.execute_stmt(), so every `clarity profile` died with an
+-- empty "Runtime error: {}" and recorded nothing past the first line.
+
+show "-- Profiler: real execution --"
+
+let _RUN_SRC = "/tmp/_profiler_run_src.clarity"
+write(_RUN_SRC, "let a = 2 + 3\nlet b = a * 4\nshow b\n")
+let prun = Profiler(_RUN_SRC)
+let toks = tokenize(prun.source, prun.source_path)
+let tree = parse(toks, prun.source)
+-- must not throw, and must actually execute (defining a, then b from a)
+prun.profile_stmts(tree.body, "<main>")
+assert(len(keys(prun.line_stats)) >= 3, "profiler records a hit for every executed line")
+assert(has(prun.line_stats, "2"), "line 2 (let b = a * 4) executed — depends on line 1's binding")
+-- the interpreter actually evaluated the program: b == 20 lives in its env
+assert_eq(prun.interp.global_env.get("b", 0), 20, "statements really ran through the interpreter (b = 20)")
+exec("rm -f " + _RUN_SRC)
 
 -- ── get_stats snapshot ──────────────────────────────────
 
