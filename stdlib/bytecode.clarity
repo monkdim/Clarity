@@ -1385,6 +1385,11 @@ class VM {
             let operand = instr[1]
             frame.ip = frame.ip + 1
 
+            -- The whole dispatch runs inside a handler so that engine-raised
+            -- errors (division by zero, undefined variable, bad index, …) are
+            -- routed to an active try/catch instead of blowing past it. See
+            -- the catch at the bottom of the loop.
+            try {
             if op == OP_HALT {
                 if len(this.stack) > 0 { return this.stack[len(this.stack) - 1] }
                 return null
@@ -1853,6 +1858,27 @@ class VM {
 
             else {
                 throw "RuntimeError: Unknown opcode: {op}"
+            }
+            } catch err {
+                -- An engine-raised error reached us. Hand it to the nearest
+                -- active try handler on THIS frame — the same routing OP_THROW
+                -- does for an explicit `throw` — otherwise let it propagate.
+                -- Control-flow signals (return/break/continue) are re-raised by
+                -- the host before reaching here, so `err` is always a real
+                -- error, never a jump.
+                if len(this.try_stack) > 0 {
+                    let handler = this.try_stack[len(this.try_stack) - 1]
+                    if handler["frame_idx"] == len(this.frames) - 1 {
+                        pop(this.try_stack)
+                        while len(this.stack) > handler["stack_depth"] {
+                            pop(this.stack)
+                        }
+                        push(this.stack, err)
+                        frame.ip = handler["catch_ip"]
+                        continue
+                    }
+                }
+                throw err
             }
         }
 
