@@ -23,6 +23,16 @@ class Compositor {
         this._all_dirty = true          -- force a full repaint on first render
     }
 
+    -- Re-allocate the screen at a new size (a live host-window resize).
+    -- The old framebuffer is dropped; the next render repaints in full.
+    fn resize(width, height) {
+        this.width = width
+        this.height = height
+        this.screen = framebuffer(width, height)
+        this._all_dirty = true
+        return true
+    }
+
     -- ── Window management ──────────────────────────────
 
     fn add(window) {

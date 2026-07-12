@@ -835,6 +835,13 @@ class Compositor {
     this._dirty = [];
     this._all_dirty = true;
   }
+  resize(width, height) {
+    this.width = width;
+    this.height = height;
+    this.screen = framebuffer(width, height);
+    this._all_dirty = true;
+    return true;
+  }
   add(window) {
     push(this.windows, window);
     this.mark_window(window);
@@ -2453,6 +2460,50 @@ class Terminal {
   jump_to_live() {
     this._scroll_offset = 0;
   }
+  resize(cols, rows) {
+    let nc = cols;
+    let nr = rows;
+    if (truthy(nc < 1)) {
+      nc = 1;
+    }
+    if (truthy(nr < 1)) {
+      nr = 1;
+    }
+    if (truthy($eq(nc, this.cols) && $eq(nr, this.rows))) {
+      return null;
+    }
+    this._blank_row = [];
+    let i = 0;
+    while (truthy(i < nc)) {
+      push(this._blank_row, new Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false));
+      i += 1;
+    }
+    let new_grid = [];
+    let r = 0;
+    while (truthy(r < nr)) {
+      let row = [];
+      let c = 0;
+      while (truthy(c < nc)) {
+        if (truthy(r < this.rows && c < this.cols)) {
+          push(row, $index($index(this._grid, r), c));
+        } else {
+          push(row, new Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false));
+        }
+        c += 1;
+      }
+      push(new_grid, row);
+      r += 1;
+    }
+    this._grid = new_grid;
+    this.cols = nc;
+    this.rows = nr;
+    if (truthy(this.cursor_row >= nr)) {
+      this.cursor_row = nr - 1;
+    }
+    if (truthy(this.cursor_col >= nc)) {
+      this.cursor_col = nc - 1;
+    }
+  }
   _consume(c) {
     if (truthy($eq(this._parse_state, "esc"))) {
       if (truthy($eq(c, "["))) {
@@ -3049,7 +3100,18 @@ class KyanDesktop {
       }
     }
     for (let kv of entries(this._terminals)) {
+      let app_id = $index(kv, 0);
       let sess = $index(kv, 1);
+      if (truthy(has(this.windows, app_id))) {
+        let cr = $index(this.windows, app_id).content_rect();
+        let cols = $int($index(cr, 2) / 8);
+        let rows = $int($index(cr, 3) / 16);
+        if (truthy(cols >= 1 && rows >= 1 && ($ne(cols, $index(sess, "term").cols) || $ne(rows, $index(sess, "term").rows)))) {
+          $index(sess, "term").resize(cols, rows);
+          $index(sess, "pty").resize(cols, rows);
+          this._dirty = true;
+        }
+      }
       let out = $index(sess, "pty").read();
       if (truthy($eq(out, null))) {
         sess["dead"] = true;
@@ -3074,6 +3136,25 @@ class KyanDesktop {
     this._launcher_t0 = -1;
     this._dirty = true;
     return this.launcher_open;
+  }
+  resize(w, h) {
+    let nw = w;
+    let nh = h;
+    if (truthy(nw < 320)) {
+      nw = 320;
+    }
+    if (truthy(nh < 240)) {
+      nh = 240;
+    }
+    if (truthy($eq(nw, this.width) && $eq(nh, this.height))) {
+      return false;
+    }
+    this.width = nw;
+    this.height = nh;
+    this.comp.resize(nw, nh);
+    this._wallpaper = null;
+    this._dirty = true;
+    return true;
   }
   _anim_state(app_id) {
     if (truthy($eq(app_id, null) || !truthy(has(this._anim, app_id)) || $eq(this._last_tick, null))) {

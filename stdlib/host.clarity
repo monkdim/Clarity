@@ -53,6 +53,11 @@ fn route_event(desktop, ev) {
         desktop.handle_mouse(me)
         return null
     }
+    if ty == "resize" {
+        -- the host window changed size: match the desktop resolution to it
+        desktop.resize(ev["w"], ev["h"])
+        return null
+    }
     if ty == "text" {
         -- printable characters go to the focused terminal's shell
         if _terminal_focused(desktop) { desktop.terminal_input(ev["text"]) }
@@ -62,6 +67,11 @@ fn route_event(desktop, ev) {
         let name = ev["name"]
         -- key state drives games and modifiers (mirrors the browser path)
         desktop.set_key(name, ev["down"])
+        if ev["down"] {
+            -- launcher hotkey: Super/GUI toggles it; Escape closes it if open
+            if name == "Meta" { desktop.toggle_launcher(); return null }
+            if name == "Escape" and desktop.launcher_open { desktop.toggle_launcher(); return null }
+        }
         -- special keys the shell needs, on key-down, when it's focused
         if ev["down"] and _terminal_focused(desktop) {
             if name == "Enter" { desktop.terminal_input("\n") }

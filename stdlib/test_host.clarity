@@ -7,6 +7,7 @@
 from "host.clarity" import route_event, host_supported
 from "kyan_desktop.clarity" import kyan_desktop
 from "theme_kyan.clarity" import kyan_obsidian
+from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_supported
 from "platform.clarity" import os_name
 
@@ -55,6 +56,26 @@ assert(route_event(d, {"type": "other", "code": 999}) == null, "unknown events a
 -- (pump_events / the SDL window loop are exercised under the dummy video
 -- driver out-of-band, not here: they'd dlopen SDL2, which isn't present on
 -- the CI runners.)
+
+-- a resize event changes the desktop resolution; compose follows
+route_event(d, {"type": "resize", "w": 800, "h": 500})
+assert(d.width == 800 and d.height == 500, "resize event changes desktop resolution")
+let scr = d.compose()
+assert(scr.width == 800 and scr.height == 500, "compose renders at the new resolution")
+
+-- the launcher hotkey (Super/Meta) toggles it; Escape closes it
+assert(not d.launcher_open, "launcher starts closed")
+route_event(d, {"type": "key", "name": "Meta", "down": true})
+assert(d.launcher_open, "Meta opens the launcher")
+route_event(d, {"type": "key", "name": "Escape", "down": true})
+assert(not d.launcher_open, "Escape closes the launcher")
+
+-- the emulator reshapes its grid on resize, keeping content that fits
+let tm = Terminal(20, 5)
+tm.feed("hello")
+tm.resize(40, 8)
+assert(tm.cols == 40 and tm.rows == 8, "emulator resizes its grid")
+assert(contains(tm.line_text(0), "hello"), "resize keeps existing content")
 
 -- ── Live typing routes into the Terminal's shell (Linux) ──
 if os_name() == "linux" and pty_supported() {

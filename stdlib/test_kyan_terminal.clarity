@@ -58,6 +58,12 @@ if os_name() != "linux" or not pty_supported() {
     d.compose()
     assert(d.frames > 0, "desktop composes with a live terminal window")
 
+    -- resizing the terminal window reflows the emulator + sends SIGWINCH
+    let tcols = sess["term"].cols
+    w.resize(720, 460)
+    d.tick(3000.0)
+    assert(sess["term"].cols != tcols, "resizing the terminal window reflows its grid")
+
     d.close("terminal")
     assert(d.terminal_session("terminal") == null, "closing the Terminal cleans up its PTY")
 }

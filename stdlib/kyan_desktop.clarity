@@ -284,9 +284,21 @@ class KyanDesktop {
                 voidrunner_update(this.app_state["voidrunner"], dt, this.keys)
             }
         }
-        -- pump live PTY terminals: drain any new output into their emulator
+        -- pump live PTY terminals: reflow on a window resize (SIGWINCH),
+        -- then drain any new output into their emulator
         for kv in entries(this._terminals) {
+            let app_id = kv[0]
             let sess = kv[1]
+            if has(this.windows, app_id) {
+                let cr = this.windows[app_id].content_rect()
+                let cols = int(cr[2] / 8)
+                let rows = int(cr[3] / 16)
+                if cols >= 1 and rows >= 1 and (cols != sess["term"].cols or rows != sess["term"].rows) {
+                    sess["term"].resize(cols, rows)
+                    sess["pty"].resize(cols, rows)
+                    this._dirty = true
+                }
+            }
             let out = sess["pty"].read()
             if out == null {
                 sess["dead"] = true
@@ -309,6 +321,23 @@ class KyanDesktop {
         this._launcher_t0 = -1.0   -- (re)stamp the open animation on next tick
         this._dirty = true
         return this.launcher_open
+    }
+
+    -- Resize the whole desktop to a new resolution (a live host-window
+    -- resize). Re-allocates the compositor screen and drops the cached
+    -- wallpaper so the aurora repaints to fit; the next compose is full.
+    fn resize(w, h) {
+        mut nw = w
+        mut nh = h
+        if nw < 320 { nw = 320 }
+        if nh < 240 { nh = 240 }
+        if nw == this.width and nh == this.height { return false }
+        this.width = nw
+        this.height = nh
+        this.comp.resize(nw, nh)
+        this._wallpaper = null
+        this._dirty = true
+        return true
     }
 
     -- Open-animation state for a window: {active, scale, alpha}. Finished
