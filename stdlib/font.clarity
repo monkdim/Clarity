@@ -15,7 +15,7 @@
 --   measure_text(font, text)   → [width, height]
 
 from "ffi.clarity" import Pointer
-from "draw.clarity" import fill_rect_blend
+from "draw.clarity" import fill_rect_blend, blend_pixel
 
 class Font {
     fn init(width, height, glyphs) {
@@ -128,6 +128,78 @@ fn draw_text_scaled(fb, x, y, text, font, color, scale, tracking) {
         i += 1
     }
     return cx - x
+}
+
+-- ── Anti-aliased scaled text ────────────────────────────
+--
+-- Nearest-neighbour scaling makes big text look blocky. draw_text_smooth
+-- upscales each glyph with *bilinear coverage*: every device pixel maps
+-- back to a sub-cell position in the 8x8 mask, samples the four nearest
+-- cells, and blends the foreground with that fractional coverage as
+-- alpha. Edges become soft grey ramps instead of hard steps. At scale 1
+-- it defers to the crisp bitmap path (nothing to smooth).
+
+fn _glyph_cover(glyph, col, row, fw, fh) {
+    if col < 0 or col >= fw or row < 0 or row >= fh { return 0.0 }
+    let mask = 1 << (fw - 1 - col)
+    if (glyph[row] & mask) != 0 { return 1.0 }
+    return 0.0
+}
+
+fn _floor_i(v) {
+    let i = int(v)
+    if v < 0.0 and i > v { return i - 1 }
+    return i
+}
+
+fn draw_text_smooth(fb, x, y, text, font, color, scale, tracking) {
+    let s = if scale == null or scale < 1 { 1 } else { scale }
+    let track = if tracking == null { 0 } else { tracking }
+    if s == 1 { return draw_text_scaled(fb, x, y, text, font, color, 1, track) }
+    let fw = font.width
+    let fh = font.height
+    let base_a = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    let bx = int(x)
+    let by = int(y)
+    let chs = chars(text)
+    let dw = fw * s
+    let dh = fh * s
+    mut cx = bx
+    mut ci = 0
+    while ci < len(chs) {
+        let glyph = font.glyph(char_code(chs[ci]))
+        if glyph != null {
+            mut j = 0
+            while j < dh {
+                let fy = (j + 0.5) / s - 0.5
+                let r0 = _floor_i(fy)
+                let ty = fy - r0
+                mut i = 0
+                while i < dw {
+                    let fx = (i + 0.5) / s - 0.5
+                    let c0 = _floor_i(fx)
+                    let tx = fx - c0
+                    let v00 = _glyph_cover(glyph, c0, r0, fw, fh)
+                    let v10 = _glyph_cover(glyph, c0 + 1, r0, fw, fh)
+                    let v01 = _glyph_cover(glyph, c0, r0 + 1, fw, fh)
+                    let v11 = _glyph_cover(glyph, c0 + 1, r0 + 1, fw, fh)
+                    let top = v00 + (v10 - v00) * tx
+                    let bot = v01 + (v11 - v01) * tx
+                    let cov = top + (bot - top) * ty
+                    if cov > 0.03 {
+                        let a = int(cov * base_a)
+                        if a > 0 { blend_pixel(fb, cx + i, by + j, a * 16777216 + rgb) }
+                    }
+                    i += 1
+                }
+                j += 1
+            }
+        }
+        cx += fw * s + track
+        ci += 1
+    }
+    return cx - bx
 }
 
 -- ── Built-in 8x8 ASCII font ─────────────────────────────

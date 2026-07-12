@@ -1,7 +1,7 @@
 -- Font / draw_text tests — Phase 57 task 3.
 
 from "graphics.clarity" import framebuffer, BLACK, WHITE
-from "font.clarity" import Font, builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled, load_psf
+from "font.clarity" import Font, builtin_font, draw_text, measure_text, draw_text_scaled, draw_text_smooth, measure_text_scaled, load_psf
 from "graphics.clarity" import rgba, red_of, alpha_of
 from "ffi.clarity" import alloc, Pointer
 
@@ -80,6 +80,32 @@ draw_text_scaled(fbs, 0, 0, "A", font, rgba(0, 0, 0, 128), 3, 0)
 let blended = fbs.get_pixel(9, 0)
 assert(red_of(blended) >= 126 and red_of(blended) <= 129, "translucent scaled text blends")
 assert_eq(alpha_of(blended), 255, "scaled text result opaque")
+
+show "-- Font: draw_text_smooth (anti-aliased) --"
+
+-- at scale 1, smoothing defers to the crisp bitmap path
+let fsm1 = framebuffer(48, 16)
+fsm1.clear(BLACK)
+draw_text_smooth(fsm1, 0, 0, "A", font, WHITE, 1, 0)
+assert_eq(fsm1.get_pixel(3, 0), WHITE, "smooth@1x matches crisp bitmap")
+
+-- at scale 3, edges pick up partial-coverage grey pixels (real AA)
+let fsm3 = framebuffer(48, 32)
+fsm3.clear(BLACK)
+draw_text_smooth(fsm3, 0, 0, "A", font, WHITE, 3, 0)
+mut grays = 0
+mut ay = 0
+while ay < 24 {
+    mut ax = 0
+    while ax < 24 {
+        let r = red_of(fsm3.get_pixel(ax, ay))
+        if r > 20 and r < 235 { grays = grays + 1 }
+        ax = ax + 1
+    }
+    ay = ay + 1
+}
+assert(grays > 0, "smooth text produces anti-aliased edge pixels")
+assert_eq(alpha_of(fsm3.get_pixel(9, 8)), 255, "smooth text composites to opaque")
 
 -- ── draw_text renders the right pixels ─────────────────
 

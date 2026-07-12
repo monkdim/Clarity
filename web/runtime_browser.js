@@ -4,13 +4,29 @@
  * Regenerate with: clarity gen-runtime
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, renameSync, statSync } from 'fs';
-import { execSync } from 'child_process';
-import { createInterface } from 'readline';
-import { createServer } from 'http';
-import { resolve, dirname, basename, extname, join as pathJoin, sep } from 'path';
-import { createHash, randomUUID } from 'crypto';
-import { dlopen, FFIType, suffix as ffiSuffix, ptr as bunPtr, read as bunRead, CString, JSCallback } from 'bun:ffi';
+// Browser build of the Clarity runtime — derived from native/runtime.js.
+// Node/Bun-only imports (fs, child_process, readline, http, path, crypto,
+// bun:ffi) are removed and stubbed below so this module LOADS in a browser.
+// The desktop only ever uses runtime-owned Uint8Array buffers, so the five
+// buffer ops are reimplemented on Uint8Array (no Node Buffer).
+
+// ── Stubs for removed Node/Bun host facilities ───────────
+const _sep = '/';
+function _fsThrow() { throw new Error('filesystem is unavailable in the browser build'); }
+// bun:ffi stand-ins (never actually reached by the desktop, but referenced
+// by dlopen/FFI codepaths so they must exist as symbols).
+const FFIType = new Proxy({}, { get: () => 0 });
+const ffiSuffix = 'so';
+function bunPtr() { throw new Error('bun:ffi ptr unavailable in browser build'); }
+const bunRead = new Proxy({}, { get: () => () => { throw new Error('bun:ffi read unavailable in browser build'); } });
+class CString { constructor() { throw new Error('CString unavailable in browser build'); } }
+function dlopen() { throw new Error('dlopen unavailable in browser build'); }
+class JSCallback { constructor() { throw new Error('JSCallback unavailable in browser build'); } }
+// Minimal process shim so any stray process.* reference doesn't crash load.
+const process = (typeof globalThis !== 'undefined' && globalThis.process) || {
+  platform: 'browser', env: {}, argv: [], stdout: { write: () => {} },
+  stdin: { fd: 0 }, exit: () => {}, cwd: () => '/',
+};
 
 // ── I/O ──────────────────────────────────────────────────
 
@@ -24,25 +40,15 @@ export function show(...vals) {
 
 export { show as print };
 
-export function ask(prompt = '') {
-  process.stdout.write(prompt);
-  const buf = Buffer.alloc(1024);
-  const fd = process.platform === 'win32'
-    ? process.stdin.fd
-    : require('fs').openSync('/dev/tty', 'rs');
-  let n = 0;
-  try { n = require('fs').readSync(fd, buf, 0, buf.length, null); } catch { }
-  if (fd !== process.stdin.fd) require('fs').closeSync(fd);
-  return buf.slice(0, n).toString().replace(/[\r\n]+$/, '');
-}
+export function ask(prompt = '') { return ''; }
 
-export function read(path) { return readFileSync(path, 'utf-8'); }
-export function write(path, content) { writeFileSync(path, display(content)); return true; }
-export function append(path, content) { appendFileSync(path, display(content)); return true; }
-export function exists(path) { return existsSync(path); }
-export function lines(path) { return readFileSync(path, 'utf-8').split('\n'); }
-export function read_bytes(path) { return Array.from(readFileSync(path)); }
-export function write_bytes(path, bytes) { writeFileSync(path, Buffer.from(bytes)); return true; }
+export function read(path) { _fsThrow(); }
+export function write(path, content) { return true; }
+export function append(path, content) { return true; }
+export function exists(path) { return false; }
+export function lines(path) { _fsThrow(); }
+export function read_bytes(path) { _fsThrow(); }
+export function write_bytes(path, bytes) { return true; }
 
 // ── Type conversions ─────────────────────────────────────
 
@@ -218,26 +224,16 @@ export function pow(base, exp) { return base ** exp; }
 
 // ── System ───────────────────────────────────────────────
 
-export function exec(cmd) {
-  try { return execSync(cmd, { encoding: 'utf-8' }).replace(/\n$/, ''); }
-  catch (e) { return e.stdout || ''; }
-}
+export function exec(cmd) { return ''; }
 
-export function exec_full(cmd) {
-  try {
-    const stdout = execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    return { stdout, stderr: '', exit_code: 0 };
-  } catch (e) {
-    return { stdout: e.stdout || '', stderr: e.stderr || '', exit_code: e.status || 1 };
-  }
-}
+export function exec_full(cmd) { return { stdout: '', stderr: '', exit_code: 0 }; }
 
-export function exit(code = 0) { process.exit(code); }
-export function sleep(secs) { execSync(`sleep ${secs}`); }
+export function exit(code = 0) { /* no-op in browser */ }
+export function sleep(secs) { /* no-op in browser */ }
 export function time() { return Date.now() / 1000; }
-export function env(name) { return process.env[name] || null; }
-export function args() { return process.argv.slice(2); }
-export function cwd() { return process.cwd(); }
+export function env(name) { return null; }
+export function args() { return []; }
+export function cwd() { return '/'; }
 
 // ── JSON ─────────────────────────────────────────────────
 
@@ -247,10 +243,19 @@ export function json_string(v, indent) { return JSON.stringify(v, null, indent);
 // ── Crypto / Encoding ────────────────────────────────────
 
 export function hash(text, algo = 'sha256') {
-  return createHash(algo).update(text).digest('hex');
+  // Non-cryptographic fallback (FNV-1a) — crypto module is unavailable.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, '0');
 }
-export function encode64(text) { return Buffer.from(text).toString('base64'); }
-export function decode64(text) { return Buffer.from(text, 'base64').toString(); }
+export function encode64(text) {
+  if (typeof btoa === 'function') return btoa(unescape(encodeURIComponent(text)));
+  return '';
+}
+export function decode64(text) {
+  if (typeof atob === 'function') return decodeURIComponent(escape(atob(text)));
+  return '';
+}
 
 // ── Functional ───────────────────────────────────────────
 
@@ -269,24 +274,9 @@ export function error(msg) { return new Error(msg); }
 
 // ── HTTP ─────────────────────────────────────────────────
 
-export function fetch(url) {
-  return execSync(`curl -sL '${url}'`, { encoding: 'utf-8' });
-}
+export function fetch(url) { return ''; }
 
-export function serve(port, handler) {
-  const server = createServer((req, res) => {
-    const result = handler(req.method, req.url);
-    if (typeof result === 'object' && result !== null) {
-      res.writeHead(result.status || 200, { 'Content-Type': result.type || 'text/html' });
-      res.end(result.body || '');
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(display(result));
-    }
-  });
-  server.listen(port);
-  console.log(`  Serving on http://localhost:${port}`);
-}
+export function serve(port, handler) { /* no-op in browser */ }
 
 // ── Regex ────────────────────────────────────────────────
 
@@ -325,32 +315,34 @@ export class ClarityEnum {
 
 // ── Path module ──────────────────────────────────────────
 
+const _pathBase = (p, ext) => { let b = String(p).split('/').pop() || ''; if (ext && b.endsWith(ext)) b = b.slice(0, -ext.length); return b; };
+const _pathExt = (p) => { const b = String(p).split('/').pop() || ''; const i = b.lastIndexOf('.'); return i > 0 ? b.slice(i) : ''; };
 export const $path = {
-  join: pathJoin,
-  dir: dirname,
-  name: basename,
-  stem: (p) => basename(p, extname(p)),
-  ext: extname,
-  exists: existsSync,
-  is_file: (p) => { try { return statSync(p).isFile(); } catch { return false; } },
-  is_dir: (p) => { try { return statSync(p).isDirectory(); } catch { return false; } },
-  abs: resolve,
-  sep,
+  join: (...parts) => parts.filter(Boolean).join('/'),
+  dir: (p) => { const i = String(p).lastIndexOf('/'); return i < 0 ? '.' : String(p).slice(0, i) || '/'; },
+  name: (p) => _pathBase(p),
+  stem: (p) => _pathBase(p, _pathExt(p)),
+  ext: _pathExt,
+  exists: () => false,
+  is_file: () => false,
+  is_dir: () => false,
+  abs: (p) => p,
+  sep: _sep,
 };
 
 // ── OS module ────────────────────────────────────────────
 
 export const $os = {
-  env: (n) => process.env[n] || null,
-  cwd: () => process.cwd(),
-  args: () => process.argv.slice(2),
+  env: () => null,
+  cwd: () => '/',
+  args: () => [],
   exec: exec,
-  ls: (p = '.') => readdirSync(p),
-  mkdir: (p) => mkdirSync(p, { recursive: true }),
-  rm: unlinkSync,
-  rename: renameSync,
-  home: () => process.env.HOME || process.env.USERPROFILE || '/',
-  sep,
+  ls: () => [],
+  mkdir: () => {},
+  rm: () => {},
+  rename: () => {},
+  home: () => '/',
+  sep: _sep,
 };
 
 // ── Display helpers ──────────────────────────────────────
@@ -432,7 +424,7 @@ export function clarityMain(fn) {
   } catch (err) {
     if (err instanceof BreakSignal || err instanceof ContinueSignal || err instanceof ReturnSignal) return;
     console.error(formatClarityError(err));
-    process.exit(1);
+    throw err;
   }
 }
 
@@ -558,21 +550,24 @@ function _ffi_addr(p) {
 // stays at one address. We zero-fill ourselves since "unsafe" means
 // "don't pre-fill".
 export function _ffi_alloc(size) {
-  const buffer = Buffer.allocUnsafeSlow(size).fill(0);
-  return { _buffer: buffer, size };
+  return { _buffer: new Uint8Array(size), size };
 }
 
 export function _ffi_alloc_cstring(s) {
-  const len = Buffer.byteLength(s, 'utf-8');
-  const buffer = Buffer.allocUnsafeSlow(len + 1).fill(0);
-  buffer.write(s, 0, 'utf-8');
+  const bytes = new TextEncoder().encode(s);
+  const buffer = new Uint8Array(bytes.length + 1); // +1 null terminator
+  buffer.set(bytes);
   return { _buffer: buffer, size: buffer.length };
 }
 
 export function _ffi_read_cstring(p) {
-  const addr = _ffi_addr(p);
-  if (!addr) return null;
-  return new CString(addr).toString();
+  if (typeof p === 'object' && p !== null && p._buffer) {
+    const buf = p._buffer;
+    let end = 0;
+    while (end < buf.length && buf[end] !== 0) end++;
+    return new TextDecoder().decode(buf.subarray(0, end));
+  }
+  return null;
 }
 
 export function _ffi_ptr_addr(p) { return _ffi_addr(p); }
@@ -625,10 +620,20 @@ export function _ffi_fill_u32(p, byte_offset, count, value) {
     throw new Error('FFIError: fill_u32 requires a runtime-allocated pointer');
   }
   const buf = p._buffer;
-  const pattern = Buffer.alloc(4);
-  pattern.writeUInt32LE((value >>> 0), 0);
-  // Buffer.fill repeats the 4-byte pattern across [start, end).
-  buf.fill(pattern, byte_offset, byte_offset + count * 4);
+  const v = value >>> 0;
+  // Fast path: 4-byte aligned → use a Uint32Array view and .fill().
+  if ((buf.byteOffset + byte_offset) % 4 === 0) {
+    const u32 = new Uint32Array(buf.buffer, buf.byteOffset + byte_offset, count);
+    u32.fill(v);
+    return;
+  }
+  // Unaligned fallback: little-endian byte writes.
+  const b0 = v & 0xFF, b1 = (v >>> 8) & 0xFF, b2 = (v >>> 16) & 0xFF, b3 = (v >>> 24) & 0xFF;
+  let o = byte_offset;
+  for (let i = 0; i < count; i++) {
+    buf[o] = b0; buf[o + 1] = b1; buf[o + 2] = b2; buf[o + 3] = b3;
+    o += 4;
+  }
 }
 
 // Source-over alpha blend a solid color across `count` 32-bit BGRA
@@ -646,9 +651,7 @@ export function _ffi_blend_u32(p, byte_offset, count, color) {
   const sa = (c >>> 24) & 0xFF;
   if (sa === 0) return;
   if (sa === 255) {
-    const pattern = Buffer.alloc(4);
-    pattern.writeUInt32LE(c, 0);
-    buf.fill(pattern, byte_offset, byte_offset + count * 4);
+    _ffi_fill_u32(p, byte_offset, count, c);
     return;
   }
   const sr = (c >>> 16) & 0xFF;
@@ -673,14 +676,10 @@ export function _ffi_copy(dst, dst_offset, src, src_offset, length) {
   }
   const dbuf = dst._buffer;
   if (src && src._buffer) {
-    src._buffer.copy(dbuf, dst_offset, src_offset, src_offset + length);
+    dbuf.set(src._buffer.subarray(src_offset, src_offset + length), dst_offset);
     return;
   }
-  // Foreign source — pull bytes one at a time through bunRead.
-  const addr = _ffi_addr(src);
-  for (let i = 0; i < length; i++) {
-    dbuf[dst_offset + i] = bunRead.u8(addr, src_offset + i);
-  }
+  throw new Error('FFIError: copy source must be a runtime-allocated pointer in browser build');
 }
 
 // Write the buffer's bytes to a file path. Useful for save_bmp and friends.
@@ -688,14 +687,13 @@ export function _ffi_write_buffer(p, path) {
   if (!p || !p._buffer) {
     throw new Error('FFIError: write_buffer requires a runtime-allocated pointer');
   }
-  writeFileSync(path, p._buffer);
+  // No filesystem in the browser build.
 }
 
 // Read a file as raw bytes into a Pointer-shaped handle. Handy for
 // inspecting binary outputs and as a building block for image loaders.
 export function _ffi_read_buffer(path) {
-  const data = readFileSync(path);
-  return { _buffer: data, size: data.length };
+  throw new Error('FFIError: read_buffer requires a filesystem, unavailable in browser build');
 }
 
 // Drop the JS-side buffer reference. The OS-level memory is reclaimed by GC.

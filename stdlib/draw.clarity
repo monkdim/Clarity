@@ -292,17 +292,7 @@ fn fill_rect_blend(fb, x, y, w, h, color) {
     let sa = int(color / 16777216) & 0xFF
     if sa == 0 { return null }
     if sa == 255 { fb.fill_rect(x, y, w, h, color); return null }
-    let y_end = y + h
-    let x_end = x + w
-    mut yy = y
-    while yy < y_end {
-        mut xx = x
-        while xx < x_end {
-            blend_pixel(fb, xx, yy, color)
-            xx += 1
-        }
-        yy += 1
-    }
+    fb.blend_rect(x, y, w, h, color)
 }
 
 -- ── Gradients ───────────────────────────────────────────
@@ -394,8 +384,8 @@ fn radial_glow(fb, cx, cy, radius, color) {
 -- ── Glass panels & soft shadows ─────────────────────────
 -- Blend a single horizontal span (helper for the rounded fill).
 fn _hline_blend(fb, x0, y, x1, color) {
-    mut x = x0
-    while x <= x1 { blend_pixel(fb, x, y, color); x += 1 }
+    if x1 < x0 { return null }
+    fb.blend_rect(x0, y, x1 - x0 + 1, 1, color)
 }
 
 -- Alpha-aware rounded rectangle — a translucent glass panel. Opaque

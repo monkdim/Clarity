@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KyanOS — browser build</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: radial-gradient(1200px 800px at 50% -10%, #12203a 0%, #0a0f1c 55%, #06090f 100%);
+    color: #cdd6e6;
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { min-height: 100%; display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px 16px 40px; }
+  header { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
+  .logo { width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, #4f8cff 0%, #7a5cff 50%, #26d0c8 100%);
+    box-shadow: 0 4px 20px rgba(79,140,255,.35); }
+  h1 { font-size: 18px; font-weight: 650; letter-spacing: .2px; margin: 0; color: #eef3ff; }
+  h1 span { color: #7f8db0; font-weight: 400; }
+  .stage { position: relative; width: 100%; max-width: 1280px; aspect-ratio: 1280 / 800;
+    border-radius: 14px; overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(120,150,220,.12) inset; }
+  canvas { display: block; width: 100%; height: 100%; image-rendering: auto; cursor: default; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  button { appearance: none; border: 1px solid rgba(130,160,230,.25); background: rgba(30,42,70,.6);
+    color: #dbe4f7; padding: 8px 14px; border-radius: 9px; font: inherit; cursor: pointer; transition: .15s; }
+  button:hover { background: rgba(48,66,108,.75); border-color: rgba(150,180,255,.45); }
+  .hint { color: #6f7c9e; font-size: 12.5px; }
+  code { background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 5px; color: #9fb2dd; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo"></div>
+      <h1>KyanOS <span>· running live in your browser</span></h1>
+    </header>
+    <div class="stage">
+      <canvas id="screen" width="1280" height="800"></canvas>
+    </div>
+    <div class="bar">
+      <button id="play">▶ Play Voidrunner</button>
+      <button id="launcher">Toggle launcher</button>
+      <button id="open-terminal">Open Terminal</button>
+      <span class="hint">Click the dock, drag windows by their title bars, press Space for the launcher. In Voidrunner: ← → to move, R to restart.</span>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick
+    } from './kyanos.bundle.js';
+
+    const W = 1280, H = 800;
+    const canvas = document.getElementById('screen');
+    const ctx = canvas.getContext('2d');
+    const image = ctx.createImageData(W, H);
+    const dst32 = new Uint32Array(image.data.buffer);
+
+    const desk = createDesktop(W, H);
+    // Open a couple of apps so it looks alive on first paint.
+    openApp(desk, 'prism', 150, 96, 680, 460);
+    openApp(desk, 'files', 470, 300, 420, 320);
+    window.__kyan = { desk };
+
+    window.__kyan = { desk, sendMouse, composeToBytes }; // for verification hooks
+
+    function present() {
+      const { bytes } = composeToBytes(desk);
+      const src32 = new Uint32Array(bytes.buffer, bytes.byteOffset, W * H);
+      // Framebuffer pixel is 0xAARRGGBB (memory B,G,R,A). Canvas wants R,G,B,A.
+      // Swap R<->B and force alpha opaque.
+      for (let i = 0; i < src32.length; i++) {
+        const px = src32[i];
+        dst32[i] = ((px & 0x0000FF00)) | ((px & 0xFF) << 16) | ((px >> 16) & 0xFF) | 0xFF000000;
+      }
+      ctx.putImageData(image, 0, 0);
+    }
+
+    function loop(now) { tick(desk, now); present(); requestAnimationFrame(loop); }
+    requestAnimationFrame(loop);
+
+    // ── Keyboard → live apps (Voidrunner) ──
+    const GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','a','d','r',' ']);
+    window.addEventListener('keydown', (e) => {
+      setKey(desk, e.key, true);
+      if (GAME_KEYS.has(e.key)) e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => setKey(desk, e.key, false));
+
+    // ── Mouse routing: canvas CSS px → desktop px ──
+    function toDesktop(ev) {
+      const r = canvas.getBoundingClientRect();
+      const x = (ev.clientX - r.left) * (W / r.width);
+      const y = (ev.clientY - r.top) * (H / r.height);
+      return { x, y };
+    }
+    canvas.addEventListener('mousedown', (ev) => {
+      const { x, y } = toDesktop(ev); sendMouse(desk, x, y, 'press', ev.button);
+    });
+    canvas.addEventListener('mousemove', (ev) => {
+      const { x, y } = toDesktop(ev); sendMouse(desk, x, y, 'motion', ev.buttons ? 0 : 0);
+    });
+    canvas.addEventListener('mouseup', (ev) => {
+      const { x, y } = toDesktop(ev); sendMouse(desk, x, y, 'release', ev.button);
+    });
+
+    document.getElementById('play').onclick = () => { openApp(desk, 'voidrunner', 300, 110, 600, 500); canvas.focus(); };
+    document.getElementById('launcher').onclick = () => toggleLauncher(desk);
+    document.getElementById('open-terminal').onclick = () => openApp(desk, 'terminal', 220, 140, 460, 300);
+
+    console.log('KyanOS booted:', W + 'x' + H, 'windows=', Object.keys(desk.windows).join(','));
+  </script>
+</body>
+</html>

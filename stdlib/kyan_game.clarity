@@ -1,0 +1,150 @@
+-- Voidrunner — a small playable game for KyanOS (rebrand phase K5 seed).
+--
+-- Outrun the collapse of a dying star system: a ship at the bottom
+-- dodges neon debris falling from the top. Left/Right to move, R to
+-- restart. Pure Clarity, drawn with the K2 renderer primitives, driven
+-- by the desktop's per-frame tick. Deterministic (its own LCG), so it's
+-- unit-testable and identical in the browser and native builds.
+--
+--   let s = new_voidrunner(w, h)
+--   voidrunner_update(s, dt_ms, {"ArrowLeft": true})
+--   voidrunner_paint(fb, x, y, w, h, theme, s)
+
+from "draw.clarity" import fill_rect, rounded_rect, fill_polygon, linear_gradient, polygon
+from "font.clarity" import builtin_font, draw_text, draw_text_scaled, draw_text_smooth, measure_text
+from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
+from "graphics.clarity" import rgba
+
+let _SHIP_W = 34
+let _SHIP_H = 22
+let _OBST = 26            -- debris size
+let _SPAWN_MS = 620.0     -- ms between spawns (eases down as score climbs)
+
+fn new_voidrunner(w, h) {
+    return {
+        "w": w, "h": h,
+        "ship_x": int(w / 2) - int(_SHIP_W / 2),
+        "obs": [],           -- each: {"x","y"}
+        "score": 0.0,
+        "best": 0,
+        "dead": false,
+        "seed": 2463534242,
+        "spawn_acc": 0.0,
+        "scroll": 0.0
+    }
+}
+
+fn _rand01(s) {
+    -- LCG; keeps products within double precision
+    let next = (s["seed"] * 1664525 + 1013904223) % 4294967296
+    s["seed"] = next
+    return next / 4294967296.0
+}
+
+fn voidrunner_update(s, dt_ms, keys) {
+    let dt = if dt_ms > 60.0 { 60.0 } else { dt_ms }   -- clamp big frame gaps
+    let restart = has(keys, "r") and keys["r"]
+    if s["dead"] {
+        if restart {
+            let prev_best = s["best"]
+            let prev_score = int(s["score"])
+            let ns = new_voidrunner(s["w"], s["h"])
+            for kv in entries(ns) { s[kv[0]] = kv[1] }
+            s["best"] = if prev_score > prev_best { prev_score } else { prev_best }
+        }
+        return s
+    }
+
+    -- ship movement
+    let speed = 0.42 * dt
+    let left = (has(keys, "ArrowLeft") and keys["ArrowLeft"]) or (has(keys, "a") and keys["a"])
+    let right = (has(keys, "ArrowRight") and keys["ArrowRight"]) or (has(keys, "d") and keys["d"])
+    if left { s["ship_x"] = s["ship_x"] - int(speed) }
+    if right { s["ship_x"] = s["ship_x"] + int(speed) }
+    if s["ship_x"] < 0 { s["ship_x"] = 0 }
+    if s["ship_x"] > s["w"] - _SHIP_W { s["ship_x"] = s["w"] - _SHIP_W }
+
+    -- difficulty ramps with score
+    let fall = (0.14 + s["score"] * 0.00006) * dt
+    let spawn_ms = if _SPAWN_MS - s["score"] * 0.9 < 200.0 { 200.0 } else { _SPAWN_MS - s["score"] * 0.9 }
+
+    -- advance + cull debris, detect collision
+    let ship_y = s["h"] - _SHIP_H - 8
+    mut next_obs = []
+    for o in s["obs"] {
+        let ny = o["y"] + fall
+        if ny < s["h"] {
+            -- collision: rect overlap vs ship
+            if ny + _OBST >= ship_y and ny <= ship_y + _SHIP_H
+               and o["x"] + _OBST >= s["ship_x"] and o["x"] <= s["ship_x"] + _SHIP_W {
+                s["dead"] = true
+            }
+            push(next_obs, {"x": o["x"], "y": ny})
+        }
+    }
+    s["obs"] = next_obs
+
+    -- spawn
+    s["spawn_acc"] = s["spawn_acc"] + dt
+    if s["spawn_acc"] >= spawn_ms {
+        s["spawn_acc"] = 0.0
+        let ox = int(_rand01(s) * (s["w"] - _OBST))
+        push(s["obs"], {"x": ox, "y": 0.0 - _OBST})
+    }
+
+    s["scroll"] = s["scroll"] + fall
+    if not s["dead"] { s["score"] = s["score"] + dt * 0.03 }
+    return s
+}
+
+fn voidrunner_paint(fb, x, y, w, h, theme, s) {
+    -- void field with drifting grid (parallax via scroll)
+    fill_rect(fb, x, y, w, h, 0xFF05060A)
+    let band = int(s["scroll"]) % 40
+    mut gy = y - 40 + band
+    while gy < y + h {
+        if gy >= y { fill_rect(fb, x, gy, w, 1, 0xFF10151F) }
+        gy = gy + 40
+    }
+
+    -- debris — violet→cyan neon squares with a bright core
+    for o in s["obs"] {
+        let ox = x + o["x"]
+        let oy = y + int(o["y"])
+        rounded_rect(fb, ox, oy, _OBST, _OBST, 5, 0xFF7C3AED)
+        fill_rect(fb, ox + 8, oy + 8, _OBST - 16, _OBST - 16, 0xFF22D3EE)
+    }
+
+    -- ship — a cyan chevron with a violet thruster
+    let sx = x + s["ship_x"]
+    let sy = y + h - _SHIP_H - 8
+    fill_polygon(fb, [
+        [sx + int(_SHIP_W / 2), sy],
+        [sx + _SHIP_W, sy + _SHIP_H],
+        [sx + int(_SHIP_W / 2), sy + _SHIP_H - 6],
+        [sx, sy + _SHIP_H]
+    ], 0xFF2AD8F0)
+    fill_rect(fb, sx + int(_SHIP_W / 2) - 3, sy + _SHIP_H - 4, 6, 5, 0xFF8B5CF6)
+
+    -- HUD
+    let atlas = shared_atlas()
+    draw_atlas_text(fb, x + 10, y + 9, "SCORE " + str(int(s["score"])), atlas, 0xFF2AD8F0, {"size": 15})
+    let best = if int(s["score"]) > s["best"] { int(s["score"]) } else { s["best"] }
+    let bstr = "BEST " + str(best)
+    draw_atlas_text(fb, x + w - measure_atlas_text(atlas, bstr, 15, 0)[0] - 10, y + 9, bstr, atlas, theme["foreground_muted"], {"size": 15})
+
+    if s["dead"] {
+        fill_rect(fb, x, y + int(h / 2) - 34, w, 68, rgba(5, 6, 10, 210))
+        let over = "VOIDRUNNER DOWN"
+        let ow = measure_atlas_text(atlas, over, 26, 1)[0]
+        draw_atlas_text(fb, x + int(w / 2) - int(ow / 2), y + int(h / 2) - 28, over, atlas, 0xFFFB7185, {"size": 26, "tracking": 1})
+        let hint = "press R to run again"
+        draw_atlas_text(fb, x + int(w / 2) - int(measure_atlas_text(atlas, hint, 14, 0)[0] / 2), y + int(h / 2) + 8, hint, atlas, theme["foreground"], {"size": 14})
+    }
+}
+
+-- scaled width helper (measure_text_scaled returns [w,h]); local to avoid
+-- another import churn
+fn measure_text_scaled_w(font, text, scale) {
+    return len(text) * font.width * scale + (len(text) - 1)
+}

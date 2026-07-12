@@ -11,9 +11,11 @@
 -- add "prism" — the game-hub hero mark.
 
 from "draw.clarity" import line, circle, fill_rect, rect, rounded_rect, polygon, polyline, fill_polygon
+from "graphics.clarity" import framebuffer
 from "theme_kyan.clarity" import kyan_gradient
 from "branding_modern.clarity" import paint_icon, icon_recipes
-from "font.clarity" import draw_text, measure_text, draw_text_scaled, measure_text_scaled, builtin_font
+from "font.clarity" import draw_text, measure_text, draw_text_scaled, draw_text_smooth, measure_text_scaled, builtin_font
+from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 
 -- ── Brand identity ─────────────────────────────
 
@@ -90,60 +92,218 @@ fn paint_monogram(fb, cx, cy, size, theme, opts) {
 -- total pixel width drawn.
 fn paint_kyan_wordmark(fb, x, y, theme, opts) {
     let o = opts ?? {}
-    let font = if has(o, "font") { o["font"] } else { builtin_font() }
+    let atlas = shared_atlas()
     let text = if has(o, "text") { o["text"] } else { KYAN_BRAND_NAME }
     let ink = if has(o, "color") { o["color"] } else { theme["foreground"] }
     let accent = if has(o, "accent") { o["accent"] } else { theme["accent"] }
     let split = if has(o, "split") { o["split"] } else { 4 }   -- "Kyan" | "OS"
-    let scale = if has(o, "scale") { o["scale"] } else { 1 }
+    -- Display-size anti-aliased type. `size` wins; else derive from the old
+    -- integer `scale` (each unit ~ a 14px step) so legacy callers still work.
+    let size = if has(o, "size") { o["size"] } else { if has(o, "scale") { int(o["scale"] * 14) } else { 30 } }
     let letter_spacing = if has(o, "letter_spacing") { o["letter_spacing"] } else { 1 }
     mut cursor = x
     mut i = 0
     while i < len(text) {
         let glyph = char_at(text, i)
         let color = if i < split { ink } else { accent }
-        draw_text_scaled(fb, cursor, y, glyph, font, color, scale, 0)
-        cursor = cursor + measure_text_scaled(font, glyph, scale, 0)[0] + letter_spacing
+        draw_atlas_text(fb, cursor, y, glyph, atlas, color, {"size": size, "tracking": letter_spacing})
+        cursor = cursor + measure_atlas_text(atlas, glyph, size, letter_spacing)[0] + letter_spacing
         i = i + 1
     }
     return cursor - x
 }
 
--- ── App icons — modern set + the Prism hero mark ──
+-- ── App icons — a modern, anti-aliased set ──────────────
+--
+-- The old icons were thin 1-px "abstract marks" that looked archaic.
+-- These are bold, filled glyphs in the Kyan palette. To kill the
+-- jaggies, each icon is drawn at 3x into a scratch buffer seeded with
+-- the real destination pixels, then box-downsampled back — supersampled
+-- anti-aliasing that composites cleanly over whatever's behind it (the
+-- dock glass, the launcher scrim, a window).
 
--- Prism: the game hub. An upward triangle (a prism) split by a
--- vertical line — light entering, refracting. Painted in the
--- signature cyan on the theme surface.
-fn paint_prism_icon(fb, x, y, size, theme) {
-    let radius = int(size / 5)
-    rounded_rect(fb, x, y, size, size, radius, theme["surface"])
-    let edge = kyan_gradient(theme, 0.85)
-    fill_rect(fb, x, y, size, max(2, int(size / 16)), edge)
-    let cx = x + size / 2
-    let top = y + int(size * 0.24)
-    let bot = y + int(size * 0.74)
-    let half = int(size * 0.26)
-    -- prism triangle outline
-    polyline(fb, [
-        [cx, top], [cx + half, bot], [cx - half, bot], [cx, top]
-    ], edge)
-    -- refraction line down the centre
-    line(fb, cx, top, cx, bot, theme["accent_secondary"])
-}
+let _ICON_SS = 3
 
 fn kyan_icon_recipes() {
     mut out = {}
     for kv in entries(icon_recipes()) { out[kv[0]] = kv[1] }
     out["prism"] = {"mark": "prism", "accent": "accent"}
+    out["voidrunner"] = {"mark": "prism", "accent": "accent"}
     return out
 }
 
--- Paint any app icon in the Kyan theme. "prism" is handled here;
--- everything else delegates to the modern abstract-mark painter
--- (which already pulls its accent from the passed theme).
+fn paint_prism_icon(fb, x, y, size, theme) {
+    paint_kyan_icon(fb, "prism", x, y, size, theme)
+    return true
+}
+
+let _KNOWN_ICONS = ["prism", "voidrunner", "terminal", "files", "editor", "monitor", "settings", "calc", "viewer", "mail", "chat", "store"]
+
 fn paint_kyan_icon(fb, app_id, x, y, size, theme) {
-    if app_id == "prism" { paint_prism_icon(fb, x, y, size, theme); return true }
-    return paint_icon(fb, app_id, x, y, size, theme)
+    let matched = contains(_KNOWN_ICONS, app_id)
+    let ss = _ICON_SS
+    let n = size * ss
+    let tmp = framebuffer(n, n)
+    -- seed the scratch buffer with the upscaled destination background
+    mut yy = 0
+    while yy < n {
+        let sy = y + int(yy / ss)
+        mut xx = 0
+        while xx < n {
+            tmp.put_pixel(xx, yy, fb.get_pixel(x + int(xx / ss), sy))
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    -- draw the bold mark at 3x
+    _kyan_mark(tmp, app_id, 0, 0, n, theme)
+    -- box-downsample back into the destination (anti-aliased)
+    let cnt = ss * ss
+    mut dy = 0
+    while dy < size {
+        mut dx = 0
+        while dx < size {
+            mut r = 0
+            mut g = 0
+            mut b = 0
+            mut oy = 0
+            while oy < ss {
+                mut ox = 0
+                while ox < ss {
+                    let p = tmp.get_pixel(dx * ss + ox, dy * ss + oy)
+                    r = r + (int(p / 65536) & 0xFF)
+                    g = g + (int(p / 256) & 0xFF)
+                    b = b + (p & 0xFF)
+                    ox = ox + 1
+                }
+                oy = oy + 1
+            }
+            fb.put_pixel(x + dx, y + dy, 4278190080 + int(r / cnt) * 65536 + int(g / cnt) * 256 + int(b / cnt))
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+    return matched
+}
+
+-- The bold filled marks, drawn in a size×size box at (x, y).
+fn _kyan_mark(fb, app, x, y, s, theme) {
+    let cyan = theme["accent"]
+    let violet = theme["accent_secondary"]
+    let indigo = theme["accent_tertiary"]
+    let ink = theme["foreground"]
+    let muted = theme["foreground_muted"]
+    let glass = theme["surface_elevated"]
+    let pad = int(s * 0.14)
+    let iw = s - 2 * pad
+    let cx = x + int(s / 2)
+    let cy = y + int(s / 2)
+
+    if app == "prism" or app == "voidrunner" {
+        let top = y + int(s * 0.20)
+        let bot = y + int(s * 0.80)
+        let half = int(s * 0.30)
+        fill_polygon(fb, [[cx, top], [cx + half, bot], [cx - half, bot]], violet)
+        fill_polygon(fb, [[cx, top], [cx + int(half / 2), int((top + bot) / 2)], [cx, bot]], cyan)
+        fill_rect(fb, cx - max(1, int(s / 32)), top, max(2, int(s / 16)), bot - top, 0xFFEAF6FF)
+        return null
+    }
+    if app == "terminal" {
+        rounded_rect(fb, x + pad, y + pad, iw, iw, int(s * 0.14), 0xFF0B0F18)
+        fill_rect(fb, x + pad, y + pad, iw, int(s * 0.16), glass)
+        -- chevron ">"
+        let bx = x + int(s * 0.30)
+        let by = cy
+        let cw = int(s * 0.16)
+        fill_polygon(fb, [[bx, by - cw], [bx + cw, by], [bx, by + cw], [bx - int(cw / 2), by + cw], [bx + int(cw / 2), by], [bx - int(cw / 2), by - cw]], cyan)
+        -- prompt underscore
+        fill_rect(fb, cx + int(s * 0.02), by + int(cw * 0.6), int(s * 0.22), max(2, int(s / 22)), cyan)
+        return null
+    }
+    if app == "files" {
+        let fw = iw
+        let fy = y + int(s * 0.30)
+        rounded_rect(fb, x + pad, fy - int(s * 0.10), int(fw * 0.5), int(s * 0.14), int(s * 0.05), violet)
+        rounded_rect(fb, x + pad, fy, fw, int(s * 0.42), int(s * 0.06), cyan)
+        return null
+    }
+    if app == "editor" {
+        rounded_rect(fb, x + pad, y + pad, iw, iw, int(s * 0.10), 0xFFEAEEF7)
+        fill_polygon(fb, [[x + s - pad - int(iw * 0.34), y + pad], [x + s - pad, y + pad], [x + s - pad, y + pad + int(iw * 0.34)]], glass)
+        let lx = x + pad + int(s * 0.10)
+        let lw = iw - int(s * 0.20)
+        fill_rect(fb, lx, cy - int(s * 0.10), lw, max(2, int(s / 24)), violet)
+        fill_rect(fb, lx, cy, int(lw * 0.75), max(2, int(s / 24)), muted)
+        fill_rect(fb, lx, cy + int(s * 0.10), int(lw * 0.5), max(2, int(s / 24)), muted)
+        return null
+    }
+    if app == "monitor" {
+        let base = y + s - pad
+        let bw = int(s * 0.16)
+        let gap = int(s * 0.08)
+        let x0 = cx - int((3 * bw + 2 * gap) / 2)
+        rounded_rect(fb, x0, base - int(s * 0.28), bw, int(s * 0.28), int(bw / 3), indigo)
+        rounded_rect(fb, x0 + bw + gap, base - int(s * 0.46), bw, int(s * 0.46), int(bw / 3), violet)
+        rounded_rect(fb, x0 + 2 * (bw + gap), base - int(s * 0.62), bw, int(s * 0.62), int(bw / 3), cyan)
+        return null
+    }
+    if app == "settings" {
+        -- three sliders with knobs (modern, not a gear)
+        let rows = [{"y": 0.34, "kx": 0.66, "c": cyan}, {"y": 0.5, "kx": 0.38, "c": violet}, {"y": 0.66, "kx": 0.58, "c": indigo}]
+        for row in rows {
+            let ry = y + int(s * row["y"])
+            fill_rect(fb, x + pad, ry - max(1, int(s / 40)), iw, max(2, int(s / 20)), glass)
+            circle(fb, x + pad + int(iw * row["kx"]), ry, int(s * 0.075), row["c"])
+        }
+        return null
+    }
+    if app == "calc" {
+        rounded_rect(fb, x + pad, y + pad, iw, iw, int(s * 0.12), glass)
+        fill_rect(fb, x + pad + int(s * 0.08), y + pad + int(s * 0.08), iw - int(s * 0.16), int(s * 0.16), 0xFF0B0F18)
+        mut gy2 = y + pad + int(s * 0.34)
+        mut ri = 0
+        while ri < 2 {
+            mut cxi = x + pad + int(s * 0.10)
+            mut cc = 0
+            while cc < 3 {
+                let col = if ri == 0 and cc == 2 { cyan } else { muted }
+                circle(fb, cxi, gy2, int(s * 0.045), col)
+                cxi = cxi + int(s * 0.24)
+                cc = cc + 1
+            }
+            gy2 = gy2 + int(s * 0.20)
+            ri = ri + 1
+        }
+        return null
+    }
+    if app == "viewer" {
+        rounded_rect(fb, x + pad, y + pad, iw, iw, int(s * 0.10), glass)
+        circle(fb, x + pad + int(iw * 0.72), y + pad + int(iw * 0.28), int(s * 0.07), 0xFFFBBF24)
+        fill_polygon(fb, [[x + pad, y + s - pad], [x + pad + int(iw * 0.4), cy], [x + pad + int(iw * 0.7), y + s - pad]], cyan)
+        fill_polygon(fb, [[x + pad + int(iw * 0.45), y + s - pad], [x + pad + int(iw * 0.75), y + int(s * 0.5)], [x + s - pad, y + s - pad]], violet)
+        return null
+    }
+    if app == "mail" {
+        rounded_rect(fb, x + pad, y + int(s * 0.28), iw, int(s * 0.44), int(s * 0.06), cyan)
+        fill_polygon(fb, [[x + pad, y + int(s * 0.30)], [cx, cy], [x + s - pad, y + int(s * 0.30)]], 0xFF0B1524)
+        return null
+    }
+    if app == "chat" {
+        rounded_rect(fb, x + pad, y + pad, iw, int(iw * 0.72), int(s * 0.14), violet)
+        fill_polygon(fb, [[x + pad + int(iw * 0.2), y + pad + int(iw * 0.66)], [x + pad + int(iw * 0.14), y + s - pad], [x + pad + int(iw * 0.44), y + pad + int(iw * 0.66)]], violet)
+        circle(fb, cx - int(s * 0.14), y + pad + int(iw * 0.34), int(s * 0.035), 0xFFEAF6FF)
+        circle(fb, cx, y + pad + int(iw * 0.34), int(s * 0.035), 0xFFEAF6FF)
+        circle(fb, cx + int(s * 0.14), y + pad + int(iw * 0.34), int(s * 0.035), 0xFFEAF6FF)
+        return null
+    }
+    if app == "store" {
+        fill_polygon(fb, [[cx, y + pad], [x + s - pad, cy], [cx, y + s - pad], [x + pad, cy]], violet)
+        fill_polygon(fb, [[cx, y + int(s * 0.3)], [x + s - int(s * 0.34), cy], [cx, y + int(s * 0.7)], [x + int(s * 0.34), cy]], cyan)
+        return null
+    }
+    -- generic: a rounded tile with a signature dot
+    rounded_rect(fb, x + pad, y + pad, iw, iw, int(s * 0.12), glass)
+    circle(fb, cx, cy, int(s * 0.16), cyan)
 }
 
 fn max(a, b) { if a > b { return a }; return b }

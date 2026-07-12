@@ -1,0 +1,76 @@
+-- KyanOS app content painter tests — rebrand phase K4.
+
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, app_painters
+from "theme_kyan.clarity" import kyan_obsidian
+from "graphics.clarity" import framebuffer
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+fn painted(fb, bg) {
+    mut y = 0
+    while y < fb.height {
+        mut x = 0
+        while x < fb.width {
+            if fb.get_pixel(x, y) != bg { return true }
+            x = x + 4
+        }
+        y = y + 4
+    }
+    return false
+}
+
+let t = kyan_obsidian()
+
+-- ── registry ──
+show "-- Kyan apps: registry --"
+let reg = app_painters()
+assert(has(reg, "prism"), "prism painter registered")
+assert(has(reg, "terminal"), "terminal painter registered")
+assert(has(reg, "files"), "files painter registered")
+
+-- ── Prism ──
+show "-- Kyan apps: prism --"
+let fp = framebuffer(680, 420)
+fp.clear(0xFF000000)
+paint_prism(fp, 0, 0, 680, 420, t, true)
+assert(painted(fp, 0xFF000000), "prism paints content")
+-- sidebar band on the left uses the elevated surface
+assert_eq(fp.get_pixel(40, 200), t["surface_elevated"], "prism sidebar painted")
+-- the featured card region (right of the sidebar) is not empty
+assert(fp.get_pixel(400, 60) != 0xFF000000, "prism featured card painted")
+-- a tiny content area is a no-op, not a crash
+let tiny = framebuffer(60, 60)
+tiny.clear(0xFF000000)
+paint_prism(tiny, 0, 0, 60, 60, t, true)
+assert(true, "prism tolerates a tiny content rect")
+
+-- ── Terminal ──
+show "-- Kyan apps: terminal --"
+let ft = framebuffer(360, 200)
+ft.clear(0xFF112233)
+paint_terminal_content(ft, 0, 0, 360, 200, t, true)
+-- terminal fills its own void-black background
+assert_eq(ft.get_pixel(2, 2), 0xFF05060A, "terminal fills void background")
+assert(painted(ft, 0xFF05060A), "terminal draws prompt text over the void")
+
+-- ── Files ──
+show "-- Kyan apps: files --"
+let ff = framebuffer(380, 240)
+ff.clear(0xFF000000)
+paint_files_content(ff, 0, 0, 380, 240, t, true)
+assert_eq(ff.get_pixel(2, 2), t["surface"], "files fills the surface")
+assert(painted(ff, 0xFF000000), "files draws rows")
+
+-- ── Summary ──
+show ""
+show "Kyan apps: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " kyan apps test(s) failed" }
