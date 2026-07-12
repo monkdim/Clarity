@@ -55,7 +55,15 @@ export function tick(desk, nowMs) {
   desk.tick(nowMs);
 }
 
+// Whether the desktop changed since the last compose. The host loop uses
+// this to skip recompositing an idle frame — frosted glass is costly, so
+// an unchanging desktop should cost nothing. A running game reports dirty
+// every frame, so animation stays smooth.
+export function needsRedraw(desk) {
+  return desk.needs_redraw();
+}
+
 export { MouseEvent };
 
 // Browser global for a single-file (inlined) build.
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, MouseEvent };
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw, MouseEvent };

@@ -14,6 +14,8 @@
 -- midpoint for circles) — no anti-aliasing yet; that lands as a follow-up
 -- once we have a font and can compare against ground-truth output.
 
+from "graphics.clarity" import framebuffer
+
 -- ── Line: Bresenham's algorithm ──────────────────────────
 
 fn line(fb, x0, y0, x1, y1, color) {
@@ -440,6 +442,29 @@ fn rounded_rect_blend(fb, x, y, w, h, radius, color) {
     _aa_corners(fb, x, y, w, h, r, color)
 }
 
+-- Fast rounded translucent fill with integer-scanline corners (no AA).
+-- The soft-shadow builder stacks several of these per panel with large
+-- radii; the staircase is invisible under the blur, so paying per-pixel
+-- sqrt AA on every layer would just burn frame time.
+fn _rounded_blend_noaa(fb, x, y, w, h, radius, color) {
+    let r0 = if radius * 2 > w { int(w / 2) } else { radius }
+    let r = if r0 * 2 > h { int(h / 2) } else { r0 }
+    if r <= 0 { fill_rect_blend(fb, x, y, w, h, color); return null }
+    fill_rect_blend(fb, x + r, y, w - 2 * r, h, color)
+    fill_rect_blend(fb, x, y + r, r, h - 2 * r, color)
+    fill_rect_blend(fb, x + w - r, y + r, r, h - 2 * r, color)
+    mut dy = 0 - r
+    while dy <= 0 {
+        mut dx = 0
+        while (dx + 1) * (dx + 1) + dy * dy <= r * r { dx += 1 }
+        let row_top = y + r + dy
+        let row_bot = y + h - 1 - r - dy
+        _hline_blend(fb, x + r - dx, row_top, x + w - r + dx - 1, color)
+        _hline_blend(fb, x + r - dx, row_bot, x + w - r + dx - 1, color)
+        dy += 1
+    }
+}
+
 -- Soft drop shadow beneath a panel: `blur` translucent rounded rects,
 -- each larger and drawn underneath the next, so alpha accumulates near
 -- the panel edge and fades outward. `color`'s alpha is the total the
@@ -452,7 +477,7 @@ fn drop_shadow(fb, x, y, w, h, radius, color, blur) {
     let off = int(blur / 2)
     mut i = blur
     while i >= 1 {
-        rounded_rect_blend(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb)
+        _rounded_blend_noaa(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb)
         i -= 1
     }
 }
@@ -507,4 +532,29 @@ fn blit_rounded(dst, src, dx, dy, w, h, radius) {
     _blit_corner(dst, src, dx, dy, dx + w - r, dy,         dx + w - r, dy + r,     r)
     _blit_corner(dst, src, dx, dy, dx,         dy + h - r, dx + r,     dy + h - r, r)
     _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r)
+}
+
+-- ── Frosted glass (separable box blur) ──────────────────
+-- A running-sum box blur is O(pixels) regardless of radius. It runs every
+-- frame under the dock and launcher, so the pixel loop is a native builtin
+-- (_ffi_box_blur) working straight on the framebuffer's BGRA bytes — an
+-- interpreted per-pixel loop was ~50x too slow. `passes` box passes
+-- approximate a gaussian (2 ≈ soft glass); edges replicate.
+fn box_blur(fb, radius, passes) {
+    if radius < 1 { return null }
+    _ffi_box_blur(fb.buffer._handle, fb.width, fb.height, radius, passes)
+}
+
+-- Frosted-glass panel: blur what's behind the panel, drop it back in with
+-- rounded anti-aliased corners, then lay a translucent tint on top so the
+-- blur reads through. The signature macOS/vibrancy look. `blur` is the box
+-- radius; `tint` is the glass colour (translucent). Draw before any panel
+-- content (icons, text) — this establishes the surface.
+fn frosted_panel(fb, x, y, w, h, radius, tint, blur) {
+    if w <= 0 or h <= 0 { return null }
+    let snap = framebuffer(w, h)
+    snap.blit(fb, x, y, 0, 0, w, h)
+    box_blur(snap, blur, 2)
+    blit_rounded(fb, snap, x, y, w, h, radius)
+    rounded_rect_blend(fb, x, y, w, h, radius, tint)
 }

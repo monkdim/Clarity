@@ -23,7 +23,7 @@ from "compositor.clarity" import compositor
 from "window.clarity" import window
 from "window_manager.clarity" import window_manager
 from "graphics.clarity" import framebuffer, rgba
-from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded, frosted_panel
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
@@ -72,6 +72,16 @@ class KyanDesktop {
         this._last_tick = null
         this._icon_cache = {}      -- "app:size:bg" -> pre-rendered icon fb
         this._win_sig = {}         -- app_id -> last-painted chrome signature
+        this._dirty = true         -- recompose only when state changed (frost is costly)
+    }
+
+    -- Whether the next frame needs a fresh compose. A discrete change
+    -- (input, open/close/focus, launcher) sets the dirty flag; a live app
+    -- (a running game) forces a redraw every frame. When neither holds the
+    -- host loop can skip compose entirely and just re-present the last
+    -- frame — so an idle desktop costs nothing even with frosted glass.
+    fn needs_redraw() {
+        return this._dirty or len(keys(this.app_state)) > 0
     }
 
     -- Reverse-lookup the app id owning a window (or null).
@@ -103,6 +113,7 @@ class KyanDesktop {
     -- ── App windows ─────────────────────────────────
 
     fn open(app_id, x, y, w, h) {
+        this._dirty = true
         if has(this.windows, app_id) {
             let win = this.windows[app_id]
             win.set_visible(true)
@@ -126,6 +137,7 @@ class KyanDesktop {
     }
 
     fn close(app_id) {
+        this._dirty = true
         if not has(this.windows, app_id) { return false }
         this.comp.remove(this.windows[app_id])
         mut next = {}
@@ -149,6 +161,7 @@ class KyanDesktop {
     fn focus(app_id) {
         if not has(this.windows, app_id) { return false }
         this.comp.focus(this.windows[app_id])
+        this._dirty = true
         return true
     }
 
@@ -159,6 +172,7 @@ class KyanDesktop {
     -- Route a mouse event. The shell claims clicks on the dock and the
     -- launcher; everything else goes to the WindowManager (focus/drag).
     fn handle_mouse(me) {
+        this._dirty = true
         if this.launcher_open {
             if me.is_press { return this._launcher_click(me.x, me.y) }
             return true
@@ -194,7 +208,7 @@ class KyanDesktop {
 
     -- Track key state by name (browser feeds e.key; native feeds the
     -- same). Live apps read this each tick.
-    fn set_key(name, down) { this.keys[name] = down }
+    fn set_key(name, down) { this.keys[name] = down; this._dirty = true }
 
     -- Advance time-based apps one frame. The host loop calls this with a
     -- monotonic ms clock before compose(); dt is derived here.
@@ -211,6 +225,7 @@ class KyanDesktop {
 
     fn toggle_launcher() {
         this.launcher_open = not this.launcher_open
+        this._dirty = true
         return this.launcher_open
     }
 
@@ -302,6 +317,7 @@ class KyanDesktop {
         this._paint_dock(s)
         if this.launcher_open { this._paint_launcher(s) }
         this.frames = this.frames + 1
+        this._dirty = false
         return s
     }
 
@@ -408,9 +424,10 @@ class KyanDesktop {
         let dy = layout["y"]
         let dw = layout["w"]
         let dh = layout["h"]
-        -- floating glass pill with a soft shadow
+        -- floating frosted-glass pill with a soft shadow: blur what's
+        -- behind it, then a translucent tint so the blur reads through
         drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7)
-        rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205))
+        frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6)
         -- icons (cached, AA) + running indicators
         for ic in layout["icons"] {
             let bg = fb.get_pixel(ic["x"], ic["y"])   -- the glass under this icon
@@ -430,7 +447,7 @@ class KyanDesktop {
         let bx = int(this.width / 2) - int(bw / 2)
         let by = int(this.height * 0.24)
         drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8)
-        rounded_rect_blend(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 235))
+        frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7)
         linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h")
         draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, t["foreground_muted"], {"size": 18})
         -- icon grid of pinned apps (geometry shared with hit-testing)

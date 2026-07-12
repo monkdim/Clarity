@@ -666,6 +666,51 @@ export function _ffi_blend_u32(p, byte_offset, count, color) {
   }
 }
 
+// Separable box blur of a framebuffer's BGRA buffer, in place. `passes`
+// box passes approximate a gaussian (2 ≈ soft frosted glass). Running-sum,
+// so cost is O(pixels) regardless of radius; edges replicate. This is the
+// frosted-glass hot path — a per-pixel Clarity loop was ~50x too slow to
+// run every frame.
+export function _ffi_box_blur(p, width, height, radius, passes) {
+  if (!p || !p._buffer) {
+    throw new Error('FFIError: box_blur requires a runtime-allocated pointer');
+  }
+  if (radius < 1) return;
+  const buf = p._buffer;
+  const w = width | 0, h = height | 0, r = radius | 0;
+  const win = 2 * r + 1;
+  const line = new Int32Array(Math.max(w, h) * 3);
+  for (let pass = 0; pass < passes; pass++) {
+    // horizontal
+    for (let y = 0; y < h; y++) {
+      const row = y * w * 4;
+      for (let x = 0; x < w; x++) { const o = row + x * 4; line[x*3]=buf[o+2]; line[x*3+1]=buf[o+1]; line[x*3+2]=buf[o]; }
+      let sr = 0, sg = 0, sb = 0;
+      for (let i = -r; i <= r; i++) { const c = i < 0 ? 0 : (i >= w ? w-1 : i); sr+=line[c*3]; sg+=line[c*3+1]; sb+=line[c*3+2]; }
+      for (let x = 0; x < w; x++) {
+        const o = row + x * 4;
+        buf[o]=(sb/win)|0; buf[o+1]=(sg/win)|0; buf[o+2]=(sr/win)|0; buf[o+3]=255;
+        const oi = x - r, ii = x + r + 1;
+        const oc = oi < 0 ? 0 : oi, ic = ii >= w ? w-1 : ii;
+        sr += line[ic*3]-line[oc*3]; sg += line[ic*3+1]-line[oc*3+1]; sb += line[ic*3+2]-line[oc*3+2];
+      }
+    }
+    // vertical
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < h; y++) { const o = (y*w+x)*4; line[y*3]=buf[o+2]; line[y*3+1]=buf[o+1]; line[y*3+2]=buf[o]; }
+      let sr = 0, sg = 0, sb = 0;
+      for (let i = -r; i <= r; i++) { const c = i < 0 ? 0 : (i >= h ? h-1 : i); sr+=line[c*3]; sg+=line[c*3+1]; sb+=line[c*3+2]; }
+      for (let y = 0; y < h; y++) {
+        const o = (y*w+x)*4;
+        buf[o]=(sb/win)|0; buf[o+1]=(sg/win)|0; buf[o+2]=(sr/win)|0; buf[o+3]=255;
+        const oi = y - r, ii = y + r + 1;
+        const oc = oi < 0 ? 0 : oi, ic = ii >= h ? h-1 : ii;
+        sr += line[ic*3]-line[oc*3]; sg += line[ic*3+1]-line[oc*3+1]; sb += line[ic*3+2]-line[oc*3+2];
+      }
+    }
+  }
+}
+
 // Bulk copy from one owned (or wrapped) pointer to an owned destination.
 export function _ffi_copy(dst, dst_offset, src, src_offset, length) {
   if (!dst || !dst._buffer) {

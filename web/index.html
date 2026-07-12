@@ -52,7 +52,7 @@
 
   <script type="module">
     import {
-      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick
+      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw
     } from './kyanos.bundle.js';
 
     const W = 1280, H = 800;
@@ -81,7 +81,15 @@
       ctx.putImageData(image, 0, 0);
     }
 
-    function loop(now) { tick(desk, now); present(); requestAnimationFrame(loop); }
+    // Compose only when the desktop changed (input, window moves, a running
+    // game). An idle desktop re-presents nothing — frosted glass is only paid
+    // for on frames that actually change.
+    function loop(now) {
+      tick(desk, now);
+      if (needsRedraw(desk)) present();
+      requestAnimationFrame(loop);
+    }
+    present();               // first paint
     requestAnimationFrame(loop);
 
     // ── Keyboard → live apps (Voidrunner) ──

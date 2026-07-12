@@ -361,6 +361,74 @@ function _ffi_blend_u32(p, byte_offset, count, color) {
     o += 4;
   }
 }
+function _ffi_box_blur(p, width, height, radius, passes) {
+  if (!p || !p._buffer) {
+    throw new Error("FFIError: box_blur requires a runtime-allocated pointer");
+  }
+  if (radius < 1)
+    return;
+  const buf = p._buffer;
+  const w = width | 0, h = height | 0, r = radius | 0;
+  const win = 2 * r + 1;
+  const line = new Int32Array(Math.max(w, h) * 3);
+  for (let pass = 0;pass < passes; pass++) {
+    for (let y = 0;y < h; y++) {
+      const row = y * w * 4;
+      for (let x = 0;x < w; x++) {
+        const o = row + x * 4;
+        line[x * 3] = buf[o + 2];
+        line[x * 3 + 1] = buf[o + 1];
+        line[x * 3 + 2] = buf[o];
+      }
+      let sr = 0, sg = 0, sb = 0;
+      for (let i = -r;i <= r; i++) {
+        const c = i < 0 ? 0 : i >= w ? w - 1 : i;
+        sr += line[c * 3];
+        sg += line[c * 3 + 1];
+        sb += line[c * 3 + 2];
+      }
+      for (let x = 0;x < w; x++) {
+        const o = row + x * 4;
+        buf[o] = sb / win | 0;
+        buf[o + 1] = sg / win | 0;
+        buf[o + 2] = sr / win | 0;
+        buf[o + 3] = 255;
+        const oi = x - r, ii = x + r + 1;
+        const oc = oi < 0 ? 0 : oi, ic = ii >= w ? w - 1 : ii;
+        sr += line[ic * 3] - line[oc * 3];
+        sg += line[ic * 3 + 1] - line[oc * 3 + 1];
+        sb += line[ic * 3 + 2] - line[oc * 3 + 2];
+      }
+    }
+    for (let x = 0;x < w; x++) {
+      for (let y = 0;y < h; y++) {
+        const o = (y * w + x) * 4;
+        line[y * 3] = buf[o + 2];
+        line[y * 3 + 1] = buf[o + 1];
+        line[y * 3 + 2] = buf[o];
+      }
+      let sr = 0, sg = 0, sb = 0;
+      for (let i = -r;i <= r; i++) {
+        const c = i < 0 ? 0 : i >= h ? h - 1 : i;
+        sr += line[c * 3];
+        sg += line[c * 3 + 1];
+        sb += line[c * 3 + 2];
+      }
+      for (let y = 0;y < h; y++) {
+        const o = (y * w + x) * 4;
+        buf[o] = sb / win | 0;
+        buf[o + 1] = sg / win | 0;
+        buf[o + 2] = sr / win | 0;
+        buf[o + 3] = 255;
+        const oi = y - r, ii = y + r + 1;
+        const oc = oi < 0 ? 0 : oi, ic = ii >= h ? h - 1 : ii;
+        sr += line[ic * 3] - line[oc * 3];
+        sg += line[ic * 3 + 1] - line[oc * 3 + 1];
+        sb += line[ic * 3 + 2] - line[oc * 3 + 2];
+      }
+    }
+  }
+}
 function _ffi_copy(dst, dst_offset, src, src_offset, length) {
   if (!dst || !dst._buffer) {
     throw new Error("FFIError: copy destination must be a runtime-allocated pointer");
@@ -1412,6 +1480,12 @@ function linear_gradient(fb, x, y, w, h, stops, dir) {
     }
   }
 }
+function _hline_blend(fb, x0, y, x1, color) {
+  if (truthy(x1 < x0)) {
+    return null;
+  }
+  fb.blend_rect(x0, y, x1 - x0 + 1, 1, color);
+}
 function rounded_rect_blend(fb, x, y, w, h, radius, color) {
   let sa = $int(color / 16777216) & 255;
   if (truthy($eq(sa, 0))) {
@@ -1432,6 +1506,29 @@ function rounded_rect_blend(fb, x, y, w, h, radius, color) {
   fill_rect_blend(fb, x + w - r, y + r, r, h - 2 * r, color);
   _aa_corners(fb, x, y, w, h, r, color);
 }
+function _rounded_blend_noaa(fb, x, y, w, h, radius, color) {
+  let r0 = truthy(radius * 2 > w) ? $int(w / 2) : radius;
+  let r = truthy(r0 * 2 > h) ? $int(h / 2) : r0;
+  if (truthy(r <= 0)) {
+    fill_rect_blend(fb, x, y, w, h, color);
+    return null;
+  }
+  fill_rect_blend(fb, x + r, y, w - 2 * r, h, color);
+  fill_rect_blend(fb, x, y + r, r, h - 2 * r, color);
+  fill_rect_blend(fb, x + w - r, y + r, r, h - 2 * r, color);
+  let dy = 0 - r;
+  while (truthy(dy <= 0)) {
+    let dx = 0;
+    while (truthy((dx + 1) * (dx + 1) + dy * dy <= r * r)) {
+      dx += 1;
+    }
+    let row_top = y + r + dy;
+    let row_bot = y + h - 1 - r - dy;
+    _hline_blend(fb, x + r - dx, row_top, x + w - r + dx - 1, color);
+    _hline_blend(fb, x + r - dx, row_bot, x + w - r + dx - 1, color);
+    dy += 1;
+  }
+}
 function drop_shadow(fb, x, y, w, h, radius, color, blur) {
   if (truthy(blur <= 0)) {
     return null;
@@ -1442,7 +1539,7 @@ function drop_shadow(fb, x, y, w, h, radius, color, blur) {
   let off = $int(blur / 2);
   let i = blur;
   while (truthy(i >= 1)) {
-    rounded_rect_blend(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb2);
+    _rounded_blend_noaa(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb2);
     i -= 1;
   }
 }
@@ -1488,6 +1585,22 @@ function blit_rounded(dst, src, dx, dy, w, h, radius) {
   _blit_corner(dst, src, dx, dy, dx + w - r, dy, dx + w - r, dy + r, r);
   _blit_corner(dst, src, dx, dy, dx, dy + h - r, dx + r, dy + h - r, r);
   _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r);
+}
+function box_blur(fb, radius, passes) {
+  if (truthy(radius < 1)) {
+    return null;
+  }
+  _ffi_box_blur(fb.buffer._handle, fb.width, fb.height, radius, passes);
+}
+function frosted_panel(fb, x, y, w, h, radius, tint, blur) {
+  if (truthy(w <= 0 || h <= 0)) {
+    return null;
+  }
+  let snap = framebuffer(w, h);
+  snap.blit(fb, x, y, 0, 0, w, h);
+  box_blur(snap, blur, 2);
+  blit_rounded(fb, snap, x, y, w, h, radius);
+  rounded_rect_blend(fb, x, y, w, h, radius, tint);
 }
 
 // web/build/font.js
@@ -2163,6 +2276,10 @@ class KyanDesktop {
     this._last_tick = null;
     this._icon_cache = {};
     this._win_sig = {};
+    this._dirty = true;
+  }
+  needs_redraw() {
+    return this._dirty || len(keys(this.app_state)) > 0;
   }
   _app_of(win) {
     for (let kv of entries(this.windows)) {
@@ -2189,6 +2306,7 @@ class KyanDesktop {
     return true;
   }
   open(app_id, x, y, w, h) {
+    this._dirty = true;
     if (truthy(has(this.windows, app_id))) {
       let win2 = $index(this.windows, app_id);
       win2.set_visible(true);
@@ -2210,6 +2328,7 @@ class KyanDesktop {
     return win;
   }
   close(app_id) {
+    this._dirty = true;
     if (truthy(!truthy(has(this.windows, app_id)))) {
       return false;
     }
@@ -2246,12 +2365,14 @@ class KyanDesktop {
       return false;
     }
     this.comp.focus($index(this.windows, app_id));
+    this._dirty = true;
     return true;
   }
   running() {
     return keys(this.windows);
   }
   handle_mouse(me) {
+    this._dirty = true;
     if (truthy(this.launcher_open)) {
       if (truthy(me.is_press)) {
         return this._launcher_click(me.x, me.y);
@@ -2297,6 +2418,7 @@ class KyanDesktop {
   }
   set_key(name, down) {
     this.keys[name] = down;
+    this._dirty = true;
   }
   tick(now_ms) {
     if (truthy($ne(this._last_tick, null))) {
@@ -2310,6 +2432,7 @@ class KyanDesktop {
   }
   toggle_launcher() {
     this.launcher_open = !truthy(this.launcher_open);
+    this._dirty = true;
     return this.launcher_open;
   }
   _activate(app_id) {
@@ -2399,6 +2522,7 @@ class KyanDesktop {
       this._paint_launcher(s);
     }
     this.frames = this.frames + 1;
+    this._dirty = false;
     return s;
   }
   screenshot(path) {
@@ -2482,7 +2606,7 @@ class KyanDesktop {
     let dw = $index(layout, "w");
     let dh = $index(layout, "h");
     drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7);
-    rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205));
+    frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6);
     for (let ic of $index(layout, "icons")) {
       let bg = fb.get_pixel($index(ic, "x"), $index(ic, "y"));
       fb.blit(this._icon($index(ic, "app"), $index(ic, "size"), bg), 0, 0, $index(ic, "x"), $index(ic, "y"), $index(ic, "size"), $index(ic, "size"));
@@ -2498,7 +2622,7 @@ class KyanDesktop {
     let bx = $int(this.width / 2) - $int(bw / 2);
     let by = $int(this.height * 0.24);
     drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8);
-    rounded_rect_blend(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 235));
+    frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7);
     linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h");
     draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, $index(t, "foreground_muted"), { ["size"]: 18 });
     let layout = this._launcher_layout();
@@ -2583,13 +2707,17 @@ function setKey(desk, name, down) {
 function tick(desk, nowMs) {
   desk.tick(nowMs);
 }
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, MouseEvent };
+function needsRedraw(desk) {
+  return desk.needs_redraw();
+}
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw, MouseEvent };
 export {
   toggleLauncher,
   tick,
   setKey,
   sendMouse,
   openApp,
+  needsRedraw,
   createDesktop,
   composeToBytes,
   MouseEvent
