@@ -25,3 +25,6 @@ web/kyanos_artifact.html
 !web/build/
 web/build/*.js
 !web/build/entry.js
+tools/_atlas_*.png
+web/_atlas_*.png
+web/_atlas_*.cjs

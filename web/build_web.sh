@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-MODS="branding_kyan branding_modern compositor draw event_bus ffi font graphics \
+MODS="atlas_font branding_kyan branding_modern compositor draw event_bus ffi font font_atlas graphics \
       input keymap kyan_apps kyan_game kyan_desktop mouse theme_kyan theme_meadow touch \
       window window_manager"
 

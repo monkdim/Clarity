@@ -15,6 +15,7 @@ from "graphics.clarity" import framebuffer
 from "theme_kyan.clarity" import kyan_gradient
 from "branding_modern.clarity" import paint_icon, icon_recipes
 from "font.clarity" import draw_text, measure_text, draw_text_scaled, draw_text_smooth, measure_text_scaled, builtin_font
+from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 
 -- ── Brand identity ─────────────────────────────
 
@@ -91,20 +92,22 @@ fn paint_monogram(fb, cx, cy, size, theme, opts) {
 -- total pixel width drawn.
 fn paint_kyan_wordmark(fb, x, y, theme, opts) {
     let o = opts ?? {}
-    let font = if has(o, "font") { o["font"] } else { builtin_font() }
+    let atlas = shared_atlas()
     let text = if has(o, "text") { o["text"] } else { KYAN_BRAND_NAME }
     let ink = if has(o, "color") { o["color"] } else { theme["foreground"] }
     let accent = if has(o, "accent") { o["accent"] } else { theme["accent"] }
     let split = if has(o, "split") { o["split"] } else { 4 }   -- "Kyan" | "OS"
-    let scale = if has(o, "scale") { o["scale"] } else { 1 }
+    -- Display-size anti-aliased type. `size` wins; else derive from the old
+    -- integer `scale` (each unit ~ a 14px step) so legacy callers still work.
+    let size = if has(o, "size") { o["size"] } else { if has(o, "scale") { int(o["scale"] * 14) } else { 30 } }
     let letter_spacing = if has(o, "letter_spacing") { o["letter_spacing"] } else { 1 }
     mut cursor = x
     mut i = 0
     while i < len(text) {
         let glyph = char_at(text, i)
         let color = if i < split { ink } else { accent }
-        draw_text_smooth(fb, cursor, y, glyph, font, color, scale, 0)
-        cursor = cursor + measure_text_scaled(font, glyph, scale, 0)[0] + letter_spacing
+        draw_atlas_text(fb, cursor, y, glyph, atlas, color, {"size": size, "tracking": letter_spacing})
+        cursor = cursor + measure_atlas_text(atlas, glyph, size, letter_spacing)[0] + letter_spacing
         i = i + 1
     }
     return cursor - x

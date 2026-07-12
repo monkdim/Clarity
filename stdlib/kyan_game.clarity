@@ -12,6 +12,7 @@
 
 from "draw.clarity" import fill_rect, rounded_rect, fill_polygon, linear_gradient, polygon
 from "font.clarity" import builtin_font, draw_text, draw_text_scaled, draw_text_smooth, measure_text
+from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "graphics.clarity" import rgba
 
 let _SHIP_W = 34
@@ -126,19 +127,19 @@ fn voidrunner_paint(fb, x, y, w, h, theme, s) {
     fill_rect(fb, sx + int(_SHIP_W / 2) - 3, sy + _SHIP_H - 4, 6, 5, 0xFF8B5CF6)
 
     -- HUD
-    let font = builtin_font()
-    draw_text(fb, x + 10, y + 10, "SCORE " + str(int(s["score"])), font, 0xFF2AD8F0)
+    let atlas = shared_atlas()
+    draw_atlas_text(fb, x + 10, y + 9, "SCORE " + str(int(s["score"])), atlas, 0xFF2AD8F0, {"size": 15})
     let best = if int(s["score"]) > s["best"] { int(s["score"]) } else { s["best"] }
     let bstr = "BEST " + str(best)
-    draw_text(fb, x + w - measure_text(font, bstr)[0] - 10, y + 10, bstr, font, theme["foreground_muted"])
+    draw_atlas_text(fb, x + w - measure_atlas_text(atlas, bstr, 15, 0)[0] - 10, y + 9, bstr, atlas, theme["foreground_muted"], {"size": 15})
 
     if s["dead"] {
         fill_rect(fb, x, y + int(h / 2) - 34, w, 68, rgba(5, 6, 10, 210))
         let over = "VOIDRUNNER DOWN"
-        let ow = measure_text_scaled_w(font, over, 2)
-        draw_text_smooth(fb, x + int(w / 2) - int(ow / 2), y + int(h / 2) - 26, over, font, 0xFFFB7185, 2, 1)
+        let ow = measure_atlas_text(atlas, over, 26, 1)[0]
+        draw_atlas_text(fb, x + int(w / 2) - int(ow / 2), y + int(h / 2) - 28, over, atlas, 0xFFFB7185, {"size": 26, "tracking": 1})
         let hint = "press R to run again"
-        draw_text(fb, x + int(w / 2) - int(measure_text(font, hint)[0] / 2), y + int(h / 2) + 8, hint, font, theme["foreground"])
+        draw_atlas_text(fb, x + int(w / 2) - int(measure_atlas_text(atlas, hint, 14, 0)[0] / 2), y + int(h / 2) + 8, hint, atlas, theme["foreground"], {"size": 14})
     }
 }
 

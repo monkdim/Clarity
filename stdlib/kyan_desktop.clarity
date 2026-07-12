@@ -25,6 +25,7 @@ from "window_manager.clarity" import window_manager
 from "graphics.clarity" import framebuffer, rgba
 from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
+from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
 from "kyan_apps.clarity" import app_painters, prism_play_rect
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
@@ -58,6 +59,7 @@ class KyanDesktop {
         this.comp.set_background(this.theme["background"])
         this.wm = window_manager(this.comp)
         this.font = builtin_font()
+        this._atlas = shared_atlas()   -- anti-aliased UI type (shared decode cache)
         this.pinned = DEFAULT_PINNED
         this.windows = {}          -- app_id -> Window
         this.painters = app_painters()   -- app_id -> content painter
@@ -68,6 +70,15 @@ class KyanDesktop {
         this.keys = {}             -- key name -> down? (browser/native fed)
         this._last_tick = null
         this._icon_cache = {}      -- "app:size:bg" -> pre-rendered icon fb
+        this._win_sig = {}         -- app_id -> last-painted chrome signature
+    }
+
+    -- Reverse-lookup the app id owning a window (or null).
+    fn _app_of(win) {
+        for kv in entries(this.windows) {
+            if kv[1] == win { return kv[0] }
+        }
+        return null
     }
 
     -- Anti-aliased icons are supersampled (expensive), so render each
@@ -121,6 +132,11 @@ class KyanDesktop {
             if kv[0] != app_id { next[kv[0]] = kv[1] }
         }
         this.windows = next
+        if has(this._win_sig, app_id) {
+            mut nsig = {}
+            for kv in entries(this._win_sig) { if kv[0] != app_id { nsig[kv[0]] = kv[1] } }
+            this._win_sig = nsig
+        }
         if has(this.app_state, app_id) {
             mut ns = {}
             for kv in entries(this.app_state) { if kv[0] != app_id { ns[kv[0]] = kv[1] } }
@@ -263,10 +279,22 @@ class KyanDesktop {
             this._paint_wallpaper(this._wallpaper)
         }
         s.blit(this._wallpaper, 0, 0, 0, 0, this.width, this.height)
-        -- app windows, bottom-to-top, each floated with a soft shadow
+        -- app windows, bottom-to-top, each floated with a soft shadow.
+        -- Anti-aliased text is not cheap, so a window's chrome+content is
+        -- painted into its own framebuffer only when it actually changes
+        -- (focus/size). Live apps (their own state) always repaint. Static
+        -- windows keep their retained buffer and just re-blit — this is what
+        -- keeps the atlas font affordable per frame.
         for win in this.comp.windows {
             if not win.visible or win.minimized { continue }
-            this._paint_chrome(win)
+            let app_id = this._app_of(win)
+            let live = app_id != null and has(this.app_state, app_id)
+            let sig = str(win.focused) + ":" + str(win.width) + ":" + str(win.height)
+            let cached = app_id != null and has(this._win_sig, app_id) and this._win_sig[app_id] == sig
+            if live or not cached {
+                this._paint_chrome(win)
+                if app_id != null { this._win_sig[app_id] = sig }
+            }
             drop_shadow(s, win.x, win.y, win.width, win.height, 12, rgba(0, 0, 0, 150), 7)
             s.blit(win.framebuffer, 0, 0, win.x, win.y, win.width, win.height)
         }
@@ -324,11 +352,11 @@ class KyanDesktop {
         fill_rect(fb, 14, dy, 10, 10, 0xFFFB7185)
         fill_rect(fb, 30, dy, 10, 10, 0xFFFBBF24)
         fill_rect(fb, 46, dy, 10, 10, 0xFF34D399)
-        -- title, centred
-        let tw = measure_text(this.font, win.title)[0]
+        -- title, centred (anti-aliased proportional type)
+        let tw = measure_atlas_text(this._atlas, win.title, 15, 0)[0]
         let tx = int(w / 2) - int(tw / 2)
         let tcol = if win.focused { t["foreground"] } else { t["foreground_muted"] }
-        draw_text(fb, tx, int(th / 2) - 4, win.title, this.font, tcol)
+        draw_atlas_text(fb, tx, int((th - 15) / 2), win.title, this._atlas, tcol, {"size": 15})
         -- hairline under the title bar
         fill_rect(fb, 0, th - 1, w, 1, t["border"])
         -- app content in the area below the title bar
@@ -403,7 +431,7 @@ class KyanDesktop {
         drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8)
         rounded_rect_blend(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 235))
         linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h")
-        draw_text(fb, bx + 18, by + 18, "Search apps, files, commands", this.font, t["foreground_muted"])
+        draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, t["foreground_muted"], {"size": 18})
         -- icon grid of pinned apps (geometry shared with hit-testing)
         let layout = this._launcher_layout()
         let cell = layout["cell"]
@@ -413,8 +441,8 @@ class KyanDesktop {
             let bg = fb.get_pixel(ix, gy)
             fb.blit(this._icon(c["app"], 52, bg), 0, 0, ix, gy, 52, 52)
             let label = if has(APP_TITLES, c["app"]) { APP_TITLES[c["app"]] } else { c["app"] }
-            let lw = measure_text(this.font, label)[0]
-            draw_text(fb, c["x"] + int((cell - lw) / 2), gy + 60, label, this.font, t["foreground"])
+            let lw = measure_atlas_text(this._atlas, label, 14, 0)[0]
+            draw_atlas_text(fb, c["x"] + int((cell - lw) / 2), gy + 58, label, this._atlas, t["foreground"], {"size": 14})
         }
     }
 

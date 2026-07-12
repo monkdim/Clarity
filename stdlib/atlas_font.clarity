@@ -1,0 +1,223 @@
+-- atlas_font.clarity — anti-aliased proportional text renderer.
+--
+-- Loads the offline-rasterized font atlas (font_atlas.clarity) and paints
+-- smooth, proportional, real-typeface text into a Framebuffer. This is the
+-- modern replacement for the 8x8 bitmap path in font.clarity; that path is
+-- kept intact as a fallback.
+--
+--   let atlas = load_atlas()
+--   draw_atlas_text(fb, x, y, "Hello", atlas, 0xFFFFFFFF, {"size": 20})
+--   let wh = measure_atlas_text(atlas, "Hello", 20, 0)
+--
+-- Every glyph carries anti-aliased grayscale coverage; the renderer picks
+-- the nearest cached atlas size and bilinear-scales coverage to the target
+-- size, so any pixel size looks smooth. All destination coordinates are
+-- floored with int() — fractional coords corrupt the framebuffer.
+--
+-- All top-level names are unique or _atlas_-prefixed to survive the flat
+-- browser bundle (no collisions with max/fill/etc. defined elsewhere).
+
+from "font_atlas.clarity" import atlas_data
+from "draw.clarity" import blend_pixel
+
+class AtlasFont {
+    fn init(data) {
+        this.data = data
+        this.sizes = data["sizes"]         -- e.g. [15, 20, 30, 44]
+        this.ascent = data["ascent"]       -- size_str -> ascent px
+        this.glyphs = data["glyphs"]       -- size_str -> code_str -> metrics
+        this._cov_cache = {}               -- "size:code" -> decoded byte list
+    }
+
+    -- Nearest available atlas size to a target pixel size.
+    fn nearest_size(target) {
+        mut best = this.sizes[0]
+        mut best_d = _atlas_abs(target - best)
+        mut i = 1
+        while i < len(this.sizes) {
+            let s = this.sizes[i]
+            let d = _atlas_abs(target - s)
+            if d < best_d { best = s; best_d = d }
+            i += 1
+        }
+        return best
+    }
+
+    fn ascent_for(size_key) { return this.ascent[size_key] }
+
+    -- Glyph metrics dict for (size_key, code) or null.
+    fn glyph(size_key, code) {
+        let gs = this.glyphs[size_key]
+        let ck = str(code)
+        if has(gs, ck) { return gs[ck] }
+        return null
+    }
+
+    -- Decoded coverage byte list (values 0..255) for (size_key, code),
+    -- decoded once from base64 and cached. Empty glyphs return [].
+    fn coverage(size_key, code) {
+        let key = size_key + ":" + str(code)
+        if has(this._cov_cache, key) { return this._cov_cache[key] }
+        let g = this.glyph(size_key, code)
+        mut out = []
+        if g != null and g["cov"] != "" {
+            let s = decode64(g["cov"])
+            let n = len(s)
+            mut i = 0
+            while i < n {
+                -- stored 7-bit; scale back to 0..255 (x2, 127 -> 254)
+                push(out, char_code(char_at(s, i)) * 2)
+                i += 1
+            }
+        }
+        this._cov_cache[key] = out
+        return out
+    }
+}
+
+fn _atlas_abs(v) { if v < 0 { return 0 - v }; return v }
+
+fn _atlas_floor_i(v) {
+    let i = int(v)
+    if v < 0.0 and i > v { return i - 1 }
+    return i
+}
+
+-- Load the atlas once. Callers should cache the returned AtlasFont (it holds
+-- a lazily-populated decode cache) rather than reloading each frame.
+fn load_atlas() {
+    return AtlasFont(atlas_data())
+}
+
+-- Process-wide shared AtlasFont. All UI call sites use this so the base64
+-- decode cache is populated once and reused across chrome, app content, the
+-- game HUD and the wordmark — never re-decoded per frame.
+mut _ATLAS_SHARED = null
+fn shared_atlas() {
+    if _ATLAS_SHARED == null { _ATLAS_SHARED = load_atlas() }
+    return _ATLAS_SHARED
+}
+
+-- Total advance width and line height (in target px) of `text`.
+fn measure_atlas_text(atlas, text, size, tracking) {
+    let track = if tracking == null { 0 } else { tracking }
+    let target = if size == null { atlas.sizes[0] } else { size }
+    let base = atlas.nearest_size(target)
+    let scale = (target * 1.0) / base
+    let sk = str(base)
+    let chs = chars(text)
+    let n = len(chs)
+    if n == 0 { return [0, target] }
+    mut w = 0.0
+    mut i = 0
+    while i < n {
+        let g = atlas.glyph(sk, char_code(chs[i]))
+        if g != null { w = w + g["adv"] * scale }
+        if i < n - 1 { w = w + track }
+        i += 1
+    }
+    return [int(w + 0.5), target]
+}
+
+-- Paint anti-aliased proportional text with its top-left at (x, y).
+-- opts: {"size": target_px, "tracking": extra_px}. Returns advance width.
+fn draw_atlas_text(fb, x, y, text, atlas, color, opts) {
+    let o = opts ?? {}
+    let target = if has(o, "size") { o["size"] } else { atlas.sizes[0] }
+    let track = if has(o, "tracking") { o["tracking"] } else { 0 }
+    let base = atlas.nearest_size(target)
+    let scale = (target * 1.0) / base
+    let sk = str(base)
+    let asc = atlas.ascent_for(sk)
+    let base_a = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    if base_a == 0 { return 0 }
+
+    let ox = int(x)
+    let oy = int(y)
+    let chs = chars(text)
+    let n = len(chs)
+    mut pen = ox * 1.0
+    mut i = 0
+    while i < n {
+        let code = char_code(chs[i])
+        let g = atlas.glyph(sk, code)
+        if g != null {
+            let gw = g["w"]
+            let gh = g["h"]
+            if gw > 0 and gh > 0 {
+                let cov = atlas.coverage(sk, code)
+                -- top-left of this glyph's bitmap in device space
+                let gx = pen + g["left"] * scale
+                let gy = oy + (asc - g["top"]) * scale
+                if scale > 0.999 and scale < 1.001 {
+                    _atlas_blit_glyph(fb, int(gx), int(gy), cov, gw, gh, base_a, rgb)
+                } else {
+                    _atlas_scale_glyph(fb, gx, gy, cov, gw, gh, scale, base_a, rgb)
+                }
+            }
+            pen = pen + g["adv"] * scale + track
+        }
+        i += 1
+    }
+    return int(pen) - ox
+}
+
+-- Crisp 1:1 blit of a glyph's coverage (target == atlas size).
+fn _atlas_blit_glyph(fb, gx, gy, cov, gw, gh, base_a, rgb) {
+    mut row = 0
+    while row < gh {
+        let rbase = row * gw
+        mut col = 0
+        while col < gw {
+            let c = cov[rbase + col]
+            if c > 0 {
+                let a = int(c * base_a / 255)
+                if a > 0 { blend_pixel(fb, gx + col, gy + row, a * 16777216 + rgb) }
+            }
+            col += 1
+        }
+        row += 1
+    }
+}
+
+-- Bilinear-scaled glyph: each device pixel samples the four nearest source
+-- coverage cells so edges stay soft at any target size.
+fn _atlas_scale_glyph(fb, gx, gy, cov, gw, gh, scale, base_a, rgb) {
+    let dw = int(gw * scale + 0.5)
+    let dh = int(gh * scale + 0.5)
+    if dw <= 0 or dh <= 0 { return null }
+    let bx = int(gx)
+    let by = int(gy)
+    mut j = 0
+    while j < dh {
+        let fy = (j + 0.5) / scale - 0.5
+        let r0 = _atlas_floor_i(fy)
+        let ty = fy - r0
+        mut i = 0
+        while i < dw {
+            let fx = (i + 0.5) / scale - 0.5
+            let c0 = _atlas_floor_i(fx)
+            let tx = fx - c0
+            let v00 = _atlas_cover(cov, gw, gh, c0, r0)
+            let v10 = _atlas_cover(cov, gw, gh, c0 + 1, r0)
+            let v01 = _atlas_cover(cov, gw, gh, c0, r0 + 1)
+            let v11 = _atlas_cover(cov, gw, gh, c0 + 1, r0 + 1)
+            let top = v00 + (v10 - v00) * tx
+            let bot = v01 + (v11 - v01) * tx
+            let cv = top + (bot - top) * ty
+            if cv > 1.0 {
+                let a = int(cv * base_a / 255)
+                if a > 0 { blend_pixel(fb, bx + i, by + j, a * 16777216 + rgb) }
+            }
+            i += 1
+        }
+        j += 1
+    }
+}
+
+-- Source coverage (0..255) at (col, row); 0 outside the bitmap.
+fn _atlas_cover(cov, gw, gh, col, row) {
+    if col < 0 or col >= gw or row < 0 or row >= gh { return 0.0 }
+    return cov[row * gw + col] * 1.0
+}
