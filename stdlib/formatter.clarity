@@ -330,7 +330,17 @@ class Formatter {
 
         if nt == "NumberLiteral" { return str(node.value) }
         if nt == "StringLiteral" {
-            let escaped = replace(replace(node.value, "\\", "\\\\"), "\"", "\\\"")
+            -- Re-encode every escape the lexer decodes, or the output is a
+            -- broken string: a decoded newline/tab written raw produces an
+            -- "unterminated string" that won't re-parse (fmt --write would
+            -- corrupt source). Backslash first, so the ones added below for
+            -- \n/\t/\r aren't themselves doubled.
+            mut escaped = replace(node.value, "\\", "\\\\")
+            escaped = replace(escaped, "\"", "\\\"")
+            escaped = replace(escaped, "\n", "\\n")
+            escaped = replace(escaped, "\t", "\\t")
+            escaped = replace(escaped, "\r", "\\r")
+            escaped = replace(escaped, "\0", "\\0")
             return "\"" + escaped + "\""
         }
         if nt == "BoolLiteral" { return if node.value { "true" } else { "false" } }

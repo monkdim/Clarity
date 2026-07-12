@@ -1,0 +1,57 @@
+-- Formatter tests — the self-hosted clarity fmt.
+-- Focus: formatted output must always re-parse (fmt --write must never
+-- corrupt a file). String-escape re-encoding is the regression that used
+-- to break this: the lexer decodes \n/\t/\r, and the formatter emitted the
+-- raw control chars back, producing an "unterminated string".
+
+from "formatter.clarity" import format_source
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: " + msg + " (expected " + str(expected) + ", got " + str(actual) + ")" }
+}
+
+-- Formatting is a fixed point over parse: format(src) must re-parse, and
+-- re-formatting must be identical (idempotent).
+fn reparses(src) {
+    let out = format_source(src, "<t>")
+    try { parse(tokenize(out, "<t>"), out); return true } catch e { return false }
+}
+fn run_out(src) {
+    let interp = Interpreter(null, null)
+    interp.run(parse(tokenize(src, "<t>"), src))
+    return interp.output
+}
+
+show "-- Formatter: string escapes round-trip --"
+
+-- newline / tab / carriage-return escapes must survive a format pass
+assert(reparses("let s = \"a\\nb\"\n"), "newline escape re-parses after format")
+assert(reparses("let s = \"a\\tb\\rc\"\n"), "tab + CR escapes re-parse after format")
+assert(reparses("let s = \"say \\\"hi\\\"\"\n"), "embedded quotes re-parse after format")
+assert(reparses("let s = \"back\\\\slash\"\n"), "backslash re-parses after format")
+
+-- and the semantics are preserved: formatting then running yields the same
+-- output as running the original.
+let src1 = "show \"a\\nb\"\n"
+assert_eq(run_out(format_source(src1, "<t>")), run_out(src1), "formatted string prints identically (newline)")
+let src2 = "show \"x\\ty\\\"z\\\"\"\n"
+assert_eq(run_out(format_source(src2, "<t>")), run_out(src2), "formatted string prints identically (tab + quotes)")
+
+-- formatting is idempotent: format(format(x)) == format(x)
+let once = format_source("let s = \"a\\nb\\tc\"\nshow s\n", "<t>")
+let twice = format_source(once, "<t>")
+assert_eq(twice, once, "formatting is idempotent over escaped strings")
+
+show ""
+show "Formatter: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " formatter test(s) failed" }
