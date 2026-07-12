@@ -15,6 +15,7 @@ from "ui.clarity" import Widget
 from "draw.clarity" import fill_rect, rect, line, hline
 from "font.clarity" import draw_text, measure_text
 from "theme.clarity" import theme_color, theme_font
+from "highlight.clarity" import highlight_spans
 
 class TextBuffer {
     fn init() {
@@ -320,6 +321,22 @@ class EditorApp < Widget {
         return f.height + 2
     }
 
+    -- Draw colour for a highlighter span kind (a modern editor palette;
+    -- plain identifiers fall back to the theme foreground).
+    fn _syntax_color(kind, t, fg) {
+        if kind == "keyword" or kind == "this" { return 0xFFC792EA }   -- violet
+        if kind == "declaration" { return 0xFF82AAFF }                 -- blue
+        if kind == "import" { return 0xFF89DDFF }                      -- cyan
+        if kind == "operator" { return 0xFFF78C6C }                    -- orange
+        if kind == "builtin" { return 0xFF7FDBCA }                     -- teal
+        if kind == "number" { return 0xFFF78C6C }                      -- orange
+        if kind == "string" { return 0xFFC3E88D }                      -- green
+        if kind == "boolean" or kind == "null" { return 0xFFFF9CAC }   -- rose
+        if kind == "comment" { return 0xFF6B7684 }                     -- muted
+        if kind == "punctuation" { return 0xFF9AA4AF }                 -- dim
+        return fg
+    }
+
     fn _paint(fb) {
         let r = this.screen_rect()
         let t = this.theme()
@@ -344,12 +361,19 @@ class EditorApp < Widget {
             let num = str(row + 1)
             let nm = measure_text(f, num)
             draw_text(fb, r[0] + this.gutter_w - nm[0] - 6, y, num, f, muted)
-            -- Line content
-            let line = this.buffer.lines[row]
-            draw_text(fb, r[0] + this.gutter_w + 6, y, line, f, fg)
+            -- Line content, syntax-highlighted span by span. (Local named
+            -- `src`, not `line`, so it doesn't shadow the `line` draw fn used
+            -- for the caret below.)
+            let src = this.buffer.lines[row]
+            mut tx = r[0] + this.gutter_w + 6
+            for sp in highlight_spans(src) {
+                let scol = this._syntax_color(sp["kind"], t, fg)
+                draw_text(fb, tx, y, sp["text"], f, scol)
+                tx = tx + measure_text(f, sp["text"])[0]
+            }
             -- Caret
             if row == this.buffer.cursor_row {
-                let prefix = substring(line, 0, this.buffer.cursor_col)
+                let prefix = substring(src, 0, this.buffer.cursor_col)
                 let pm = measure_text(f, prefix)
                 let cx = r[0] + this.gutter_w + 6 + pm[0]
                 line(fb, cx, y, cx, y + lh - 2, accent)

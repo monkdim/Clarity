@@ -107,6 +107,68 @@ fn highlight_line(line) {
     return highlight(line, "<repl>")
 }
 
+-- Per-line colour spans for a graphical editor: an ordered list of
+-- {"text": chunk, "kind": semantic} covering the whole line. Same token
+-- classification as the ANSI highlighter, but returned as data (no escape
+-- codes) so a renderer can pick its own colours. UI-agnostic — depends
+-- only on the lexer.
+fn highlight_spans(line) {
+    try {
+        let tokens = tokenize(line, "<edit>")
+        return _spans_from_tokens(line, tokens)
+    } catch e {
+        return [{"text": line, "kind": "default"}]
+    }
+}
+
+fn _spans_from_tokens(line_text, tokens) {
+    mut line_colors = []
+    mut ci = 0
+    while ci < len(line_text) { push(line_colors, null); ci += 1 }
+    for tok in tokens {
+        if tok.type == "NEWLINE" or tok.type == "EOF" { continue }
+        if tok.line != 1 { continue }
+        let col_idx = tok.column - 1
+        let color = _token_color(tok.type)
+        mut tok_len = len(str(tok.value))
+        if tok.type == "STRING" or tok.type == "RAW_STRING" { tok_len = tok_len + 2 }
+        mut k = col_idx
+        while k < col_idx + tok_len and k < len(line_colors) {
+            if k >= 0 { line_colors[k] = color }
+            k += 1
+        }
+    }
+    -- comment detection (mirrors the ANSI path)
+    mut comment_start = -1
+    mut in_str = false
+    mut si = 0
+    while si < len(line_text) {
+        if line_text[si] == "\"" and not in_str { in_str = true }
+        elif line_text[si] == "\"" and in_str { in_str = false }
+        elif not in_str and si + 1 < len(line_text) and line_text[si] == "-" and line_text[si + 1] == "-" { comment_start = si; break }
+        elif not in_str and si + 1 < len(line_text) and line_text[si] == "/" and line_text[si + 1] == "/" { comment_start = si; break }
+        si += 1
+    }
+    mut spans = []
+    mut i = 0
+    while i < len(line_text) {
+        if comment_start >= 0 and i >= comment_start {
+            push(spans, {"text": substring(line_text, i, len(line_text)), "kind": "comment"})
+            break
+        }
+        let color = if i < len(line_colors) and line_colors[i] != null { line_colors[i] } else { "default" }
+        mut end = i + 1
+        while end < len(line_text) and (comment_start < 0 or end < comment_start) {
+            let nc = if end < len(line_colors) and line_colors[end] != null { line_colors[end] } else { "default" }
+            if nc != color { break }
+            end += 1
+        }
+        push(spans, {"text": substring(line_text, i, end), "kind": color})
+        i = end
+    }
+    return spans
+}
+
 fn _highlight_from_tokens(source, tokens) {
     -- Reconstruct the source with ANSI colors inserted at token boundaries
     let lines = split(source, "\n")
