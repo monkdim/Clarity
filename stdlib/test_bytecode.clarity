@@ -217,6 +217,39 @@ assert_single("counter class", "class Counter {\n  fn init() { this.count = 0 }\
 
 assert_single("map filter pipe", "let r = [1, 2, 3, 4, 5, 6] |> filter(fn(x) { return x % 2 == 0 }) |> map(fn(x) { return x * 10 })\nshow r", "[20, 40, 60]")
 
+-- ── Section 18: Comprehensions ───────────────────────────
+-- These crashed before: the compilers emitted a stray OP_DUP before
+-- OP_ITER_NEXT (which peeks), leaking an iterator per iteration, and the
+-- list-comp append used the wrong stack order + a wrong AST field name.
+
+show "Section 18: Comprehensions"
+
+assert_single("list comprehension", "show [x * 2 for x in [1, 2, 3]]", "[2, 4, 6]")
+assert_single("filtered comprehension", "show [x for x in [1, 2, 3, 4, 5, 6] if x % 2 == 0]", "[2, 4, 6]")
+assert_single("comprehension over a string", "show [c for c in \"abc\"]", "[\"a\", \"b\", \"c\"]")
+assert_single("comprehension over a map", "let m = {\"a\": 1, \"b\": 2}\nshow sort([k for k in m])", "[\"a\", \"b\"]")
+assert_single("map comprehension", "let d = {k: k * k for k in [1, 2, 3]}\nshow d[2]", "4")
+assert_single("filtered map comprehension", "let d = {x: x for x in [1, 2, 3, 4] if x % 2 == 0}\nshow d[2] + d[4]", "6")
+
+-- Iteration must be stack-neutral: a stray OP_DUP used to leak one iterator
+-- per element, so the VM stack grew with the loop (only masked because
+-- results are read from locals). Assert the stack is empty after running.
+fn stack_after(source) {
+    let code = compile_to_bytecode(parse(tokenize(source, "<test>")))
+    optimize(code)
+    let vm = VM()
+    vm.run(code)
+    return len(vm.stack)
+}
+fn assert_neutral(name, source) {
+    let d = stack_after(source)
+    if d == 0 { passed += 1 }
+    else { show "  FAIL: {name} — residual stack {d} (expected 0)"; failed += 1 }
+}
+assert_neutral("for-loop leaves no stack residue", "mut t = 0\nfor x in [1, 2, 3, 4, 5] { t += x }\nshow t")
+assert_neutral("nested for leaves no stack residue", "mut t = 0\nfor a in [1, 2] { for b in [1, 2, 3] { t += 1 } }\nshow t")
+assert_neutral("comprehension leaves no stack residue", "let xs = [x * x for x in [1, 2, 3, 4]]\nshow xs")
+
 -- ── Summary ──────────────────────────────────────────────
 
 show ""
