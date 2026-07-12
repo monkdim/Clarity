@@ -28,6 +28,9 @@ function $int(v) {
   }
   return Math.trunc(Number(v));
 }
+function $float(v) {
+  return parseFloat(v);
+}
 function str(v) {
   return display(v);
 }
@@ -86,6 +89,9 @@ function keys(obj) {
 function entries(obj) {
   return Object.entries(obj);
 }
+function merge(...objs) {
+  return Object.assign({}, ...objs);
+}
 function has(obj, key) {
   if (Array.isArray(obj))
     return obj.includes(key);
@@ -114,6 +120,9 @@ function char_code(s) {
   return s.charCodeAt(0);
 }
 var sqrt = Math.sqrt;
+function abs(n) {
+  return Math.abs(n);
+}
 function sleep(secs) {}
 function _pty_supported() {
   return false;
@@ -2002,6 +2011,18 @@ var OBS_SHADOW = 1711539728;
 function kyan_obsidian() {
   return _merge(_BASE_SHARED, { ["name"]: "Obsidian", ["id"]: "kyan-obsidian", ["background"]: OBS_VOID, ["surface"]: OBS_SURFACE, ["surface_elevated"]: OBS_RAISED, ["border"]: OBS_HAIRLINE, ["foreground"]: OBS_TEXT, ["foreground_muted"]: OBS_MUTED, ["ink_soft"]: OBS_INK_SOFT, ["primary"]: OBS_ACCENT, ["primary_dark"]: 4279999924, ["accent"]: OBS_ACCENT, ["accent_secondary"]: KYAN_VIOLET, ["accent_tertiary"]: KYAN_INDIGO, ["highlight"]: KYAN_CYAN, ["selection"]: 1076549872, ["danger"]: 4294668677, ["warning"]: 4294688548, ["success"]: 4281652121, ["focus_ring"]: OBS_ACCENT, ["disabled"]: 4282008150, ["shadow"]: OBS_SHADOW, ["gradient_stops"]: kyan_gradient_stops(), ["scheme"]: "dark", ["font"]: builtin_font() });
 }
+var QTZ_CANVAS = 4294244091;
+var QTZ_SURFACE = 4294967295;
+var QTZ_RAISED = 4294967295;
+var QTZ_HAIRLINE = 4293060594;
+var QTZ_TEXT = 4278980632;
+var QTZ_MUTED = 4284179576;
+var QTZ_INK_SOFT = 4280955458;
+var QTZ_ACCENT = 4278751666;
+var QTZ_SHADOW = 437723199;
+function kyan_quartz() {
+  return _merge(_BASE_SHARED, { ["name"]: "Quartz", ["id"]: "kyan-quartz", ["background"]: QTZ_CANVAS, ["surface"]: QTZ_SURFACE, ["surface_elevated"]: QTZ_RAISED, ["border"]: QTZ_HAIRLINE, ["foreground"]: QTZ_TEXT, ["foreground_muted"]: QTZ_MUTED, ["ink_soft"]: QTZ_INK_SOFT, ["primary"]: QTZ_ACCENT, ["primary_dark"]: 4278610820, ["accent"]: QTZ_ACCENT, ["accent_secondary"]: KYAN_VIOLET, ["accent_tertiary"]: KYAN_INDIGO, ["highlight"]: KYAN_CYAN, ["selection"]: 856199602, ["danger"]: 4292943176, ["warning"]: 4292441862, ["success"]: 4278556265, ["focus_ring"]: QTZ_ACCENT, ["disabled"]: 4291087322, ["shadow"]: QTZ_SHADOW, ["gradient_stops"]: kyan_gradient_stops(), ["scheme"]: "light", ["font"]: builtin_font() });
+}
 
 // web/build/branding_kyan.js
 var _ICON_SS = 3;
@@ -2323,8 +2344,12 @@ function paint_monitor_content(fb, x, y, w, h, theme, focused) {
     r = r + 1;
   }
 }
-var _THEME_SWATCHES = [{ ["name"]: "Obsidian", ["a"]: 4286331629, ["b"]: 4280472558 }, { ["name"]: "Quartz", ["a"]: 4293257215, ["b"]: 4288329471 }, { ["name"]: "Meadow", ["a"]: 4281652121, ["b"]: 4279150057 }, { ["name"]: "Midnight", ["a"]: 4283385573, ["b"]: 4278915360 }];
-var _TOGGLES = [{ ["label"]: "Frosted glass", ["on"]: true }, { ["label"]: "Window animations", ["on"]: true }, { ["label"]: "Reduce motion", ["on"]: false }, { ["label"]: "Show dock labels", ["on"]: false }];
+var _SWATCHES = [{ ["id"]: "obsidian", ["name"]: "Obsidian", ["a"]: 4286331629, ["b"]: 4280472558 }, { ["id"]: "quartz", ["name"]: "Quartz", ["a"]: 4293257215, ["b"]: 4288329471 }, { ["id"]: "meadow", ["name"]: "Meadow", ["a"]: 4281652121, ["b"]: 4279150057 }, { ["id"]: "midnight", ["name"]: "Midnight", ["a"]: 4286680312, ["b"]: 4278915360 }];
+var _TOGGLE_KEYS = ["frosted", "animations", "reduce_motion", "dock_labels"];
+var _TOGGLE_LABELS = ["Frosted glass", "Window animations", "Reduce motion", "Show dock labels"];
+function new_prefs() {
+  return { ["frosted"]: true, ["animations"]: true, ["reduce_motion"]: false, ["dock_labels"]: false, ["theme"]: "obsidian" };
+}
 function _toggle(fb, x, y, t, on) {
   let tw = 40;
   let th = 22;
@@ -2333,10 +2358,50 @@ function _toggle(fb, x, y, t, on) {
   let knob = truthy(on) ? x + tw - th + 3 : x + 3;
   rounded_rect(fb, knob, y + 3, th - 6, th - 6, 8, 4294967295);
 }
-function paint_settings_content(fb, x, y, w, h, theme, focused) {
+function _settings_layout(x, y, w, h) {
+  let sw = 132;
+  let mx = x + sw + 20;
+  let mw = w - sw - 40;
+  let cols = 4;
+  let gap = 12;
+  let cwid = $int((mw - (cols - 1) * gap) / cols);
+  let chh = 58;
+  let cy = y + 60;
+  let swatches = [];
+  let c = 0;
+  while (truthy(c < cols)) {
+    push(swatches, { ["index"]: c, ["x"]: mx + c * (cwid + gap), ["y"]: cy, ["w"]: cwid, ["h"]: chh });
+    c = c + 1;
+  }
+  let toggles = [];
+  let ty = y + 60 + chh + 20;
+  let i = 0;
+  while (truthy(i < len(_TOGGLE_KEYS))) {
+    push(toggles, { ["index"]: i, ["x"]: mx, ["y"]: ty, ["w"]: mw, ["h"]: 30 });
+    ty = ty + 40;
+    i = i + 1;
+  }
+  return { ["sw"]: sw, ["mx"]: mx, ["mw"]: mw, ["swatches"]: swatches, ["toggles"]: toggles };
+}
+function settings_hit(x, y, w, h, px, py) {
+  let L = _settings_layout(x, y, w, h);
+  for (let s of $index(L, "swatches")) {
+    if (truthy(px >= $index(s, "x") && px < $index(s, "x") + $index(s, "w") && py >= $index(s, "y") && py < $index(s, "y") + $index(s, "h"))) {
+      return { ["kind"]: "theme", ["id"]: $index($index(_SWATCHES, $index(s, "index")), "id") };
+    }
+  }
+  for (let tg of $index(L, "toggles")) {
+    if (truthy(px >= $index(tg, "x") && px < $index(tg, "x") + $index(tg, "w") && py >= $index(tg, "y") && py < $index(tg, "y") + $index(tg, "h"))) {
+      return { ["kind"]: "toggle", ["key"]: $index(_TOGGLE_KEYS, $index(tg, "index")) };
+    }
+  }
+  return null;
+}
+function paint_settings(fb, x, y, w, h, theme, prefs) {
   let t = theme;
   let atlas = shared_atlas();
-  let sw = 132;
+  let L = _settings_layout(x, y, w, h);
+  let sw = $index(L, "sw");
   fill_rect(fb, x, y, w, h, $index(t, "surface"));
   fill_rect(fb, x, y, sw, h, $index(t, "surface_elevated"));
   fill_rect(fb, x + sw - 1, y, 1, h, $index(t, "border"));
@@ -2353,57 +2418,137 @@ function paint_settings_content(fb, x, y, w, h, theme, focused) {
     sy = sy + 28;
     i = i + 1;
   }
-  let mx = x + sw + 20;
-  let mw = w - sw - 40;
+  let mx = $index(L, "mx");
+  let mw = $index(L, "mw");
   if (truthy(mw < 40)) {
     return null;
   }
   draw_atlas_text(fb, mx, y + 16, "Appearance", atlas, $index(t, "foreground"), { ["size"]: 20 });
   draw_atlas_text(fb, mx, y + 44, "THEME", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
-  let cols = 4;
-  let gap = 12;
-  let cwid = $int((mw - (cols - 1) * gap) / cols);
-  let chh = 58;
-  let c = 0;
-  while (truthy(c < cols)) {
-    let cx = mx + c * (cwid + gap);
-    let cy = y + 60;
-    linear_gradient(fb, cx, cy, cwid, chh - 18, [{ ["t"]: 0, ["color"]: $index($index(_THEME_SWATCHES, c), "a") }, { ["t"]: 1, ["color"]: $index($index(_THEME_SWATCHES, c), "b") }], "h");
-    if (truthy($eq(c, 0))) {
-      rounded_rect(fb, cx + cwid - 20, cy + 4, 14, 14, 7, 4278519306);
-      fill_rect(fb, cx + cwid - 15, cy + 10, 3, 3, $index(t, "accent"));
+  for (let s of $index(L, "swatches")) {
+    let sw_meta = $index(_SWATCHES, $index(s, "index"));
+    linear_gradient(fb, $index(s, "x"), $index(s, "y"), $index(s, "w"), $index(s, "h") - 18, [{ ["t"]: 0, ["color"]: $index(sw_meta, "a") }, { ["t"]: 1, ["color"]: $index(sw_meta, "b") }], "h");
+    if (truthy($eq($index(prefs, "theme"), $index(sw_meta, "id")))) {
+      rounded_rect(fb, $index(s, "x") + $index(s, "w") - 20, $index(s, "y") + 4, 14, 14, 7, 4278519306);
+      fill_rect(fb, $index(s, "x") + $index(s, "w") - 15, $index(s, "y") + 10, 3, 3, $index(t, "accent"));
     }
-    draw_atlas_text(fb, cx + 2, cy + chh - 14, $index($index(_THEME_SWATCHES, c), "name"), atlas, $index(t, "foreground"), { ["size"]: 13 });
-    c = c + 1;
+    draw_atlas_text(fb, $index(s, "x") + 2, $index(s, "y") + $index(s, "h") - 14, $index(sw_meta, "name"), atlas, $index(t, "foreground"), { ["size"]: 13 });
   }
-  let ty = y + 60 + chh + 20;
-  for (let tg of _TOGGLES) {
-    if (truthy(ty + 30 > y + h)) {
+  for (let tg of $index(L, "toggles")) {
+    if (truthy($index(tg, "y") + 30 > y + h)) {
       break;
     }
-    draw_atlas_text(fb, mx, ty + 3, $index(tg, "label"), atlas, $index(t, "foreground"), { ["size"]: 15 });
-    _toggle(fb, mx + mw - 40, ty, t, $index(tg, "on"));
-    fill_rect(fb, mx, ty + 30, mw, 1, $index(t, "border"));
-    ty = ty + 40;
+    draw_atlas_text(fb, mx, $index(tg, "y") + 3, $index(_TOGGLE_LABELS, $index(tg, "index")), atlas, $index(t, "foreground"), { ["size"]: 15 });
+    _toggle(fb, mx + mw - 40, $index(tg, "y"), t, $index(prefs, $index(_TOGGLE_KEYS, $index(tg, "index"))));
+    fill_rect(fb, mx, $index(tg, "y") + 30, mw, 1, $index(t, "border"));
   }
 }
-var _CALC_KEYS = [["C", "±", "%", "÷"], ["7", "8", "9", "×"], ["4", "5", "6", "−"], ["1", "2", "3", "+"], ["0", ".", "="]];
+function paint_settings_content(fb, x, y, w, h, theme, focused) {
+  paint_settings(fb, x, y, w, h, theme, new_prefs());
+}
+var _CALC_KEYS = [["C", "+/-", "%", "/"], ["7", "8", "9", "*"], ["4", "5", "6", "-"], ["1", "2", "3", "+"], ["0", ".", "="]];
 function _is_op(k) {
-  return $eq(k, "÷") || $eq(k, "×") || $eq(k, "−") || $eq(k, "+") || $eq(k, "=");
+  return $eq(k, "/") || $eq(k, "*") || $eq(k, "-") || $eq(k, "+") || $eq(k, "=");
 }
 function _is_fn(k) {
-  return $eq(k, "C") || $eq(k, "±") || $eq(k, "%");
+  return $eq(k, "C") || $eq(k, "+/-") || $eq(k, "%");
 }
-function paint_calc_content(fb, x, y, w, h, theme, focused) {
-  let t = theme;
-  let atlas = shared_atlas();
-  fill_rect(fb, x, y, w, h, 4278914582);
+function new_calc() {
+  return { ["display"]: "0", ["expr"]: "", ["acc"]: 0, ["op"]: "", ["fresh"]: true };
+}
+function _calc_num(s) {
+  if (truthy($eq(s, "Error") || $eq(s, "") || $eq(s, "."))) {
+    return 0;
+  }
+  return $float(s);
+}
+function _calc_fmt(n) {
+  if (truthy($eq(n, $int(n)) && abs(n) < 1000000000000)) {
+    return str($int(n));
+  }
+  return str(n);
+}
+function _calc_compute(a, op, b) {
+  if (truthy($eq(op, "+"))) {
+    return a + b;
+  }
+  if (truthy($eq(op, "-"))) {
+    return a - b;
+  }
+  if (truthy($eq(op, "*"))) {
+    return a * b;
+  }
+  if (truthy($eq(op, "/"))) {
+    if (truthy($eq(b, 0))) {
+      return 0;
+    }
+    return a / b;
+  }
+  return b;
+}
+function calc_press(s, key) {
+  if (truthy($eq(key, "C"))) {
+    s["display"] = "0";
+    s["expr"] = "";
+    s["acc"] = 0;
+    s["op"] = "";
+    s["fresh"] = true;
+    return s;
+  }
+  if (truthy($eq(key, "+/-"))) {
+    s["display"] = _calc_fmt(0 - _calc_num($index(s, "display")));
+    return s;
+  }
+  if (truthy($eq(key, "%"))) {
+    s["display"] = _calc_fmt(_calc_num($index(s, "display")) / 100);
+    return s;
+  }
+  if (truthy($eq(key, "."))) {
+    if (truthy($index(s, "fresh"))) {
+      s["display"] = "0.";
+      s["fresh"] = false;
+    } else if (truthy(!truthy(contains($index(s, "display"), ".")))) {
+      s["display"] = $index(s, "display") + ".";
+    }
+    return s;
+  }
+  if (truthy(_is_op(key) && $ne(key, "="))) {
+    if (truthy($ne($index(s, "op"), "") && !truthy($index(s, "fresh")))) {
+      let r = _calc_compute($index(s, "acc"), $index(s, "op"), _calc_num($index(s, "display")));
+      s["acc"] = r;
+      s["display"] = _calc_fmt(r);
+    } else {
+      s["acc"] = _calc_num($index(s, "display"));
+    }
+    s["op"] = key;
+    s["fresh"] = true;
+    s["expr"] = _calc_fmt($index(s, "acc")) + " " + key;
+    return s;
+  }
+  if (truthy($eq(key, "="))) {
+    if (truthy($ne($index(s, "op"), ""))) {
+      let r = _calc_compute($index(s, "acc"), $index(s, "op"), _calc_num($index(s, "display")));
+      s["expr"] = _calc_fmt($index(s, "acc")) + " " + $index(s, "op") + " " + $index(s, "display") + " =";
+      s["display"] = _calc_fmt(r);
+      s["acc"] = r;
+      s["op"] = "";
+      s["fresh"] = true;
+    }
+    return s;
+  }
+  if (truthy($index(s, "fresh"))) {
+    s["display"] = key;
+    s["fresh"] = false;
+  } else if (truthy($eq($index(s, "display"), "0"))) {
+    s["display"] = key;
+  } else {
+    s["display"] = $index(s, "display") + key;
+  }
+  return s;
+}
+function _calc_layout(x, y, w, h) {
   let pad = 14;
   let disp_h = 74;
-  draw_atlas_text(fb, x + w - pad - $index(measure_atlas_text(atlas, "128 x 8 +", 14, 0), 0), y + 16, "128 x 8 +", atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
-  let big = "1,024";
-  let bw = $index(measure_atlas_text(atlas, big, 40, 0), 0);
-  draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 4294967295, { ["size"]: 40 });
   let gy = y + disp_h + 6;
   let gh = h - disp_h - pad - 6;
   let cols = 4;
@@ -2411,6 +2556,7 @@ function paint_calc_content(fb, x, y, w, h, theme, focused) {
   let gap = 8;
   let kw = $int((w - pad * 2 - (cols - 1) * gap) / cols);
   let kh = $int((gh - (rows - 1) * gap) / rows);
+  let cells = [];
   let r = 0;
   for (let row of _CALC_KEYS) {
     let c = 0;
@@ -2419,20 +2565,49 @@ function paint_calc_content(fb, x, y, w, h, theme, focused) {
       let kx = x + pad + c * (kw + gap);
       let ky = gy + r * (kh + gap);
       let kwid = kw * span + (span - 1) * gap;
-      let bgc = $index(t, "surface_elevated");
-      if (truthy(_is_op(k))) {
-        bgc = $index(t, "accent");
-      } else if (truthy(_is_fn(k))) {
-        bgc = $index(t, "surface");
-      }
-      rounded_rect(fb, kx, ky, kwid, kh, 10, bgc);
-      let kcol = truthy(_is_op(k)) ? 4278519306 : truthy(_is_fn(k)) ? $index(t, "foreground_muted") : 4294967295;
-      let lw = $index(measure_atlas_text(atlas, k, 20, 0), 0);
-      draw_atlas_text(fb, kx + $int(kwid / 2) - $int(lw / 2), ky + $int(kh / 2) - 12, k, atlas, kcol, { ["size"]: 20 });
+      push(cells, { ["key"]: k, ["x"]: kx, ["y"]: ky, ["w"]: kwid, ["h"]: kh });
       c = c + span;
     }
     r = r + 1;
   }
+  return cells;
+}
+function calc_key_at(x, y, w, h, px, py) {
+  for (let cell of _calc_layout(x, y, w, h)) {
+    if (truthy(px >= $index(cell, "x") && px < $index(cell, "x") + $index(cell, "w") && py >= $index(cell, "y") && py < $index(cell, "y") + $index(cell, "h"))) {
+      return $index(cell, "key");
+    }
+  }
+  return null;
+}
+function paint_calc(fb, x, y, w, h, theme, state) {
+  let t = theme;
+  let atlas = shared_atlas();
+  fill_rect(fb, x, y, w, h, 4278914582);
+  let pad = 14;
+  let expr = $index(state, "expr");
+  if (truthy(len(expr) > 0)) {
+    draw_atlas_text(fb, x + w - pad - $index(measure_atlas_text(atlas, expr, 14, 0), 0), y + 16, expr, atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+  }
+  let big = $index(state, "display");
+  let bw = $index(measure_atlas_text(atlas, big, 40, 0), 0);
+  draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 4294967295, { ["size"]: 40 });
+  for (let cell of _calc_layout(x, y, w, h)) {
+    let k = $index(cell, "key");
+    let bgc = $index(t, "surface_elevated");
+    if (truthy(_is_op(k))) {
+      bgc = $index(t, "accent");
+    } else if (truthy(_is_fn(k))) {
+      bgc = $index(t, "surface");
+    }
+    rounded_rect(fb, $index(cell, "x"), $index(cell, "y"), $index(cell, "w"), $index(cell, "h"), 10, bgc);
+    let kcol = truthy(_is_op(k)) ? 4278519306 : truthy(_is_fn(k)) ? $index(t, "foreground_muted") : 4294967295;
+    let lw = $index(measure_atlas_text(atlas, k, 20, 0), 0);
+    draw_atlas_text(fb, $index(cell, "x") + $int($index(cell, "w") / 2) - $int(lw / 2), $index(cell, "y") + $int($index(cell, "h") / 2) - 12, k, atlas, kcol, { ["size"]: 20 });
+  }
+}
+function paint_calc_content(fb, x, y, w, h, theme, focused) {
+  paint_calc(fb, x, y, w, h, theme, new_calc());
 }
 function app_painters() {
   return { ["prism"]: paint_prism, ["terminal"]: paint_terminal_content, ["files"]: paint_files_content, ["monitor"]: paint_monitor_content, ["settings"]: paint_settings_content, ["calc"]: paint_calc_content };
@@ -3066,6 +3241,30 @@ class KyanDesktop {
     this._anim = {};
     this._launcher_t0 = -1;
     this._terminals = {};
+    this._app_ui = {};
+    this.prefs = new_prefs();
+  }
+  _theme_for(id) {
+    if (truthy($eq(id, "quartz"))) {
+      return kyan_quartz();
+    }
+    if (truthy($eq(id, "meadow"))) {
+      return merge(kyan_obsidian(), { ["accent"]: 4281652121, ["accent_secondary"]: 4279150057, ["accent_tertiary"]: rgba(52, 211, 153, 40) });
+    }
+    if (truthy($eq(id, "midnight"))) {
+      return merge(kyan_obsidian(), { ["accent"]: 4286680312, ["accent_secondary"]: 4283385573, ["accent_tertiary"]: rgba(129, 140, 248, 40), ["background"]: 4278651412 });
+    }
+    return kyan_obsidian();
+  }
+  set_theme_by_id(id) {
+    this.prefs["theme"] = id;
+    this.theme = this._theme_for(id);
+    this.comp.set_background($index(this.theme, "background"));
+    this._wallpaper = null;
+    this._icon_cache = {};
+    this._win_sig = {};
+    this._dirty = true;
+    return true;
   }
   needs_redraw() {
     if (truthy(this._dirty)) {
@@ -3138,6 +3337,9 @@ class KyanDesktop {
       let rows = $int($index(cr, 3) / 16);
       this._terminals["terminal"] = { ["term"]: Terminal(cols, rows), ["pty"]: pty_spawn_shell(cols, rows), ["dead"]: false };
     }
+    if (truthy($eq(app_id, "calc") && !truthy(has(this._app_ui, "calc")))) {
+      this._app_ui["calc"] = new_calc();
+    }
     return win;
   }
   close(app_id) {
@@ -3180,6 +3382,15 @@ class KyanDesktop {
         }
       }
       this._terminals = nt;
+    }
+    if (truthy(has(this._app_ui, app_id))) {
+      let nu = {};
+      for (let kv of entries(this._app_ui)) {
+        if (truthy($ne($index(kv, 0), app_id))) {
+          nu[$index(kv, 0)] = $index(kv, 1);
+        }
+      }
+      this._app_ui = nu;
     }
     return true;
   }
@@ -3225,14 +3436,41 @@ class KyanDesktop {
         app_id = $index(kv, 0);
       }
     }
-    if (truthy($ne(app_id, "prism"))) {
+    if (truthy($eq(app_id, null))) {
       return false;
     }
     let cr = top.content_rect();
-    let r = prism_play_rect(top.x + $index(cr, 0), top.y + $index(cr, 1), $index(cr, 2), $index(cr, 3));
-    if (truthy(this._in(px, py, $index(r, 0), $index(r, 1), $index(r, 2), $index(r, 3)))) {
-      this._activate("voidrunner");
-      return true;
+    let ax = top.x + $index(cr, 0);
+    let ay = top.y + $index(cr, 1);
+    let aw = $index(cr, 2);
+    let ah = $index(cr, 3);
+    if (truthy($eq(app_id, "prism"))) {
+      let r = prism_play_rect(ax, ay, aw, ah);
+      if (truthy(this._in(px, py, $index(r, 0), $index(r, 1), $index(r, 2), $index(r, 3)))) {
+        this._activate("voidrunner");
+        return true;
+      }
+      return false;
+    }
+    if (truthy($eq(app_id, "calc") && has(this._app_ui, "calc"))) {
+      let key = calc_key_at(ax, ay, aw, ah, px, py);
+      if (truthy($ne(key, null))) {
+        calc_press($index(this._app_ui, "calc"), key);
+        this._dirty = true;
+        return true;
+      }
+    }
+    if (truthy($eq(app_id, "settings"))) {
+      let hit = settings_hit(ax, ay, aw, ah, px, py);
+      if (truthy($ne(hit, null))) {
+        if (truthy($eq($index(hit, "kind"), "theme"))) {
+          this.set_theme_by_id($index(hit, "id"));
+        } else {
+          this.prefs[$index(hit, "key")] = !truthy($index(this.prefs, $index(hit, "key")));
+          this._dirty = true;
+        }
+        return true;
+      }
     }
     return false;
   }
@@ -3322,6 +3560,9 @@ class KyanDesktop {
     return true;
   }
   _anim_state(app_id) {
+    if (truthy(!truthy($index(this.prefs, "animations")) || $index(this.prefs, "reduce_motion"))) {
+      return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
+    }
     if (truthy($eq(app_id, null) || !truthy(has(this._anim, app_id)) || $eq(this._last_tick, null))) {
       return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
     }
@@ -3509,6 +3750,14 @@ class KyanDesktop {
       this._render_terminal(fb, cx, cy, cw, ch, $index(this._terminals, "terminal"));
       return null;
     }
+    if (truthy($eq(app_id, "calc") && has(this._app_ui, "calc"))) {
+      paint_calc(fb, cx, cy, cw, ch, t, $index(this._app_ui, "calc"));
+      return null;
+    }
+    if (truthy($eq(app_id, "settings"))) {
+      paint_settings(fb, cx, cy, cw, ch, t, this.prefs);
+      return null;
+    }
     if (truthy($ne(app_id, null) && has(this.painters, app_id))) {
       $index(this.painters, app_id)(fb, cx, cy, cw, ch, t, win.focused);
       return null;
@@ -3566,12 +3815,21 @@ class KyanDesktop {
     let dw = $index(layout, "w");
     let dh = $index(layout, "h");
     drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7);
-    frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6);
+    if (truthy($index(this.prefs, "frosted"))) {
+      frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6);
+    } else {
+      rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 225));
+    }
     for (let ic of $index(layout, "icons")) {
       let bg = fb.get_pixel($index(ic, "x"), $index(ic, "y"));
       fb.blit(this._icon($index(ic, "app"), $index(ic, "size"), bg), 0, 0, $index(ic, "x"), $index(ic, "y"), $index(ic, "size"), $index(ic, "size"));
       if (truthy(has(this.windows, $index(ic, "app")))) {
         fill_rect(fb, $index(ic, "x") + $int($index(ic, "size") / 2) - 2, dy + dh - 5, 4, 4, $index(this.theme, "accent"));
+      }
+      if (truthy($index(this.prefs, "dock_labels"))) {
+        let label = truthy(has(APP_TITLES, $index(ic, "app"))) ? $index(APP_TITLES, $index(ic, "app")) : $index(ic, "app");
+        let lw = $index(measure_atlas_text(this._atlas, label, 11, 0), 0);
+        draw_atlas_text(fb, $index(ic, "x") + $int($index(ic, "size") / 2) - $int(lw / 2), dy + dh + 3, label, this._atlas, $index(this.theme, "foreground_muted"), { ["size"]: 11 });
       }
     }
   }

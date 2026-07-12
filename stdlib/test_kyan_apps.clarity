@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, app_painters
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, app_painters, new_calc, calc_press, calc_key_at
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -100,6 +100,29 @@ paint_monitor_content(fc, 0, 0, 30, 20, t, true)
 paint_settings_content(fc, 0, 0, 30, 20, t, true)
 paint_calc_content(fc, 0, 0, 30, 20, t, true)
 assert(true, "painters survive a tiny content rect")
+
+-- ── Calculator logic ──
+show "-- Kyan apps: calculator --"
+fn calc_seq(keys) {
+    let s = new_calc()
+    for k in keys { calc_press(s, k) }
+    return s["display"]
+}
+assert_eq(calc_seq(["8", "*", "8", "="]), "64", "8 * 8 = 64")
+assert_eq(calc_seq(["1", "2", "+", "3", "0", "="]), "42", "12 + 30 = 42")
+assert_eq(calc_seq(["1", "0", "0", "/", "4", "="]), "25", "100 / 4 = 25")
+assert_eq(calc_seq(["7", "-", "9", "="]), "-2", "7 - 9 = -2")
+assert_eq(calc_seq(["2", "+", "3", "*", "4", "="]), "20", "chained ops evaluate left-to-right")
+assert_eq(calc_seq(["1", ".", "5", "+", "2", ".", "5", "="]), "4", "decimals: 1.5 + 2.5 = 4")
+assert_eq(calc_seq(["9", "9", "C"]), "0", "C clears to 0")
+assert_eq(calc_seq(["5", "+/-"]), "-5", "+/- negates")
+assert_eq(calc_seq(["5", "0", "%"]), "0.5", "% divides by 100")
+-- divide by zero is safe (no crash)
+assert_eq(calc_seq(["5", "/", "0", "="]), "0", "divide by zero returns 0, no crash")
+-- hit-test finds keys inside the keypad and nothing outside it
+let hk = calc_key_at(0, 0, 300, 400, 40, 120)
+assert(hk != null, "calc_key_at finds a key inside the pad")
+assert_eq(calc_key_at(0, 0, 300, 400, -5, -5), null, "calc_key_at misses outside the pad")
 
 -- ── Summary ──
 show ""

@@ -27,11 +27,11 @@ from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_sha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters, prism_play_rect
+from "kyan_apps.clarity" import app_painters, prism_play_rect, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_spawn_shell, pty_supported
-from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
+from "theme_kyan.clarity" import kyan_obsidian, kyan_quartz, kyan_gradient_stops
 
 let TITLE_H = 32
 let WIN_RADIUS = 12       -- rounded window corners (MacOS-style float)
@@ -94,6 +94,34 @@ class KyanDesktop {
         this._anim = {}            -- app_id -> open-anim start ms (-1 = pending stamp)
         this._launcher_t0 = -1.0   -- launcher open-anim start ms (-1 = pending / closed)
         this._terminals = {}       -- app_id -> {term, pty, dead}: live PTY-backed shells
+        this._app_ui = {}          -- app_id -> interactive UI state (calc, etc.); redraws on click, not every frame
+        this.prefs = new_prefs()   -- desktop preferences the Settings app drives (theme, frosted, animations, dock labels)
+    }
+
+    -- Resolve a theme id (Settings swatch) to a full theme dict. Meadow /
+    -- Midnight are Obsidian with a different accent family, so every theme
+    -- carries the complete key set the shell needs.
+    fn _theme_for(id) {
+        if id == "quartz" { return kyan_quartz() }
+        if id == "meadow" {
+            return merge(kyan_obsidian(), {"accent": 0xFF34D399, "accent_secondary": 0xFF0EA5E9, "accent_tertiary": rgba(52, 211, 153, 40)})
+        }
+        if id == "midnight" {
+            return merge(kyan_obsidian(), {"accent": 0xFF818CF8, "accent_secondary": 0xFF4F46E5, "accent_tertiary": rgba(129, 140, 248, 40), "background": 0xFF070A14})
+        }
+        return kyan_obsidian()
+    }
+
+    -- Switch the desktop theme live (Settings swatch click).
+    fn set_theme_by_id(id) {
+        this.prefs["theme"] = id
+        this.theme = this._theme_for(id)
+        this.comp.set_background(this.theme["background"])
+        this._wallpaper = null       -- re-cache the aurora in the new palette
+        this._icon_cache = {}        -- icons are accent-tinted → invalidate
+        this._win_sig = {}           -- window chrome uses the theme → repaint
+        this._dirty = true
+        return true
     }
 
     -- Whether the next frame needs a fresh compose. A discrete change
@@ -177,6 +205,10 @@ class KyanDesktop {
                 "dead": false
             }
         }
+        -- interactive apps get a fresh UI state
+        if app_id == "calc" and not has(this._app_ui, "calc") {
+            this._app_ui["calc"] = new_calc()
+        }
         return win
     }
 
@@ -204,6 +236,11 @@ class KyanDesktop {
             mut nt = {}
             for kv in entries(this._terminals) { if kv[0] != app_id { nt[kv[0]] = kv[1] } }
             this._terminals = nt
+        }
+        if has(this._app_ui, app_id) {
+            mut nu = {}
+            for kv in entries(this._app_ui) { if kv[0] != app_id { nu[kv[0]] = kv[1] } }
+            this._app_ui = nu
         }
         return true
     }
@@ -235,8 +272,8 @@ class KyanDesktop {
         return this.wm.handle_mouse(me)
     }
 
-    -- Clicks inside an app's content that the shell handles (e.g. the
-    -- Prism "Play" button launches Voidrunner).
+    -- Clicks inside an app's content that the shell handles: the Prism
+    -- "Play" button, and interactive apps (Calculator keys, etc.).
     fn _content_click(px, py) {
         let top = this.comp.top_window()
         if top == null { return false }
@@ -244,12 +281,37 @@ class KyanDesktop {
         for kv in entries(this.windows) {
             if kv[1] == top { app_id = kv[0] }
         }
-        if app_id != "prism" { return false }
+        if app_id == null { return false }
         let cr = top.content_rect()
-        let r = prism_play_rect(top.x + cr[0], top.y + cr[1], cr[2], cr[3])
-        if this._in(px, py, r[0], r[1], r[2], r[3]) {
-            this._activate("voidrunner")
-            return true
+        let ax = top.x + cr[0]
+        let ay = top.y + cr[1]
+        let aw = cr[2]
+        let ah = cr[3]
+
+        if app_id == "prism" {
+            let r = prism_play_rect(ax, ay, aw, ah)
+            if this._in(px, py, r[0], r[1], r[2], r[3]) { this._activate("voidrunner"); return true }
+            return false
+        }
+        if app_id == "calc" and has(this._app_ui, "calc") {
+            let key = calc_key_at(ax, ay, aw, ah, px, py)
+            if key != null {
+                calc_press(this._app_ui["calc"], key)
+                this._dirty = true
+                return true
+            }
+        }
+        if app_id == "settings" {
+            let hit = settings_hit(ax, ay, aw, ah, px, py)
+            if hit != null {
+                if hit["kind"] == "theme" {
+                    this.set_theme_by_id(hit["id"])
+                } else {
+                    this.prefs[hit["key"]] = not this.prefs[hit["key"]]
+                    this._dirty = true
+                }
+                return true
+            }
         }
         return false
     }
@@ -344,6 +406,11 @@ class KyanDesktop {
     -- or clock-less (native one-shot render) animations report inactive, so
     -- the window draws at rest. Removes an animation once it completes.
     fn _anim_state(app_id) {
+        -- Settings can disable window animations / enable reduce-motion, in
+        -- which case windows always draw at rest.
+        if not this.prefs["animations"] or this.prefs["reduce_motion"] {
+            return {"active": false, "scale": 1.0, "alpha": 255}
+        }
         if app_id == null or not has(this._anim, app_id) or this._last_tick == null {
             return {"active": false, "scale": 1.0, "alpha": 255}
         }
@@ -554,6 +621,16 @@ class KyanDesktop {
             this._render_terminal(fb, cx, cy, cw, ch, this._terminals["terminal"])
             return null
         }
+        -- interactive Calculator paints from its live state
+        if app_id == "calc" and has(this._app_ui, "calc") {
+            paint_calc(fb, cx, cy, cw, ch, t, this._app_ui["calc"])
+            return null
+        }
+        -- Settings paints from the live desktop preferences
+        if app_id == "settings" {
+            paint_settings(fb, cx, cy, cw, ch, t, this.prefs)
+            return null
+        }
         if app_id != null and has(this.painters, app_id) {
             (this.painters[app_id])(fb, cx, cy, cw, ch, t, win.focused)
             return null
@@ -610,16 +687,25 @@ class KyanDesktop {
         let dy = layout["y"]
         let dw = layout["w"]
         let dh = layout["h"]
-        -- floating frosted-glass pill with a soft shadow: blur what's
-        -- behind it, then a translucent tint so the blur reads through
+        -- floating pill with a soft shadow. Frosted glass (blur what's
+        -- behind it) when enabled in Settings; otherwise a plain glass tint.
         drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7)
-        frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6)
-        -- icons (cached, AA) + running indicators
+        if this.prefs["frosted"] {
+            frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6)
+        } else {
+            rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 225))
+        }
+        -- icons (cached, AA) + running indicators + optional labels
         for ic in layout["icons"] {
             let bg = fb.get_pixel(ic["x"], ic["y"])   -- the glass under this icon
             fb.blit(this._icon(ic["app"], ic["size"], bg), 0, 0, ic["x"], ic["y"], ic["size"], ic["size"])
             if has(this.windows, ic["app"]) {
                 fill_rect(fb, ic["x"] + int(ic["size"] / 2) - 2, dy + dh - 5, 4, 4, this.theme["accent"])
+            }
+            if this.prefs["dock_labels"] {
+                let label = if has(APP_TITLES, ic["app"]) { APP_TITLES[ic["app"]] } else { ic["app"] }
+                let lw = measure_atlas_text(this._atlas, label, 11, 0)[0]
+                draw_atlas_text(fb, ic["x"] + int(ic["size"] / 2) - int(lw / 2), dy + dh + 3, label, this._atlas, this.theme["foreground_muted"], {"size": 11})
             }
         }
     }

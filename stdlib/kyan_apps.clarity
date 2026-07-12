@@ -228,18 +228,20 @@ fn paint_monitor_content(fb, x, y, w, h, theme, focused) {
 
 -- ── Settings ────────────────────────────────────────────
 
-let _THEME_SWATCHES = [
-    {"name": "Obsidian", "a": 0xFF7C3AED, "b": 0xFF22D3EE},
-    {"name": "Quartz",   "a": 0xFFE5E7FF, "b": 0xFF9AB6FF},
-    {"name": "Meadow",   "a": 0xFF34D399, "b": 0xFF0EA5E9},
-    {"name": "Midnight", "a": 0xFF4F46E5, "b": 0xFF0B1120}
+let _SWATCHES = [
+    {"id": "obsidian", "name": "Obsidian", "a": 0xFF7C3AED, "b": 0xFF22D3EE},
+    {"id": "quartz",   "name": "Quartz",   "a": 0xFFE5E7FF, "b": 0xFF9AB6FF},
+    {"id": "meadow",   "name": "Meadow",   "a": 0xFF34D399, "b": 0xFF0EA5E9},
+    {"id": "midnight", "name": "Midnight", "a": 0xFF818CF8, "b": 0xFF0B1120}
 ]
-let _TOGGLES = [
-    {"label": "Frosted glass", "on": true},
-    {"label": "Window animations", "on": true},
-    {"label": "Reduce motion", "on": false},
-    {"label": "Show dock labels", "on": false}
-]
+-- pref keys (in row order) + their labels
+let _TOGGLE_KEYS = ["frosted", "animations", "reduce_motion", "dock_labels"]
+let _TOGGLE_LABELS = ["Frosted glass", "Window animations", "Reduce motion", "Show dock labels"]
+
+-- Default desktop preferences.
+fn new_prefs() {
+    return {"frosted": true, "animations": true, "reduce_motion": false, "dock_labels": false, "theme": "obsidian"}
+}
 
 fn _toggle(fb, x, y, t, on) {
     let tw = 40
@@ -250,10 +252,55 @@ fn _toggle(fb, x, y, t, on) {
     rounded_rect(fb, knob, y + 3, th - 6, th - 6, 8, 0xFFFFFFFF)
 }
 
-fn paint_settings_content(fb, x, y, w, h, theme, focused) {
+-- Shared layout for the Appearance pane: swatch cards + toggle rows.
+fn _settings_layout(x, y, w, h) {
+    let sw = 132
+    let mx = x + sw + 20
+    let mw = w - sw - 40
+    let cols = 4
+    let gap = 12
+    let cwid = int((mw - (cols - 1) * gap) / cols)
+    let chh = 58
+    let cy = y + 60
+    mut swatches = []
+    mut c = 0
+    while c < cols {
+        push(swatches, {"index": c, "x": mx + c * (cwid + gap), "y": cy, "w": cwid, "h": chh})
+        c = c + 1
+    }
+    mut toggles = []
+    mut ty = y + 60 + chh + 20
+    mut i = 0
+    while i < len(_TOGGLE_KEYS) {
+        push(toggles, {"index": i, "x": mx, "y": ty, "w": mw, "h": 30})
+        ty = ty + 40
+        i = i + 1
+    }
+    return {"sw": sw, "mx": mx, "mw": mw, "swatches": swatches, "toggles": toggles}
+}
+
+-- Hit-test the Appearance pane. Returns {"kind":"theme","id":..} or
+-- {"kind":"toggle","key":..} or null.
+fn settings_hit(x, y, w, h, px, py) {
+    let L = _settings_layout(x, y, w, h)
+    for s in L["swatches"] {
+        if px >= s["x"] and px < s["x"] + s["w"] and py >= s["y"] and py < s["y"] + s["h"] {
+            return {"kind": "theme", "id": _SWATCHES[s["index"]]["id"]}
+        }
+    }
+    for tg in L["toggles"] {
+        if px >= tg["x"] and px < tg["x"] + tg["w"] and py >= tg["y"] and py < tg["y"] + tg["h"] {
+            return {"kind": "toggle", "key": _TOGGLE_KEYS[tg["index"]]}
+        }
+    }
+    return null
+}
+
+fn paint_settings(fb, x, y, w, h, theme, prefs) {
     let t = theme
     let atlas = shared_atlas()
-    let sw = 132
+    let L = _settings_layout(x, y, w, h)
+    let sw = L["sw"]
     fill_rect(fb, x, y, w, h, t["surface"])
     fill_rect(fb, x, y, sw, h, t["surface_elevated"])
     fill_rect(fb, x + sw - 1, y, 1, h, t["border"])
@@ -270,76 +317,126 @@ fn paint_settings_content(fb, x, y, w, h, theme, focused) {
         sy = sy + 28
         i = i + 1
     }
-
-    let mx = x + sw + 20
-    let mw = w - sw - 40
+    let mx = L["mx"]
+    let mw = L["mw"]
     if mw < 40 { return null }
     draw_atlas_text(fb, mx, y + 16, "Appearance", atlas, t["foreground"], {"size": 20})
     draw_atlas_text(fb, mx, y + 44, "THEME", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
 
-    -- theme swatches
-    let cols = 4
-    let gap = 12
-    let cwid = int((mw - (cols - 1) * gap) / cols)
-    let chh = 58
-    mut c = 0
-    while c < cols {
-        let cx = mx + c * (cwid + gap)
-        let cy = y + 60
-        linear_gradient(fb, cx, cy, cwid, chh - 18, [
-            {"t": 0.0, "color": _THEME_SWATCHES[c]["a"]},
-            {"t": 1.0, "color": _THEME_SWATCHES[c]["b"]}
+    for s in L["swatches"] {
+        let sw_meta = _SWATCHES[s["index"]]
+        linear_gradient(fb, s["x"], s["y"], s["w"], s["h"] - 18, [
+            {"t": 0.0, "color": sw_meta["a"]},
+            {"t": 1.0, "color": sw_meta["b"]}
         ], "h")
-        if c == 0 {
-            rounded_rect(fb, cx + cwid - 20, cy + 4, 14, 14, 7, 0xFF05060A)
-            fill_rect(fb, cx + cwid - 15, cy + 10, 3, 3, t["accent"])
+        if prefs["theme"] == sw_meta["id"] {
+            rounded_rect(fb, s["x"] + s["w"] - 20, s["y"] + 4, 14, 14, 7, 0xFF05060A)
+            fill_rect(fb, s["x"] + s["w"] - 15, s["y"] + 10, 3, 3, t["accent"])
         }
-        draw_atlas_text(fb, cx + 2, cy + chh - 14, _THEME_SWATCHES[c]["name"], atlas, t["foreground"], {"size": 13})
-        c = c + 1
+        draw_atlas_text(fb, s["x"] + 2, s["y"] + s["h"] - 14, sw_meta["name"], atlas, t["foreground"], {"size": 13})
     }
 
-    -- toggle rows
-    mut ty = y + 60 + chh + 20
-    for tg in _TOGGLES {
-        if ty + 30 > y + h { break }
-        draw_atlas_text(fb, mx, ty + 3, tg["label"], atlas, t["foreground"], {"size": 15})
-        _toggle(fb, mx + mw - 40, ty, t, tg["on"])
-        fill_rect(fb, mx, ty + 30, mw, 1, t["border"])
-        ty = ty + 40
+    for tg in L["toggles"] {
+        if tg["y"] + 30 > y + h { break }
+        draw_atlas_text(fb, mx, tg["y"] + 3, _TOGGLE_LABELS[tg["index"]], atlas, t["foreground"], {"size": 15})
+        _toggle(fb, mx + mw - 40, tg["y"], t, prefs[_TOGGLE_KEYS[tg["index"]]])
+        fill_rect(fb, mx, tg["y"] + 30, mw, 1, t["border"])
     }
+}
+
+-- Registry/fallback wrapper: renders with default prefs.
+fn paint_settings_content(fb, x, y, w, h, theme, focused) {
+    paint_settings(fb, x, y, w, h, theme, new_prefs())
 }
 
 -- ── Calculator ──────────────────────────────────────────
 
+-- ASCII operator labels — the atlas font only covers ASCII 32-126, so
+-- ÷ × − ± would render as blank keys. / * - read clearly and are the same
+-- symbols a keyboard sends anyway.
 let _CALC_KEYS = [
-    ["C", "±", "%", "÷"],
-    ["7", "8", "9", "×"],
-    ["4", "5", "6", "−"],
+    ["C", "+/-", "%", "/"],
+    ["7", "8", "9", "*"],
+    ["4", "5", "6", "-"],
     ["1", "2", "3", "+"],
     ["0", ".", "="]
 ]
 
 fn _is_op(k) {
-    return k == "÷" or k == "×" or k == "−" or k == "+" or k == "="
+    return k == "/" or k == "*" or k == "-" or k == "+" or k == "="
 }
 fn _is_fn(k) {
-    return k == "C" or k == "±" or k == "%"
+    return k == "C" or k == "+/-" or k == "%"
 }
 
-fn paint_calc_content(fb, x, y, w, h, theme, focused) {
-    let t = theme
-    let atlas = shared_atlas()
-    fill_rect(fb, x, y, w, h, 0xFF0B0E16)
+-- ── Calculator state machine ────────────────────────────
+
+fn new_calc() {
+    return {"display": "0", "expr": "", "acc": 0.0, "op": "", "fresh": true}
+}
+
+fn _calc_num(s) {
+    if s == "Error" or s == "" or s == "." { return 0.0 }
+    return float(s)
+}
+
+fn _calc_fmt(n) {
+    if n == int(n) and abs(n) < 1000000000000.0 { return str(int(n)) }
+    return str(n)
+}
+
+fn _calc_compute(a, op, b) {
+    if op == "+" { return a + b }
+    if op == "-" { return a - b }
+    if op == "*" { return a * b }
+    if op == "/" { if b == 0.0 { return 0.0 } return a / b }
+    return b
+}
+
+-- Apply a keypress to the calculator state (mutates and returns it).
+fn calc_press(s, key) {
+    if key == "C" {
+        s["display"] = "0"; s["expr"] = ""; s["acc"] = 0.0; s["op"] = ""; s["fresh"] = true
+        return s
+    }
+    if key == "+/-" { s["display"] = _calc_fmt(0.0 - _calc_num(s["display"])); return s }
+    if key == "%" { s["display"] = _calc_fmt(_calc_num(s["display"]) / 100.0); return s }
+    if key == "." {
+        if s["fresh"] { s["display"] = "0."; s["fresh"] = false }
+        elif not contains(s["display"], ".") { s["display"] = s["display"] + "." }
+        return s
+    }
+    if _is_op(key) and key != "=" {
+        if s["op"] != "" and not s["fresh"] {
+            let r = _calc_compute(s["acc"], s["op"], _calc_num(s["display"]))
+            s["acc"] = r; s["display"] = _calc_fmt(r)
+        } else {
+            s["acc"] = _calc_num(s["display"])
+        }
+        s["op"] = key; s["fresh"] = true
+        s["expr"] = _calc_fmt(s["acc"]) + " " + key
+        return s
+    }
+    if key == "=" {
+        if s["op"] != "" {
+            let r = _calc_compute(s["acc"], s["op"], _calc_num(s["display"]))
+            s["expr"] = _calc_fmt(s["acc"]) + " " + s["op"] + " " + s["display"] + " ="
+            s["display"] = _calc_fmt(r); s["acc"] = r; s["op"] = ""; s["fresh"] = true
+        }
+        return s
+    }
+    -- a digit
+    if s["fresh"] { s["display"] = key; s["fresh"] = false }
+    elif s["display"] == "0" { s["display"] = key }
+    else { s["display"] = s["display"] + key }
+    return s
+}
+
+-- Keypad geometry: the single source of truth shared by paint and the
+-- desktop's hit-test. Returns a list of {"key","x","y","w","h"}.
+fn _calc_layout(x, y, w, h) {
     let pad = 14
-
-    -- display
     let disp_h = 74
-    draw_atlas_text(fb, x + w - pad - measure_atlas_text(atlas, "128 x 8 +", 14, 0)[0], y + 16, "128 x 8 +", atlas, t["foreground_muted"], {"size": 14})
-    let big = "1,024"
-    let bw = measure_atlas_text(atlas, big, 40, 0)[0]
-    draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 0xFFFFFFFF, {"size": 40})
-
-    -- keypad
     let gy = y + disp_h + 6
     let gh = h - disp_h - pad - 6
     let cols = 4
@@ -347,26 +444,62 @@ fn paint_calc_content(fb, x, y, w, h, theme, focused) {
     let gap = 8
     let kw = int((w - pad * 2 - (cols - 1) * gap) / cols)
     let kh = int((gh - (rows - 1) * gap) / rows)
+    mut cells = []
     mut r = 0
     for row in _CALC_KEYS {
         mut c = 0
         for k in row {
-            -- the "0" key spans two columns on the last row
             let span = if k == "0" { 2 } else { 1 }
             let kx = x + pad + c * (kw + gap)
             let ky = gy + r * (kh + gap)
             let kwid = kw * span + (span - 1) * gap
-            mut bgc = t["surface_elevated"]
-            if _is_op(k) { bgc = t["accent"] }
-            elif _is_fn(k) { bgc = t["surface"] }
-            rounded_rect(fb, kx, ky, kwid, kh, 10, bgc)
-            let kcol = if _is_op(k) { 0xFF05060A } else { if _is_fn(k) { t["foreground_muted"] } else { 0xFFFFFFFF } }
-            let lw = measure_atlas_text(atlas, k, 20, 0)[0]
-            draw_atlas_text(fb, kx + int(kwid / 2) - int(lw / 2), ky + int(kh / 2) - 12, k, atlas, kcol, {"size": 20})
+            push(cells, {"key": k, "x": kx, "y": ky, "w": kwid, "h": kh})
             c = c + span
         }
         r = r + 1
     }
+    return cells
+}
+
+-- Which key (if any) is under (px,py) for a calc at (x,y,w,h).
+fn calc_key_at(x, y, w, h, px, py) {
+    for cell in _calc_layout(x, y, w, h) {
+        if px >= cell["x"] and px < cell["x"] + cell["w"] and py >= cell["y"] and py < cell["y"] + cell["h"] {
+            return cell["key"]
+        }
+    }
+    return null
+}
+
+fn paint_calc(fb, x, y, w, h, theme, state) {
+    let t = theme
+    let atlas = shared_atlas()
+    fill_rect(fb, x, y, w, h, 0xFF0B0E16)
+    let pad = 14
+    -- display: pending expression (small) + current value (big, right-aligned)
+    let expr = state["expr"]
+    if len(expr) > 0 {
+        draw_atlas_text(fb, x + w - pad - measure_atlas_text(atlas, expr, 14, 0)[0], y + 16, expr, atlas, t["foreground_muted"], {"size": 14})
+    }
+    let big = state["display"]
+    let bw = measure_atlas_text(atlas, big, 40, 0)[0]
+    draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 0xFFFFFFFF, {"size": 40})
+    -- keypad
+    for cell in _calc_layout(x, y, w, h) {
+        let k = cell["key"]
+        mut bgc = t["surface_elevated"]
+        if _is_op(k) { bgc = t["accent"] }
+        elif _is_fn(k) { bgc = t["surface"] }
+        rounded_rect(fb, cell["x"], cell["y"], cell["w"], cell["h"], 10, bgc)
+        let kcol = if _is_op(k) { 0xFF05060A } else { if _is_fn(k) { t["foreground_muted"] } else { 0xFFFFFFFF } }
+        let lw = measure_atlas_text(atlas, k, 20, 0)[0]
+        draw_atlas_text(fb, cell["x"] + int(cell["w"] / 2) - int(lw / 2), cell["y"] + int(cell["h"] / 2) - 12, k, atlas, kcol, {"size": 20})
+    }
+}
+
+-- Registry/fallback wrapper: a fresh calculator (shows 0).
+fn paint_calc_content(fb, x, y, w, h, theme, focused) {
+    paint_calc(fb, x, y, w, h, theme, new_calc())
 }
 
 -- ── Registry ────────────────────────────────────────────

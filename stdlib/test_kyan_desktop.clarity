@@ -9,6 +9,7 @@ from "kyan_desktop.clarity" import kyan_desktop, KyanDesktop
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 from "mouse.clarity" import MouseEvent
+from "kyan_apps.clarity" import _calc_layout, _settings_layout
 
 mut PASSED = 0
 mut FAILED = 0
@@ -212,6 +213,50 @@ da.tick(1300.0)                                   -- past the animation
 da.compose()                                      -- sweeps the finished animation, clears dirty
 assert(not da._anim_state("files")["active"], "animation cleared once complete")
 assert(not da.needs_redraw(), "settled desktop is idle (no redraw)")
+
+-- ── Calculator: clicking keys computes on the desktop ──
+
+fn _key_center(cells, k) {
+    for cell in cells {
+        if cell["key"] == k { return [cell["x"] + int(cell["w"] / 2), cell["y"] + int(cell["h"] / 2)] }
+    }
+    return null
+}
+
+let dc = kyan_desktop(1000, 640, theme)
+dc.boot(null)
+let cwin = dc.open("calc", 100, 80, 300, 420)
+assert(dc._app_ui["calc"] != null, "opening calc seeds its UI state")
+let ccr = cwin.content_rect()
+let cells = _calc_layout(cwin.x + ccr[0], cwin.y + ccr[1], ccr[2], ccr[3])
+for k in ["7", "*", "8", "="] {
+    let ctr = _key_center(cells, k)
+    dc.handle_mouse(mk_mouse(ctr[0], ctr[1], "press", 1))
+}
+assert_eq(dc._app_ui["calc"]["display"], "56", "clicking 7 * 8 = shows 56 on the desktop")
+-- closing the calc frees its UI state
+dc.close("calc")
+assert(not has(dc._app_ui, "calc"), "closing calc frees its UI state")
+
+-- ── Settings: toggles flip prefs, swatches switch the theme ──
+let ds = kyan_desktop(1000, 640, theme)
+ds.boot(null)
+let swin = ds.open("settings", 60, 50, 640, 400)
+let scr = swin.content_rect()
+let SL = _settings_layout(swin.x + scr[0], swin.y + scr[1], scr[2], scr[3])
+-- click the first toggle (frosted glass) → pref flips
+let tg0 = SL["toggles"][0]
+let was_frosted = ds.prefs["frosted"]
+ds.handle_mouse(mk_mouse(tg0["x"] + int(tg0["w"] / 2), tg0["y"] + int(tg0["h"] / 2), "press", 1))
+assert(ds.prefs["frosted"] != was_frosted, "clicking a toggle flips its preference")
+-- click the Quartz swatch (index 1) → theme switches live
+let sw1 = SL["swatches"][1]
+ds.handle_mouse(mk_mouse(sw1["x"] + int(sw1["w"] / 2), sw1["y"] + int(sw1["h"] / 2), "press", 1))
+assert_eq(ds.prefs["theme"], "quartz", "clicking a swatch sets the active theme id")
+assert(ds.theme["background"] != theme["background"], "the desktop theme actually changed (Quartz ≠ Obsidian)")
+-- animations pref gates the open animation
+ds.prefs["animations"] = false
+assert(not ds._anim_state("prism")["active"], "disabling animations makes windows draw at rest")
 
 -- ── close ────────────────────────────────────────
 
