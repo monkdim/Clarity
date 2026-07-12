@@ -698,10 +698,14 @@ class Interpreter {
 
     fn exec_ForStatement(node, env) {
         let iterable = this.evaluate(node.iterable, env)
+        -- Iterating a map yields its keys (like Python). Integer-indexing a
+        -- map returns null, so without this `for k in someMap` silently
+        -- produced a run of nulls. Lists and strings still index by position.
+        let items = if cl_type_name(iterable) == "map" { keys(iterable) } else { iterable }
         mut result = null
         mut i = 0
-        while i < len(iterable) {
-            let item = iterable[i]
+        while i < len(items) {
+            let item = items[i]
             let loop_env = Environment(env)
             loop_env.set(node.variable, item, true)
             try {

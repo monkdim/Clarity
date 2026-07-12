@@ -164,6 +164,20 @@ assert_output("continue in loop",
     "mut s = 0\nfor x in [1, 2, 3, 4, 5] { if x % 2 == 0 { continue }\ns += x }\nshow s",
     ["9"])
 
+-- Iterating a map yields its keys (regression: used to yield a run of
+-- nulls because the loop integer-indexed the dict, and dict[0] is null).
+assert_output("for over a map yields its keys",
+    "let m = {\"a\": 1, \"b\": 2, \"c\": 3}\nmut out = []\nfor k in m { push(out, k) }\nshow out",
+    ["[\"a\", \"b\", \"c\"]"])
+
+assert_output("for over a map can look up each value",
+    "let m = {\"x\": 10, \"y\": 20}\nmut total = 0\nfor k in m { total += m[k] }\nshow total",
+    ["30"])
+
+assert_output("for over an empty map runs zero times",
+    "mut n = 0\nfor k in {} { n += 1 }\nshow n",
+    ["0"])
+
 -- ── Lists ────────────────────────────────────────────────
 show ""
 show "── Lists ──"
