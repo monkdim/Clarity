@@ -18,7 +18,7 @@ Clarity is what Python wishes it could be. It reads like English, runs like Java
 
 - **Readable by default.** Immutable variables, named arguments, pattern matching, `|>` pipes that make data flow visible at a glance, `show "Hello {name}"` interpolation, `--` line comments. No semicolons, no type-juggling ceremony, no clever-but-cryptic operators.
 - **Powerful where it counts.** Classes with inheritance and interfaces, async / await, generators, decorators, comprehensions, destructuring, null coalescing, optional chaining, pattern matching. Everything modern languages give you, with none of the noise.
-- **Self-hosted, end to end.** The lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, language server, and shell are all written in Clarity. You can read every byte of the toolchain in the same syntax you use to ship apps. **~430 tests, all in Clarity**, run in CI.
+- **Self-hosted, end to end.** The lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, language server, and shell are all written in Clarity. You can read every byte of the toolchain in the same syntax you use to ship apps. **~2,750 assertions across 50 test files, all in Clarity**, run in CI.
 - **Ships as a single binary.** Clarity transpiles to JavaScript, Bun compiles the bundle to a native executable for macOS, Linux, and Windows (x64 + ARM64). No runtime to install, no virtual environment to activate, no Python on the target machine. `clarity run hello.clarity` and you're done.
 - **Batteries included.** `clarity debug`, `clarity profile`, `clarity fmt`, `clarity lint`, `clarity test`, `clarity doc`, `clarity lsp`, `clarity install <pkg>`. The whole developer experience is one command away from the moment you install.
 
@@ -49,8 +49,8 @@ That's the bet: **a programming language good enough to write its own operating 
 | | Clarity | KyanOS |
 |---|---|---|
 | **Status** | v1.0.0 — self-hosted, single binary, runs today | Experimental — kernel + full userspace written; reliable boot-to-desktop still in progress, not yet CI-verified |
-| **Lines of code** | ~53,000 lines of Clarity total — toolchain, stdlib, and OS userspace all live in `stdlib/` | plus a ~4,500-line Zig micro-kernel and a ~3,000-line Python bootstrap transpiler |
-| **Tests** | ~430 tests in Clarity (~2,700 assertions), run in CI via `clarity test stdlib/` | included in the suite above |
+| **Lines of code** | ~58,000 lines of Clarity total — toolchain, stdlib, and OS userspace all live in `stdlib/` | plus a ~3,600-line Zig micro-kernel and a ~3,100-line Python bootstrap transpiler |
+| **Tests** | ~2,750 assertions across 50 test files in Clarity, run in CI via `clarity test stdlib/` | included in the suite above |
 | **Boot time** | — | target: under 5 s to desktop (goal, not yet verified) |
 | **Frame rate** | — | target: 60 fps with frame-time tracking (goal) |
 | **Idle RAM** | — | target: under 256 MB (goal) |
@@ -127,7 +127,7 @@ Marketing lockup — the gem-cut monogram with its signature-lit edge, and the w
 
 ## What's inside
 
-Clarity ships a self-hosted lexer, parser, AST, tree-walking interpreter, stack-based bytecode VM (58 opcodes), CLI dispatcher, REPL, shell, formatter, linter, type checker, debugger, profiler, doc generator, package manager + TOML parser, package registry server, language server (JSON-RPC 2.0), Clarity-to-JavaScript transpiler, build pipeline, installer, and a runtime spec that auto-generates the JS shim. Everything in `stdlib/`. Everything readable.
+Clarity ships a self-hosted lexer, parser, AST, tree-walking interpreter, stack-based bytecode VM (56 opcodes), CLI dispatcher, REPL, shell, formatter, linter, type checker, debugger, profiler, doc generator, package manager + TOML parser, package registry server, language server (JSON-RPC 2.0), Clarity-to-JavaScript transpiler, build pipeline, installer, and a runtime spec that auto-generates the JS shim. Everything in `stdlib/`. Everything readable.
 
 The KyanOS codebase adds a multiboot2 Zig micro-kernel (paging, scheduler, syscalls, fork/exec/wait/kill, page faults, timer, multiboot framebuffer), a freestanding QuickJS-based userspace runtime, init / tmpfs / devfs / procfs, an input pipeline, a compositor, a window manager, a dock, a launcher, a settings panel, a notification centre, a theme protocol with the Kyan identity (Obsidian + Quartz) plus the legacy spring themes, a registry + a picker, procedural mineral / aurora / grid wallpapers, the faceted-K branding kit (gem monogram, signature-lit edge, abstract app-icon marks including the Prism game hub), a void-black boot splash, a perf-profiler with a release gate (boot / frame / memory / launch), crash recovery (journal + watchdog + crash dialog with bug-report flow), a pure-Clarity ISO9660 packer, a macOS QEMU launcher with HVF, an installer, a website generator, a release pipeline, and the eleven default apps (terminal, files, editor, calc, viewer, monitor, browser, mail, chat, store, settings). These are written and in the tree; wiring them into a reliable end-to-end boot is the work that remains.
 

@@ -6,7 +6,7 @@ This document tracks **what's next for the Clarity language and toolchain**. The
 
 ## Where we are (May 2026)
 
-- **v1.0.0 shipped.** 100% self-hosted; the lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, LSP, and shell are all written in Clarity. ~430 tests, all in Clarity.
+- **v1.0.0 shipped.** 100% self-hosted; the lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, LSP, and shell are all written in Clarity. ~2,750 assertions across 50 test files, all in Clarity.
 - **One binary, no runtime.** `clarity` ships as a single Bun-compiled executable for macOS and Linux on x64 and ARM64.
 - **The Python bootstrap is still in `native/`.** It exists to rebuild the binary from source (`python3 native/transpile.py --bundle --compile`); end users never touch it.
 
