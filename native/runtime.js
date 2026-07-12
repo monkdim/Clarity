@@ -235,6 +235,130 @@ export function exec_full(cmd) {
 export function exit(code = 0) { process.exit(code); }
 export function sleep(secs) { execSync(`sleep ${secs}`); }
 export function time() { return Date.now() / 1000; }
+
+// ── PTY: a real pseudo-terminal for the terminal app ─────
+// Spawns a child (a shell) on a pseudo-terminal so the terminal emulator
+// can drive raw-mode programs, not just line-buffered pipes. Uses
+// openpty (libutil) + posix_spawn — posix_spawn never runs JS in the
+// child (unlike forkpty), so the Bun runtime is never left forked.
+// These builtins are NOT in runtime_spec.clarity (they carry module
+// state); runtime.js is the canonical, build-copied runtime.
+let _ptyLib = null;
+function _pty_lib() {
+  if (_ptyLib) return _ptyLib;
+  const plat = process.platform;
+  let cfg;
+  if (plat === 'linux') {
+    cfg = { util: 'libutil.so.1', libc: 'libc.so.6', TIOCSWINSZ: 0x5414, O_NONBLOCK: 0o4000, F_SETFL: 4 };
+  } else if (plat === 'darwin') {
+    cfg = { util: 'libutil.dylib', libc: 'libSystem.dylib', TIOCSWINSZ: 0x80087467, O_NONBLOCK: 0x0004, F_SETFL: 4 };
+  } else {
+    throw new Error('PtyError: pseudo-terminals are not supported on ' + plat);
+  }
+  const util = dlopen(cfg.util, { openpty: { args: ['ptr', 'ptr', 'ptr', 'ptr', 'ptr'], returns: 'int' } });
+  const libc = dlopen(cfg.libc, {
+    posix_spawn: { args: ['ptr', 'cstring', 'ptr', 'ptr', 'ptr', 'ptr'], returns: 'int' },
+    posix_spawn_file_actions_init: { args: ['ptr'], returns: 'int' },
+    posix_spawn_file_actions_adddup2: { args: ['ptr', 'int', 'int'], returns: 'int' },
+    read: { args: ['int', 'ptr', 'u64'], returns: 'i64' },
+    write: { args: ['int', 'ptr', 'u64'], returns: 'i64' },
+    close: { args: ['int'], returns: 'int' },
+    fcntl: { args: ['int', 'int', 'int'], returns: 'int' },
+    ioctl: { args: ['int', 'u64', 'ptr'], returns: 'int' },
+    waitpid: { args: ['int', 'ptr', 'int'], returns: 'int' },
+    kill: { args: ['int', 'int'], returns: 'int' },
+  });
+  _ptyLib = { util, libc, cfg };
+  return _ptyLib;
+}
+
+// PTY support is verified on Linux; macOS constants are wired but gated
+// pending a run on real hardware, so callers can degrade gracefully.
+export function _pty_supported() { return process.platform === 'linux'; }
+
+const _ptySessions = new Map();   // master fd -> { pid, exited, status }
+function _pty_enc(s) { const bb = Buffer.from(String(s), 'utf-8'); const u = new Uint8Array(bb.length + 1); u.set(bb); return u; }
+
+// Spawn `path` (argv a list, cols×rows the window size). Returns
+// { master, pid }. `master` is a non-blocking fd to read/write.
+export function _pty_spawn(path, argv, cols, rows) {
+  const L = _pty_lib();
+  const { util, libc } = L;
+  const mfd = new Int32Array(1), sfd = new Int32Array(1);
+  const ws = new Uint16Array(4); ws[0] = (rows | 0) || 24; ws[1] = (cols | 0) || 80;
+  if (util.symbols.openpty(bunPtr(mfd), bunPtr(sfd), 0, 0, bunPtr(ws)) !== 0) {
+    throw new Error('PtyError: openpty failed');
+  }
+  const master = mfd[0], slave = sfd[0];
+  const fa = new Uint8Array(1024);
+  libc.symbols.posix_spawn_file_actions_init(bunPtr(fa));
+  libc.symbols.posix_spawn_file_actions_adddup2(bunPtr(fa), slave, 0);
+  libc.symbols.posix_spawn_file_actions_adddup2(bunPtr(fa), slave, 1);
+  libc.symbols.posix_spawn_file_actions_adddup2(bunPtr(fa), slave, 2);
+  const args = (argv && argv.length) ? argv : [path];
+  const argBufs = args.map(_pty_enc);
+  const argvArr = new BigUint64Array(argBufs.length + 1);
+  argBufs.forEach((b, i) => { argvArr[i] = BigInt(bunPtr(b)); });
+  const envList = ['TERM=xterm-256color'];
+  for (const k of ['PATH', 'HOME', 'LANG', 'USER', 'SHELL']) if (process.env[k]) envList.push(k + '=' + process.env[k]);
+  const envBufs = envList.map(_pty_enc);
+  const envArr = new BigUint64Array(envBufs.length + 1);
+  envBufs.forEach((b, i) => { envArr[i] = BigInt(bunPtr(b)); });
+  const pathBuf = _pty_enc(path);
+  const pidbuf = new Int32Array(1);
+  const rc = libc.symbols.posix_spawn(bunPtr(pidbuf), bunPtr(pathBuf), bunPtr(fa), 0, bunPtr(argvArr), bunPtr(envArr));
+  libc.symbols.close(slave);
+  if (rc !== 0) { libc.symbols.close(master); throw new Error('PtyError: posix_spawn failed (rc=' + rc + ')'); }
+  libc.symbols.fcntl(master, L.cfg.F_SETFL, L.cfg.O_NONBLOCK);
+  _ptySessions.set(master, { pid: pidbuf[0], exited: false, status: 0 });
+  return { master, pid: pidbuf[0] };
+}
+
+// Read available bytes without blocking. Returns a string of new output,
+// "" if nothing is ready yet, or null once the child has closed the PTY.
+export function _pty_read(master, maxlen) {
+  const L = _pty_lib();
+  const n = Math.max(1, Math.min((maxlen | 0) || 65536, 1 << 20));
+  const buf = new Uint8Array(n);
+  const got = Number(L.libc.symbols.read(master, bunPtr(buf), BigInt(n)));
+  if (got > 0) return Buffer.from(buf.subarray(0, got)).toString('utf-8');
+  if (got === 0) return null;
+  return '';
+}
+
+export function _pty_write(master, text) {
+  const L = _pty_lib();
+  const bb = Buffer.from(String(text), 'utf-8');
+  const u = new Uint8Array(bb.length); u.set(bb);
+  return Number(L.libc.symbols.write(master, bunPtr(u), BigInt(u.length)));
+}
+
+export function _pty_resize(master, cols, rows) {
+  const L = _pty_lib();
+  const ws = new Uint16Array(4); ws[0] = rows | 0; ws[1] = cols | 0;
+  return L.libc.symbols.ioctl(master, BigInt(L.cfg.TIOCSWINSZ), bunPtr(ws));
+}
+
+// Non-blocking reap: returns true while the child runs, false once it has
+// exited (and reaps it so it doesn't linger as a zombie).
+export function _pty_poll(master) {
+  const L = _pty_lib();
+  const s = _ptySessions.get(master);
+  if (!s || s.exited) return false;
+  const st = new Int32Array(1);
+  const r = L.libc.symbols.waitpid(s.pid, bunPtr(st), 1 /* WNOHANG */);
+  if (r === s.pid) { s.exited = true; s.status = st[0]; return false; }
+  return true;
+}
+
+export function _pty_close(master) {
+  const L = _pty_lib();
+  const s = _ptySessions.get(master);
+  if (s && !s.exited) { L.libc.symbols.kill(s.pid, 9); }
+  L.libc.symbols.close(master);
+  _ptySessions.delete(master);
+  return true;
+}
 export function env(name) { return process.env[name] || null; }
 export function args() { return process.argv.slice(2); }
 export function cwd() { return process.cwd(); }

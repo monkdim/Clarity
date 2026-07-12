@@ -708,6 +708,7 @@ def transpile_with_runtime(path):
         '  _ffi_write_f32, _ffi_write_f64,\n'
         '  _ffi_callback, _ffi_callback_close,\n'
         '  _ffi_fill_u32, _ffi_blend_u32, _ffi_box_blur, _ffi_blit_scaled_alpha, _ffi_copy, _ffi_write_buffer, _ffi_read_buffer,\n'
+        '  _pty_supported, _pty_spawn, _pty_read, _pty_write, _pty_resize, _pty_poll, _pty_close,\n'
         '  formatClarityError, clarityMain\n'
         '} from "./runtime.js";\n\n'
     )
@@ -754,7 +755,7 @@ def bundle(compile_native=False):
     stdlib_files = [
         'tokens.clarity', 'lexer.clarity', 'ast_nodes.clarity',
         'parser.clarity', 'interpreter.clarity', 'terminal.clarity',
-        'process.clarity', 'shell.clarity', 'repl.clarity',
+        'process.clarity', 'pty.clarity', 'shell.clarity', 'repl.clarity',
         'package.clarity', 'lsp.clarity', 'bytecode.clarity',
         'runtime.clarity',
         'linter.clarity', 'formatter.clarity', 'type_checker.clarity',
