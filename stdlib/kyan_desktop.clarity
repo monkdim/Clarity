@@ -23,7 +23,7 @@ from "compositor.clarity" import compositor
 from "window.clarity" import window
 from "window_manager.clarity" import window_manager
 from "graphics.clarity" import framebuffer, rgba
-from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
@@ -32,6 +32,7 @@ from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_pa
 from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
 
 let TITLE_H = 32
+let WIN_RADIUS = 12       -- rounded window corners (MacOS-style float)
 let DOCK_ICON = 44
 let DOCK_GAP = 12
 let DOCK_PAD = 12
@@ -295,8 +296,8 @@ class KyanDesktop {
                 this._paint_chrome(win)
                 if app_id != null { this._win_sig[app_id] = sig }
             }
-            drop_shadow(s, win.x, win.y, win.width, win.height, 12, rgba(0, 0, 0, 150), 7)
-            s.blit(win.framebuffer, 0, 0, win.x, win.y, win.width, win.height)
+            drop_shadow(s, win.x, win.y, win.width, win.height, WIN_RADIUS, rgba(0, 0, 0, 150), 7)
+            blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS)
         }
         this._paint_dock(s)
         if this.launcher_open { this._paint_launcher(s) }

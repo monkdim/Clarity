@@ -107,6 +107,7 @@ function char_at(s, i) {
 function char_code(s) {
   return s.charCodeAt(0);
 }
+var sqrt = Math.sqrt;
 function decode64(text) {
   if (typeof atob === "function")
     return decodeURIComponent(escape(atob(text)));
@@ -1202,28 +1203,51 @@ function circle(fb, cx, cy, r, color) {
     dy += 1;
   }
 }
+function _aa_corners(fb, x, y, w, h, r, color) {
+  let base_a = $int(color / 16777216) & 255;
+  let rgb2 = color & 16777215;
+  let quads = [[x, y, x + r, y + r], [x + w - r, y, x + w - r, y + r], [x, y + h - r, x + r, y + h - r], [x + w - r, y + h - r, x + w - r, y + h - r]];
+  for (let q of quads) {
+    let bx = $index(q, 0);
+    let by = $index(q, 1);
+    let ccx = $index(q, 2);
+    let ccy = $index(q, 3);
+    let yy = 0;
+    while (truthy(yy < r)) {
+      let xx = 0;
+      while (truthy(xx < r)) {
+        let px = bx + xx;
+        let py = by + yy;
+        let ex = px + 0.5 - ccx;
+        let ey = py + 0.5 - ccy;
+        let d = sqrt(ex * ex + ey * ey);
+        let cov = r + 0.5 - d;
+        if (truthy(cov > 1)) {
+          cov = 1;
+        }
+        if (truthy(cov > 0)) {
+          let a = $int(base_a * cov);
+          if (truthy(a > 0)) {
+            blend_pixel(fb, px, py, a * 16777216 + rgb2);
+          }
+        }
+        xx = xx + 1;
+      }
+      yy = yy + 1;
+    }
+  }
+}
 function rounded_rect(fb, x, y, w, h, radius, color) {
-  let r = truthy(radius * 2 > w) ? w / 2 : radius;
-  let r2 = truthy(r * 2 > h) ? h / 2 : r;
-  if (truthy(r2 <= 0)) {
+  let r0 = truthy(radius * 2 > w) ? $int(w / 2) : radius;
+  let r = truthy(r0 * 2 > h) ? $int(h / 2) : r0;
+  if (truthy(r <= 0)) {
     fb.fill_rect(x, y, w, h, color);
     return null;
   }
-  fb.fill_rect(x + r2, y, w - 2 * r2, h, color);
-  fb.fill_rect(x, y + r2, r2, h - 2 * r2, color);
-  fb.fill_rect(x + w - r2, y + r2, r2, h - 2 * r2, color);
-  let dy = 0 - r2;
-  while (truthy(dy <= 0)) {
-    let dx = 0;
-    while (truthy((dx + 1) * (dx + 1) + dy * dy <= r2 * r2)) {
-      dx += 1;
-    }
-    let row_top = y + r2 + dy;
-    let row_bot = y + h - 1 - r2 - dy;
-    hline(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color);
-    hline(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color);
-    dy += 1;
-  }
+  fb.fill_rect(x + r, y, w - 2 * r, h, color);
+  fb.fill_rect(x, y + r, r, h - 2 * r, color);
+  fb.fill_rect(x + w - r, y + r, r, h - 2 * r, color);
+  _aa_corners(fb, x, y, w, h, r, color);
 }
 function fill_polygon(fb, points, color) {
   let n = len(points);
@@ -1388,12 +1412,6 @@ function linear_gradient(fb, x, y, w, h, stops, dir) {
     }
   }
 }
-function _hline_blend(fb, x0, y, x1, color) {
-  if (truthy(x1 < x0)) {
-    return null;
-  }
-  fb.blend_rect(x0, y, x1 - x0 + 1, 1, color);
-}
 function rounded_rect_blend(fb, x, y, w, h, radius, color) {
   let sa = $int(color / 16777216) & 255;
   if (truthy($eq(sa, 0))) {
@@ -1403,27 +1421,16 @@ function rounded_rect_blend(fb, x, y, w, h, radius, color) {
     rounded_rect(fb, x, y, w, h, radius, color);
     return null;
   }
-  let r = truthy(radius * 2 > w) ? w / 2 : radius;
-  let r2 = truthy(r * 2 > h) ? h / 2 : r;
-  if (truthy(r2 <= 0)) {
+  let r0 = truthy(radius * 2 > w) ? $int(w / 2) : radius;
+  let r = truthy(r0 * 2 > h) ? $int(h / 2) : r0;
+  if (truthy(r <= 0)) {
     fill_rect_blend(fb, x, y, w, h, color);
     return null;
   }
-  fill_rect_blend(fb, x + r2, y, w - 2 * r2, h, color);
-  fill_rect_blend(fb, x, y + r2, r2, h - 2 * r2, color);
-  fill_rect_blend(fb, x + w - r2, y + r2, r2, h - 2 * r2, color);
-  let dy = 0 - r2;
-  while (truthy(dy <= 0)) {
-    let dx = 0;
-    while (truthy((dx + 1) * (dx + 1) + dy * dy <= r2 * r2)) {
-      dx += 1;
-    }
-    let row_top = y + r2 + dy;
-    let row_bot = y + h - 1 - r2 - dy;
-    _hline_blend(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color);
-    _hline_blend(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color);
-    dy += 1;
-  }
+  fill_rect_blend(fb, x + r, y, w - 2 * r, h, color);
+  fill_rect_blend(fb, x, y + r, r, h - 2 * r, color);
+  fill_rect_blend(fb, x + w - r, y + r, r, h - 2 * r, color);
+  _aa_corners(fb, x, y, w, h, r, color);
 }
 function drop_shadow(fb, x, y, w, h, radius, color, blur) {
   if (truthy(blur <= 0)) {
@@ -1438,6 +1445,49 @@ function drop_shadow(fb, x, y, w, h, radius, color, blur) {
     rounded_rect_blend(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb2);
     i -= 1;
   }
+}
+function _blit_corner(dst, src, ox, oy, box_x, box_y, cx, cy, r) {
+  let yy = 0;
+  while (truthy(yy < r)) {
+    let xx = 0;
+    while (truthy(xx < r)) {
+      let px = box_x + xx;
+      let py = box_y + yy;
+      let ex = px + 0.5 - cx;
+      let ey = py + 0.5 - cy;
+      let d = sqrt(ex * ex + ey * ey);
+      let cov = r + 0.5 - d;
+      if (truthy(cov > 1)) {
+        cov = 1;
+      }
+      if (truthy(cov > 0)) {
+        let sp = src.get_pixel(px - ox, py - oy);
+        if (truthy(cov >= 1)) {
+          dst.put_pixel(px, py, sp);
+        } else {
+          let a = $int(255 * cov);
+          blend_pixel(dst, px, py, a * 16777216 + (sp & 16777215));
+        }
+      }
+      xx = xx + 1;
+    }
+    yy = yy + 1;
+  }
+}
+function blit_rounded(dst, src, dx, dy, w, h, radius) {
+  let r0 = truthy(radius * 2 > w) ? $int(w / 2) : radius;
+  let r = truthy(r0 * 2 > h) ? $int(h / 2) : r0;
+  if (truthy(r <= 0)) {
+    dst.blit(src, 0, 0, dx, dy, w, h);
+    return null;
+  }
+  dst.blit(src, r, 0, dx + r, dy, w - 2 * r, h);
+  dst.blit(src, 0, r, dx, dy + r, r, h - 2 * r);
+  dst.blit(src, w - r, r, dx + w - r, dy + r, r, h - 2 * r);
+  _blit_corner(dst, src, dx, dy, dx, dy, dx + r, dy + r, r);
+  _blit_corner(dst, src, dx, dy, dx + w - r, dy, dx + w - r, dy + r, r);
+  _blit_corner(dst, src, dx, dy, dx, dy + h - r, dx + r, dy + h - r, r);
+  _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r);
 }
 
 // web/build/font.js
@@ -2084,6 +2134,7 @@ function voidrunner_paint(fb, x, y, w, h, theme, s) {
 
 // web/build/kyan_desktop.js
 var TITLE_H = 32;
+var WIN_RADIUS = 12;
 var DOCK_ICON = 44;
 var DOCK_GAP = 12;
 var DOCK_PAD = 12;
@@ -2340,8 +2391,8 @@ class KyanDesktop {
           this._win_sig[app_id] = sig;
         }
       }
-      drop_shadow(s, win.x, win.y, win.width, win.height, 12, rgba(0, 0, 0, 150), 7);
-      s.blit(win.framebuffer, 0, 0, win.x, win.y, win.width, win.height);
+      drop_shadow(s, win.x, win.y, win.width, win.height, WIN_RADIUS, rgba(0, 0, 0, 150), 7);
+      blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS);
     }
     this._paint_dock(s);
     if (truthy(this.launcher_open)) {
