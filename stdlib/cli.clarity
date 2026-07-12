@@ -66,6 +66,7 @@ fn _help() {
     show "  os build              Build the ClarityOS kernel + runtime + ISO"
     show "  os run                Boot ClarityOS in QEMU (HVF on macOS, KVM on Linux)"
     show "  os iso                Build the ISO only (alias for `os build`)"
+    show "  desktop               Launch the KyanOS desktop in a window (SDL2)"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
@@ -919,6 +920,23 @@ fn main() {
     -- OS subcommands (clarity os build / run / iso / install)
     if command == "os" {
         do_os(cli_args)
+        return null
+    }
+
+    -- Launch the KyanOS desktop in a real OS window (SDL2 host)
+    if command == "desktop" {
+        from "kyan_desktop.clarity" import kyan_desktop
+        from "theme_kyan.clarity" import kyan_obsidian
+        from "host.clarity" import host_run, host_supported
+        if not host_supported() {
+            show "KyanOS desktop needs an SDL2 windowing host, unavailable on this platform."
+            return null
+        }
+        let d = kyan_desktop(1280, 800, kyan_obsidian())
+        d.boot(null)
+        d.open("prism", 150, 96, 700, 470)
+        show "Launching KyanOS — close the window to exit."
+        host_run(d, {"title": "KyanOS"})
         return null
     }
 

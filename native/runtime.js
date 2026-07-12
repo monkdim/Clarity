@@ -359,6 +359,127 @@ export function _pty_close(master) {
   _ptySessions.delete(master);
   return true;
 }
+
+// ── Host window: run KyanOS in a real OS window (SDL2) ───
+// Opens a native window, uploads the composed framebuffer to a streaming
+// texture, and turns SDL input into desktop events. The framebuffer is
+// BGRA in memory, which is exactly SDL_PIXELFORMAT_ARGB8888 on a
+// little-endian host — so pixels upload with no conversion. Encapsulated
+// as builtins (like PTY) so the app loop stays in Clarity.
+let _hostState = null;
+function _host_sdl() {
+  if (_hostState && _hostState.S) return _hostState;
+  let name;
+  if (process.platform === 'linux') name = 'libSDL2-2.0.so.0';
+  else if (process.platform === 'darwin') name = 'libSDL2-2.0.dylib';
+  else if (process.platform === 'win32') name = 'SDL2.dll';
+  else throw new Error('HostError: no SDL2 for platform ' + process.platform);
+  const S = dlopen(name, {
+    SDL_Init: { args: ['u32'], returns: 'int' },
+    SDL_Quit: { args: [], returns: 'void' },
+    SDL_GetError: { args: [], returns: 'cstring' },
+    SDL_CreateWindow: { args: ['cstring', 'int', 'int', 'int', 'int', 'u32'], returns: 'ptr' },
+    SDL_CreateRenderer: { args: ['ptr', 'int', 'u32'], returns: 'ptr' },
+    SDL_CreateTexture: { args: ['ptr', 'u32', 'int', 'int', 'int'], returns: 'ptr' },
+    SDL_UpdateTexture: { args: ['ptr', 'ptr', 'ptr', 'int'], returns: 'int' },
+    SDL_RenderClear: { args: ['ptr'], returns: 'int' },
+    SDL_RenderCopy: { args: ['ptr', 'ptr', 'ptr', 'ptr'], returns: 'int' },
+    SDL_RenderPresent: { args: ['ptr'], returns: 'void' },
+    SDL_PollEvent: { args: ['ptr'], returns: 'int' },
+    SDL_StartTextInput: { args: [], returns: 'void' },
+    SDL_GetTicks: { args: [], returns: 'u32' },
+    SDL_Delay: { args: ['u32'], returns: 'void' },
+    SDL_DestroyTexture: { args: ['ptr'], returns: 'void' },
+    SDL_DestroyRenderer: { args: ['ptr'], returns: 'void' },
+    SDL_DestroyWindow: { args: ['ptr'], returns: 'void' },
+  });
+  _hostState = { S, win: null, ren: null, tex: null, w: 0, h: 0, ev: new Uint8Array(64) };
+  return _hostState;
+}
+
+export function _host_supported() {
+  return process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32';
+}
+
+// SDL keycode → the name the desktop/games expect (mirrors browser e.key).
+function _host_key_name(sym) {
+  switch (sym) {
+    case 0x4000004F: return 'ArrowRight';
+    case 0x40000050: return 'ArrowLeft';
+    case 0x40000051: return 'ArrowDown';
+    case 0x40000052: return 'ArrowUp';
+    case 13: return 'Enter';
+    case 27: return 'Escape';
+    case 8: return 'Backspace';
+    case 9: return 'Tab';
+    case 32: return ' ';
+  }
+  if (sym >= 33 && sym <= 126) return String.fromCharCode(sym);
+  return '';
+}
+
+export function _host_open(title, w, h) {
+  const st = _host_sdl();
+  if (st.win) return true;
+  if (st.S.symbols.SDL_Init(0x20 /* VIDEO */) !== 0) throw new Error('HostError: SDL_Init: ' + st.S.symbols.SDL_GetError().toString());
+  const t = _pty_enc(String(title || 'KyanOS'));
+  const CENTERED = 0x2FFF0000;
+  st.win = st.S.symbols.SDL_CreateWindow(bunPtr(t), CENTERED, CENTERED, w | 0, h | 0, 0x4 /* SHOWN */);
+  if (!st.win) throw new Error('HostError: CreateWindow: ' + st.S.symbols.SDL_GetError().toString());
+  st.ren = st.S.symbols.SDL_CreateRenderer(st.win, -1, 0);
+  st.tex = st.S.symbols.SDL_CreateTexture(st.ren, 0x16362004 /* ARGB8888 */, 1 /* STREAMING */, w | 0, h | 0);
+  st.w = w | 0; st.h = h | 0;
+  st.S.symbols.SDL_StartTextInput();
+  return true;
+}
+
+export function _host_present(fbHandle, w, h) {
+  const st = _host_sdl();
+  if (!st.tex || !fbHandle || !fbHandle._buffer) return false;
+  st.S.symbols.SDL_UpdateTexture(st.tex, 0, bunPtr(fbHandle._buffer), (w | 0) * 4);
+  st.S.symbols.SDL_RenderClear(st.ren);
+  st.S.symbols.SDL_RenderCopy(st.ren, st.tex, 0, 0);
+  st.S.symbols.SDL_RenderPresent(st.ren);
+  return true;
+}
+
+// Pop one pending event as a plain object, or null when the queue is empty.
+export function _host_poll() {
+  const st = _host_sdl();
+  const ev = st.ev;
+  if (st.S.symbols.SDL_PollEvent(bunPtr(ev)) === 0) return null;
+  const dv = new DataView(ev.buffer);
+  const type = dv.getUint32(0, true);
+  if (type === 0x100) return { type: 'quit' };
+  if (type === 0x300 || type === 0x301) {
+    const sym = dv.getInt32(20, true);
+    return { type: 'key', down: type === 0x300, name: _host_key_name(sym), sym };
+  }
+  if (type === 0x303) {                                   // SDL_TEXTINPUT
+    let s = ''; let i = 12;
+    while (i < 44 && ev[i] !== 0) { s += String.fromCharCode(ev[i]); i++; }
+    return { type: 'text', text: Buffer.from(s, 'binary').toString('utf-8') };
+  }
+  if (type === 0x400) return { type: 'mouse', kind: 'motion', x: dv.getInt32(20, true), y: dv.getInt32(24, true), button: 0 };
+  if (type === 0x401 || type === 0x402) {
+    return { type: 'mouse', kind: type === 0x401 ? 'down' : 'up', x: dv.getInt32(20, true), y: dv.getInt32(24, true), button: ev[16] };
+  }
+  return { type: 'other', code: type };
+}
+
+export function _host_ticks() { return _host_sdl().S.symbols.SDL_GetTicks(); }
+export function _host_delay(ms) { _host_sdl().S.symbols.SDL_Delay(ms | 0); }
+
+export function _host_close() {
+  const st = _hostState;
+  if (!st || !st.S) return true;
+  if (st.tex) st.S.symbols.SDL_DestroyTexture(st.tex);
+  if (st.ren) st.S.symbols.SDL_DestroyRenderer(st.ren);
+  if (st.win) st.S.symbols.SDL_DestroyWindow(st.win);
+  st.S.symbols.SDL_Quit();
+  _hostState = null;
+  return true;
+}
 export function env(name) { return process.env[name] || null; }
 export function args() { return process.argv.slice(2); }
 export function cwd() { return process.cwd(); }

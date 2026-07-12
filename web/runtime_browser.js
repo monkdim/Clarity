@@ -240,6 +240,15 @@ export function _pty_write() { _pty_unavailable(); }
 export function _pty_resize() { _pty_unavailable(); }
 export function _pty_poll() { return false; }
 export function _pty_close() { return true; }
+
+// ── Host window: not applicable in the browser (the page IS the host) ──
+export function _host_supported() { return false; }
+export function _host_open() { return false; }
+export function _host_present() { return false; }
+export function _host_poll() { return null; }
+export function _host_ticks() { return 0; }
+export function _host_delay() {}
+export function _host_close() { return true; }
 export function time() { return Date.now() / 1000; }
 export function env(name) { return null; }
 export function args() { return []; }
