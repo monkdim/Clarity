@@ -314,6 +314,16 @@ assert_output("filtered comprehension",
     "let evens = [x for x in range(10) if x % 2 == 0]\nshow evens",
     ["[0, 2, 4, 6, 8]"])
 
+-- Comprehensions over a map iterate its keys (used to crash: each() called
+-- .forEach on a dict). Sort the keys so the assertion is order-independent.
+assert_output("list comprehension over a map",
+    "let m = {\"b\": 2, \"a\": 1}\nlet ks = [k for k in m]\nshow sort(ks)",
+    ["[\"a\", \"b\"]"])
+
+assert_output("map comprehension over a map",
+    "let m = {\"a\": 1, \"b\": 2}\nlet doubled = {k: m[k] * 2 for k in m}\nshow doubled[\"a\"] + doubled[\"b\"]",
+    ["6"])
+
 -- ── Higher-order functions ───────────────────────────────
 show ""
 show "── Higher-order Functions ──"

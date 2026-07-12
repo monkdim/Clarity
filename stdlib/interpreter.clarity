@@ -1466,8 +1466,10 @@ class Interpreter {
 
     fn eval_ComprehensionExpression(node, env) {
         let iterable = this.evaluate(node.iterable, env)
+        -- a map comprehends over its keys, like a for-loop does
+        let items = if cl_type_name(iterable) == "map" { keys(iterable) } else { iterable }
         let result = []
-        each(iterable, fn(item) {
+        each(items, fn(item) {
             let comp_env = Environment(env)
             comp_env.set(node.variable, item, true)
             if node.condition != null {
@@ -1482,8 +1484,10 @@ class Interpreter {
 
     fn eval_MapComprehensionExpression(node, env) {
         let iterable = this.evaluate(node.iterable, env)
+        -- a map comprehends over its keys, like a for-loop does
+        let items = if cl_type_name(iterable) == "map" { keys(iterable) } else { iterable }
         let result = {}
-        each(iterable, fn(item) {
+        each(items, fn(item) {
             let comp_env = Environment(env)
             if len(node.variables) == 1 {
                 comp_env.set(node.variables[0], item, true)
