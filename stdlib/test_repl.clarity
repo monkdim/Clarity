@@ -1,0 +1,66 @@
+-- REPL tests — the interactive evaluator core.
+-- The terminal loop can't run headlessly, but repl_eval (the part that
+-- actually runs a parsed line through the session interpreter) is pure
+-- w.r.t. state.interp, so we drive it directly. Regression: the REPL used
+-- to only parse and print "[parsed: N statement(s)]" — it never executed.
+
+from "repl.clarity" import ReplState, repl_eval
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: " + msg + " (expected " + str(expected) + ", got " + str(actual) + ")" }
+}
+
+let st = ReplState()
+fn feed(src) {
+    let tree = parse(tokenize(src, "<repl>"), src)
+    return repl_eval(st, tree)
+}
+
+show "-- REPL: evaluation --"
+
+-- a bare expression evaluates and is echoed
+let r_expr = feed("2 + 3 * 4")
+assert_eq(r_expr["value"], 14, "expression evaluates (2 + 3 * 4 = 14)")
+assert(r_expr["echo"], "a bare expression is echoed")
+
+-- a binding runs but is not echoed
+let r_let = feed("let x = 40")
+assert(not r_let["echo"], "a let binding is not echoed")
+
+-- state accumulates across lines — x is still in scope
+let r_use = feed("x + 2")
+assert_eq(r_use["value"], 42, "bindings persist across lines (x + 2 = 42)")
+
+-- reassigning a mutable, then reading it back
+feed("mut c = 0")
+feed("c = c + 7")
+let r_c = feed("c")
+assert_eq(r_c["value"], 7, "mutable state persists and updates across lines")
+
+-- function definitions persist and are callable on later lines
+feed("fn double(n) { return n * 2 }")
+let r_call = feed("double(x)")
+assert_eq(r_call["value"], 80, "a function defined earlier is callable later")
+assert(r_call["echo"], "a call expression is echoed")
+
+-- show statements run (side effect) and are not echoed as a value
+let r_show = feed("show 99")
+assert(not r_show["echo"], "a show statement is not echoed")
+
+-- a fresh session starts with an empty environment
+let st2 = ReplState()
+fn feed2(src) { return repl_eval(st2, parse(tokenize(src, "<r2>"), src)) }
+let r_fresh = feed2("let only_here = 5\nonly_here")
+assert_eq(r_fresh["value"], 5, "a new ReplState has its own interpreter/env")
+
+show ""
+show "REPL: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " REPL test(s) failed" }

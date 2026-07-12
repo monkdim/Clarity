@@ -9,6 +9,9 @@ from "highlight.clarity" import highlight_line
 from "completer.clarity" import Completer, format_completions, common_prefix
 from "pretty.clarity" import pretty, pretty_show, pretty_json
 from "claude.clarity" import chat, ask_claude, clear_conversation, has_api_key
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
 
 -- ── Constants ───────────────────────────────────────────
 
@@ -30,7 +33,28 @@ class ReplState {
         this.show_highlighted = true
         this.pretty_output = true
         this.claude_mode = false
+        -- One interpreter for the whole session, so bindings from earlier
+        -- lines stay visible on later ones (let x = 5 … then x + 1).
+        this.interp = Interpreter(null, null)
     }
+}
+
+-- Run a parsed line through the session interpreter and decide whether to
+-- echo a result. Pure enough to unit-test without a terminal: it only
+-- touches state.interp. Returns {"value", "echo"} — echo is true when the
+-- trailing statement is a bare expression that produced a value (a real
+-- REPL prints `2 + 3` → 5 but stays quiet for `let`/`show`/`fn`).
+fn repl_eval(state, tree) {
+    mut result = null
+    for stmt in tree.body {
+        result = state.interp.execute(stmt, state.interp.global_env)
+    }
+    mut echo = false
+    if len(tree.body) > 0 and result != null {
+        let last = tree.body[len(tree.body) - 1]
+        if last.node_type == "ExpressionStatement" { echo = true }
+    }
+    return {"value": result, "echo": echo}
 }
 
 -- ── Persistent History ──────────────────────────────────
@@ -473,8 +497,6 @@ fn repl_start() {
         } else {
             -- Execute as Clarity code
             try {
-                from "lexer.clarity" import tokenize
-                from "parser.clarity" import parse
                 let tokens = tokenize(source, "<repl>")
                 let tree = parse(tokens, source)
 
@@ -490,7 +512,14 @@ fn repl_start() {
                     show dim("  └─")
                 }
 
-                show gray("  [parsed: " + str(len(tree.body)) + " statement(s)]")
+                -- Actually run the input through the session interpreter, so
+                -- state accumulates line-to-line. Echo the value of a trailing
+                -- bare expression (like a real REPL); statements that bind or
+                -- print (let / show / fn / …) produce their own output.
+                let result = repl_eval(state, tree)
+                if result["echo"] {
+                    show cyan("  = ") + state.interp._to_display(result["value"])
+                }
             } catch e {
                 show red("  " + str(e))
             }
