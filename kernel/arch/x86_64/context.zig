@@ -22,7 +22,9 @@ pub const Context = extern struct {
 /// resumes wherever `next.rip` points — which for a brand-new
 /// thread is `arch_thread_entry`, and for a previously-running
 /// thread is the instruction right after its own switch_to call.
-pub fn switch_to(prev: *Context, next: *const Context) callconv(.Naked) void {
+pub fn switch_to(_: *Context, _: *const Context) callconv(.Naked) void {
+    // params arrive in %rdi (prev) and %rsi (next) per the SysV ABI and are
+    // used directly by the asm below; Zig sees them as unused, hence `_`.
     asm volatile (
         \\ push %rbp
         \\ push %rbx
@@ -94,7 +96,9 @@ pub const IretFrame = extern struct {
 };
 
 /// Issue iretq using a pre-built frame at the current RSP.
-pub fn enter_userland(rsp_with_iret_frame: u64) callconv(.Naked) noreturn {
+pub fn enter_userland(_: u64) callconv(.Naked) noreturn {
+    // the iret-frame RSP arrives in %rdi (SysV ABI) and is consumed by the
+    // asm; unused from Zig's view, hence `_`.
     asm volatile (
         \\ mov %rdi, %rsp
         \\ swapgs                      // user GS, before iretq

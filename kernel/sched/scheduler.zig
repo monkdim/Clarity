@@ -157,12 +157,12 @@ pub fn spawn_kthread(entry: *const fn () noreturn, name: []const u8, priority: P
 
 pub fn spawn_user(path: []const u8) !*Thread {
     // 1. Read the ELF off the VFS.
-    const image = try vfs.read_file_into_heap(path, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(image);
+    const image = try vfs.read_file_into_heap(path, heap.allocator());
+    defer heap.allocator().free(image);
     // 2. Parse + load.
-    const exe = try elf.parse(image, std.heap.page_allocator);
-    defer elf.release(std.heap.page_allocator, exe);
-    const loaded = try loader.load_into_new_space(exe, image, std.heap.page_allocator);
+    const exe = try elf.parse(image, heap.allocator());
+    defer elf.release(heap.allocator(), exe);
+    const loaded = try loader.load_into_new_space(exe, image, heap.allocator());
 
     // 3. Allocate Process + main Thread.
     const proc = try process_table.gpa.create(process.Process);
@@ -199,7 +199,7 @@ pub fn spawn_user(path: []const u8) !*Thread {
     const user_ss: u16 = 0x23;                  // user data, ring 3
     t.iret_rsp = context.build_iret_frame(t.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, user_rflags, user_cs, user_ss);
 
-    queues[@intFromEnum(.normal)].enqueue(t);
+    queues[@intFromEnum(Priority.normal)].enqueue(t);
     return t;
 }
 
@@ -304,7 +304,7 @@ pub fn fork() !Pid {
     };
     next_tid += 1;
     child.main_thread_tid = t.tid;
-    queues[@intFromEnum(.normal)].enqueue(t);
+    queues[@intFromEnum(Priority.normal)].enqueue(t);
     return child.pid;
 }
 
@@ -314,11 +314,11 @@ pub fn exec(path: []const u8) !void {
     const cur = current orelse return error.NoCurrent;
     const proc = process_table.lookup(cur.pid) orelse return error.NoCurrent;
 
-    const image = try vfs.read_file_into_heap(path, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(image);
-    const exe_obj = try elf.parse(image, std.heap.page_allocator);
-    defer elf.release(std.heap.page_allocator, exe_obj);
-    const loaded = try loader.load_into_new_space(exe_obj, image, std.heap.page_allocator);
+    const image = try vfs.read_file_into_heap(path, heap.allocator());
+    defer heap.allocator().free(image);
+    const exe_obj = try elf.parse(image, heap.allocator());
+    defer elf.release(heap.allocator(), exe_obj);
+    const loaded = try loader.load_into_new_space(exe_obj, image, heap.allocator());
 
     // Tear down the old address space; the new one replaces it.
     proc.address_space = loaded.address_space;
@@ -363,6 +363,6 @@ fn clone_address_space(src: *vmm.AddressSpace) !*vmm.AddressSpace {
     const new_pml4 = pmm.alloc_page() orelse return error.OutOfMemory;
     dst.* = .{ .pml4_phys = new_pml4, .regions = .{} };
     // Region table is shallow-cloned; physical pages copied below.
-    for (src.regions.items) |r| try dst.regions.append(std.heap.page_allocator, r);
+    for (src.regions.items) |r| try dst.regions.append(heap.allocator(), r);
     return dst;
 }

@@ -13,6 +13,7 @@
 //! testable mirror.
 
 const std = @import("std");
+const heap = @import("../mm/heap.zig");
 const vfs = @import("vfs.zig");
 const sched = @import("../sched/scheduler.zig");
 const pmm = @import("../mm/pmm.zig");
@@ -120,7 +121,7 @@ fn op_readdir(_: *vfs.Fs, inode: *vfs.Inode) ![]const vfs.DirEntry {
     var it = sched.process_table.map.iterator();
     while (it.next()) |entry| {
         if (n >= out.entries.len) break;
-        const buf = std.heap.page_allocator.alloc(u8, 16) catch continue;
+        const buf = heap.allocator().alloc(u8, 16) catch continue;
         const written = std.fmt.bufPrint(buf, "{d}", .{entry.key_ptr.*}) catch continue;
         out.entries[n] = .{ .name = written, .inode_num = 3000 + @as(u64, @intCast(entry.key_ptr.*)), .file_type = .directory };
         n += 1;
@@ -153,8 +154,8 @@ fn parse_pid(name: []const u8) ?i32 {
 }
 
 fn alloc_synth_inode(name: []const u8) !*vfs.Inode {
-    const inode = try std.heap.page_allocator.create(vfs.Inode);
-    const synth = try std.heap.page_allocator.create(SyntheticInode);
+    const inode = try heap.allocator().create(vfs.Inode);
+    const synth = try heap.allocator().create(SyntheticInode);
     synth.* = .{ .name = name };
     inode.* = .{
         .num = 2999,
@@ -170,7 +171,7 @@ fn alloc_synth_inode(name: []const u8) !*vfs.Inode {
 }
 
 fn render(name: []const u8) ![]const u8 {
-    const gpa = std.heap.page_allocator;
+    const gpa = heap.allocator();
     if (std.mem.eql(u8, name, "cpuinfo")) return try render_cpuinfo(gpa);
     if (std.mem.eql(u8, name, "meminfo")) return try render_meminfo(gpa);
     if (std.mem.eql(u8, name, "uptime"))  return try render_uptime(gpa);

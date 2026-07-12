@@ -28,3 +28,7 @@ web/build/*.js
 tools/_atlas_*.png
 web/_atlas_*.png
 web/_atlas_*.cjs
+
+# Zig build artifacts (kernel + freestanding runtime)
+.zig-cache/
+zig-out/

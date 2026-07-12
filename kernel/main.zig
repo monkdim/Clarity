@@ -81,8 +81,8 @@ pub export fn kernel_main(boot_info: *const BootInfo) callconv(.C) noreturn {
     //    Clarity runtime executing /init.clarity. Schedule it and
     //    drop into the dispatch loop; we never come back.
     console.println("ClarityOS ready.");
-    sched.spawn_kthread(idle_loop, "[idle]", .idle) catch unreachable;
-    sched.spawn_user("/bin/clarity-init") catch |err| {
+    _ = sched.spawn_kthread(idle_loop, "[idle]", .idle) catch unreachable;
+    _ = sched.spawn_user("/bin/clarity-init") catch |err| {
         console.print("PANIC: spawn /bin/clarity-init: ");
         console.println(@errorName(err));
         hang();
