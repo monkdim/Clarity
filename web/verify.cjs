@@ -42,7 +42,11 @@ const url = 'file://' + path.join(WEB, 'index.html');
   const clickPt = await page.evaluate(() => {
     const c = document.getElementById('screen');
     const r = c.getBoundingClientRect();
-    const dx = 556, dy = 750; // terminal dock icon center in 1280x800 space
+    // Find the terminal dock icon's centre from the live dock layout, so
+    // this stays correct as pinned apps (and the dock width) change.
+    const layout = window.__kyan.desk._dock_layout();
+    let icon = layout.icons.find((ic) => ic.app === 'terminal') || layout.icons[0];
+    const dx = icon.x + icon.size / 2, dy = icon.y + icon.size / 2;
     return { px: r.left + dx * (r.width / c.width), py: r.top + dy * (r.height / c.height) };
   });
   await page.mouse.click(clickPt.px, clickPt.py);

@@ -1740,7 +1740,10 @@ class VM {
             -- Iteration
             elif op == OP_ITER_INIT {
                 let iterable = pop(this.stack)
-                let iter = VMIterator(iterable)
+                -- Iterating a map yields its keys (like Python). Without this
+                -- the iterator integer-indexes the dict and yields nulls.
+                let items = if type(iterable) == "map" { keys(iterable) } else { iterable }
+                let iter = VMIterator(items)
                 push(this.stack, iter)
             }
             elif op == OP_ITER_NEXT {

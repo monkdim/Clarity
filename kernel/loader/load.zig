@@ -13,6 +13,7 @@
 //!      ELF entry with the user stack as the new RSP.
 
 const std = @import("std");
+const heap = @import("../mm/heap.zig");
 const elf = @import("elf.zig");
 const pmm = @import("../mm/pmm.zig");
 const vmm = @import("../mm/vmm.zig");
@@ -89,7 +90,7 @@ fn map_segment(space: *vmm.AddressSpace, seg: elf.Segment, image: []const u8) Lo
     }
 
     // Record the region for the page-fault + brk machinery.
-    space.regions.append(std.heap.page_allocator, .{
+    space.regions.append(heap.allocator(), .{
         .start = start,
         .end = end,
         .flags = if (seg.writable()) vmm.PAGE_WRITE else 0,
@@ -115,7 +116,7 @@ fn alloc_address_space(gpa: std.mem.Allocator) LoadError!*vmm.AddressSpace {
 }
 
 fn destroy_address_space(space: *vmm.AddressSpace, gpa: std.mem.Allocator) void {
-    space.regions.deinit(std.heap.page_allocator);
+    space.regions.deinit(heap.allocator());
     pmm.free_page(space.pml4_phys);
     gpa.destroy(space);
 }

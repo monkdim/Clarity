@@ -232,6 +232,17 @@ fn cl_type_name(value) {
     return t
 }
 
+-- Normalize an iterable into the sequence a loop/comprehension walks: a
+-- map yields its keys, a string yields its characters, everything else
+-- iterates as-is. Shared by the for-loop and both comprehension forms so
+-- they always agree on what "iterating X" means.
+fn _iter_items(iterable) {
+    let t = cl_type_name(iterable)
+    if t == "map" { return keys(iterable) }
+    if t == "string" { return chars(iterable) }
+    return iterable
+}
+
 -- ── Interpreter ──────────────────────────────────────────
 
 class Interpreter {
@@ -698,10 +709,14 @@ class Interpreter {
 
     fn exec_ForStatement(node, env) {
         let iterable = this.evaluate(node.iterable, env)
+        -- Iterating a map yields its keys (like Python); a string yields its
+        -- characters. Integer-indexing a map returns null, so without this
+        -- `for k in someMap` silently produced a run of nulls.
+        let items = _iter_items(iterable)
         mut result = null
         mut i = 0
-        while i < len(iterable) {
-            let item = iterable[i]
+        while i < len(items) {
+            let item = items[i]
             let loop_env = Environment(env)
             loop_env.set(node.variable, item, true)
             try {
@@ -1462,8 +1477,12 @@ class Interpreter {
 
     fn eval_ComprehensionExpression(node, env) {
         let iterable = this.evaluate(node.iterable, env)
+        -- comprehend over the same sequence a for-loop would (map→keys,
+        -- string→chars); each() needs a real list, so this also stops a
+        -- string/map comprehension from crashing on list.forEach.
+        let items = _iter_items(iterable)
         let result = []
-        each(iterable, fn(item) {
+        each(items, fn(item) {
             let comp_env = Environment(env)
             comp_env.set(node.variable, item, true)
             if node.condition != null {
@@ -1478,8 +1497,10 @@ class Interpreter {
 
     fn eval_MapComprehensionExpression(node, env) {
         let iterable = this.evaluate(node.iterable, env)
+        -- same normalization as the list comprehension (map→keys, string→chars)
+        let items = _iter_items(iterable)
         let result = {}
-        each(iterable, fn(item) {
+        each(items, fn(item) {
             let comp_env = Environment(env)
             if len(node.variables) == 1 {
                 comp_env.set(node.variables[0], item, true)

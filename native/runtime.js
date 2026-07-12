@@ -413,6 +413,8 @@ function _host_key_name(sym) {
     case 8: return 'Backspace';
     case 9: return 'Tab';
     case 32: return ' ';
+    case 0x400000E3: return 'Meta';   // Left GUI (Super/Cmd/Win)
+    case 0x400000E7: return 'Meta';   // Right GUI
   }
   if (sym >= 33 && sym <= 126) return String.fromCharCode(sym);
   return '';
@@ -424,7 +426,7 @@ export function _host_open(title, w, h) {
   if (st.S.symbols.SDL_Init(0x20 /* VIDEO */) !== 0) throw new Error('HostError: SDL_Init: ' + st.S.symbols.SDL_GetError().toString());
   const t = _pty_enc(String(title || 'KyanOS'));
   const CENTERED = 0x2FFF0000;
-  st.win = st.S.symbols.SDL_CreateWindow(bunPtr(t), CENTERED, CENTERED, w | 0, h | 0, 0x4 /* SHOWN */);
+  st.win = st.S.symbols.SDL_CreateWindow(bunPtr(t), CENTERED, CENTERED, w | 0, h | 0, 0x4 /* SHOWN */ | 0x20 /* RESIZABLE */);
   if (!st.win) throw new Error('HostError: CreateWindow: ' + st.S.symbols.SDL_GetError().toString());
   st.ren = st.S.symbols.SDL_CreateRenderer(st.win, -1, 0);
   st.tex = st.S.symbols.SDL_CreateTexture(st.ren, 0x16362004 /* ARGB8888 */, 1 /* STREAMING */, w | 0, h | 0);
@@ -435,7 +437,13 @@ export function _host_open(title, w, h) {
 
 export function _host_present(fbHandle, w, h) {
   const st = _host_sdl();
-  if (!st.tex || !fbHandle || !fbHandle._buffer) return false;
+  if (!st.ren || !fbHandle || !fbHandle._buffer) return false;
+  // the framebuffer resized (a live window resize): rebuild the texture
+  if (!st.tex || st.w !== (w | 0) || st.h !== (h | 0)) {
+    if (st.tex) st.S.symbols.SDL_DestroyTexture(st.tex);
+    st.tex = st.S.symbols.SDL_CreateTexture(st.ren, 0x16362004, 1, w | 0, h | 0);
+    st.w = w | 0; st.h = h | 0;
+  }
   st.S.symbols.SDL_UpdateTexture(st.tex, 0, bunPtr(fbHandle._buffer), (w | 0) * 4);
   st.S.symbols.SDL_RenderClear(st.ren);
   st.S.symbols.SDL_RenderCopy(st.ren, st.tex, 0, 0);
@@ -451,6 +459,11 @@ export function _host_poll() {
   const dv = new DataView(ev.buffer);
   const type = dv.getUint32(0, true);
   if (type === 0x100) return { type: 'quit' };
+  if (type === 0x200) {                                   // SDL_WINDOWEVENT
+    const wev = ev[12];
+    if (wev === 5 || wev === 6) return { type: 'resize', w: dv.getInt32(16, true), h: dv.getInt32(20, true) };
+    return { type: 'other', code: 'win' };
+  }
   if (type === 0x300 || type === 0x301) {
     const sym = dv.getInt32(20, true);
     return { type: 'key', down: type === 0x300, name: _host_key_name(sym), sym };

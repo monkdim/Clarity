@@ -108,11 +108,11 @@ pub const Table = struct {
     /// When a process exits, its children get reparented to init
     /// so init can reap them. Linux does the same dance.
     pub fn reparent_children(self: *Table, dying: *Process) !void {
-        const init = self.lookup(self.init_pid) orelse return;
+        const init_proc = self.lookup(self.init_pid) orelse return;
         for (dying.children.items) |child_pid| {
             if (self.lookup(child_pid)) |child| {
                 child.parent_pid = self.init_pid;
-                try init.add_child(child_pid, self.gpa);
+                try init_proc.add_child(child_pid, self.gpa);
             }
         }
         dying.children.clearAndFree(self.gpa);

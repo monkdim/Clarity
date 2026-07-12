@@ -71,7 +71,7 @@ class Profiler {
             try {
                 if stmt.node_type == "FnStatement" {
                     -- Register function but don't profile its definition execution
-                    this.interp.execute_stmt(stmt, this.interp.global_env)
+                    this.interp.execute(stmt, this.interp.global_env)
                     let elapsed = time() - t0
                     this.record_line(line, elapsed)
                     continue
@@ -80,7 +80,7 @@ class Profiler {
 
             -- Execute and time
             try {
-                this.interp.execute_stmt(stmt, this.interp.global_env)
+                this.interp.execute(stmt, this.interp.global_env)
             } catch e {
                 -- Rethrow after recording
                 let elapsed = time() - t0

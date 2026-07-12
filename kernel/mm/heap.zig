@@ -32,6 +32,39 @@ pub fn init() void {
     }
 }
 
+// ── std.mem.Allocator interface over the slab ────────────
+// So the rest of the kernel can hand a real Allocator to ArrayList /
+// AutoHashMap / the loader — using OUR heap, not std.heap.page_allocator
+// (which is mmap-backed and doesn't exist on a freestanding target).
+pub fn allocator() std.mem.Allocator {
+    return .{ .ptr = undefined, .vtable = &vtable };
+}
+
+const vtable = std.mem.Allocator.VTable{
+    .alloc = vt_alloc,
+    .resize = vt_resize,
+    .free = vt_free,
+};
+
+// Pick a slab class big enough for both the length and the alignment, so
+// the class-aligned chunk we return also satisfies the requested align.
+fn need_size(len: usize, log2_align: u8) usize {
+    const alignment = @as(usize, 1) << @as(u6, @intCast(log2_align));
+    return if (alignment > len) alignment else len;
+}
+
+fn vt_alloc(_: *anyopaque, len: usize, log2_align: u8, _: usize) ?[*]u8 {
+    return alloc(need_size(len, log2_align));
+}
+
+fn vt_resize(_: *anyopaque, buf: []u8, _: u8, new_len: usize, _: usize) bool {
+    return new_len <= buf.len;
+}
+
+fn vt_free(_: *anyopaque, buf: []u8, log2_align: u8, _: usize) void {
+    free(buf.ptr, need_size(buf.len, log2_align));
+}
+
 pub fn alloc(size: usize) ?[*]u8 {
     if (size == 0) return null;
     if (size > 4096) {

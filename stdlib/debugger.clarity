@@ -138,7 +138,7 @@ class Debugger {
             }
 
             -- Execute the statement via interpreter
-            this.interp.execute_stmt(stmt, this.interp.global_env)
+            this.interp.execute(stmt, this.interp.global_env)
         }
     }
 
@@ -175,7 +175,7 @@ class Debugger {
                             if last.node_type == "ExpressionStatement" {
                                 val = this.interp.evaluate(last.expression, this.interp.global_env)
                             } else {
-                                val = this.interp.execute_stmt(last, this.interp.global_env)
+                                val = this.interp.execute(last, this.interp.global_env)
                             }
                         } catch e {
                             val = red("<error: " + str(e) + ">")
@@ -332,7 +332,7 @@ class Debugger {
                 if last.node_type == "ExpressionStatement" {
                     val = this.interp.evaluate(last.expression, this.interp.global_env)
                 } else {
-                    val = this.interp.execute_stmt(last, this.interp.global_env)
+                    val = this.interp.execute(last, this.interp.global_env)
                 }
                 show "  = " + this.format_value(val)
             }
@@ -353,7 +353,7 @@ class Debugger {
             let etree = parse(etokens, expr)
             mut result = null
             for stmt in etree.body {
-                result = this.interp.execute_stmt(stmt, this.interp.global_env)
+                result = this.interp.execute(stmt, this.interp.global_env)
             }
             if result != null {
                 show "  = " + this.format_value(result)

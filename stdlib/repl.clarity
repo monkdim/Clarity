@@ -9,6 +9,9 @@ from "highlight.clarity" import highlight_line
 from "completer.clarity" import Completer, format_completions, common_prefix
 from "pretty.clarity" import pretty, pretty_show, pretty_json
 from "claude.clarity" import chat, ask_claude, clear_conversation, has_api_key
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
 
 -- ── Constants ───────────────────────────────────────────
 
@@ -30,13 +33,48 @@ class ReplState {
         this.show_highlighted = true
         this.pretty_output = true
         this.claude_mode = false
+        -- One interpreter for the whole session, so bindings from earlier
+        -- lines stay visible on later ones (let x = 5 … then x + 1).
+        this.interp = Interpreter(null, null)
     }
+}
+
+-- Run a parsed line through the session interpreter and decide whether to
+-- echo a result. Pure enough to unit-test without a terminal: it only
+-- touches state.interp. Returns {"value", "echo"} — echo is true when the
+-- trailing statement is a bare expression that produced a value (a real
+-- REPL prints `2 + 3` → 5 but stays quiet for `let`/`show`/`fn`).
+fn repl_eval(state, tree) {
+    mut result = null
+    for stmt in tree.body {
+        result = state.interp.execute(stmt, state.interp.global_env)
+    }
+    mut echo = false
+    if len(tree.body) > 0 and result != null {
+        let last = tree.body[len(tree.body) - 1]
+        if last.node_type == "ExpressionStatement" { echo = true }
+    }
+    return {"value": result, "echo": echo}
 }
 
 -- ── Persistent History ──────────────────────────────────
 
 fn _history_path() {
     return home_dir() + "/" + HISTORY_FILE
+}
+
+-- Last elements of a list from `start` onward. Clarity has no global
+-- slice() builtin (the earlier code called one that never existed, so
+-- once history passed MAX_HISTORY the trim threw and — inside the
+-- surrounding try/catch — history silently stopped persisting).
+fn _tail(lst, start) {
+    mut result = []
+    mut i = if start < 0 { 0 } else { start }
+    while i < len(lst) {
+        push(result, lst[i])
+        i += 1
+    }
+    return result
 }
 
 fn _load_history() {
@@ -56,7 +94,7 @@ fn _load_history() {
         }
         -- Keep only last MAX_HISTORY entries
         if len(history) > MAX_HISTORY {
-            history = slice(history, len(history) - MAX_HISTORY)
+            history = _tail(history, len(history) - MAX_HISTORY)
         }
         return history
     } catch e {
@@ -71,7 +109,7 @@ fn _save_history(history) {
         -- Keep only last MAX_HISTORY entries
         mut to_save = history
         if len(to_save) > MAX_HISTORY {
-            to_save = slice(to_save, len(to_save) - MAX_HISTORY)
+            to_save = _tail(to_save, len(to_save) - MAX_HISTORY)
         }
         write(path, join(to_save, "\n") + "\n")
     } catch e {
@@ -156,6 +194,9 @@ fn handle_builtin(line, state) {
 
     if trimmed == ".reset" {
         state.completer = Completer()
+        -- actually clear interpreter state, as the help promises: drop every
+        -- binding by starting a fresh session interpreter.
+        state.interp = Interpreter(null, null)
         show yellow("  -- State reset --")
         return true
     }
@@ -473,8 +514,6 @@ fn repl_start() {
         } else {
             -- Execute as Clarity code
             try {
-                from "lexer.clarity" import tokenize
-                from "parser.clarity" import parse
                 let tokens = tokenize(source, "<repl>")
                 let tree = parse(tokens, source)
 
@@ -490,7 +529,14 @@ fn repl_start() {
                     show dim("  └─")
                 }
 
-                show gray("  [parsed: " + str(len(tree.body)) + " statement(s)]")
+                -- Actually run the input through the session interpreter, so
+                -- state accumulates line-to-line. Echo the value of a trailing
+                -- bare expression (like a real REPL); statements that bind or
+                -- print (let / show / fn / …) produce their own output.
+                let result = repl_eval(state, tree)
+                if result["echo"] {
+                    show cyan("  = ") + state.interp._to_display(result["value"])
+                }
             } catch e {
                 show red("  " + str(e))
             }

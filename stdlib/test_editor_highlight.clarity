@@ -1,0 +1,61 @@
+-- Editor syntax highlighting — the editor is now wired to the lexer-based
+-- highlighter (highlight_spans), so code renders token-coloured instead of
+-- one flat foreground. Tests the span classifier and that the editor paints
+-- highlighted content without crashing.
+
+from "highlight.clarity" import highlight_spans
+from "app_editor.clarity" import EditorApp
+from "graphics.clarity" import framebuffer
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(v, m) { if v { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + m } }
+
+-- Is there a non-blank span of the given kind on this line?
+fn has_kind(line, kind) {
+    for sp in highlight_spans(line) {
+        if sp["kind"] == kind and len(trim(sp["text"])) > 0 { return true }
+    }
+    return false
+}
+
+show "-- Editor syntax highlighting --"
+
+-- spans classify the token stream
+assert(has_kind("let x = 42", "declaration") or has_kind("let x = 42", "keyword"), "let is a keyword/declaration")
+assert(has_kind("let x = 42", "number"), "42 is a number")
+assert(has_kind("let x = 42", "operator"), "= is an operator")
+assert(has_kind("let s = \"hi\"", "string"), "string literal is highlighted")
+assert(has_kind("fn go() { return 1 }", "declaration") or has_kind("fn go() { return 1 }", "keyword"), "fn / return are keywords")
+assert(has_kind("-- a comment", "comment"), "line comment is highlighted")
+
+-- spans reconstruct the source line exactly (no dropped/dup characters)
+mut joined = ""
+for sp in highlight_spans("fn f(a, b)  -- sig") { joined = joined + sp["text"] }
+assert(joined == "fn f(a, b)  -- sig", "spans reconstruct the source line")
+
+-- unknown/garbled input degrades gracefully to a single default span
+let g = highlight_spans("@@@###")
+assert(len(g) >= 1, "garbled input still yields spans")
+
+-- the editor paints highlighted content without crashing
+let ed = EditorApp()
+ed.set_bounds(0, 0, 400, 240)
+ed.buffer.load("fn main() {\n    let n = 42   -- answer\n    show n\n}")
+let fb = framebuffer(400, 240)
+ed._paint(fb)
+mut drawn = 0
+mut yy = 0
+while yy < 240 {
+    mut xx = 0
+    while xx < 400 {
+        if (fb.get_pixel(xx, yy) & 0xFFFFFF) != 0 { drawn += 1 }
+        xx += 20
+    }
+    yy += 12
+}
+assert(drawn > 0, "editor renders highlighted content to the framebuffer")
+
+show ""
+show "Editor highlight: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " editor highlight test(s) failed" }

@@ -92,6 +92,41 @@ class Terminal {
     }
     fn jump_to_live() { this._scroll_offset = 0 }
 
+    -- Re-shape the grid to cols×rows, keeping the cells that still fit
+    -- (top-left anchored) and clamping the cursor. Called when the terminal
+    -- window is resized, alongside a PTY SIGWINCH so the shell reflows.
+    fn resize(cols, rows) {
+        mut nc = cols
+        mut nr = rows
+        if nc < 1 { nc = 1 }
+        if nr < 1 { nr = 1 }
+        if nc == this.cols and nr == this.rows { return null }
+        this._blank_row = []
+        mut i = 0
+        while i < nc { push(this._blank_row, Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false)); i += 1 }
+        mut new_grid = []
+        mut r = 0
+        while r < nr {
+            mut row = []
+            mut c = 0
+            while c < nc {
+                if r < this.rows and c < this.cols {
+                    push(row, this._grid[r][c])
+                } else {
+                    push(row, Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false))
+                }
+                c += 1
+            }
+            push(new_grid, row)
+            r += 1
+        }
+        this._grid = new_grid
+        this.cols = nc
+        this.rows = nr
+        if this.cursor_row >= nr { this.cursor_row = nr - 1 }
+        if this.cursor_col >= nc { this.cursor_col = nc - 1 }
+    }
+
     -- ── Parser state machine ────────────────────────
 
     fn _consume(c) {

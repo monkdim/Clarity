@@ -28,6 +28,9 @@ function $int(v) {
   }
   return Math.trunc(Number(v));
 }
+function $float(v) {
+  return parseFloat(v);
+}
 function str(v) {
   return display(v);
 }
@@ -86,6 +89,9 @@ function keys(obj) {
 function entries(obj) {
   return Object.entries(obj);
 }
+function merge(...objs) {
+  return Object.assign({}, ...objs);
+}
 function has(obj, key) {
   if (Array.isArray(obj))
     return obj.includes(key);
@@ -98,6 +104,9 @@ function split(s, sep = " ") {
 }
 function trim(s) {
   return s.trim();
+}
+function lower(s) {
+  return s.toLowerCase();
 }
 function contains(s, sub) {
   if (Array.isArray(s))
@@ -113,7 +122,13 @@ function char_at(s, i) {
 function char_code(s) {
   return s.charCodeAt(0);
 }
+function substring(s, start, end) {
+  return s.substring(start, end);
+}
 var sqrt = Math.sqrt;
+function abs(n) {
+  return Math.abs(n);
+}
 function sleep(secs) {}
 function _pty_supported() {
   return false;
@@ -834,6 +849,13 @@ class Compositor {
     this.windows = [];
     this._dirty = [];
     this._all_dirty = true;
+  }
+  resize(width, height) {
+    this.width = width;
+    this.height = height;
+    this.screen = framebuffer(width, height);
+    this._all_dirty = true;
+    return true;
   }
   add(window) {
     push(this.windows, window);
@@ -1995,6 +2017,18 @@ var OBS_SHADOW = 1711539728;
 function kyan_obsidian() {
   return _merge(_BASE_SHARED, { ["name"]: "Obsidian", ["id"]: "kyan-obsidian", ["background"]: OBS_VOID, ["surface"]: OBS_SURFACE, ["surface_elevated"]: OBS_RAISED, ["border"]: OBS_HAIRLINE, ["foreground"]: OBS_TEXT, ["foreground_muted"]: OBS_MUTED, ["ink_soft"]: OBS_INK_SOFT, ["primary"]: OBS_ACCENT, ["primary_dark"]: 4279999924, ["accent"]: OBS_ACCENT, ["accent_secondary"]: KYAN_VIOLET, ["accent_tertiary"]: KYAN_INDIGO, ["highlight"]: KYAN_CYAN, ["selection"]: 1076549872, ["danger"]: 4294668677, ["warning"]: 4294688548, ["success"]: 4281652121, ["focus_ring"]: OBS_ACCENT, ["disabled"]: 4282008150, ["shadow"]: OBS_SHADOW, ["gradient_stops"]: kyan_gradient_stops(), ["scheme"]: "dark", ["font"]: builtin_font() });
 }
+var QTZ_CANVAS = 4294244091;
+var QTZ_SURFACE = 4294967295;
+var QTZ_RAISED = 4294967295;
+var QTZ_HAIRLINE = 4293060594;
+var QTZ_TEXT = 4278980632;
+var QTZ_MUTED = 4284179576;
+var QTZ_INK_SOFT = 4280955458;
+var QTZ_ACCENT = 4278751666;
+var QTZ_SHADOW = 437723199;
+function kyan_quartz() {
+  return _merge(_BASE_SHARED, { ["name"]: "Quartz", ["id"]: "kyan-quartz", ["background"]: QTZ_CANVAS, ["surface"]: QTZ_SURFACE, ["surface_elevated"]: QTZ_RAISED, ["border"]: QTZ_HAIRLINE, ["foreground"]: QTZ_TEXT, ["foreground_muted"]: QTZ_MUTED, ["ink_soft"]: QTZ_INK_SOFT, ["primary"]: QTZ_ACCENT, ["primary_dark"]: 4278610820, ["accent"]: QTZ_ACCENT, ["accent_secondary"]: KYAN_VIOLET, ["accent_tertiary"]: KYAN_INDIGO, ["highlight"]: KYAN_CYAN, ["selection"]: 856199602, ["danger"]: 4292943176, ["warning"]: 4292441862, ["success"]: 4278556265, ["focus_ring"]: QTZ_ACCENT, ["disabled"]: 4291087322, ["shadow"]: QTZ_SHADOW, ["gradient_stops"]: kyan_gradient_stops(), ["scheme"]: "light", ["font"]: builtin_font() });
+}
 
 // web/build/branding_kyan.js
 var _ICON_SS = 3;
@@ -2241,29 +2275,481 @@ function paint_terminal_content(fb, x, y, w, h, theme, focused) {
   }
   fill_rect(fb, x + 12, ly + 2, 8, 13, $index(t, "accent"));
 }
-var _FILE_ROWS = [{ ["name"]: "clarity", ["meta"]: "173 items", ["dir"]: true }, { ["name"]: "kyanos-themes", ["meta"]: "12 items", ["dir"]: true }, { ["name"]: "theme_kyan.clarity", ["meta"]: "8.2 KB", ["dir"]: false }, { ["name"]: "prism_library.clarity", ["meta"]: "14.6 KB", ["dir"]: false }, { ["name"]: "voidrunner.clarity", ["meta"]: "31.0 KB", ["dir"]: false }];
-function paint_files_content(fb, x, y, w, h, theme, focused) {
+function _kyan_fs() {
+  return { ["name"]: "Home", ["dir"]: true, ["children"]: [{ ["name"]: "Projects", ["dir"]: true, ["children"]: [{ ["name"]: "clarity", ["dir"]: true, ["children"]: [{ ["name"]: "stdlib", ["dir"]: true, ["children"]: [{ ["name"]: "kyan_desktop.clarity", ["dir"]: false, ["size"]: "44.3 KB" }, { ["name"]: "kyan_apps.clarity", ["dir"]: false, ["size"]: "31.5 KB" }, { ["name"]: "graphics.clarity", ["dir"]: false, ["size"]: "10.7 KB" }] }, { ["name"]: "README.md", ["dir"]: false, ["size"]: "6.1 KB" }, { ["name"]: "transpile.clarity", ["dir"]: false, ["size"]: "48.2 KB" }, { ["name"]: "interpreter.clarity", ["dir"]: false, ["size"]: "92.7 KB" }] }, { ["name"]: "voidrunner", ["dir"]: true, ["children"]: [{ ["name"]: "sprites", ["dir"]: true, ["children"]: [{ ["name"]: "ship.png", ["dir"]: false, ["size"]: "2.4 KB" }, { ["name"]: "asteroid.png", ["dir"]: false, ["size"]: "5.1 KB" }] }, { ["name"]: "game.clarity", ["dir"]: false, ["size"]: "31.0 KB" }] }] }, { ["name"]: "Documents", ["dir"]: true, ["children"]: [{ ["name"]: "design-notes.md", ["dir"]: false, ["size"]: "12.4 KB" }, { ["name"]: "roadmap.md", ["dir"]: false, ["size"]: "4.8 KB" }] }, { ["name"]: "Pictures", ["dir"]: true, ["children"]: [{ ["name"]: "wallpaper-obsidian.png", ["dir"]: false, ["size"]: "1.2 MB" }, { ["name"]: "wallpaper-quartz.png", ["dir"]: false, ["size"]: "1.1 MB" }] }, { ["name"]: "Music", ["dir"]: true, ["children"]: [{ ["name"]: "synthwave.flac", ["dir"]: false, ["size"]: "38.2 MB" }] }, { ["name"]: "theme_kyan.clarity", ["dir"]: false, ["size"]: "8.2 KB" }, { ["name"]: "notes.txt", ["dir"]: false, ["size"]: "1.1 KB" }] };
+}
+function new_files() {
+  return { ["path"]: [] };
+}
+function _fs_child(dir, name) {
+  for (let c of $index(dir, "children")) {
+    if (truthy($eq($index(c, "name"), name))) {
+      return c;
+    }
+  }
+  return null;
+}
+function _files_dir(state) {
+  let node = _kyan_fs();
+  for (let name of $index(state, "path")) {
+    let nxt = _fs_child(node, name);
+    if (truthy($eq(nxt, null) || !truthy($index(nxt, "dir")))) {
+      return node;
+    }
+    node = nxt;
+  }
+  return node;
+}
+function _files_sorted(dir) {
+  let out = [];
+  for (let c of $index(dir, "children")) {
+    if (truthy($index(c, "dir"))) {
+      push(out, c);
+    }
+  }
+  for (let c of $index(dir, "children")) {
+    if (truthy(!truthy($index(c, "dir")))) {
+      push(out, c);
+    }
+  }
+  return out;
+}
+function _entry_meta(e2) {
+  if (truthy($index(e2, "dir"))) {
+    return str(len($index(e2, "children"))) + " items";
+  }
+  return $index(e2, "size");
+}
+function files_nav(state, name) {
+  let dir = _files_dir(state);
+  let child = _fs_child(dir, name);
+  if (truthy($ne(child, null) && $index(child, "dir"))) {
+    push($index(state, "path"), name);
+  }
+  return state;
+}
+function files_goto(state, idx) {
+  let np = [];
+  let i = 0;
+  while (truthy(i < idx && i < len($index(state, "path")))) {
+    push(np, $index($index(state, "path"), i));
+    i = i + 1;
+  }
+  state["path"] = np;
+  return state;
+}
+function _files_crumbs(state) {
+  let out = ["Home"];
+  for (let name of $index(state, "path")) {
+    push(out, name);
+  }
+  return out;
+}
+var _FILES_ROW_H = 26;
+var _FILES_HEAD_H = 34;
+function _files_layout(state, x, y, w, h) {
+  let atlas = shared_atlas();
+  let crumbs = [];
+  let cx = x + 14;
+  let cy = y + 10;
+  let labels = _files_crumbs(state);
+  let i = 0;
+  for (let label of labels) {
+    let cw = $index(measure_atlas_text(atlas, label, 13, 0), 0);
+    push(crumbs, { ["label"]: label, ["index"]: i, ["x"]: cx, ["y"]: cy, ["w"]: cw, ["h"]: 16 });
+    cx = cx + cw + 16;
+    i = i + 1;
+  }
+  let rows = [];
+  let ry = y + _FILES_HEAD_H + 6;
+  for (let e2 of _files_sorted(_files_dir(state))) {
+    push(rows, { ["name"]: $index(e2, "name"), ["dir"]: $index(e2, "dir"), ["meta"]: _entry_meta(e2), ["x"]: x + 6, ["y"]: ry, ["w"]: w - 12, ["h"]: _FILES_ROW_H - 2 });
+    ry = ry + _FILES_ROW_H;
+  }
+  return { ["crumbs"]: crumbs, ["rows"]: rows };
+}
+function files_hit(state, x, y, w, h, px, py) {
+  let lay = _files_layout(state, x, y, w, h);
+  for (let c of $index(lay, "crumbs")) {
+    if (truthy(px >= $index(c, "x") - 4 && px <= $index(c, "x") + $index(c, "w") + 4 && py >= $index(c, "y") - 4 && py <= $index(c, "y") + $index(c, "h") + 4)) {
+      return { ["kind"]: "crumb", ["index"]: $index(c, "index") };
+    }
+  }
+  for (let r of $index(lay, "rows")) {
+    if (truthy(px >= $index(r, "x") && px <= $index(r, "x") + $index(r, "w") && py >= $index(r, "y") && py <= $index(r, "y") + $index(r, "h"))) {
+      return { ["kind"]: "row", ["name"]: $index(r, "name"), ["dir"]: $index(r, "dir") };
+    }
+  }
+  return null;
+}
+function files_click(state, x, y, w, h, px, py) {
+  let hit = files_hit(state, x, y, w, h, px, py);
+  if (truthy($eq(hit, null))) {
+    return false;
+  }
+  if (truthy($eq($index(hit, "kind"), "crumb"))) {
+    let before = len($index(state, "path"));
+    files_goto(state, $index(hit, "index"));
+    return $ne(len($index(state, "path")), before);
+  }
+  if (truthy($eq($index(hit, "kind"), "row") && $index(hit, "dir"))) {
+    files_nav(state, $index(hit, "name"));
+    return true;
+  }
+  return false;
+}
+function paint_files(fb, x, y, w, h, theme, state) {
   let t = theme;
   let atlas = shared_atlas();
   fill_rect(fb, x, y, w, h, $index(t, "surface"));
-  let ry = y + 10;
-  let i = 0;
-  for (let row of _FILE_ROWS) {
-    if (truthy($eq(i, 1))) {
-      fill_rect(fb, x + 6, ry - 3, w - 12, 24, $index(t, "accent_tertiary"));
+  let lay = _files_layout(state, x, y, w, h);
+  fill_rect(fb, x, y, w, _FILES_HEAD_H, $index(t, "surface_elevated"));
+  fill_rect(fb, x, y + _FILES_HEAD_H - 1, w, 1, $index(t, "border"));
+  let last = len($index(lay, "crumbs")) - 1;
+  let ci = 0;
+  for (let c of $index(lay, "crumbs")) {
+    let col = truthy($eq(ci, last)) ? $index(t, "foreground") : $index(t, "accent");
+    draw_atlas_text(fb, $index(c, "x"), $index(c, "y"), $index(c, "label"), atlas, col, { ["size"]: 13 });
+    if (truthy($ne(ci, last))) {
+      draw_atlas_text(fb, $index(c, "x") + $index(c, "w") + 5, $index(c, "y"), "/", atlas, $index(t, "foreground_muted"), { ["size"]: 13 });
     }
-    let ic = truthy($index(row, "dir")) ? $index(t, "accent_secondary") : $index(t, "accent");
-    fill_rect(fb, x + 12, ry + 3, 12, 10, ic);
-    let name_col = truthy($eq(i, 1)) ? 4294967295 : $index(t, "foreground");
-    draw_atlas_text(fb, x + 32, ry, $index(row, "name"), atlas, name_col, { ["size"]: 15 });
-    let mw = $index(measure_atlas_text(atlas, $index(row, "meta"), 14, 0), 0);
-    draw_atlas_text(fb, x + w - mw - 14, ry + 1, $index(row, "meta"), atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
-    ry = ry + 26;
-    i = i + 1;
+    ci = ci + 1;
+  }
+  for (let r of $index(lay, "rows")) {
+    let ic = truthy($index(r, "dir")) ? $index(t, "accent_secondary") : $index(t, "accent");
+    fill_rect(fb, $index(r, "x") + 6, $index(r, "y") + 6, 12, 10, ic);
+    draw_atlas_text(fb, $index(r, "x") + 26, $index(r, "y") + 3, $index(r, "name"), atlas, $index(t, "foreground"), { ["size"]: 15 });
+    let mw = $index(measure_atlas_text(atlas, $index(r, "meta"), 14, 0), 0);
+    draw_atlas_text(fb, x + w - mw - 14, $index(r, "y") + 4, $index(r, "meta"), atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+  }
+  if (truthy($eq(len($index(lay, "rows")), 0))) {
+    draw_atlas_text(fb, x + 20, y + _FILES_HEAD_H + 14, "This folder is empty", atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
   }
 }
+function paint_files_content(fb, x, y, w, h, theme, focused) {
+  paint_files(fb, x, y, w, h, theme, new_files());
+}
+var _CPU_BARS = [0.32, 0.58, 0.24, 0.71, 0.44, 0.63, 0.38, 0.52];
+var _PROCS = [{ ["name"]: "clarity-init", ["cpu"]: "2.4%", ["mem"]: "38 MB" }, { ["name"]: "compositor", ["cpu"]: "6.1%", ["mem"]: "72 MB" }, { ["name"]: "prism", ["cpu"]: "11.7%", ["mem"]: "144 MB" }, { ["name"]: "voidrunner", ["cpu"]: "18.3%", ["mem"]: "96 MB" }, { ["name"]: "terminal", ["cpu"]: "0.9%", ["mem"]: "24 MB" }];
+function _stat_card(fb, x, y, w, h, t, atlas, label, value) {
+  rounded_rect(fb, x, y, w, h, 10, $index(t, "surface_elevated"));
+  fill_rect(fb, x, y, w, 3, $index(t, "accent"));
+  draw_atlas_text(fb, x + 12, y + 10, label, atlas, $index(t, "foreground_muted"), { ["size"]: 12, ["tracking"]: 1 });
+  draw_atlas_text(fb, x + 12, y + 24, value, atlas, 4294967295, { ["size"]: 24 });
+}
+function paint_monitor_content(fb, x, y, w, h, theme, focused) {
+  let t = theme;
+  let atlas = shared_atlas();
+  fill_rect(fb, x, y, w, h, $index(t, "surface"));
+  let pad = 16;
+  let cw = $int((w - pad * 3) / 2);
+  _stat_card(fb, x + pad, y + pad, cw, 58, t, atlas, "CPU LOAD", "47%");
+  _stat_card(fb, x + pad * 2 + cw, y + pad, cw, 58, t, atlas, "MEMORY", "6.2 / 16 GB");
+  let gy = y + pad + 58 + 16;
+  let gh = 74;
+  rounded_rect(fb, x + pad, gy, w - pad * 2, gh, 10, $index(t, "surface_elevated"));
+  draw_atlas_text(fb, x + pad + 12, gy + 8, "CORES", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
+  let bars = len(_CPU_BARS);
+  let inner = w - pad * 2 - 24;
+  let bw = $int(inner / bars) - 6;
+  let base_y = gy + gh - 12;
+  let max_h = gh - 30;
+  let i = 0;
+  while (truthy(i < bars)) {
+    let bx = x + pad + 12 + i * (bw + 6);
+    let bh = $int($index(_CPU_BARS, i) * max_h);
+    fill_rect(fb, bx, gy + 24, bw, max_h, $index(t, "surface"));
+    linear_gradient(fb, bx, base_y - bh, bw, bh, [{ ["t"]: 0, ["color"]: 4280472558 }, { ["t"]: 1, ["color"]: 4286331629 }], "v");
+    i = i + 1;
+  }
+  let py0 = gy + gh + 16;
+  draw_atlas_text(fb, x + pad, py0, "PROCESSES", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
+  let py = py0 + 18;
+  let r = 0;
+  for (let p of _PROCS) {
+    if (truthy(py + 22 > y + h)) {
+      break;
+    }
+    if (truthy($eq(r % 2, 1))) {
+      fill_rect(fb, x + pad, py - 3, w - pad * 2, 22, $index(t, "surface_elevated"));
+    }
+    fill_rect(fb, x + pad + 4, py + 4, 6, 6, $index(t, "accent"));
+    draw_atlas_text(fb, x + pad + 18, py, $index(p, "name"), atlas, $index(t, "foreground"), { ["size"]: 14 });
+    let cpuw = $index(measure_atlas_text(atlas, $index(p, "cpu"), 14, 0), 0);
+    draw_atlas_text(fb, x + w - pad - 90 - cpuw, py, $index(p, "cpu"), atlas, $index(t, "accent"), { ["size"]: 14 });
+    let memw = $index(measure_atlas_text(atlas, $index(p, "mem"), 14, 0), 0);
+    draw_atlas_text(fb, x + w - pad - memw, py, $index(p, "mem"), atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+    py = py + 24;
+    r = r + 1;
+  }
+}
+var _SWATCHES = [{ ["id"]: "obsidian", ["name"]: "Obsidian", ["a"]: 4286331629, ["b"]: 4280472558 }, { ["id"]: "quartz", ["name"]: "Quartz", ["a"]: 4293257215, ["b"]: 4288329471 }, { ["id"]: "meadow", ["name"]: "Meadow", ["a"]: 4281652121, ["b"]: 4279150057 }, { ["id"]: "midnight", ["name"]: "Midnight", ["a"]: 4286680312, ["b"]: 4278915360 }];
+var _TOGGLE_KEYS = ["frosted", "animations", "reduce_motion", "dock_labels"];
+var _TOGGLE_LABELS = ["Frosted glass", "Window animations", "Reduce motion", "Show dock labels"];
+function new_prefs() {
+  return { ["frosted"]: true, ["animations"]: true, ["reduce_motion"]: false, ["dock_labels"]: false, ["theme"]: "obsidian" };
+}
+function _toggle(fb, x, y, t, on) {
+  let tw = 40;
+  let th = 22;
+  let track = truthy(on) ? $index(t, "accent") : $index(t, "border");
+  rounded_rect(fb, x, y, tw, th, 11, track);
+  let knob = truthy(on) ? x + tw - th + 3 : x + 3;
+  rounded_rect(fb, knob, y + 3, th - 6, th - 6, 8, 4294967295);
+}
+function _settings_layout(x, y, w, h) {
+  let sw = 132;
+  let mx = x + sw + 20;
+  let mw = w - sw - 40;
+  let cols = 4;
+  let gap = 12;
+  let cwid = $int((mw - (cols - 1) * gap) / cols);
+  let chh = 58;
+  let cy = y + 60;
+  let swatches = [];
+  let c = 0;
+  while (truthy(c < cols)) {
+    push(swatches, { ["index"]: c, ["x"]: mx + c * (cwid + gap), ["y"]: cy, ["w"]: cwid, ["h"]: chh });
+    c = c + 1;
+  }
+  let toggles = [];
+  let ty = y + 60 + chh + 20;
+  let i = 0;
+  while (truthy(i < len(_TOGGLE_KEYS))) {
+    push(toggles, { ["index"]: i, ["x"]: mx, ["y"]: ty, ["w"]: mw, ["h"]: 30 });
+    ty = ty + 40;
+    i = i + 1;
+  }
+  return { ["sw"]: sw, ["mx"]: mx, ["mw"]: mw, ["swatches"]: swatches, ["toggles"]: toggles };
+}
+function settings_hit(x, y, w, h, px, py) {
+  let L = _settings_layout(x, y, w, h);
+  for (let s of $index(L, "swatches")) {
+    if (truthy(px >= $index(s, "x") && px < $index(s, "x") + $index(s, "w") && py >= $index(s, "y") && py < $index(s, "y") + $index(s, "h"))) {
+      return { ["kind"]: "theme", ["id"]: $index($index(_SWATCHES, $index(s, "index")), "id") };
+    }
+  }
+  for (let tg of $index(L, "toggles")) {
+    if (truthy(px >= $index(tg, "x") && px < $index(tg, "x") + $index(tg, "w") && py >= $index(tg, "y") && py < $index(tg, "y") + $index(tg, "h"))) {
+      return { ["kind"]: "toggle", ["key"]: $index(_TOGGLE_KEYS, $index(tg, "index")) };
+    }
+  }
+  return null;
+}
+function paint_settings(fb, x, y, w, h, theme, prefs) {
+  let t = theme;
+  let atlas = shared_atlas();
+  let L = _settings_layout(x, y, w, h);
+  let sw = $index(L, "sw");
+  fill_rect(fb, x, y, w, h, $index(t, "surface"));
+  fill_rect(fb, x, y, sw, h, $index(t, "surface_elevated"));
+  fill_rect(fb, x + sw - 1, y, 1, h, $index(t, "border"));
+  let items = ["Appearance", "Display", "Network", "Sound", "About"];
+  let sy = y + 16;
+  let i = 0;
+  for (let it of items) {
+    if (truthy($eq(i, 0))) {
+      rounded_rect(fb, x + 10, sy - 3, sw - 20, 24, 6, $index(t, "accent_tertiary"));
+      draw_atlas_text(fb, x + 20, sy, it, atlas, 4294967295, { ["size"]: 14 });
+    } else {
+      draw_atlas_text(fb, x + 20, sy, it, atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+    }
+    sy = sy + 28;
+    i = i + 1;
+  }
+  let mx = $index(L, "mx");
+  let mw = $index(L, "mw");
+  if (truthy(mw < 40)) {
+    return null;
+  }
+  draw_atlas_text(fb, mx, y + 16, "Appearance", atlas, $index(t, "foreground"), { ["size"]: 20 });
+  draw_atlas_text(fb, mx, y + 44, "THEME", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
+  for (let s of $index(L, "swatches")) {
+    let sw_meta = $index(_SWATCHES, $index(s, "index"));
+    linear_gradient(fb, $index(s, "x"), $index(s, "y"), $index(s, "w"), $index(s, "h") - 18, [{ ["t"]: 0, ["color"]: $index(sw_meta, "a") }, { ["t"]: 1, ["color"]: $index(sw_meta, "b") }], "h");
+    if (truthy($eq($index(prefs, "theme"), $index(sw_meta, "id")))) {
+      rounded_rect(fb, $index(s, "x") + $index(s, "w") - 20, $index(s, "y") + 4, 14, 14, 7, 4278519306);
+      fill_rect(fb, $index(s, "x") + $index(s, "w") - 15, $index(s, "y") + 10, 3, 3, $index(t, "accent"));
+    }
+    draw_atlas_text(fb, $index(s, "x") + 2, $index(s, "y") + $index(s, "h") - 14, $index(sw_meta, "name"), atlas, $index(t, "foreground"), { ["size"]: 13 });
+  }
+  for (let tg of $index(L, "toggles")) {
+    if (truthy($index(tg, "y") + 30 > y + h)) {
+      break;
+    }
+    draw_atlas_text(fb, mx, $index(tg, "y") + 3, $index(_TOGGLE_LABELS, $index(tg, "index")), atlas, $index(t, "foreground"), { ["size"]: 15 });
+    _toggle(fb, mx + mw - 40, $index(tg, "y"), t, $index(prefs, $index(_TOGGLE_KEYS, $index(tg, "index"))));
+    fill_rect(fb, mx, $index(tg, "y") + 30, mw, 1, $index(t, "border"));
+  }
+}
+function paint_settings_content(fb, x, y, w, h, theme, focused) {
+  paint_settings(fb, x, y, w, h, theme, new_prefs());
+}
+var _CALC_KEYS = [["C", "+/-", "%", "/"], ["7", "8", "9", "*"], ["4", "5", "6", "-"], ["1", "2", "3", "+"], ["0", ".", "="]];
+function _is_op(k) {
+  return $eq(k, "/") || $eq(k, "*") || $eq(k, "-") || $eq(k, "+") || $eq(k, "=");
+}
+function _is_fn(k) {
+  return $eq(k, "C") || $eq(k, "+/-") || $eq(k, "%");
+}
+function new_calc() {
+  return { ["display"]: "0", ["expr"]: "", ["acc"]: 0, ["op"]: "", ["fresh"]: true };
+}
+function _calc_num(s) {
+  if (truthy($eq(s, "Error") || $eq(s, "") || $eq(s, "."))) {
+    return 0;
+  }
+  return $float(s);
+}
+function _calc_fmt(n) {
+  if (truthy($eq(n, $int(n)) && abs(n) < 1000000000000)) {
+    return str($int(n));
+  }
+  return str(n);
+}
+function _calc_compute(a, op, b) {
+  if (truthy($eq(op, "+"))) {
+    return a + b;
+  }
+  if (truthy($eq(op, "-"))) {
+    return a - b;
+  }
+  if (truthy($eq(op, "*"))) {
+    return a * b;
+  }
+  if (truthy($eq(op, "/"))) {
+    if (truthy($eq(b, 0))) {
+      return 0;
+    }
+    return a / b;
+  }
+  return b;
+}
+function calc_press(s, key) {
+  if (truthy($eq(key, "C"))) {
+    s["display"] = "0";
+    s["expr"] = "";
+    s["acc"] = 0;
+    s["op"] = "";
+    s["fresh"] = true;
+    return s;
+  }
+  if (truthy($eq(key, "+/-"))) {
+    s["display"] = _calc_fmt(0 - _calc_num($index(s, "display")));
+    return s;
+  }
+  if (truthy($eq(key, "%"))) {
+    s["display"] = _calc_fmt(_calc_num($index(s, "display")) / 100);
+    return s;
+  }
+  if (truthy($eq(key, "."))) {
+    if (truthy($index(s, "fresh"))) {
+      s["display"] = "0.";
+      s["fresh"] = false;
+    } else if (truthy(!truthy(contains($index(s, "display"), ".")))) {
+      s["display"] = $index(s, "display") + ".";
+    }
+    return s;
+  }
+  if (truthy(_is_op(key) && $ne(key, "="))) {
+    if (truthy($ne($index(s, "op"), "") && !truthy($index(s, "fresh")))) {
+      let r = _calc_compute($index(s, "acc"), $index(s, "op"), _calc_num($index(s, "display")));
+      s["acc"] = r;
+      s["display"] = _calc_fmt(r);
+    } else {
+      s["acc"] = _calc_num($index(s, "display"));
+    }
+    s["op"] = key;
+    s["fresh"] = true;
+    s["expr"] = _calc_fmt($index(s, "acc")) + " " + key;
+    return s;
+  }
+  if (truthy($eq(key, "="))) {
+    if (truthy($ne($index(s, "op"), ""))) {
+      let r = _calc_compute($index(s, "acc"), $index(s, "op"), _calc_num($index(s, "display")));
+      s["expr"] = _calc_fmt($index(s, "acc")) + " " + $index(s, "op") + " " + $index(s, "display") + " =";
+      s["display"] = _calc_fmt(r);
+      s["acc"] = r;
+      s["op"] = "";
+      s["fresh"] = true;
+    }
+    return s;
+  }
+  if (truthy($index(s, "fresh"))) {
+    s["display"] = key;
+    s["fresh"] = false;
+  } else if (truthy($eq($index(s, "display"), "0"))) {
+    s["display"] = key;
+  } else {
+    s["display"] = $index(s, "display") + key;
+  }
+  return s;
+}
+function _calc_layout(x, y, w, h) {
+  let pad = 14;
+  let disp_h = 74;
+  let gy = y + disp_h + 6;
+  let gh = h - disp_h - pad - 6;
+  let cols = 4;
+  let rows = 5;
+  let gap = 8;
+  let kw = $int((w - pad * 2 - (cols - 1) * gap) / cols);
+  let kh = $int((gh - (rows - 1) * gap) / rows);
+  let cells = [];
+  let r = 0;
+  for (let row of _CALC_KEYS) {
+    let c = 0;
+    for (let k of row) {
+      let span = truthy($eq(k, "0")) ? 2 : 1;
+      let kx = x + pad + c * (kw + gap);
+      let ky = gy + r * (kh + gap);
+      let kwid = kw * span + (span - 1) * gap;
+      push(cells, { ["key"]: k, ["x"]: kx, ["y"]: ky, ["w"]: kwid, ["h"]: kh });
+      c = c + span;
+    }
+    r = r + 1;
+  }
+  return cells;
+}
+function calc_key_at(x, y, w, h, px, py) {
+  for (let cell of _calc_layout(x, y, w, h)) {
+    if (truthy(px >= $index(cell, "x") && px < $index(cell, "x") + $index(cell, "w") && py >= $index(cell, "y") && py < $index(cell, "y") + $index(cell, "h"))) {
+      return $index(cell, "key");
+    }
+  }
+  return null;
+}
+function paint_calc(fb, x, y, w, h, theme, state) {
+  let t = theme;
+  let atlas = shared_atlas();
+  fill_rect(fb, x, y, w, h, 4278914582);
+  let pad = 14;
+  let expr = $index(state, "expr");
+  if (truthy(len(expr) > 0)) {
+    draw_atlas_text(fb, x + w - pad - $index(measure_atlas_text(atlas, expr, 14, 0), 0), y + 16, expr, atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+  }
+  let big = $index(state, "display");
+  let bw = $index(measure_atlas_text(atlas, big, 40, 0), 0);
+  draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 4294967295, { ["size"]: 40 });
+  for (let cell of _calc_layout(x, y, w, h)) {
+    let k = $index(cell, "key");
+    let bgc = $index(t, "surface_elevated");
+    if (truthy(_is_op(k))) {
+      bgc = $index(t, "accent");
+    } else if (truthy(_is_fn(k))) {
+      bgc = $index(t, "surface");
+    }
+    rounded_rect(fb, $index(cell, "x"), $index(cell, "y"), $index(cell, "w"), $index(cell, "h"), 10, bgc);
+    let kcol = truthy(_is_op(k)) ? 4278519306 : truthy(_is_fn(k)) ? $index(t, "foreground_muted") : 4294967295;
+    let lw = $index(measure_atlas_text(atlas, k, 20, 0), 0);
+    draw_atlas_text(fb, $index(cell, "x") + $int($index(cell, "w") / 2) - $int(lw / 2), $index(cell, "y") + $int($index(cell, "h") / 2) - 12, k, atlas, kcol, { ["size"]: 20 });
+  }
+}
+function paint_calc_content(fb, x, y, w, h, theme, focused) {
+  paint_calc(fb, x, y, w, h, theme, new_calc());
+}
 function app_painters() {
-  return { ["prism"]: paint_prism, ["terminal"]: paint_terminal_content, ["files"]: paint_files_content };
+  return { ["prism"]: paint_prism, ["terminal"]: paint_terminal_content, ["files"]: paint_files_content, ["monitor"]: paint_monitor_content, ["settings"]: paint_settings_content, ["calc"]: paint_calc_content };
 }
 
 // web/build/kyan_game.js
@@ -2452,6 +2938,50 @@ class Terminal {
   }
   jump_to_live() {
     this._scroll_offset = 0;
+  }
+  resize(cols, rows) {
+    let nc = cols;
+    let nr = rows;
+    if (truthy(nc < 1)) {
+      nc = 1;
+    }
+    if (truthy(nr < 1)) {
+      nr = 1;
+    }
+    if (truthy($eq(nc, this.cols) && $eq(nr, this.rows))) {
+      return null;
+    }
+    this._blank_row = [];
+    let i = 0;
+    while (truthy(i < nc)) {
+      push(this._blank_row, new Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false));
+      i += 1;
+    }
+    let new_grid = [];
+    let r = 0;
+    while (truthy(r < nr)) {
+      let row = [];
+      let c = 0;
+      while (truthy(c < nc)) {
+        if (truthy(r < this.rows && c < this.cols)) {
+          push(row, $index($index(this._grid, r), c));
+        } else {
+          push(row, new Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false));
+        }
+        c += 1;
+      }
+      push(new_grid, row);
+      r += 1;
+    }
+    this._grid = new_grid;
+    this.cols = nc;
+    this.rows = nr;
+    if (truthy(this.cursor_row >= nr)) {
+      this.cursor_row = nr - 1;
+    }
+    if (truthy(this.cursor_col >= nc)) {
+      this.cursor_col = nc - 1;
+    }
   }
   _consume(c) {
     if (truthy($eq(this._parse_state, "esc"))) {
@@ -2812,7 +3342,7 @@ var DOCK_PAD = 12;
 var DOCK_MARGIN = 16;
 var WIN_ANIM_MS = 220;
 var LAUNCHER_ANIM_MS = 190;
-var DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings"];
+var DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings", "calc"];
 function _ease_out_cubic(t) {
   let u = 1 - t;
   return 1 - u * u * u;
@@ -2849,7 +3379,32 @@ class KyanDesktop {
     this._dirty = true;
     this._anim = {};
     this._launcher_t0 = -1;
+    this._launcher_query = "";
     this._terminals = {};
+    this._app_ui = {};
+    this.prefs = new_prefs();
+  }
+  _theme_for(id) {
+    if (truthy($eq(id, "quartz"))) {
+      return kyan_quartz();
+    }
+    if (truthy($eq(id, "meadow"))) {
+      return merge(kyan_obsidian(), { ["accent"]: 4281652121, ["accent_secondary"]: 4279150057, ["accent_tertiary"]: rgba(52, 211, 153, 40) });
+    }
+    if (truthy($eq(id, "midnight"))) {
+      return merge(kyan_obsidian(), { ["accent"]: 4286680312, ["accent_secondary"]: 4283385573, ["accent_tertiary"]: rgba(129, 140, 248, 40), ["background"]: 4278651412 });
+    }
+    return kyan_obsidian();
+  }
+  set_theme_by_id(id) {
+    this.prefs["theme"] = id;
+    this.theme = this._theme_for(id);
+    this.comp.set_background($index(this.theme, "background"));
+    this._wallpaper = null;
+    this._icon_cache = {};
+    this._win_sig = {};
+    this._dirty = true;
+    return true;
   }
   needs_redraw() {
     if (truthy(this._dirty)) {
@@ -2922,6 +3477,12 @@ class KyanDesktop {
       let rows = $int($index(cr, 3) / 16);
       this._terminals["terminal"] = { ["term"]: Terminal(cols, rows), ["pty"]: pty_spawn_shell(cols, rows), ["dead"]: false };
     }
+    if (truthy($eq(app_id, "calc") && !truthy(has(this._app_ui, "calc")))) {
+      this._app_ui["calc"] = new_calc();
+    }
+    if (truthy($eq(app_id, "files") && !truthy(has(this._app_ui, "files")))) {
+      this._app_ui["files"] = new_files();
+    }
     return win;
   }
   close(app_id) {
@@ -2964,6 +3525,15 @@ class KyanDesktop {
         }
       }
       this._terminals = nt;
+    }
+    if (truthy(has(this._app_ui, app_id))) {
+      let nu = {};
+      for (let kv of entries(this._app_ui)) {
+        if (truthy($ne($index(kv, 0), app_id))) {
+          nu[$index(kv, 0)] = $index(kv, 1);
+        }
+      }
+      this._app_ui = nu;
     }
     return true;
   }
@@ -3009,14 +3579,47 @@ class KyanDesktop {
         app_id = $index(kv, 0);
       }
     }
-    if (truthy($ne(app_id, "prism"))) {
+    if (truthy($eq(app_id, null))) {
       return false;
     }
     let cr = top.content_rect();
-    let r = prism_play_rect(top.x + $index(cr, 0), top.y + $index(cr, 1), $index(cr, 2), $index(cr, 3));
-    if (truthy(this._in(px, py, $index(r, 0), $index(r, 1), $index(r, 2), $index(r, 3)))) {
-      this._activate("voidrunner");
-      return true;
+    let ax = top.x + $index(cr, 0);
+    let ay = top.y + $index(cr, 1);
+    let aw = $index(cr, 2);
+    let ah = $index(cr, 3);
+    if (truthy($eq(app_id, "prism"))) {
+      let r = prism_play_rect(ax, ay, aw, ah);
+      if (truthy(this._in(px, py, $index(r, 0), $index(r, 1), $index(r, 2), $index(r, 3)))) {
+        this._activate("voidrunner");
+        return true;
+      }
+      return false;
+    }
+    if (truthy($eq(app_id, "calc") && has(this._app_ui, "calc"))) {
+      let key = calc_key_at(ax, ay, aw, ah, px, py);
+      if (truthy($ne(key, null))) {
+        calc_press($index(this._app_ui, "calc"), key);
+        this._dirty = true;
+        return true;
+      }
+    }
+    if (truthy($eq(app_id, "settings"))) {
+      let hit = settings_hit(ax, ay, aw, ah, px, py);
+      if (truthy($ne(hit, null))) {
+        if (truthy($eq($index(hit, "kind"), "theme"))) {
+          this.set_theme_by_id($index(hit, "id"));
+        } else {
+          this.prefs[$index(hit, "key")] = !truthy($index(this.prefs, $index(hit, "key")));
+          this._dirty = true;
+        }
+        return true;
+      }
+    }
+    if (truthy($eq(app_id, "files") && has(this._app_ui, "files"))) {
+      if (truthy(files_click($index(this._app_ui, "files"), ax, ay, aw, ah, px, py))) {
+        this._dirty = true;
+        return true;
+      }
     }
     return false;
   }
@@ -3049,7 +3652,18 @@ class KyanDesktop {
       }
     }
     for (let kv of entries(this._terminals)) {
+      let app_id = $index(kv, 0);
       let sess = $index(kv, 1);
+      if (truthy(has(this.windows, app_id))) {
+        let cr = $index(this.windows, app_id).content_rect();
+        let cols = $int($index(cr, 2) / 8);
+        let rows = $int($index(cr, 3) / 16);
+        if (truthy(cols >= 1 && rows >= 1 && ($ne(cols, $index(sess, "term").cols) || $ne(rows, $index(sess, "term").rows)))) {
+          $index(sess, "term").resize(cols, rows);
+          $index(sess, "pty").resize(cols, rows);
+          this._dirty = true;
+        }
+      }
       let out = $index(sess, "pty").read();
       if (truthy($eq(out, null))) {
         sess["dead"] = true;
@@ -3072,10 +3686,78 @@ class KyanDesktop {
   toggle_launcher() {
     this.launcher_open = !truthy(this.launcher_open);
     this._launcher_t0 = -1;
+    this._launcher_query = "";
     this._dirty = true;
     return this.launcher_open;
   }
+  _filtered_apps() {
+    let q = lower(this._launcher_query);
+    if (truthy($eq(len(q), 0))) {
+      return this.pinned;
+    }
+    let out = [];
+    for (let app of this.pinned) {
+      let title = truthy(has(APP_TITLES, app)) ? $index(APP_TITLES, app) : app;
+      if (truthy(contains(lower(title), q) || contains(lower(app), q))) {
+        push(out, app);
+      }
+    }
+    return out;
+  }
+  launcher_type(text) {
+    if (truthy(!truthy(this.launcher_open))) {
+      return false;
+    }
+    this._launcher_query = this._launcher_query + text;
+    this._dirty = true;
+    return true;
+  }
+  launcher_backspace() {
+    if (truthy(!truthy(this.launcher_open))) {
+      return false;
+    }
+    let n = len(this._launcher_query);
+    if (truthy(n > 0)) {
+      this._launcher_query = substring(this._launcher_query, 0, n - 1);
+    }
+    this._dirty = true;
+    return true;
+  }
+  launcher_submit() {
+    if (truthy(!truthy(this.launcher_open))) {
+      return false;
+    }
+    let matches = this._filtered_apps();
+    if (truthy(len(matches) > 0)) {
+      this.launcher_open = false;
+      this._activate($index(matches, 0));
+      return true;
+    }
+    return false;
+  }
+  resize(w, h) {
+    let nw = w;
+    let nh = h;
+    if (truthy(nw < 320)) {
+      nw = 320;
+    }
+    if (truthy(nh < 240)) {
+      nh = 240;
+    }
+    if (truthy($eq(nw, this.width) && $eq(nh, this.height))) {
+      return false;
+    }
+    this.width = nw;
+    this.height = nh;
+    this.comp.resize(nw, nh);
+    this._wallpaper = null;
+    this._dirty = true;
+    return true;
+  }
   _anim_state(app_id) {
+    if (truthy(!truthy($index(this.prefs, "animations")) || $index(this.prefs, "reduce_motion"))) {
+      return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
+    }
     if (truthy($eq(app_id, null) || !truthy(has(this._anim, app_id)) || $eq(this._last_tick, null))) {
       return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
     }
@@ -3168,7 +3850,7 @@ class KyanDesktop {
         continue;
       }
       let app_id = this._app_of(win);
-      let live = $ne(app_id, null) && has(this.app_state, app_id);
+      let live = $ne(app_id, null) && (has(this.app_state, app_id) || has(this._app_ui, app_id) || $eq(app_id, "settings"));
       let sig = str(win.focused) + ":" + str(win.width) + ":" + str(win.height);
       let cached = $ne(app_id, null) && has(this._win_sig, app_id) && $eq($index(this._win_sig, app_id), sig);
       if (truthy(live || !truthy(cached))) {
@@ -3263,6 +3945,18 @@ class KyanDesktop {
       this._render_terminal(fb, cx, cy, cw, ch, $index(this._terminals, "terminal"));
       return null;
     }
+    if (truthy($eq(app_id, "calc") && has(this._app_ui, "calc"))) {
+      paint_calc(fb, cx, cy, cw, ch, t, $index(this._app_ui, "calc"));
+      return null;
+    }
+    if (truthy($eq(app_id, "settings"))) {
+      paint_settings(fb, cx, cy, cw, ch, t, this.prefs);
+      return null;
+    }
+    if (truthy($eq(app_id, "files") && has(this._app_ui, "files"))) {
+      paint_files(fb, cx, cy, cw, ch, t, $index(this._app_ui, "files"));
+      return null;
+    }
     if (truthy($ne(app_id, null) && has(this.painters, app_id))) {
       $index(this.painters, app_id)(fb, cx, cy, cw, ch, t, win.focused);
       return null;
@@ -3320,12 +4014,21 @@ class KyanDesktop {
     let dw = $index(layout, "w");
     let dh = $index(layout, "h");
     drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7);
-    frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6);
+    if (truthy($index(this.prefs, "frosted"))) {
+      frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6);
+    } else {
+      rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 225));
+    }
     for (let ic of $index(layout, "icons")) {
       let bg = fb.get_pixel($index(ic, "x"), $index(ic, "y"));
       fb.blit(this._icon($index(ic, "app"), $index(ic, "size"), bg), 0, 0, $index(ic, "x"), $index(ic, "y"), $index(ic, "size"), $index(ic, "size"));
       if (truthy(has(this.windows, $index(ic, "app")))) {
         fill_rect(fb, $index(ic, "x") + $int($index(ic, "size") / 2) - 2, dy + dh - 5, 4, 4, $index(this.theme, "accent"));
+      }
+      if (truthy($index(this.prefs, "dock_labels"))) {
+        let label = truthy(has(APP_TITLES, $index(ic, "app"))) ? $index(APP_TITLES, $index(ic, "app")) : $index(ic, "app");
+        let lw = $index(measure_atlas_text(this._atlas, label, 11, 0), 0);
+        draw_atlas_text(fb, $index(ic, "x") + $int($index(ic, "size") / 2) - $int(lw / 2), dy + dh + 3, label, this._atlas, $index(this.theme, "foreground_muted"), { ["size"]: 11 });
       }
     }
   }
@@ -3347,21 +4050,38 @@ class KyanDesktop {
     drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8);
     frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7);
     linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h");
-    draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, $index(t, "foreground_muted"), { ["size"]: 18 });
+    if (truthy(len(this._launcher_query) > 0)) {
+      draw_atlas_text(fb, bx + 18, by + 13, this._launcher_query, this._atlas, $index(t, "foreground"), { ["size"]: 18 });
+      let qw = $index(measure_atlas_text(this._atlas, this._launcher_query, 18, 0), 0);
+      fill_rect(fb, bx + 20 + qw, by + 12, 2, 20, $index(t, "accent"));
+    } else {
+      draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, $index(t, "foreground_muted"), { ["size"]: 18 });
+    }
     let layout = this._launcher_layout();
     let cell = $index(layout, "cell");
     let gy = $index(layout, "gy") + off;
+    if (truthy($eq(len($index(layout, "cells")), 0))) {
+      let msg = 'No results for "' + this._launcher_query + '"';
+      let mw = $index(measure_atlas_text(this._atlas, msg, 16, 0), 0);
+      draw_atlas_text(fb, $int(this.width / 2) - $int(mw / 2), gy + 20, msg, this._atlas, $index(t, "foreground_muted"), { ["size"]: 16 });
+    }
+    let idx = 0;
     for (let c of $index(layout, "cells")) {
       let ix = $index(c, "x") + $int((cell - 52) / 2);
       let bg = fb.get_pixel(ix, gy);
+      if (truthy($eq(idx, 0) && len(this._launcher_query) > 0)) {
+        rounded_rect_blend(fb, $index(c, "x") + 6, gy - 6, cell - 12, 76, 12, rgba(124, 58, 237, 60));
+      }
       fb.blit(this._icon($index(c, "app"), 52, bg), 0, 0, ix, gy, 52, 52);
       let label = truthy(has(APP_TITLES, $index(c, "app"))) ? $index(APP_TITLES, $index(c, "app")) : $index(c, "app");
       let lw = $index(measure_atlas_text(this._atlas, label, 14, 0), 0);
       draw_atlas_text(fb, $index(c, "x") + $int((cell - lw) / 2), gy + 58, label, this._atlas, $index(t, "foreground"), { ["size"]: 14 });
+      idx = idx + 1;
     }
   }
   _launcher_layout() {
-    let cols = len(this.pinned);
+    let apps = this._filtered_apps();
+    let cols = len(apps);
     let cell = 84;
     let gw = cols * cell;
     let gx = $int(this.width / 2) - $int(gw / 2);
@@ -3369,7 +4089,7 @@ class KyanDesktop {
     let gy = by + 92;
     let cells = [];
     let cx = gx;
-    for (let app of this.pinned) {
+    for (let app of apps) {
       push(cells, { ["app"]: app, ["x"]: cx, ["y"]: gy - 6, ["w"]: cell, ["h"]: 80 });
       cx = cx + cell;
     }
@@ -3424,6 +4144,15 @@ function openApp(desk, appId, x, y, w, h) {
 function toggleLauncher(desk) {
   return desk.toggle_launcher();
 }
+function launcherType(desk, text) {
+  return desk.launcher_type(text);
+}
+function launcherBackspace(desk) {
+  return desk.launcher_backspace();
+}
+function launcherSubmit(desk) {
+  return desk.launcher_submit();
+}
 function setKey(desk, name, down) {
   desk.set_key(name, !!down);
 }
@@ -3433,7 +4162,7 @@ function tick(desk, nowMs) {
 function needsRedraw(desk) {
   return desk.needs_redraw();
 }
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw, MouseEvent };
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, launcherType, launcherBackspace, launcherSubmit, setKey, tick, needsRedraw, MouseEvent };
 export {
   toggleLauncher,
   tick,
@@ -3441,6 +4170,9 @@ export {
   sendMouse,
   openApp,
   needsRedraw,
+  launcherType,
+  launcherSubmit,
+  launcherBackspace,
   createDesktop,
   composeToBytes,
   MouseEvent

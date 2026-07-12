@@ -45,6 +45,17 @@ export function toggleLauncher(desk) {
   return desk.toggle_launcher();
 }
 
+// Live launcher search: while the launcher is open it owns typed input.
+export function launcherType(desk, text) {
+  return desk.launcher_type(text);
+}
+export function launcherBackspace(desk) {
+  return desk.launcher_backspace();
+}
+export function launcherSubmit(desk) {
+  return desk.launcher_submit();
+}
+
 // Feed key state (browser e.key) so live apps (Voidrunner) can read it.
 export function setKey(desk, name, down) {
   desk.set_key(name, !!down);
@@ -66,4 +77,4 @@ export function needsRedraw(desk) {
 export { MouseEvent };
 
 // Browser global for a single-file (inlined) build.
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw, MouseEvent };
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, launcherType, launcherBackspace, launcherSubmit, setKey, tick, needsRedraw, MouseEvent };

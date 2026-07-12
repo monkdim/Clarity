@@ -6,6 +6,7 @@
 //! the Clarity userspace draw into it via mmap().
 
 const std = @import("std");
+const heap = @import("../mm/heap.zig");
 const multiboot = @import("../boot/multiboot2.zig");
 const vmm = @import("../mm/vmm.zig");
 
@@ -77,7 +78,7 @@ pub fn map_into_user(space: *vmm.AddressSpace, user_virt: u64) !u64 {
         try vmm.map_page(space, virt, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER);
     }
     // Track the mapping as a region so munmap + COW (later) work.
-    try space.regions.append(std.heap.page_allocator, .{
+    try space.regions.append(heap.allocator(), .{
         .start = user_virt,
         .end = user_virt + pages * 0x1000,
         .flags = vmm.PAGE_WRITE,

@@ -97,6 +97,21 @@ assert(contains(dbg.format_value({a: 1}), "a"), "format map contains key")
 let long_list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 assert(len(dbg.format_value(long_list)) > 0, "long list formats")
 
+-- ── eval executes code (regression: execute_stmt → execute) ──
+-- cmd_eval runs code through the interpreter. It called a nonexistent
+-- Interpreter.execute_stmt(), so `eval`, `step`, and `continue` all
+-- died — a debug session couldn't run a single statement. Drive the
+-- interpreter via cmd_eval and confirm the binding really landed.
+
+show "-- Debugger: eval runs code --"
+
+let dbg5 = Debugger(_DBG_SRC)
+dbg5.cmd_eval("let q = 6 * 7")
+assert_eq(dbg5.interp.global_env.get("q", 0), 42, "eval executes: q = 42 lives in the interpreter env")
+-- an expression built on the just-defined binding also runs
+dbg5.cmd_eval("let r = q + 8")
+assert_eq(dbg5.interp.global_env.get("r", 0), 50, "eval chains: r = q + 8 = 50")
+
 -- ── Cleanup ─────────────────────────────────────────────
 
 exec("rm -f " + _DBG_SRC)

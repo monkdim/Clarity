@@ -86,6 +86,10 @@ assert_single("if elif", "let x = 2\nif x == 1 { show \"one\" } elif x == 2 { sh
 assert_single("while loop", "mut i = 0\nmut sum = 0\nwhile i < 5 { sum += i; i += 1 }\nshow sum", "10")
 assert_single("for loop", "mut total = 0\nfor x in [1, 2, 3, 4, 5] { total += x }\nshow total", "15")
 assert_single("for range", "mut s = 0\nfor i in range(5) { s += i }\nshow s", "10")
+-- Iterating a map yields its keys (regression: used to yield nulls because
+-- the VM iterator integer-indexed the dict).
+assert_single("for over a map yields keys", "let m = {\"a\": 1, \"b\": 2}\nmut out = \"\"\nfor k in m { out = out + k }\nshow out", "ab")
+assert_single("for over a map sums values", "let m = {\"x\": 10, \"y\": 20}\nmut t = 0\nfor k in m { t += m[k] }\nshow t", "30")
 
 assert_single("break", "mut i = 0\nwhile true { if i >= 3 { break }; i += 1 }\nshow i", "3")
 assert_single("continue", "mut sum = 0\nfor i in range(6) { if i % 2 == 0 { continue }; sum += i }\nshow sum", "9")
