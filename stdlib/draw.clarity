@@ -534,6 +534,16 @@ fn blit_rounded(dst, src, dx, dy, w, h, radius) {
     _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r)
 }
 
+-- ── Scaled + faded compositing (window animations) ──────
+-- Composite `src` into `dst` scaled to `dw`×`dh` at (dx,dy), source-over
+-- at `alpha` (0-255). Bilinear, native. This is how a window scales up
+-- and fades in on open — the whole thing runs each animation frame.
+fn blit_scaled_alpha(dst, src, dx, dy, dw, dh, alpha) {
+    _ffi_blit_scaled_alpha(dst.buffer._handle, dst.width, dst.height,
+                           src.buffer._handle, src.width, src.height,
+                           int(dx), int(dy), int(dw), int(dh), int(alpha))
+}
+
 -- ── Frosted glass (separable box blur) ──────────────────
 -- A running-sum box blur is O(pixels) regardless of radius. It runs every
 -- frame under the dock and launcher, so the pixel loop is a native builtin

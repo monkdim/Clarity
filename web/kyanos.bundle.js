@@ -429,6 +429,67 @@ function _ffi_box_blur(p, width, height, radius, passes) {
     }
   }
 }
+function _ffi_blit_scaled_alpha(dstP, dstW, dstH, srcP, srcW, srcH, dx, dy, dw, dh, alpha) {
+  if (!dstP || !dstP._buffer || !srcP || !srcP._buffer) {
+    throw new Error("FFIError: blit_scaled_alpha requires runtime-allocated pointers");
+  }
+  const a = alpha | 0;
+  if (a <= 0 || dw <= 0 || dh <= 0)
+    return;
+  const d = dstP._buffer, s = srcP._buffer;
+  const DW = dstW | 0, DH = dstH | 0, SW = srcW | 0, SH = srcH | 0;
+  const x0 = Math.max(0, dx | 0), y0 = Math.max(0, dy | 0);
+  const x1 = Math.min(DW, dx + dw | 0), y1 = Math.min(DH, dy + dh | 0);
+  if (x1 <= x0 || y1 <= y0)
+    return;
+  const ia = 255 - a;
+  for (let y = y0;y < y1; y++) {
+    let fv = (y - dy) / dh * SH;
+    if (fv < 0)
+      fv = 0;
+    let sy = fv | 0;
+    let vy = fv - sy;
+    let sy2 = sy + 1;
+    if (sy2 >= SH) {
+      sy2 = SH - 1;
+    }
+    if (sy >= SH) {
+      sy = SH - 1;
+    }
+    const rowd = y * DW * 4, row0 = sy * SW * 4, row1 = sy2 * SW * 4;
+    for (let x = x0;x < x1; x++) {
+      let fu = (x - dx) / dw * SW;
+      if (fu < 0)
+        fu = 0;
+      let sx = fu | 0;
+      let ux = fu - sx;
+      let sx2 = sx + 1;
+      if (sx2 >= SW) {
+        sx2 = SW - 1;
+      }
+      if (sx >= SW) {
+        sx = SW - 1;
+      }
+      const c0 = row0 + sx * 4, c1 = row0 + sx2 * 4, c2 = row1 + sx * 4, c3 = row1 + sx2 * 4;
+      const w00 = (1 - ux) * (1 - vy), w10 = ux * (1 - vy), w01 = (1 - ux) * vy, w11 = ux * vy;
+      const b = s[c0] * w00 + s[c1] * w10 + s[c2] * w01 + s[c3] * w11 | 0;
+      const g = s[c0 + 1] * w00 + s[c1 + 1] * w10 + s[c2 + 1] * w01 + s[c3 + 1] * w11 | 0;
+      const r = s[c0 + 2] * w00 + s[c1 + 2] * w10 + s[c2 + 2] * w01 + s[c3 + 2] * w11 | 0;
+      const o = rowd + x * 4;
+      if (a === 255) {
+        d[o] = b;
+        d[o + 1] = g;
+        d[o + 2] = r;
+        d[o + 3] = 255;
+      } else {
+        d[o] = (b * a + d[o] * ia) / 255 | 0;
+        d[o + 1] = (g * a + d[o + 1] * ia) / 255 | 0;
+        d[o + 2] = (r * a + d[o + 2] * ia) / 255 | 0;
+        d[o + 3] = 255;
+      }
+    }
+  }
+}
 function _ffi_copy(dst, dst_offset, src, src_offset, length) {
   if (!dst || !dst._buffer) {
     throw new Error("FFIError: copy destination must be a runtime-allocated pointer");
@@ -1586,6 +1647,9 @@ function blit_rounded(dst, src, dx, dy, w, h, radius) {
   _blit_corner(dst, src, dx, dy, dx, dy + h - r, dx + r, dy + h - r, r);
   _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r);
 }
+function blit_scaled_alpha(dst, src, dx, dy, dw, dh, alpha) {
+  _ffi_blit_scaled_alpha(dst.buffer._handle, dst.width, dst.height, src.buffer._handle, src.width, src.height, $int(dx), $int(dy), $int(dw), $int(dh), $int(alpha));
+}
 function box_blur(fb, radius, passes) {
   if (truthy(radius < 1)) {
     return null;
@@ -2252,7 +2316,19 @@ var DOCK_ICON = 44;
 var DOCK_GAP = 12;
 var DOCK_PAD = 12;
 var DOCK_MARGIN = 16;
+var WIN_ANIM_MS = 220;
+var LAUNCHER_ANIM_MS = 190;
 var DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings"];
+function _ease_out_cubic(t) {
+  let u = 1 - t;
+  return 1 - u * u * u;
+}
+function _ease_out_back(t) {
+  let c1 = 1.70158;
+  let c3 = c1 + 1;
+  let u = t - 1;
+  return 1 + c3 * u * u * u + c1 * u * u;
+}
 var APP_TITLES = { ["prism"]: "Prism", ["terminal"]: "Terminal", ["files"]: "Files", ["editor"]: "Editor", ["monitor"]: "System Monitor", ["settings"]: "Settings", ["calc"]: "Calculator", ["viewer"]: "Image Viewer" };
 
 class KyanDesktop {
@@ -2277,9 +2353,28 @@ class KyanDesktop {
     this._icon_cache = {};
     this._win_sig = {};
     this._dirty = true;
+    this._anim = {};
+    this._launcher_t0 = -1;
   }
   needs_redraw() {
-    return this._dirty || len(keys(this.app_state)) > 0;
+    if (truthy(this._dirty)) {
+      return true;
+    }
+    if (truthy(len(keys(this.app_state)) > 0)) {
+      return true;
+    }
+    for (let kv of entries(this._anim)) {
+      if (truthy($index(kv, 1) < 0)) {
+        return true;
+      }
+      if (truthy($ne(this._last_tick, null) && this._last_tick - $index(kv, 1) < WIN_ANIM_MS)) {
+        return true;
+      }
+    }
+    if (truthy(this.launcher_open && this._launcher_t0 >= 0 && $ne(this._last_tick, null) && this._last_tick - this._launcher_t0 < LAUNCHER_ANIM_MS)) {
+      return true;
+    }
+    return false;
   }
   _app_of(win) {
     for (let kv of entries(this.windows)) {
@@ -2321,6 +2416,7 @@ class KyanDesktop {
     this.windows[app_id] = win;
     this.comp.add(win);
     this.comp.focus(win);
+    this._anim[app_id] = -1;
     if (truthy($eq(app_id, "voidrunner"))) {
       let cr = win.content_rect();
       this.app_state["voidrunner"] = new_voidrunner($index(cr, 2), $index(cr, 3));
@@ -2427,13 +2523,45 @@ class KyanDesktop {
         voidrunner_update($index(this.app_state, "voidrunner"), dt, this.keys);
       }
     }
+    for (let kv of entries(this._anim)) {
+      if (truthy($index(kv, 1) < 0)) {
+        this._anim[$index(kv, 0)] = now_ms;
+      }
+    }
+    if (truthy(this.launcher_open && this._launcher_t0 < 0)) {
+      this._launcher_t0 = now_ms;
+    }
     this._last_tick = now_ms;
     return true;
   }
   toggle_launcher() {
     this.launcher_open = !truthy(this.launcher_open);
+    this._launcher_t0 = -1;
     this._dirty = true;
     return this.launcher_open;
+  }
+  _anim_state(app_id) {
+    if (truthy($eq(app_id, null) || !truthy(has(this._anim, app_id)) || $eq(this._last_tick, null))) {
+      return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
+    }
+    let start = $index(this._anim, app_id);
+    if (truthy(start < 0)) {
+      return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
+    }
+    let p = (this._last_tick - start) / WIN_ANIM_MS;
+    if (truthy(p >= 1)) {
+      let next = {};
+      for (let kv of entries(this._anim)) {
+        if (truthy($ne($index(kv, 0), app_id))) {
+          next[$index(kv, 0)] = $index(kv, 1);
+        }
+      }
+      this._anim = next;
+      return { ["active"]: false, ["scale"]: 1, ["alpha"]: 255 };
+    }
+    let scale = 0.92 + 0.08 * _ease_out_back(p);
+    let alpha = $int(255 * _ease_out_cubic(p));
+    return { ["active"]: true, ["scale"]: scale, ["alpha"]: alpha };
   }
   _activate(app_id) {
     if (truthy(has(this.windows, app_id))) {
@@ -2514,8 +2642,21 @@ class KyanDesktop {
           this._win_sig[app_id] = sig;
         }
       }
-      drop_shadow(s, win.x, win.y, win.width, win.height, WIN_RADIUS, rgba(0, 0, 0, 150), 7);
-      blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS);
+      let anim = this._anim_state(app_id);
+      if (truthy($index(anim, "active"))) {
+        let cx = win.x + $int(win.width / 2);
+        let cy = win.y + $int(win.height / 2);
+        let dw = $int(win.width * $index(anim, "scale"));
+        let dh = $int(win.height * $index(anim, "scale"));
+        let dx = cx - $int(dw / 2);
+        let dy = cy - $int(dh / 2);
+        let sh_a = $int(150 * $index(anim, "alpha") / 255);
+        drop_shadow(s, dx, dy, dw, dh, WIN_RADIUS, rgba(0, 0, 0, sh_a), 7);
+        blit_scaled_alpha(s, win.framebuffer, dx, dy, dw, dh, $index(anim, "alpha"));
+      } else {
+        drop_shadow(s, win.x, win.y, win.width, win.height, WIN_RADIUS, rgba(0, 0, 0, 150), 7);
+        blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS);
+      }
     }
     this._paint_dock(s);
     if (truthy(this.launcher_open)) {
@@ -2617,17 +2758,26 @@ class KyanDesktop {
   }
   _paint_launcher(fb) {
     let t = this.theme;
-    fill_rect_blend(fb, 0, 0, this.width, this.height, rgba(5, 6, 10, 170));
+    let p = 1;
+    if (truthy(this._launcher_t0 >= 0 && $ne(this._last_tick, null))) {
+      p = (this._last_tick - this._launcher_t0) / LAUNCHER_ANIM_MS;
+      if (truthy(p > 1)) {
+        p = 1;
+      }
+    }
+    let off = $int((1 - _ease_out_back(p)) * -14);
+    let scrim_a = $int(170 * _ease_out_cubic(p));
+    fill_rect_blend(fb, 0, 0, this.width, this.height, rgba(5, 6, 10, scrim_a));
     let bw = $int(this.width * 0.5);
     let bx = $int(this.width / 2) - $int(bw / 2);
-    let by = $int(this.height * 0.24);
+    let by = $int(this.height * 0.24) + off;
     drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8);
     frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7);
     linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h");
     draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, $index(t, "foreground_muted"), { ["size"]: 18 });
     let layout = this._launcher_layout();
     let cell = $index(layout, "cell");
-    let gy = $index(layout, "gy");
+    let gy = $index(layout, "gy") + off;
     for (let c of $index(layout, "cells")) {
       let ix = $index(c, "x") + $int((cell - 52) / 2);
       let bg = fb.get_pixel(ix, gy);

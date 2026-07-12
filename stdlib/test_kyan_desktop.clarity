@@ -196,6 +196,23 @@ let cr = pw.content_rect()
 dp.handle_mouse(mk_mouse(pw.x + cr[0] + 168 + 45, pw.y + cr[1] + 104 + 12, "press", 1))
 assert(contains(dp.running(), "voidrunner"), "Prism Play button launched Voidrunner")
 
+-- ── open animation drives redraw, then settles ───
+
+let da = kyan_desktop(1000, 640, theme)
+da.boot(null)
+da.tick(1000.0)
+da.open("files", 120, 90, 400, 300)
+da.tick(1040.0)                                   -- 40ms into a 220ms open
+let mid = da._anim_state("files")
+assert(mid["active"], "window reports an active open animation")
+assert(mid["alpha"] < 255, "opening window is still fading in")
+da.compose()                                      -- the host loop composes each dirty frame
+assert(da.needs_redraw(), "mid-animation still asks for a redraw")
+da.tick(1300.0)                                   -- past the animation
+da.compose()                                      -- sweeps the finished animation, clears dirty
+assert(not da._anim_state("files")["active"], "animation cleared once complete")
+assert(not da.needs_redraw(), "settled desktop is idle (no redraw)")
+
 -- ── close ────────────────────────────────────────
 
 assert(d.close("terminal"), "close terminal")
