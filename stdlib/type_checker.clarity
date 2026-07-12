@@ -41,7 +41,8 @@ let BUILTIN_TYPES = {
 
 let BUILTIN_NAMES = [
     "show", "ask", "exec", "exec_full", "exit", "env", "args", "cwd",
-    "fetch", "serve", "compose", "tap", "set", "error"
+    "fetch", "serve", "compose", "tap", "set", "error",
+    "print", "read_bytes", "write_bytes"
 ]
 
 -- ── Type compatibility ────────────────────────────────────
@@ -125,15 +126,25 @@ class TypeChecker {
 
     fn check(tree) {
         this.diagnostics = []
-        -- Pre-register top-level function signatures so a call is arity-checked
-        -- even when it appears before the definition (Clarity allows that).
+        -- Pre-register top-level declarations so a reference is resolved even
+        -- when it appears before the definition (Clarity allows that): this
+        -- makes forward calls arity-checkable and stops forward references to
+        -- functions/classes/enums from looking "undefined".
         for stmt in tree.body {
-            if stmt.node_type == "FnStatement" {
+            let snt = stmt.node_type
+            if snt == "FnStatement" {
                 mut ptypes = {}
                 mut rtype = null
                 try { ptypes = stmt.param_types } catch e {}
                 try { rtype = stmt.return_type } catch e {}
                 this.scope.functions[stmt.name] = {"param_types": ptypes, "return_type": rtype, "params": stmt.params}
+                this.scope.set_type(stmt.name, "function")
+            } elif snt == "ClassStatement" {
+                this.scope.set_type(stmt.name, "class")
+            } elif snt == "EnumStatement" {
+                this.scope.set_type(stmt.name, "enum")
+            } elif snt == "InterfaceStatement" {
+                this.scope.set_type(stmt.name, "interface")
             }
         }
         for stmt in tree.body {
@@ -244,9 +255,12 @@ class TypeChecker {
             let pname = p
             if type(p) == "list" { pname = p[0] }
             if type(pname) == "string" {
+                -- a variadic param is stored as "...rest" but referenced as
+                -- "rest" inside the body — bind the name the body will use
+                let clean = if starts(pname, "...") { substring(pname, 3, len(pname)) } else { pname }
                 mut ptype = "any"
-                if has(param_types, pname) { ptype = param_types[pname] }
-                this.scope.set_type(pname, ptype)
+                if has(param_types, clean) { ptype = param_types[clean] }
+                this.scope.set_type(clean, ptype)
             }
         }
         this.check_body(node.body)
@@ -284,6 +298,25 @@ class TypeChecker {
             this.diag("'" + name + "' expects " + str(arity["required"]) + " argument(s), got " + str(argc), line, "error")
         }
         return null
+    }
+
+    -- Is `name` bound to anything the program can legitimately reference? A
+    -- variable/param/loop-var/import/this (scope.vars), a forward-referenced
+    -- function (function table), a class, or a low-level FFI/host/PTY builtin.
+    -- Every builtin is pre-populated into scope.vars in init, so get_type
+    -- covers those too.
+    fn name_defined(name) {
+        if this.scope.get_type(name) != null { return true }
+        if this.scope.get_function(name) != null { return true }
+        if this.scope.get_class(name) != null { return true }
+        if starts(name, "_ffi_") or starts(name, "_host_") or starts(name, "_pty_") { return true }
+        return false
+    }
+
+    fn _report_undefined(name, node) {
+        mut line = null
+        try { line = node.line } catch e {}
+        this.diag("'" + name + "' is not defined", line, "warning")
     }
 
     fn check_return(node) {
@@ -369,11 +402,12 @@ class TypeChecker {
                     let pname = p
                     if type(p) == "list" { pname = p[0] }
                     if type(pname) == "string" {
+                        let clean = if starts(pname, "...") { substring(pname, 3, len(pname)) } else { pname }
                         mut ptype = "any"
                         try {
-                            if has(method.param_types, pname) { ptype = method.param_types[pname] }
+                            if has(method.param_types, clean) { ptype = method.param_types[clean] }
                         } catch e {}
-                        this.scope.set_type(pname, ptype)
+                        this.scope.set_type(clean, ptype)
                     }
                 }
                 this.check_body(method.body)
@@ -525,6 +559,10 @@ class TypeChecker {
         if nt == "Identifier" {
             let t = this.scope.get_type(node.name)
             if t != null { return t }
+            if not this.name_defined(node.name) {
+                -- nothing defines this name — almost certainly a typo
+                this._report_undefined(node.name, node)
+            }
             return "any"
         }
         if nt == "ThisExpression" {
@@ -570,6 +608,10 @@ class TypeChecker {
                 }
                 let cls = this.scope.get_class(name)
                 if cls != null { return name }
+                -- calling a name nothing defines — a typo'd function name
+                if not this.name_defined(name) {
+                    this._report_undefined(name, node)
+                }
             }
             return "any"
         }
