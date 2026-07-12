@@ -4,7 +4,7 @@
 -- w.r.t. state.interp, so we drive it directly. Regression: the REPL used
 -- to only parse and print "[parsed: N statement(s)]" — it never executed.
 
-from "repl.clarity" import ReplState, repl_eval
+from "repl.clarity" import ReplState, repl_eval, _tail, handle_builtin
 from "lexer.clarity" import tokenize
 from "parser.clarity" import parse
 
@@ -60,6 +60,27 @@ let st2 = ReplState()
 fn feed2(src) { return repl_eval(st2, parse(tokenize(src, "<r2>"), src)) }
 let r_fresh = feed2("let only_here = 5\nonly_here")
 assert_eq(r_fresh["value"], 5, "a new ReplState has its own interpreter/env")
+
+show "-- REPL: history tail helper --"
+
+-- _tail replaces a slice() builtin that never existed; without it, trimming
+-- history past MAX_HISTORY threw (silently, inside try/catch) so history
+-- stopped persisting. It keeps the elements from `start` onward.
+assert_eq(_tail([1, 2, 3, 4, 5], 2), [3, 4, 5], "_tail keeps from index onward")
+assert_eq(_tail([1, 2, 3], 0), [1, 2, 3], "_tail from 0 is the whole list")
+assert_eq(_tail([1, 2, 3], 3), [], "_tail at length is empty")
+assert_eq(_tail([1, 2, 3], -1), [1, 2, 3], "_tail clamps a negative start to 0")
+
+show "-- REPL: .reset clears interpreter state --"
+
+let st3 = ReplState()
+repl_eval(st3, parse(tokenize("let keep = 123", "<r>"), "let keep = 123"))
+assert_eq(repl_eval(st3, parse(tokenize("keep", "<r>"), "keep"))["value"], 123, "binding present before reset")
+handle_builtin(".reset", st3)
+-- after reset the binding is gone: evaluating it now throws NameError
+mut threw = false
+try { repl_eval(st3, parse(tokenize("keep", "<r>"), "keep")) } catch e { threw = true }
+assert(threw, ".reset drops earlier bindings (fresh interpreter)")
 
 show ""
 show "REPL: " + str(PASSED) + " passed, " + str(FAILED) + " failed"

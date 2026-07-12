@@ -63,6 +63,20 @@ fn _history_path() {
     return home_dir() + "/" + HISTORY_FILE
 }
 
+-- Last elements of a list from `start` onward. Clarity has no global
+-- slice() builtin (the earlier code called one that never existed, so
+-- once history passed MAX_HISTORY the trim threw and — inside the
+-- surrounding try/catch — history silently stopped persisting).
+fn _tail(lst, start) {
+    mut result = []
+    mut i = if start < 0 { 0 } else { start }
+    while i < len(lst) {
+        push(result, lst[i])
+        i += 1
+    }
+    return result
+}
+
 fn _load_history() {
     -- Load history from ~/.clarity_history
     let path = _history_path()
@@ -80,7 +94,7 @@ fn _load_history() {
         }
         -- Keep only last MAX_HISTORY entries
         if len(history) > MAX_HISTORY {
-            history = slice(history, len(history) - MAX_HISTORY)
+            history = _tail(history, len(history) - MAX_HISTORY)
         }
         return history
     } catch e {
@@ -95,7 +109,7 @@ fn _save_history(history) {
         -- Keep only last MAX_HISTORY entries
         mut to_save = history
         if len(to_save) > MAX_HISTORY {
-            to_save = slice(to_save, len(to_save) - MAX_HISTORY)
+            to_save = _tail(to_save, len(to_save) - MAX_HISTORY)
         }
         write(path, join(to_save, "\n") + "\n")
     } catch e {
@@ -180,6 +194,9 @@ fn handle_builtin(line, state) {
 
     if trimmed == ".reset" {
         state.completer = Completer()
+        -- actually clear interpreter state, as the help promises: drop every
+        -- binding by starting a fresh session interpreter.
+        state.interp = Interpreter(null, null)
         show yellow("  -- State reset --")
         return true
     }
