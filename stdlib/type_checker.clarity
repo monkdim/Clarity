@@ -55,6 +55,23 @@ fn types_compatible(declared, inferred) {
     return false
 }
 
+-- How many arguments a function accepts, from its parameter-name list.
+-- Clarity has no default parameters, so every named parameter is required;
+-- a trailing `...rest` makes the maximum unbounded. Returns
+-- {"required": N, "variadic": bool}.
+fn fn_arity(params) {
+    mut n = len(params)
+    mut variadic = false
+    if n > 0 {
+        let last = params[n - 1]
+        if type(last) == "string" and starts(last, "...") {
+            variadic = true
+            n = n - 1
+        }
+    }
+    return {"required": n, "variadic": variadic}
+}
+
 -- ── Type scope ────────────────────────────────────────────
 
 class TypeScope {
@@ -108,6 +125,17 @@ class TypeChecker {
 
     fn check(tree) {
         this.diagnostics = []
+        -- Pre-register top-level function signatures so a call is arity-checked
+        -- even when it appears before the definition (Clarity allows that).
+        for stmt in tree.body {
+            if stmt.node_type == "FnStatement" {
+                mut ptypes = {}
+                mut rtype = null
+                try { ptypes = stmt.param_types } catch e {}
+                try { rtype = stmt.return_type } catch e {}
+                this.scope.functions[stmt.name] = {"param_types": ptypes, "return_type": rtype, "params": stmt.params}
+            }
+        }
         for stmt in tree.body {
             this.check_stmt(stmt)
         }
@@ -209,7 +237,7 @@ class TypeChecker {
         mut return_type = null
         try { param_types = node.param_types } catch e {}
         try { return_type = node.return_type } catch e {}
-        this.scope.functions[node.name] = {"param_types": param_types, "return_type": return_type}
+        this.scope.functions[node.name] = {"param_types": param_types, "return_type": return_type, "params": node.params}
         this.scope.set_type(node.name, "function")
         this.push_scope()
         for p in node.params {
@@ -235,6 +263,27 @@ class TypeChecker {
             }
         }
         this.pop_scope()
+    }
+
+    -- Flag a call to a known local function with the wrong number of
+    -- arguments. Skipped when any argument is a spread (`f(...xs)`), since the
+    -- count can't be known statically.
+    fn _check_arity(name, fn_sig, node) {
+        if not has(fn_sig, "params") { return null }
+        for a in node.arguments {
+            if a.node_type == "SpreadExpression" { return null }
+        }
+        let arity = fn_arity(fn_sig["params"])
+        let argc = len(node.arguments)
+        mut line = null
+        try { line = node.line } catch e {}
+        if argc < arity["required"] {
+            let lead = if arity["variadic"] { "at least " } else { "" }
+            this.diag("'" + name + "' expects " + lead + str(arity["required"]) + " argument(s), got " + str(argc), line, "error")
+        } elif not arity["variadic"] and argc > arity["required"] {
+            this.diag("'" + name + "' expects " + str(arity["required"]) + " argument(s), got " + str(argc), line, "error")
+        }
+        return null
     }
 
     fn check_return(node) {
@@ -508,11 +557,13 @@ class TypeChecker {
             return "any"
         }
         if nt == "CallExpression" {
+            for arg in node.arguments { this.infer(arg) }
             if node.callee.node_type == "Identifier" {
                 let name = node.callee.name
                 if has(BUILTIN_TYPES, name) { return BUILTIN_TYPES[name] }
                 let fn_sig = this.scope.get_function(name)
                 if fn_sig != null {
+                    this._check_arity(name, fn_sig, node)
                     let rt = fn_sig["return_type"]
                     if rt != null { return rt }
                     return "any"
@@ -520,7 +571,6 @@ class TypeChecker {
                 let cls = this.scope.get_class(name)
                 if cls != null { return name }
             }
-            for arg in node.arguments { this.infer(arg) }
             return "any"
         }
         if nt == "MemberExpression" or nt == "OptionalMemberExpression" {
