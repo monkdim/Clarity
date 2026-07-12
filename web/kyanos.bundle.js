@@ -93,6 +93,12 @@ function has(obj, key) {
     return obj.includes(key);
   return obj != null && key in obj;
 }
+function split(s, sep = " ") {
+  return s.split(sep);
+}
+function trim(s) {
+  return s.trim();
+}
 function contains(s, sub) {
   if (Array.isArray(s))
     return s.includes(sub);
@@ -108,6 +114,31 @@ function char_code(s) {
   return s.charCodeAt(0);
 }
 var sqrt = Math.sqrt;
+function sleep(secs) {}
+function _pty_supported() {
+  return false;
+}
+function _pty_unavailable() {
+  throw new Error("PtyError: pseudo-terminals are not available in the browser build");
+}
+function _pty_spawn() {
+  _pty_unavailable();
+}
+function _pty_read() {
+  _pty_unavailable();
+}
+function _pty_write() {
+  _pty_unavailable();
+}
+function _pty_resize() {
+  _pty_unavailable();
+}
+function _pty_poll() {
+  return false;
+}
+function _pty_close() {
+  return true;
+}
 function decode64(text) {
   if (typeof atob === "function")
     return decodeURIComponent(escape(atob(text)));
@@ -1685,6 +1716,36 @@ class Font {
     return null;
   }
 }
+function draw_text(fb, x, y, text, font, color) {
+  let fw = font.width;
+  let fh = font.height;
+  let bx = $int(x);
+  let by = $int(y);
+  let chs = chars(text);
+  let col_offset = 0;
+  let i = 0;
+  while (truthy(i < len(chs))) {
+    let code = char_code($index(chs, i));
+    let glyph = font.glyph(code);
+    if (truthy($ne(glyph, null))) {
+      let row = 0;
+      while (truthy(row < fh)) {
+        let byte = $index(glyph, row);
+        let bit = 0;
+        while (truthy(bit < fw)) {
+          let mask = 1 << fw - 1 - bit;
+          if (truthy($ne(byte & mask, 0))) {
+            fb.put_pixel(bx + col_offset + bit, by + row, color);
+          }
+          bit += 1;
+        }
+        row += 1;
+      }
+    }
+    col_offset += fw;
+    i += 1;
+  }
+}
 var _BUILTIN_GLYPHS = { ["32"]: [0, 0, 0, 0, 0, 0, 0, 0], ["33"]: [24, 24, 24, 24, 24, 0, 24, 0], ["34"]: [54, 54, 0, 0, 0, 0, 0, 0], ["35"]: [54, 54, 127, 54, 127, 54, 54, 0], ["36"]: [24, 62, 96, 60, 6, 124, 24, 0], ["37"]: [102, 108, 24, 48, 102, 102, 0, 0], ["38"]: [56, 108, 104, 118, 108, 110, 54, 0], ["39"]: [24, 24, 0, 0, 0, 0, 0, 0], ["40"]: [12, 24, 48, 48, 48, 24, 12, 0], ["41"]: [48, 24, 12, 12, 12, 24, 48, 0], ["42"]: [0, 102, 60, 255, 60, 102, 0, 0], ["43"]: [0, 24, 24, 126, 24, 24, 0, 0], ["44"]: [0, 0, 0, 0, 0, 24, 24, 48], ["45"]: [0, 0, 0, 126, 0, 0, 0, 0], ["46"]: [0, 0, 0, 0, 0, 0, 24, 0], ["47"]: [6, 12, 24, 48, 96, 192, 128, 0], ["48"]: [60, 102, 110, 118, 102, 102, 60, 0], ["49"]: [24, 56, 24, 24, 24, 24, 126, 0], ["50"]: [60, 102, 6, 12, 24, 48, 126, 0], ["51"]: [60, 102, 6, 28, 6, 102, 60, 0], ["52"]: [6, 14, 30, 102, 127, 6, 6, 0], ["53"]: [126, 96, 124, 6, 6, 102, 60, 0], ["54"]: [60, 102, 96, 124, 102, 102, 60, 0], ["55"]: [126, 102, 6, 12, 24, 24, 24, 0], ["56"]: [60, 102, 102, 60, 102, 102, 60, 0], ["57"]: [60, 102, 102, 62, 6, 102, 60, 0], ["58"]: [0, 24, 24, 0, 0, 24, 24, 0], ["59"]: [0, 24, 24, 0, 0, 24, 24, 48], ["60"]: [14, 24, 48, 96, 48, 24, 14, 0], ["61"]: [0, 0, 126, 0, 126, 0, 0, 0], ["62"]: [112, 24, 12, 6, 12, 24, 112, 0], ["63"]: [60, 102, 6, 12, 24, 0, 24, 0], ["64"]: [60, 102, 110, 110, 96, 102, 60, 0], ["65"]: [24, 60, 102, 102, 126, 102, 102, 0], ["66"]: [124, 102, 102, 124, 102, 102, 124, 0], ["67"]: [60, 102, 96, 96, 96, 102, 60, 0], ["68"]: [120, 108, 102, 102, 102, 108, 120, 0], ["69"]: [126, 96, 96, 120, 96, 96, 126, 0], ["70"]: [126, 96, 96, 120, 96, 96, 96, 0], ["71"]: [60, 102, 96, 110, 102, 102, 60, 0], ["72"]: [102, 102, 102, 126, 102, 102, 102, 0], ["73"]: [60, 24, 24, 24, 24, 24, 60, 0], ["74"]: [30, 12, 12, 12, 12, 108, 56, 0], ["75"]: [102, 108, 120, 112, 120, 108, 102, 0], ["76"]: [96, 96, 96, 96, 96, 96, 126, 0], ["77"]: [99, 119, 127, 107, 99, 99, 99, 0], ["78"]: [102, 118, 126, 126, 110, 102, 102, 0], ["79"]: [60, 102, 102, 102, 102, 102, 60, 0], ["80"]: [124, 102, 102, 124, 96, 96, 96, 0], ["81"]: [60, 102, 102, 102, 102, 60, 14, 0], ["82"]: [124, 102, 102, 124, 120, 108, 102, 0], ["83"]: [60, 102, 96, 60, 6, 102, 60, 0], ["84"]: [126, 24, 24, 24, 24, 24, 24, 0], ["85"]: [102, 102, 102, 102, 102, 102, 60, 0], ["86"]: [102, 102, 102, 102, 102, 60, 24, 0], ["87"]: [99, 99, 99, 107, 127, 119, 99, 0], ["88"]: [102, 102, 60, 24, 60, 102, 102, 0], ["89"]: [102, 102, 102, 60, 24, 24, 24, 0], ["90"]: [126, 6, 12, 24, 48, 96, 126, 0], ["91"]: [60, 48, 48, 48, 48, 48, 60, 0], ["92"]: [192, 96, 48, 24, 12, 6, 2, 0], ["93"]: [60, 12, 12, 12, 12, 12, 60, 0], ["94"]: [24, 60, 102, 0, 0, 0, 0, 0], ["95"]: [0, 0, 0, 0, 0, 0, 0, 255], ["96"]: [48, 24, 12, 0, 0, 0, 0, 0], ["97"]: [0, 0, 60, 6, 62, 102, 62, 0], ["98"]: [96, 96, 124, 102, 102, 102, 124, 0], ["99"]: [0, 0, 60, 102, 96, 102, 60, 0], ["100"]: [6, 6, 62, 102, 102, 102, 62, 0], ["101"]: [0, 0, 60, 102, 126, 96, 60, 0], ["102"]: [28, 54, 48, 120, 48, 48, 48, 0], ["103"]: [0, 0, 62, 102, 102, 62, 6, 124], ["104"]: [96, 96, 124, 102, 102, 102, 102, 0], ["105"]: [24, 0, 56, 24, 24, 24, 60, 0], ["106"]: [6, 0, 6, 6, 6, 6, 102, 60], ["107"]: [96, 96, 102, 108, 120, 108, 102, 0], ["108"]: [56, 24, 24, 24, 24, 24, 60, 0], ["109"]: [0, 0, 102, 127, 127, 107, 99, 0], ["110"]: [0, 0, 124, 102, 102, 102, 102, 0], ["111"]: [0, 0, 60, 102, 102, 102, 60, 0], ["112"]: [0, 0, 124, 102, 102, 124, 96, 96], ["113"]: [0, 0, 62, 102, 102, 62, 6, 6], ["114"]: [0, 0, 124, 102, 96, 96, 96, 0], ["115"]: [0, 0, 62, 96, 60, 6, 124, 0], ["116"]: [48, 48, 120, 48, 48, 54, 28, 0], ["117"]: [0, 0, 102, 102, 102, 102, 62, 0], ["118"]: [0, 0, 102, 102, 102, 60, 24, 0], ["119"]: [0, 0, 99, 107, 127, 127, 54, 0], ["120"]: [0, 0, 102, 60, 24, 60, 102, 0], ["121"]: [0, 0, 102, 102, 102, 62, 6, 124], ["122"]: [0, 0, 126, 12, 24, 48, 126, 0], ["123"]: [14, 24, 24, 112, 24, 24, 14, 0], ["124"]: [24, 24, 24, 24, 24, 24, 24, 0], ["125"]: [112, 24, 24, 14, 24, 24, 112, 0], ["126"]: [118, 220, 0, 0, 0, 0, 0, 0] };
 function builtin_font() {
   return new Font(8, 8, _BUILTIN_GLYPHS);
@@ -2309,6 +2370,439 @@ function voidrunner_paint(fb, x, y, w, h, theme, s) {
   }
 }
 
+// web/build/terminal_emulator.js
+class Cell {
+  constructor(ch, fg, bg, bold) {
+    this.ch = ch;
+    this.fg = fg;
+    this.bg = bg;
+    this.bold = bold;
+  }
+}
+var _DEFAULT_FG = 4293322470;
+var _DEFAULT_BG = 4279900698;
+var _ANSI_PALETTE = [4278190080, 4291637553, 4279090297, 4293256464, 4280578760, 4290527164, 4279347405, 4293256677, 4284900966, 4294003788, 4280537483, 4294309187, 4282093290, 4292243670, 4280924379, 4294967295];
+
+class Terminal {
+  constructor(cols, rows) {
+    this.cols = cols;
+    this.rows = rows;
+    this.cursor_row = 0;
+    this.cursor_col = 0;
+    this.fg = _DEFAULT_FG;
+    this.bg = _DEFAULT_BG;
+    this.bold = false;
+    this.scrollback_limit = 1000;
+    this._grid = [];
+    this._scrollback = [];
+    this._scroll_offset = 0;
+    this._blank_row = [];
+    let i = 0;
+    while (truthy(i < cols)) {
+      push(this._blank_row, new Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false));
+      i += 1;
+    }
+    let r = 0;
+    while (truthy(r < rows)) {
+      push(this._grid, this._make_blank_row());
+      r += 1;
+    }
+    this._parse_state = "normal";
+    this._csi_buffer = "";
+  }
+  _make_blank_row() {
+    let row = [];
+    let i = 0;
+    while (truthy(i < this.cols)) {
+      push(row, new Cell(" ", _DEFAULT_FG, _DEFAULT_BG, false));
+      i += 1;
+    }
+    return row;
+  }
+  feed(text) {
+    let chs = chars(text);
+    for (let c of chs) {
+      this._consume(c);
+    }
+  }
+  cell_at(row, col) {
+    if (truthy(row < 0 || row >= this.rows || col < 0 || col >= this.cols)) {
+      return null;
+    }
+    return $index($index(this._grid, row), col);
+  }
+  line_text(row) {
+    if (truthy(row < 0 || row >= this.rows)) {
+      return "";
+    }
+    let s = "";
+    for (let cell of $index(this._grid, row)) {
+      s = s + cell.ch;
+    }
+    return s;
+  }
+  scroll_back(n) {
+    this._scroll_offset += n;
+  }
+  scroll_forward(n) {
+    this._scroll_offset -= n;
+    if (truthy(this._scroll_offset < 0)) {
+      this._scroll_offset = 0;
+    }
+  }
+  jump_to_live() {
+    this._scroll_offset = 0;
+  }
+  _consume(c) {
+    if (truthy($eq(this._parse_state, "esc"))) {
+      if (truthy($eq(c, "["))) {
+        this._parse_state = "csi";
+        this._csi_buffer = "";
+        return null;
+      }
+      this._parse_state = "normal";
+      return null;
+    }
+    if (truthy($eq(this._parse_state, "csi"))) {
+      let code = char_code(c);
+      if (truthy(code >= 64 && code <= 126)) {
+        this._dispatch_csi(c, this._csi_buffer);
+        this._parse_state = "normal";
+        this._csi_buffer = "";
+        return null;
+      }
+      this._csi_buffer = this._csi_buffer + c;
+      return null;
+    }
+    let cc = char_code(c);
+    if (truthy($eq(cc, 27))) {
+      this._parse_state = "esc";
+      return null;
+    }
+    if (truthy($eq(cc, 10))) {
+      this._line_feed();
+      return null;
+    }
+    if (truthy($eq(cc, 13))) {
+      this.cursor_col = 0;
+      return null;
+    }
+    if (truthy($eq(cc, 8))) {
+      if (truthy(this.cursor_col > 0)) {
+        this.cursor_col -= 1;
+      }
+      return null;
+    }
+    if (truthy($eq(cc, 9))) {
+      this.cursor_col = (this.cursor_col / 8 + 1) * 8;
+      if (truthy(this.cursor_col >= this.cols)) {
+        this.cursor_col = this.cols - 1;
+      }
+      return null;
+    }
+    if (truthy(cc < 32)) {
+      return null;
+    }
+    this._put_glyph(c);
+  }
+  _put_glyph(ch) {
+    if (truthy(this.cursor_col >= this.cols)) {
+      this._line_feed();
+      this.cursor_col = 0;
+    }
+    $index(this._grid, this.cursor_row)[this.cursor_col] = new Cell(ch, this.fg, this.bg, this.bold);
+    this.cursor_col += 1;
+  }
+  _line_feed() {
+    this.cursor_row += 1;
+    if (truthy(this.cursor_row >= this.rows)) {
+      this.cursor_row = this.rows - 1;
+      push(this._scrollback, $index(this._grid, 0));
+      let new_grid = [];
+      let i = 1;
+      while (truthy(i < this.rows)) {
+        push(new_grid, $index(this._grid, i));
+        i += 1;
+      }
+      push(new_grid, this._make_blank_row());
+      this._grid = new_grid;
+      while (truthy(len(this._scrollback) > this.scrollback_limit)) {
+        let sb = [];
+        let j = 1;
+        while (truthy(j < len(this._scrollback))) {
+          push(sb, $index(this._scrollback, j));
+          j += 1;
+        }
+        this._scrollback = sb;
+      }
+    }
+  }
+  _dispatch_csi(final_byte, params_str) {
+    let params = _parse_csi_params(params_str);
+    if (truthy($eq(final_byte, "A"))) {
+      let n = truthy(len(params) > 0 && $index(params, 0) > 0) ? $index(params, 0) : 1;
+      this.cursor_row -= n;
+      if (truthy(this.cursor_row < 0)) {
+        this.cursor_row = 0;
+      }
+      return null;
+    }
+    if (truthy($eq(final_byte, "B"))) {
+      let n = truthy(len(params) > 0 && $index(params, 0) > 0) ? $index(params, 0) : 1;
+      this.cursor_row += n;
+      if (truthy(this.cursor_row >= this.rows)) {
+        this.cursor_row = this.rows - 1;
+      }
+      return null;
+    }
+    if (truthy($eq(final_byte, "C"))) {
+      let n = truthy(len(params) > 0 && $index(params, 0) > 0) ? $index(params, 0) : 1;
+      this.cursor_col += n;
+      if (truthy(this.cursor_col >= this.cols)) {
+        this.cursor_col = this.cols - 1;
+      }
+      return null;
+    }
+    if (truthy($eq(final_byte, "D"))) {
+      let n = truthy(len(params) > 0 && $index(params, 0) > 0) ? $index(params, 0) : 1;
+      this.cursor_col -= n;
+      if (truthy(this.cursor_col < 0)) {
+        this.cursor_col = 0;
+      }
+      return null;
+    }
+    if (truthy($eq(final_byte, "H") || $eq(final_byte, "f"))) {
+      let row = truthy(len(params) > 0 && $index(params, 0) > 0) ? $index(params, 0) - 1 : 0;
+      let col = truthy(len(params) > 1 && $index(params, 1) > 0) ? $index(params, 1) - 1 : 0;
+      this.cursor_row = row;
+      this.cursor_col = col;
+      if (truthy(this.cursor_row >= this.rows)) {
+        this.cursor_row = this.rows - 1;
+      }
+      if (truthy(this.cursor_col >= this.cols)) {
+        this.cursor_col = this.cols - 1;
+      }
+      return null;
+    }
+    if (truthy($eq(final_byte, "K"))) {
+      let mode = truthy(len(params) > 0) ? $index(params, 0) : 0;
+      this._erase_in_line(mode);
+      return null;
+    }
+    if (truthy($eq(final_byte, "J"))) {
+      let mode = truthy(len(params) > 0) ? $index(params, 0) : 0;
+      this._erase_in_display(mode);
+      return null;
+    }
+    if (truthy($eq(final_byte, "m"))) {
+      this._apply_sgr(truthy($eq(len(params), 0)) ? [0] : params);
+      return null;
+    }
+  }
+  _erase_in_line(mode) {
+    let row = this.cursor_row;
+    if (truthy($eq(mode, 0))) {
+      let c = this.cursor_col;
+      while (truthy(c < this.cols)) {
+        $index(this._grid, row)[c] = new Cell(" ", this.fg, this.bg, false);
+        c += 1;
+      }
+    } else if (truthy($eq(mode, 1))) {
+      let c = 0;
+      while (truthy(c <= this.cursor_col)) {
+        $index(this._grid, row)[c] = new Cell(" ", this.fg, this.bg, false);
+        c += 1;
+      }
+    } else if (truthy($eq(mode, 2))) {
+      this._grid[row] = this._make_blank_row();
+    }
+  }
+  _erase_in_display(mode) {
+    if (truthy($eq(mode, 2))) {
+      let r = 0;
+      while (truthy(r < this.rows)) {
+        this._grid[r] = this._make_blank_row();
+        r += 1;
+      }
+      this.cursor_row = 0;
+      this.cursor_col = 0;
+      return null;
+    }
+    if (truthy($eq(mode, 0))) {
+      this._erase_in_line(0);
+      let r = this.cursor_row + 1;
+      while (truthy(r < this.rows)) {
+        this._grid[r] = this._make_blank_row();
+        r += 1;
+      }
+      return null;
+    }
+    if (truthy($eq(mode, 1))) {
+      this._erase_in_line(1);
+      let r = 0;
+      while (truthy(r < this.cursor_row)) {
+        this._grid[r] = this._make_blank_row();
+        r += 1;
+      }
+    }
+  }
+  _apply_sgr(params) {
+    let i = 0;
+    while (truthy(i < len(params))) {
+      let p = $index(params, i);
+      if (truthy($eq(p, 0))) {
+        this.fg = _DEFAULT_FG;
+        this.bg = _DEFAULT_BG;
+        this.bold = false;
+      } else if (truthy($eq(p, 1))) {
+        this.bold = true;
+      } else if (truthy($eq(p, 22))) {
+        this.bold = false;
+      } else if (truthy(p >= 30 && p <= 37)) {
+        this.fg = $index(_ANSI_PALETTE, p - 30);
+      } else if (truthy($eq(p, 39))) {
+        this.fg = _DEFAULT_FG;
+      } else if (truthy(p >= 40 && p <= 47)) {
+        this.bg = $index(_ANSI_PALETTE, p - 40);
+      } else if (truthy($eq(p, 49))) {
+        this.bg = _DEFAULT_BG;
+      } else if (truthy(p >= 90 && p <= 97)) {
+        this.fg = $index(_ANSI_PALETTE, 8 + (p - 90));
+      } else if (truthy(p >= 100 && p <= 107)) {
+        this.bg = $index(_ANSI_PALETTE, 8 + (p - 100));
+      } else if (truthy($eq(p, 38) || $eq(p, 48))) {
+        if (truthy(i + 1 < len(params) && $eq($index(params, i + 1), 5))) {
+          if (truthy(i + 2 < len(params))) {
+            let color = _xterm_256($index(params, i + 2));
+            if (truthy($eq(p, 38))) {
+              this.fg = color;
+            } else {
+              this.bg = color;
+            }
+            i += 2;
+          }
+        } else if (truthy(i + 1 < len(params) && $eq($index(params, i + 1), 2))) {
+          if (truthy(i + 4 < len(params))) {
+            let color = rgb($index(params, i + 2), $index(params, i + 3), $index(params, i + 4));
+            if (truthy($eq(p, 38))) {
+              this.fg = color;
+            } else {
+              this.bg = color;
+            }
+            i += 4;
+          }
+        }
+      }
+      i += 1;
+    }
+  }
+}
+function _parse_csi_params(s) {
+  if (truthy($eq(len(s), 0))) {
+    return [];
+  }
+  let out = [];
+  for (let tok of split(s, ";")) {
+    let t = trim(tok);
+    if (truthy($eq(len(t), 0))) {
+      push(out, 0);
+    } else {
+      push(out, $int(t));
+    }
+  }
+  return out;
+}
+function _xterm_256(n) {
+  if (truthy(n < 16)) {
+    return $index(_ANSI_PALETTE, n);
+  }
+  if (truthy(n < 232)) {
+    let i = n - 16;
+    let r = i / 36 % 6;
+    let g = i / 6 % 6;
+    let b = i % 6;
+    let levels = [0, 95, 135, 175, 215, 255];
+    return rgb($index(levels, r), $index(levels, g), $index(levels, b));
+  }
+  let v = 8 + (n - 232) * 10;
+  return rgb(v, v, v);
+}
+
+// web/build/pty.js
+function pty_supported() {
+  return _pty_supported();
+}
+
+class PtySession {
+  constructor(cmd, argv, cols, rows) {
+    this.cols = cols;
+    this.rows = rows;
+    this.closed = false;
+    this.exited = false;
+    let h = _pty_spawn(cmd, argv, cols, rows);
+    this.master = $index(h, "master");
+    this.pid = $index(h, "pid");
+  }
+  read() {
+    if (truthy(this.closed)) {
+      return null;
+    }
+    return _pty_read(this.master, 65536);
+  }
+  write(text) {
+    if (truthy(this.closed)) {
+      return 0;
+    }
+    return _pty_write(this.master, text);
+  }
+  resize(cols, rows) {
+    this.cols = cols;
+    this.rows = rows;
+    if (truthy(!truthy(this.closed))) {
+      _pty_resize(this.master, cols, rows);
+    }
+  }
+  alive() {
+    if (truthy(this.closed || this.exited)) {
+      return false;
+    }
+    let running = _pty_poll(this.master);
+    if (truthy(!truthy(running))) {
+      this.exited = true;
+    }
+    return running;
+  }
+  drain(budget_ms) {
+    let out = "";
+    let waited = 0;
+    let step = 15;
+    while (truthy(waited < budget_ms)) {
+      let chunk = this.read();
+      if (truthy($eq(chunk, null))) {
+        break;
+      }
+      if (truthy(len(chunk) > 0)) {
+        out = out + chunk;
+      } else {
+        sleep(step / 1000);
+        waited = waited + step;
+      }
+    }
+    return out;
+  }
+  close() {
+    if (truthy(this.closed)) {
+      return true;
+    }
+    this.closed = true;
+    _pty_close(this.master);
+    return true;
+  }
+}
+function pty_spawn_shell(cols, rows) {
+  return new PtySession("/bin/sh", ["/bin/sh", "-i"], cols, rows);
+}
+
 // web/build/kyan_desktop.js
 var TITLE_H = 32;
 var WIN_RADIUS = 12;
@@ -2355,6 +2849,7 @@ class KyanDesktop {
     this._dirty = true;
     this._anim = {};
     this._launcher_t0 = -1;
+    this._terminals = {};
   }
   needs_redraw() {
     if (truthy(this._dirty)) {
@@ -2421,6 +2916,12 @@ class KyanDesktop {
       let cr = win.content_rect();
       this.app_state["voidrunner"] = new_voidrunner($index(cr, 2), $index(cr, 3));
     }
+    if (truthy($eq(app_id, "terminal") && pty_supported() && !truthy(has(this._terminals, "terminal")))) {
+      let cr = win.content_rect();
+      let cols = $int($index(cr, 2) / 8);
+      let rows = $int($index(cr, 3) / 16);
+      this._terminals["terminal"] = { ["term"]: Terminal(cols, rows), ["pty"]: pty_spawn_shell(cols, rows), ["dead"]: false };
+    }
     return win;
   }
   close(app_id) {
@@ -2453,6 +2954,16 @@ class KyanDesktop {
         }
       }
       this.app_state = ns;
+    }
+    if (truthy(has(this._terminals, app_id))) {
+      $index($index(this._terminals, app_id), "pty").close();
+      let nt = {};
+      for (let kv of entries(this._terminals)) {
+        if (truthy($ne($index(kv, 0), app_id))) {
+          nt[$index(kv, 0)] = $index(kv, 1);
+        }
+      }
+      this._terminals = nt;
     }
     return true;
   }
@@ -2516,11 +3027,35 @@ class KyanDesktop {
     this.keys[name] = down;
     this._dirty = true;
   }
+  terminal_input(text) {
+    if (truthy(!truthy(has(this._terminals, "terminal")))) {
+      return false;
+    }
+    $index($index(this._terminals, "terminal"), "pty").write(text);
+    this._dirty = true;
+    return true;
+  }
+  terminal_session(app_id) {
+    if (truthy(has(this._terminals, app_id))) {
+      return $index(this._terminals, app_id);
+    }
+    return null;
+  }
   tick(now_ms) {
     if (truthy($ne(this._last_tick, null))) {
       let dt = now_ms - this._last_tick;
       if (truthy(has(this.windows, "voidrunner") && has(this.app_state, "voidrunner"))) {
         voidrunner_update($index(this.app_state, "voidrunner"), dt, this.keys);
+      }
+    }
+    for (let kv of entries(this._terminals)) {
+      let sess = $index(kv, 1);
+      let out = $index(sess, "pty").read();
+      if (truthy($eq(out, null))) {
+        sess["dead"] = true;
+      } else if (truthy(len(out) > 0)) {
+        $index(sess, "term").feed(out);
+        this._dirty = true;
       }
     }
     for (let kv of entries(this._anim)) {
@@ -2724,6 +3259,10 @@ class KyanDesktop {
       voidrunner_paint(fb, cx, cy, cw, ch, t, $index(this.app_state, "voidrunner"));
       return null;
     }
+    if (truthy($eq(app_id, "terminal") && has(this._terminals, "terminal"))) {
+      this._render_terminal(fb, cx, cy, cw, ch, $index(this._terminals, "terminal"));
+      return null;
+    }
     if (truthy($ne(app_id, null) && has(this.painters, app_id))) {
       $index(this.painters, app_id)(fb, cx, cy, cw, ch, t, win.focused);
       return null;
@@ -2735,6 +3274,40 @@ class KyanDesktop {
         fill_rect(fb, cx + 20, ry, $int((cw - 40) * (0.8 - i * 0.1)), 8, $index(t, "border"));
       }
       i = i + 1;
+    }
+  }
+  _render_terminal(fb, x, y, w, h, sess) {
+    let term = $index(sess, "term");
+    fill_rect(fb, x, y, w, h, 4278519306);
+    let cw = 8;
+    let chh = 16;
+    let r = 0;
+    while (truthy(r < term.rows)) {
+      let c = 0;
+      while (truthy(c < term.cols)) {
+        let cell = term.cell_at(r, c);
+        if (truthy($ne(cell, null))) {
+          let gx = x + c * cw;
+          let gy = y + r * chh;
+          if (truthy(gx + cw <= x + w && gy + chh <= y + h)) {
+            if (truthy($ne(cell.bg, 4279900698))) {
+              fill_rect(fb, gx, gy, cw, chh, cell.bg);
+            }
+            if (truthy($ne(cell.ch, " "))) {
+              draw_text(fb, gx, gy + 4, cell.ch, this.font, cell.fg);
+            }
+          }
+        }
+        c = c + 1;
+      }
+      r = r + 1;
+    }
+    if (truthy($eq(term._scroll_offset, 0))) {
+      let curx = x + term.cursor_col * cw;
+      let cury = y + term.cursor_row * chh;
+      if (truthy(curx + cw <= x + w && cury + chh <= y + h)) {
+        fill_rect(fb, curx, cury + chh - 2, cw, 2, $index(this.theme, "accent"));
+      }
     }
   }
   _paint_dock(fb) {

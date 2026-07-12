@@ -1,0 +1,67 @@
+-- Live desktop Terminal — the KyanOS Terminal window backed by a real
+-- PTY shell (not the static mockup). Opens a Terminal on the desktop,
+-- pumps the shell via tick(), types a command, and asserts its output
+-- lands in the window's character grid. Gated to Linux (verified PTY
+-- host); skips cleanly elsewhere so CI stays green on all targets.
+
+from "kyan_desktop.clarity" import kyan_desktop
+from "theme_kyan.clarity" import kyan_obsidian
+from "pty.clarity" import pty_supported
+from "platform.clarity" import os_name
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+
+fn grid_has(term, needle) {
+    mut r = 0
+    while r < term.rows {
+        if contains(term.line_text(r), needle) { return true }
+        r += 1
+    }
+    return false
+}
+
+-- Pump the desktop clock for ~`ms`, letting the shell produce output.
+fn pump(d, base, ms) {
+    mut i = 0
+    let steps = int(ms / 30)
+    while i < steps {
+        d.tick(base + i * 30.0)
+        sleep(0.03)
+        i += 1
+    }
+}
+
+show "-- KyanOS live Terminal --"
+
+if os_name() != "linux" or not pty_supported() {
+    show "  (PTY unsupported on this host — skipped)"
+} else {
+    let d = kyan_desktop(1000, 640, kyan_obsidian())
+    d.boot(null)
+    d.tick(1000.0)
+    let w = d.open("terminal", 80, 60, 520, 320)
+    let sess = d.terminal_session("terminal")
+    assert(sess != null, "opening Terminal spawns a live PTY session")
+    assert(w.framebuffer != null, "terminal window is real")
+
+    pump(d, 1030.0, 400)                 -- consume shell startup
+    assert(d.terminal_input("echo KYTERM_7x4q\n"), "input is accepted")
+    pump(d, 2000.0, 900)                 -- let the command run + drain
+
+    assert(grid_has(sess["term"], "KYTERM_7x4q"), "typed command output shows in the grid")
+
+    -- the desktop composes with a live terminal on screen (no crash)
+    d.compose()
+    assert(d.frames > 0, "desktop composes with a live terminal window")
+
+    d.close("terminal")
+    assert(d.terminal_session("terminal") == null, "closing the Terminal cleans up its PTY")
+}
+
+show ""
+show "KyanOS Terminal: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " kyan terminal test(s) failed" }
