@@ -468,7 +468,9 @@ class Compiler {
         let loop_start = len(this.code.instructions)
         push(this.loop_stack, {"start": loop_start, "break_patches": []})
 
-        this.code.emit(OP_DUP)
+        -- ITER_NEXT peeks the iterator (it does not pop it), so the iterator
+        -- must stay on the stack across iterations WITHOUT an extra DUP — a
+        -- DUP here leaks one iterator per iteration.
         this.code.emit(OP_ITER_NEXT)
         let jump_end = this.code.emit(OP_JUMP_FALSE, 0)
         let name_idx = this.code.add_const(node.variable)
@@ -934,7 +936,9 @@ class Compiler {
         this.compile_node(node.iterable)
         this.code.emit(OP_ITER_INIT, 0, line)
         let loop_start = len(this.code.instructions)
-        this.code.emit(OP_DUP)
+        -- ITER_NEXT peeks the iterator, so no DUP (a DUP leaks one iterator
+        -- per iteration — and comprehensions read results off the stack, so
+        -- unlike a for-loop the leak actually corrupts them).
         this.code.emit(OP_ITER_NEXT)
         let jump_end = this.code.emit(OP_JUMP_FALSE, 0)
         let var_idx = this.code.add_const(node.variable)
@@ -945,23 +949,18 @@ class Compiler {
             this.compile_node(node.condition)
             jump_skip = this.code.emit(OP_JUMP_FALSE, 0)
         }
-        -- Evaluate expression and append to result
-        -- We need the result list: it's below the iterator on the stack
-        -- Stack: [..., result_list, iterator]
-        -- After ITER_NEXT and STORE_NEW: [..., result_list, iterator]
-        -- We swap to get result_list, compile expr, push onto it, swap back
-        this.code.emit(OP_SWAP, 0, line)       -- [..., iterator, result_list]
-        this.compile_node(node.expression)      -- [..., iterator, result_list, value]
-        -- Use a builtin push: load push, call with (list, value)
+        -- Append the element expression to the result list. Stack here is
+        -- [result_list, iterator]. push() mutates the list and returns it,
+        -- so the return value threads result_list back for the next round.
+        -- OP_CALL expects [callee, arg1, arg2] → push(result_list, value).
+        this.code.emit(OP_SWAP, 0, line)        -- [iterator, result_list]
         let push_idx = this.code.add_const("push")
-        this.code.emit(OP_LOAD, push_idx, line)
-        this.code.emit(OP_ROT3, 0, line)       -- get args in order
-        this.code.emit(OP_ROT3, 0, line)
-        this.code.emit(OP_CALL, 2, line)
-        this.code.emit(OP_POP, 0, line)         -- pop push return value
-        this.code.emit(OP_SWAP, 0, line)         -- [..., result_list, iterator]
+        this.code.emit(OP_LOAD, push_idx, line) -- [iterator, result_list, push]
+        this.code.emit(OP_SWAP, 0, line)        -- [iterator, push, result_list]
+        this.compile_node(node.expr)            -- [iterator, push, result_list, value]
+        this.code.emit(OP_CALL, 2, line)        -- [iterator, result_list]
+        this.code.emit(OP_SWAP, 0, line)        -- [result_list, iterator]
         if jump_skip >= 0 {
-            let after_push = len(this.code.instructions)
             this.code.patch_jump(jump_skip)
         }
         this.code.emit(OP_JUMP, loop_start)
@@ -975,24 +974,31 @@ class Compiler {
         this.compile_node(node.iterable)
         this.code.emit(OP_ITER_INIT, 0, line)
         let loop_start = len(this.code.instructions)
-        this.code.emit(OP_DUP)
+        -- No DUP: ITER_NEXT peeks the iterator (see the list comprehension).
         this.code.emit(OP_ITER_NEXT)
         let jump_end = this.code.emit(OP_JUMP_FALSE, 0)
-        let var_idx = this.code.add_const(node.variable)
+        -- The AST stores loop targets as `variables` (a list). STORE_NEW binds
+        -- one name; two-target destructuring ({k: v for k, v in pairs}) isn't
+        -- compiled here yet, so reject it loudly rather than mis-binding.
+        if len(node.variables) != 1 {
+            throw "CompileError: multi-variable map comprehensions are not supported in --fast mode (line {line})"
+        }
+        let var_idx = this.code.add_const(node.variables[0])
         this.code.emit(OP_STORE_NEW, var_idx)
         mut jump_skip = -1
         if node.condition != null {
             this.compile_node(node.condition)
             jump_skip = this.code.emit(OP_JUMP_FALSE, 0)
         }
-        -- Evaluate key and value expressions
-        this.code.emit(OP_SWAP, 0, line)
-        this.code.emit(OP_DUP, 0, line)
-        this.code.emit(OP_ROT3, 0, line)
-        this.compile_node(node.key)
-        this.compile_node(node.value_expr)
-        this.code.emit(OP_SET_IDX, 0, line)
-        this.code.emit(OP_SWAP, 0, line)
+        -- result_map[key] = value, threading result_map back. Stack here is
+        -- [result_map, iterator]. SET_IDX consumes the map, so DUP a copy
+        -- first; it expects [obj, idx, value].
+        this.code.emit(OP_SWAP, 0, line)        -- [iterator, result_map]
+        this.code.emit(OP_DUP, 0, line)         -- [iterator, result_map, result_map]
+        this.compile_node(node.key_expr)        -- [iterator, result_map, result_map, key]
+        this.compile_node(node.value_expr)      -- [iterator, result_map, result_map, key, value]
+        this.code.emit(OP_SET_IDX, 0, line)     -- [iterator, result_map]
+        this.code.emit(OP_SWAP, 0, line)        -- [result_map, iterator]
         if jump_skip >= 0 {
             this.code.patch_jump(jump_skip)
         }
