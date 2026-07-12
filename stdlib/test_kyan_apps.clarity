@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, app_painters
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, app_painters
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -69,6 +69,37 @@ ff.clear(0xFF000000)
 paint_files_content(ff, 0, 0, 380, 240, t, true)
 assert_eq(ff.get_pixel(2, 2), t["surface"], "files fills the surface")
 assert(painted(ff, 0xFF000000), "files draws rows")
+
+-- ── System Monitor ──
+show "-- Kyan apps: monitor --"
+assert(has(reg, "monitor"), "monitor painter registered")
+let fm = framebuffer(500, 420)
+fm.clear(0xFF000000)
+paint_monitor_content(fm, 0, 0, 500, 420, t, true)
+assert_eq(fm.get_pixel(2, 2), t["surface"], "monitor fills the surface")
+assert(painted(fm, 0xFF000000), "monitor draws cards / bars / processes")
+
+-- ── Settings ──
+show "-- Kyan apps: settings --"
+assert(has(reg, "settings"), "settings painter registered")
+let fs = framebuffer(560, 380)
+fs.clear(0xFF000000)
+paint_settings_content(fs, 0, 0, 560, 380, t, true)
+assert_eq(fs.get_pixel(2, 2), t["surface_elevated"], "settings fills the sidebar")
+assert(painted(fs, 0xFF000000), "settings draws swatches / toggles")
+
+-- ── Calculator ──
+show "-- Kyan apps: calc --"
+assert(has(reg, "calc"), "calc painter registered")
+let fc = framebuffer(300, 400)
+fc.clear(0xFF000000)
+paint_calc_content(fc, 0, 0, 300, 400, t, true)
+assert(painted(fc, 0xFF000000), "calc draws display + keypad")
+-- a small window must not crash the painters (clip guards)
+paint_monitor_content(fc, 0, 0, 30, 20, t, true)
+paint_settings_content(fc, 0, 0, 30, 20, t, true)
+paint_calc_content(fc, 0, 0, 30, 20, t, true)
+assert(true, "painters survive a tiny content rect")
 
 -- ── Summary ──
 show ""

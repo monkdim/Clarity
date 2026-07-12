@@ -156,12 +156,228 @@ fn paint_files_content(fb, x, y, w, h, theme, focused) {
     }
 }
 
+-- ── System Monitor ─────────────────────────────────────
+
+let _CPU_BARS = [0.32, 0.58, 0.24, 0.71, 0.44, 0.63, 0.38, 0.52]
+let _PROCS = [
+    {"name": "clarity-init", "cpu": "2.4%", "mem": "38 MB"},
+    {"name": "compositor",   "cpu": "6.1%", "mem": "72 MB"},
+    {"name": "prism",        "cpu": "11.7%", "mem": "144 MB"},
+    {"name": "voidrunner",   "cpu": "18.3%", "mem": "96 MB"},
+    {"name": "terminal",     "cpu": "0.9%", "mem": "24 MB"}
+]
+
+fn _stat_card(fb, x, y, w, h, t, atlas, label, value) {
+    rounded_rect(fb, x, y, w, h, 10, t["surface_elevated"])
+    fill_rect(fb, x, y, w, 3, t["accent"])
+    draw_atlas_text(fb, x + 12, y + 10, label, atlas, t["foreground_muted"], {"size": 12, "tracking": 1})
+    draw_atlas_text(fb, x + 12, y + 24, value, atlas, 0xFFFFFFFF, {"size": 24})
+}
+
+fn paint_monitor_content(fb, x, y, w, h, theme, focused) {
+    let t = theme
+    let atlas = shared_atlas()
+    fill_rect(fb, x, y, w, h, t["surface"])
+    let pad = 16
+
+    -- two stat cards up top
+    let cw = int((w - pad * 3) / 2)
+    _stat_card(fb, x + pad, y + pad, cw, 58, t, atlas, "CPU LOAD", "47%")
+    _stat_card(fb, x + pad * 2 + cw, y + pad, cw, 58, t, atlas, "MEMORY", "6.2 / 16 GB")
+
+    -- CPU core bar graph
+    let gy = y + pad + 58 + 16
+    let gh = 74
+    rounded_rect(fb, x + pad, gy, w - pad * 2, gh, 10, t["surface_elevated"])
+    draw_atlas_text(fb, x + pad + 12, gy + 8, "CORES", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
+    let bars = len(_CPU_BARS)
+    let inner = w - pad * 2 - 24
+    let bw = int(inner / bars) - 6
+    let base_y = gy + gh - 12
+    let max_h = gh - 30
+    mut i = 0
+    while i < bars {
+        let bx = x + pad + 12 + i * (bw + 6)
+        let bh = int(_CPU_BARS[i] * max_h)
+        fill_rect(fb, bx, gy + 24, bw, max_h, t["surface"])
+        linear_gradient(fb, bx, base_y - bh, bw, bh, [
+            {"t": 0.0, "color": 0xFF22D3EE},
+            {"t": 1.0, "color": 0xFF7C3AED}
+        ], "v")
+        i = i + 1
+    }
+
+    -- process list
+    let py0 = gy + gh + 16
+    draw_atlas_text(fb, x + pad, py0, "PROCESSES", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
+    mut py = py0 + 18
+    mut r = 0
+    for p in _PROCS {
+        if py + 22 > y + h { break }
+        if r % 2 == 1 { fill_rect(fb, x + pad, py - 3, w - pad * 2, 22, t["surface_elevated"]) }
+        fill_rect(fb, x + pad + 4, py + 4, 6, 6, t["accent"])
+        draw_atlas_text(fb, x + pad + 18, py, p["name"], atlas, t["foreground"], {"size": 14})
+        let cpuw = measure_atlas_text(atlas, p["cpu"], 14, 0)[0]
+        draw_atlas_text(fb, x + w - pad - 90 - cpuw, py, p["cpu"], atlas, t["accent"], {"size": 14})
+        let memw = measure_atlas_text(atlas, p["mem"], 14, 0)[0]
+        draw_atlas_text(fb, x + w - pad - memw, py, p["mem"], atlas, t["foreground_muted"], {"size": 14})
+        py = py + 24
+        r = r + 1
+    }
+}
+
+-- ── Settings ────────────────────────────────────────────
+
+let _THEME_SWATCHES = [
+    {"name": "Obsidian", "a": 0xFF7C3AED, "b": 0xFF22D3EE},
+    {"name": "Quartz",   "a": 0xFFE5E7FF, "b": 0xFF9AB6FF},
+    {"name": "Meadow",   "a": 0xFF34D399, "b": 0xFF0EA5E9},
+    {"name": "Midnight", "a": 0xFF4F46E5, "b": 0xFF0B1120}
+]
+let _TOGGLES = [
+    {"label": "Frosted glass", "on": true},
+    {"label": "Window animations", "on": true},
+    {"label": "Reduce motion", "on": false},
+    {"label": "Show dock labels", "on": false}
+]
+
+fn _toggle(fb, x, y, t, on) {
+    let tw = 40
+    let th = 22
+    let track = if on { t["accent"] } else { t["border"] }
+    rounded_rect(fb, x, y, tw, th, 11, track)
+    let knob = if on { x + tw - th + 3 } else { x + 3 }
+    rounded_rect(fb, knob, y + 3, th - 6, th - 6, 8, 0xFFFFFFFF)
+}
+
+fn paint_settings_content(fb, x, y, w, h, theme, focused) {
+    let t = theme
+    let atlas = shared_atlas()
+    let sw = 132
+    fill_rect(fb, x, y, w, h, t["surface"])
+    fill_rect(fb, x, y, sw, h, t["surface_elevated"])
+    fill_rect(fb, x + sw - 1, y, 1, h, t["border"])
+    let items = ["Appearance", "Display", "Network", "Sound", "About"]
+    mut sy = y + 16
+    mut i = 0
+    for it in items {
+        if i == 0 {
+            rounded_rect(fb, x + 10, sy - 3, sw - 20, 24, 6, t["accent_tertiary"])
+            draw_atlas_text(fb, x + 20, sy, it, atlas, 0xFFFFFFFF, {"size": 14})
+        } else {
+            draw_atlas_text(fb, x + 20, sy, it, atlas, t["foreground_muted"], {"size": 14})
+        }
+        sy = sy + 28
+        i = i + 1
+    }
+
+    let mx = x + sw + 20
+    let mw = w - sw - 40
+    if mw < 40 { return null }
+    draw_atlas_text(fb, mx, y + 16, "Appearance", atlas, t["foreground"], {"size": 20})
+    draw_atlas_text(fb, mx, y + 44, "THEME", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
+
+    -- theme swatches
+    let cols = 4
+    let gap = 12
+    let cwid = int((mw - (cols - 1) * gap) / cols)
+    let chh = 58
+    mut c = 0
+    while c < cols {
+        let cx = mx + c * (cwid + gap)
+        let cy = y + 60
+        linear_gradient(fb, cx, cy, cwid, chh - 18, [
+            {"t": 0.0, "color": _THEME_SWATCHES[c]["a"]},
+            {"t": 1.0, "color": _THEME_SWATCHES[c]["b"]}
+        ], "h")
+        if c == 0 {
+            rounded_rect(fb, cx + cwid - 20, cy + 4, 14, 14, 7, 0xFF05060A)
+            fill_rect(fb, cx + cwid - 15, cy + 10, 3, 3, t["accent"])
+        }
+        draw_atlas_text(fb, cx + 2, cy + chh - 14, _THEME_SWATCHES[c]["name"], atlas, t["foreground"], {"size": 13})
+        c = c + 1
+    }
+
+    -- toggle rows
+    mut ty = y + 60 + chh + 20
+    for tg in _TOGGLES {
+        if ty + 30 > y + h { break }
+        draw_atlas_text(fb, mx, ty + 3, tg["label"], atlas, t["foreground"], {"size": 15})
+        _toggle(fb, mx + mw - 40, ty, t, tg["on"])
+        fill_rect(fb, mx, ty + 30, mw, 1, t["border"])
+        ty = ty + 40
+    }
+}
+
+-- ── Calculator ──────────────────────────────────────────
+
+let _CALC_KEYS = [
+    ["C", "±", "%", "÷"],
+    ["7", "8", "9", "×"],
+    ["4", "5", "6", "−"],
+    ["1", "2", "3", "+"],
+    ["0", ".", "="]
+]
+
+fn _is_op(k) {
+    return k == "÷" or k == "×" or k == "−" or k == "+" or k == "="
+}
+fn _is_fn(k) {
+    return k == "C" or k == "±" or k == "%"
+}
+
+fn paint_calc_content(fb, x, y, w, h, theme, focused) {
+    let t = theme
+    let atlas = shared_atlas()
+    fill_rect(fb, x, y, w, h, 0xFF0B0E16)
+    let pad = 14
+
+    -- display
+    let disp_h = 74
+    draw_atlas_text(fb, x + w - pad - measure_atlas_text(atlas, "128 x 8 +", 14, 0)[0], y + 16, "128 x 8 +", atlas, t["foreground_muted"], {"size": 14})
+    let big = "1,024"
+    let bw = measure_atlas_text(atlas, big, 40, 0)[0]
+    draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 0xFFFFFFFF, {"size": 40})
+
+    -- keypad
+    let gy = y + disp_h + 6
+    let gh = h - disp_h - pad - 6
+    let cols = 4
+    let rows = 5
+    let gap = 8
+    let kw = int((w - pad * 2 - (cols - 1) * gap) / cols)
+    let kh = int((gh - (rows - 1) * gap) / rows)
+    mut r = 0
+    for row in _CALC_KEYS {
+        mut c = 0
+        for k in row {
+            -- the "0" key spans two columns on the last row
+            let span = if k == "0" { 2 } else { 1 }
+            let kx = x + pad + c * (kw + gap)
+            let ky = gy + r * (kh + gap)
+            let kwid = kw * span + (span - 1) * gap
+            mut bgc = t["surface_elevated"]
+            if _is_op(k) { bgc = t["accent"] }
+            elif _is_fn(k) { bgc = t["surface"] }
+            rounded_rect(fb, kx, ky, kwid, kh, 10, bgc)
+            let kcol = if _is_op(k) { 0xFF05060A } else { if _is_fn(k) { t["foreground_muted"] } else { 0xFFFFFFFF } }
+            let lw = measure_atlas_text(atlas, k, 20, 0)[0]
+            draw_atlas_text(fb, kx + int(kwid / 2) - int(lw / 2), ky + int(kh / 2) - 12, k, atlas, kcol, {"size": 20})
+            c = c + span
+        }
+        r = r + 1
+    }
+}
+
 -- ── Registry ────────────────────────────────────────────
 
 fn app_painters() {
     return {
         "prism": paint_prism,
         "terminal": paint_terminal_content,
-        "files": paint_files_content
+        "files": paint_files_content,
+        "monitor": paint_monitor_content,
+        "settings": paint_settings_content,
+        "calc": paint_calc_content
     }
 }

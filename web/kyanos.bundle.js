@@ -2269,8 +2269,173 @@ function paint_files_content(fb, x, y, w, h, theme, focused) {
     i = i + 1;
   }
 }
+var _CPU_BARS = [0.32, 0.58, 0.24, 0.71, 0.44, 0.63, 0.38, 0.52];
+var _PROCS = [{ ["name"]: "clarity-init", ["cpu"]: "2.4%", ["mem"]: "38 MB" }, { ["name"]: "compositor", ["cpu"]: "6.1%", ["mem"]: "72 MB" }, { ["name"]: "prism", ["cpu"]: "11.7%", ["mem"]: "144 MB" }, { ["name"]: "voidrunner", ["cpu"]: "18.3%", ["mem"]: "96 MB" }, { ["name"]: "terminal", ["cpu"]: "0.9%", ["mem"]: "24 MB" }];
+function _stat_card(fb, x, y, w, h, t, atlas, label, value) {
+  rounded_rect(fb, x, y, w, h, 10, $index(t, "surface_elevated"));
+  fill_rect(fb, x, y, w, 3, $index(t, "accent"));
+  draw_atlas_text(fb, x + 12, y + 10, label, atlas, $index(t, "foreground_muted"), { ["size"]: 12, ["tracking"]: 1 });
+  draw_atlas_text(fb, x + 12, y + 24, value, atlas, 4294967295, { ["size"]: 24 });
+}
+function paint_monitor_content(fb, x, y, w, h, theme, focused) {
+  let t = theme;
+  let atlas = shared_atlas();
+  fill_rect(fb, x, y, w, h, $index(t, "surface"));
+  let pad = 16;
+  let cw = $int((w - pad * 3) / 2);
+  _stat_card(fb, x + pad, y + pad, cw, 58, t, atlas, "CPU LOAD", "47%");
+  _stat_card(fb, x + pad * 2 + cw, y + pad, cw, 58, t, atlas, "MEMORY", "6.2 / 16 GB");
+  let gy = y + pad + 58 + 16;
+  let gh = 74;
+  rounded_rect(fb, x + pad, gy, w - pad * 2, gh, 10, $index(t, "surface_elevated"));
+  draw_atlas_text(fb, x + pad + 12, gy + 8, "CORES", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
+  let bars = len(_CPU_BARS);
+  let inner = w - pad * 2 - 24;
+  let bw = $int(inner / bars) - 6;
+  let base_y = gy + gh - 12;
+  let max_h = gh - 30;
+  let i = 0;
+  while (truthy(i < bars)) {
+    let bx = x + pad + 12 + i * (bw + 6);
+    let bh = $int($index(_CPU_BARS, i) * max_h);
+    fill_rect(fb, bx, gy + 24, bw, max_h, $index(t, "surface"));
+    linear_gradient(fb, bx, base_y - bh, bw, bh, [{ ["t"]: 0, ["color"]: 4280472558 }, { ["t"]: 1, ["color"]: 4286331629 }], "v");
+    i = i + 1;
+  }
+  let py0 = gy + gh + 16;
+  draw_atlas_text(fb, x + pad, py0, "PROCESSES", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
+  let py = py0 + 18;
+  let r = 0;
+  for (let p of _PROCS) {
+    if (truthy(py + 22 > y + h)) {
+      break;
+    }
+    if (truthy($eq(r % 2, 1))) {
+      fill_rect(fb, x + pad, py - 3, w - pad * 2, 22, $index(t, "surface_elevated"));
+    }
+    fill_rect(fb, x + pad + 4, py + 4, 6, 6, $index(t, "accent"));
+    draw_atlas_text(fb, x + pad + 18, py, $index(p, "name"), atlas, $index(t, "foreground"), { ["size"]: 14 });
+    let cpuw = $index(measure_atlas_text(atlas, $index(p, "cpu"), 14, 0), 0);
+    draw_atlas_text(fb, x + w - pad - 90 - cpuw, py, $index(p, "cpu"), atlas, $index(t, "accent"), { ["size"]: 14 });
+    let memw = $index(measure_atlas_text(atlas, $index(p, "mem"), 14, 0), 0);
+    draw_atlas_text(fb, x + w - pad - memw, py, $index(p, "mem"), atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+    py = py + 24;
+    r = r + 1;
+  }
+}
+var _THEME_SWATCHES = [{ ["name"]: "Obsidian", ["a"]: 4286331629, ["b"]: 4280472558 }, { ["name"]: "Quartz", ["a"]: 4293257215, ["b"]: 4288329471 }, { ["name"]: "Meadow", ["a"]: 4281652121, ["b"]: 4279150057 }, { ["name"]: "Midnight", ["a"]: 4283385573, ["b"]: 4278915360 }];
+var _TOGGLES = [{ ["label"]: "Frosted glass", ["on"]: true }, { ["label"]: "Window animations", ["on"]: true }, { ["label"]: "Reduce motion", ["on"]: false }, { ["label"]: "Show dock labels", ["on"]: false }];
+function _toggle(fb, x, y, t, on) {
+  let tw = 40;
+  let th = 22;
+  let track = truthy(on) ? $index(t, "accent") : $index(t, "border");
+  rounded_rect(fb, x, y, tw, th, 11, track);
+  let knob = truthy(on) ? x + tw - th + 3 : x + 3;
+  rounded_rect(fb, knob, y + 3, th - 6, th - 6, 8, 4294967295);
+}
+function paint_settings_content(fb, x, y, w, h, theme, focused) {
+  let t = theme;
+  let atlas = shared_atlas();
+  let sw = 132;
+  fill_rect(fb, x, y, w, h, $index(t, "surface"));
+  fill_rect(fb, x, y, sw, h, $index(t, "surface_elevated"));
+  fill_rect(fb, x + sw - 1, y, 1, h, $index(t, "border"));
+  let items = ["Appearance", "Display", "Network", "Sound", "About"];
+  let sy = y + 16;
+  let i = 0;
+  for (let it of items) {
+    if (truthy($eq(i, 0))) {
+      rounded_rect(fb, x + 10, sy - 3, sw - 20, 24, 6, $index(t, "accent_tertiary"));
+      draw_atlas_text(fb, x + 20, sy, it, atlas, 4294967295, { ["size"]: 14 });
+    } else {
+      draw_atlas_text(fb, x + 20, sy, it, atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+    }
+    sy = sy + 28;
+    i = i + 1;
+  }
+  let mx = x + sw + 20;
+  let mw = w - sw - 40;
+  if (truthy(mw < 40)) {
+    return null;
+  }
+  draw_atlas_text(fb, mx, y + 16, "Appearance", atlas, $index(t, "foreground"), { ["size"]: 20 });
+  draw_atlas_text(fb, mx, y + 44, "THEME", atlas, $index(t, "foreground_muted"), { ["size"]: 11, ["tracking"]: 1 });
+  let cols = 4;
+  let gap = 12;
+  let cwid = $int((mw - (cols - 1) * gap) / cols);
+  let chh = 58;
+  let c = 0;
+  while (truthy(c < cols)) {
+    let cx = mx + c * (cwid + gap);
+    let cy = y + 60;
+    linear_gradient(fb, cx, cy, cwid, chh - 18, [{ ["t"]: 0, ["color"]: $index($index(_THEME_SWATCHES, c), "a") }, { ["t"]: 1, ["color"]: $index($index(_THEME_SWATCHES, c), "b") }], "h");
+    if (truthy($eq(c, 0))) {
+      rounded_rect(fb, cx + cwid - 20, cy + 4, 14, 14, 7, 4278519306);
+      fill_rect(fb, cx + cwid - 15, cy + 10, 3, 3, $index(t, "accent"));
+    }
+    draw_atlas_text(fb, cx + 2, cy + chh - 14, $index($index(_THEME_SWATCHES, c), "name"), atlas, $index(t, "foreground"), { ["size"]: 13 });
+    c = c + 1;
+  }
+  let ty = y + 60 + chh + 20;
+  for (let tg of _TOGGLES) {
+    if (truthy(ty + 30 > y + h)) {
+      break;
+    }
+    draw_atlas_text(fb, mx, ty + 3, $index(tg, "label"), atlas, $index(t, "foreground"), { ["size"]: 15 });
+    _toggle(fb, mx + mw - 40, ty, t, $index(tg, "on"));
+    fill_rect(fb, mx, ty + 30, mw, 1, $index(t, "border"));
+    ty = ty + 40;
+  }
+}
+var _CALC_KEYS = [["C", "±", "%", "÷"], ["7", "8", "9", "×"], ["4", "5", "6", "−"], ["1", "2", "3", "+"], ["0", ".", "="]];
+function _is_op(k) {
+  return $eq(k, "÷") || $eq(k, "×") || $eq(k, "−") || $eq(k, "+") || $eq(k, "=");
+}
+function _is_fn(k) {
+  return $eq(k, "C") || $eq(k, "±") || $eq(k, "%");
+}
+function paint_calc_content(fb, x, y, w, h, theme, focused) {
+  let t = theme;
+  let atlas = shared_atlas();
+  fill_rect(fb, x, y, w, h, 4278914582);
+  let pad = 14;
+  let disp_h = 74;
+  draw_atlas_text(fb, x + w - pad - $index(measure_atlas_text(atlas, "128 x 8 +", 14, 0), 0), y + 16, "128 x 8 +", atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+  let big = "1,024";
+  let bw = $index(measure_atlas_text(atlas, big, 40, 0), 0);
+  draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 4294967295, { ["size"]: 40 });
+  let gy = y + disp_h + 6;
+  let gh = h - disp_h - pad - 6;
+  let cols = 4;
+  let rows = 5;
+  let gap = 8;
+  let kw = $int((w - pad * 2 - (cols - 1) * gap) / cols);
+  let kh = $int((gh - (rows - 1) * gap) / rows);
+  let r = 0;
+  for (let row of _CALC_KEYS) {
+    let c = 0;
+    for (let k of row) {
+      let span = truthy($eq(k, "0")) ? 2 : 1;
+      let kx = x + pad + c * (kw + gap);
+      let ky = gy + r * (kh + gap);
+      let kwid = kw * span + (span - 1) * gap;
+      let bgc = $index(t, "surface_elevated");
+      if (truthy(_is_op(k))) {
+        bgc = $index(t, "accent");
+      } else if (truthy(_is_fn(k))) {
+        bgc = $index(t, "surface");
+      }
+      rounded_rect(fb, kx, ky, kwid, kh, 10, bgc);
+      let kcol = truthy(_is_op(k)) ? 4278519306 : truthy(_is_fn(k)) ? $index(t, "foreground_muted") : 4294967295;
+      let lw = $index(measure_atlas_text(atlas, k, 20, 0), 0);
+      draw_atlas_text(fb, kx + $int(kwid / 2) - $int(lw / 2), ky + $int(kh / 2) - 12, k, atlas, kcol, { ["size"]: 20 });
+      c = c + span;
+    }
+    r = r + 1;
+  }
+}
 function app_painters() {
-  return { ["prism"]: paint_prism, ["terminal"]: paint_terminal_content, ["files"]: paint_files_content };
+  return { ["prism"]: paint_prism, ["terminal"]: paint_terminal_content, ["files"]: paint_files_content, ["monitor"]: paint_monitor_content, ["settings"]: paint_settings_content, ["calc"]: paint_calc_content };
 }
 
 // web/build/kyan_game.js
@@ -2863,7 +3028,7 @@ var DOCK_PAD = 12;
 var DOCK_MARGIN = 16;
 var WIN_ANIM_MS = 220;
 var LAUNCHER_ANIM_MS = 190;
-var DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings"];
+var DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings", "calc"];
 function _ease_out_cubic(t) {
   let u = 1 - t;
   return 1 - u * u * u;

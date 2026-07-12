@@ -43,7 +43,7 @@ let DOCK_MARGIN = 16
 let WIN_ANIM_MS = 220.0        -- window open: scale + fade
 let LAUNCHER_ANIM_MS = 190.0   -- launcher: scrim fade + content settle
 
-let DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings"]
+let DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings", "calc"]
 
 -- Easing. ease_out_cubic settles smoothly to 1; ease_out_back overshoots
 -- just past 1 then settles — the little spring pop on a window opening.
