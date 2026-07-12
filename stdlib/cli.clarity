@@ -18,6 +18,7 @@ from "install.clarity" import install_self
 from "repl.clarity" import repl_start
 from "app_scaffold.clarity" import scaffold_app
 from "app_store.clarity" import app_store
+from "errors.clarity" import format_error
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -155,7 +156,7 @@ fn run_file(path) {
         let interp = Interpreter(null, source_dir)
         interp.run(tree)
     } catch e {
-        show red("\nClarity Error in {path}: {e}")
+        show red("\n" + format_error(e, source, path))
         exit(1)
     }
 }
@@ -178,7 +179,7 @@ fn run_file_fast(path) {
         let vm = VM()
         vm.run(code)
     } catch e {
-        show red("\nClarity Error in {path}: {e}")
+        show red("\n" + format_error(e, source, path))
         exit(1)
     }
 }
@@ -220,7 +221,7 @@ fn check_file(path, type_check) {
             }
         }
     } catch e {
-        show red("  ERROR") + " — {path}: {e}"
+        show red("  ERROR") + "\n" + red(format_error(e, source, path))
         exit(1)
     }
 }

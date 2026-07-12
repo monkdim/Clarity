@@ -1,0 +1,52 @@
+-- Friendly error rendering.
+--
+-- Clarity throws errors as plain strings that embed their position —
+-- "... at line N, column C" for lexer/parser errors, "... (line N)" for
+-- runtime errors. This module recovers that position from the message and
+-- renders the offending source line with a caret under the exact spot, so a
+-- typo points you straight at itself instead of just naming a line number.
+
+-- The integer that immediately follows `marker` in `msg` (or null).
+fn _num_after(msg, marker) {
+    let idx = index_of(msg, marker)
+    if idx < 0 { return null }
+    mut digits = ""
+    mut i = idx + len(marker)
+    while i < len(msg) {
+        let ch = substring(msg, i, i + 1)
+        if contains("0123456789", ch) { digits = digits + ch } else { break }
+        i += 1
+    }
+    if len(digits) == 0 { return null }
+    return int(digits)
+}
+
+-- Pull {line, column} out of an error message. Either may be null.
+fn error_position(msg) {
+    return {"line": _num_after(msg, "line "), "column": _num_after(msg, "column ")}
+}
+
+-- Render an error with a source-line snippet and a caret. `source` and
+-- `path` may be null (falls back to just the message). Returns a plain
+-- multi-line string; the caller decides on colour.
+fn format_error(err, source, path) {
+    let msg = str(err)
+    let where = if path != null { " in " + path } else { "" }
+    mut out = "Clarity Error" + where + ":\n\n  " + msg + "\n"
+
+    let pos = error_position(msg)
+    if pos["line"] != null and source != null {
+        let lines = split(source, "\n")
+        let li = pos["line"] - 1
+        if li >= 0 and li < len(lines) {
+            let gutter = "  " + str(pos["line"]) + " | "
+            out = out + "\n" + gutter + lines[li] + "\n"
+            -- caret only when we actually know the column, so we never point
+            -- confidently at the wrong character
+            if pos["column"] != null and pos["column"] >= 1 {
+                out = out + repeat(" ", len(gutter) + pos["column"] - 1) + "^\n"
+            }
+        }
+    }
+    return out
+}
