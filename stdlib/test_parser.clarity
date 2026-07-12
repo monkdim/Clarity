@@ -223,6 +223,13 @@ try {
 
 -- ── Results ─────────────────────────────────────────────
 
+-- Keyword names are usable as bare map keys (show:, type:, fn:, ...) — the
+-- self-hosted parser used to reject these, so it couldn't even parse its own
+-- lsp.clarity.
+assert_parses("keyword map keys", "let m = {show: 1, type: 2, fn: 3, class: 4, for: 5}")
+assert_parses("keyword and normal keys mixed", "let m = {name: \"x\", type: \"y\", count: 3}")
+assert_parses("keyword key then index read", "let m = {type: 7}\nshow m[\"type\"]")
+
 show ""
 show "════════════════════════════════════════"
 if failed == 0 {

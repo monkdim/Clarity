@@ -324,6 +324,61 @@ fn extract_word(source, line, character) {
     return substring(src_line, start, end)
 }
 
+-- 1-based line/column of a declaration node, defaulting to 1 when absent.
+fn _decl_line(stmt) { mut l = 1; try { l = stmt.line } catch e {}; return l }
+fn _decl_col(stmt) { mut c = 1; try { c = stmt.column } catch e {}; return c }
+
+-- "fn name(a, b)" for a signature display.
+fn _fn_signature(stmt) {
+    mut parts = []
+    for p in stmt.params {
+        if type(p) == "string" { push(parts, p) }
+        elif type(p) == "list" and len(p) > 0 { push(parts, p[0]) }
+    }
+    return "fn " + stmt.name + "(" + join(parts, ", ") + ")"
+}
+
+-- Map every top-level declaration name to {kind, line, column, signature},
+-- with 1-based lexer coordinates. Shared by hover and go-to-definition so
+-- they always agree on where a name comes from.
+fn collect_definitions(tree) {
+    mut defs = {}
+    for stmt in tree.body {
+        let nt = stmt.node_type
+        if nt == "FnStatement" {
+            defs[stmt.name] = {"kind": "function", "line": _decl_line(stmt), "column": _decl_col(stmt), "signature": _fn_signature(stmt)}
+        } elif nt == "ClassStatement" {
+            defs[stmt.name] = {"kind": "class", "line": _decl_line(stmt), "column": _decl_col(stmt), "signature": "class " + stmt.name}
+        } elif nt == "EnumStatement" {
+            defs[stmt.name] = {"kind": "enum", "line": _decl_line(stmt), "column": _decl_col(stmt), "signature": "enum " + stmt.name}
+        } elif nt == "InterfaceStatement" {
+            defs[stmt.name] = {"kind": "interface", "line": _decl_line(stmt), "column": _decl_col(stmt), "signature": "interface " + stmt.name}
+        } elif nt == "LetStatement" {
+            mut kw = "let "
+            try { if stmt.mutable { kw = "mut " } } catch e {}
+            defs[stmt.name] = {"kind": "variable", "line": _decl_line(stmt), "column": _decl_col(stmt), "signature": kw + stmt.name}
+        }
+    }
+    return defs
+}
+
+-- Go-to-definition: the 0-based LSP position where the word at (line,
+-- character) is declared, or null. Resolves top-level declarations.
+fn find_definition(source, line, character) {
+    let word = extract_word(source, line, character)
+    if len(word) == 0 { return null }
+    try {
+        let tree = parse(tokenize(source, "<def>"), source)
+        let defs = collect_definitions(tree)
+        if has(defs, word) {
+            let d = defs[word]
+            -- lexer coords are 1-based; LSP positions are 0-based
+            return {"line": d["line"] - 1, "character": d["column"] - 1}
+        }
+    } catch e {}
+    return null
+}
+
 fn get_hover_info(source, line, character) {
     -- Get hover information for the word at a given position.
     -- Returns a markdown string with documentation, or null if no info.
@@ -342,6 +397,15 @@ fn get_hover_info(source, line, character) {
     if has(BUILTINS_INFO, word) {
         return BUILTINS_INFO[word]
     }
+
+    -- A user-defined top-level symbol: show its signature.
+    try {
+        let tree = parse(tokenize(source, "<hover>"), source)
+        let defs = collect_definitions(tree)
+        if has(defs, word) {
+            return "```clarity\n" + defs[word]["signature"] + "\n```"
+        }
+    } catch e {}
 
     return null
 }
@@ -425,6 +489,8 @@ class LanguageServer {
             this.on_did_close(params)
         } elif method == "textDocument/hover" {
             this.on_hover(id, params)
+        } elif method == "textDocument/definition" {
+            this.on_definition(id, params)
         } elif method == "textDocument/completion" {
             this.on_completion(id, params)
         } else {
@@ -442,6 +508,7 @@ class LanguageServer {
         let capabilities = {
             textDocumentSync: 1,
             hoverProvider: true,
+            definitionProvider: true,
             completionProvider: {
                 triggerCharacters: [".", "|"],
                 resolveProvider: false
@@ -539,6 +606,30 @@ class LanguageServer {
                 contents: {
                     kind: "markdown",
                     value: info
+                }
+            }))
+        } else {
+            send_message(make_response(id, null))
+        }
+    }
+
+    fn on_definition(id, params) {
+        -- Handle textDocument/definition: jump to where the symbol is declared.
+        let doc = if has(params, "textDocument") { params.textDocument } else { {} }
+        let uri = if has(doc, "uri") { doc.uri } else { "" }
+        let pos = if has(params, "position") { params.position } else { {} }
+        let line = if has(pos, "line") { pos.line } else { 0 }
+        let character = if has(pos, "character") { pos.character } else { 0 }
+
+        let text = if has(this.documents, uri) { this.documents[uri] } else { "" }
+        let loc = find_definition(text, line, character)
+
+        if loc != null {
+            send_message(make_response(id, {
+                uri: uri,
+                range: {
+                    start: {line: loc["line"], character: loc["character"]},
+                    end: {line: loc["line"], character: loc["character"]}
                 }
             }))
         } else {
