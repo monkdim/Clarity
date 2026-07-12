@@ -23,7 +23,7 @@ from "compositor.clarity" import compositor
 from "window.clarity" import window
 from "window_manager.clarity" import window_manager
 from "graphics.clarity" import framebuffer, rgba
-from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded, frosted_panel, blit_scaled_alpha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
@@ -32,12 +32,29 @@ from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_pa
 from "theme_kyan.clarity" import kyan_obsidian, kyan_gradient_stops
 
 let TITLE_H = 32
+let WIN_RADIUS = 12       -- rounded window corners (MacOS-style float)
 let DOCK_ICON = 44
 let DOCK_GAP = 12
 let DOCK_PAD = 12
 let DOCK_MARGIN = 16
 
+let WIN_ANIM_MS = 220.0        -- window open: scale + fade
+let LAUNCHER_ANIM_MS = 190.0   -- launcher: scrim fade + content settle
+
 let DEFAULT_PINNED = ["prism", "terminal", "files", "editor", "monitor", "settings"]
+
+-- Easing. ease_out_cubic settles smoothly to 1; ease_out_back overshoots
+-- just past 1 then settles — the little spring pop on a window opening.
+fn _ease_out_cubic(t) {
+    let u = 1.0 - t
+    return 1.0 - u * u * u
+}
+fn _ease_out_back(t) {
+    let c1 = 1.70158
+    let c3 = c1 + 1.0
+    let u = t - 1.0
+    return 1.0 + c3 * u * u * u + c1 * u * u
+}
 
 let APP_TITLES = {
     "prism":    "Prism",
@@ -71,6 +88,28 @@ class KyanDesktop {
         this._last_tick = null
         this._icon_cache = {}      -- "app:size:bg" -> pre-rendered icon fb
         this._win_sig = {}         -- app_id -> last-painted chrome signature
+        this._dirty = true         -- recompose only when state changed (frost is costly)
+        this._anim = {}            -- app_id -> open-anim start ms (-1 = pending stamp)
+        this._launcher_t0 = -1.0   -- launcher open-anim start ms (-1 = pending / closed)
+    }
+
+    -- Whether the next frame needs a fresh compose. A discrete change
+    -- (input, open/close/focus, launcher) sets the dirty flag; a live app
+    -- (a running game) forces a redraw every frame. When neither holds the
+    -- host loop can skip compose entirely and just re-present the last
+    -- frame — so an idle desktop costs nothing even with frosted glass.
+    fn needs_redraw() {
+        if this._dirty { return true }
+        if len(keys(this.app_state)) > 0 { return true }
+        -- a window open-animation still in flight (pending stamp, or within
+        -- its duration). Expired entries are swept on the next compose.
+        for kv in entries(this._anim) {
+            if kv[1] < 0.0 { return true }
+            if this._last_tick != null and this._last_tick - kv[1] < WIN_ANIM_MS { return true }
+        }
+        if this.launcher_open and this._launcher_t0 >= 0.0 and this._last_tick != null
+           and this._last_tick - this._launcher_t0 < LAUNCHER_ANIM_MS { return true }
+        return false
     }
 
     -- Reverse-lookup the app id owning a window (or null).
@@ -102,6 +141,7 @@ class KyanDesktop {
     -- ── App windows ─────────────────────────────────
 
     fn open(app_id, x, y, w, h) {
+        this._dirty = true
         if has(this.windows, app_id) {
             let win = this.windows[app_id]
             win.set_visible(true)
@@ -116,6 +156,7 @@ class KyanDesktop {
         this.windows[app_id] = win
         this.comp.add(win)
         this.comp.focus(win)
+        this._anim[app_id] = -1.0   -- spring the new window in (start stamped on next tick)
         -- live apps get their state seeded to the content size
         if app_id == "voidrunner" {
             let cr = win.content_rect()
@@ -125,6 +166,7 @@ class KyanDesktop {
     }
 
     fn close(app_id) {
+        this._dirty = true
         if not has(this.windows, app_id) { return false }
         this.comp.remove(this.windows[app_id])
         mut next = {}
@@ -148,6 +190,7 @@ class KyanDesktop {
     fn focus(app_id) {
         if not has(this.windows, app_id) { return false }
         this.comp.focus(this.windows[app_id])
+        this._dirty = true
         return true
     }
 
@@ -158,6 +201,7 @@ class KyanDesktop {
     -- Route a mouse event. The shell claims clicks on the dock and the
     -- launcher; everything else goes to the WindowManager (focus/drag).
     fn handle_mouse(me) {
+        this._dirty = true
         if this.launcher_open {
             if me.is_press { return this._launcher_click(me.x, me.y) }
             return true
@@ -193,7 +237,7 @@ class KyanDesktop {
 
     -- Track key state by name (browser feeds e.key; native feeds the
     -- same). Live apps read this each tick.
-    fn set_key(name, down) { this.keys[name] = down }
+    fn set_key(name, down) { this.keys[name] = down; this._dirty = true }
 
     -- Advance time-based apps one frame. The host loop calls this with a
     -- monotonic ms clock before compose(); dt is derived here.
@@ -204,13 +248,41 @@ class KyanDesktop {
                 voidrunner_update(this.app_state["voidrunner"], dt, this.keys)
             }
         }
+        -- stamp pending animation starts against the real clock
+        for kv in entries(this._anim) {
+            if kv[1] < 0.0 { this._anim[kv[0]] = now_ms }
+        }
+        if this.launcher_open and this._launcher_t0 < 0.0 { this._launcher_t0 = now_ms }
         this._last_tick = now_ms
         return true
     }
 
     fn toggle_launcher() {
         this.launcher_open = not this.launcher_open
+        this._launcher_t0 = -1.0   -- (re)stamp the open animation on next tick
+        this._dirty = true
         return this.launcher_open
+    }
+
+    -- Open-animation state for a window: {active, scale, alpha}. Finished
+    -- or clock-less (native one-shot render) animations report inactive, so
+    -- the window draws at rest. Removes an animation once it completes.
+    fn _anim_state(app_id) {
+        if app_id == null or not has(this._anim, app_id) or this._last_tick == null {
+            return {"active": false, "scale": 1.0, "alpha": 255}
+        }
+        let start = this._anim[app_id]
+        if start < 0.0 { return {"active": false, "scale": 1.0, "alpha": 255} }
+        let p = (this._last_tick - start) / WIN_ANIM_MS
+        if p >= 1.0 {
+            mut next = {}
+            for kv in entries(this._anim) { if kv[0] != app_id { next[kv[0]] = kv[1] } }
+            this._anim = next
+            return {"active": false, "scale": 1.0, "alpha": 255}
+        }
+        let scale = 0.92 + 0.08 * _ease_out_back(p)
+        let alpha = int(255.0 * _ease_out_cubic(p))
+        return {"active": true, "scale": scale, "alpha": alpha}
     }
 
     -- Open (or focus) an app by id at a cascaded default position.
@@ -295,12 +367,27 @@ class KyanDesktop {
                 this._paint_chrome(win)
                 if app_id != null { this._win_sig[app_id] = sig }
             }
-            drop_shadow(s, win.x, win.y, win.width, win.height, 12, rgba(0, 0, 0, 150), 7)
-            s.blit(win.framebuffer, 0, 0, win.x, win.y, win.width, win.height)
+            let anim = this._anim_state(app_id)
+            if anim["active"] {
+                -- scale + fade in around the window's centre (spring pop)
+                let cx = win.x + int(win.width / 2)
+                let cy = win.y + int(win.height / 2)
+                let dw = int(win.width * anim["scale"])
+                let dh = int(win.height * anim["scale"])
+                let dx = cx - int(dw / 2)
+                let dy = cy - int(dh / 2)
+                let sh_a = int(150 * anim["alpha"] / 255)
+                drop_shadow(s, dx, dy, dw, dh, WIN_RADIUS, rgba(0, 0, 0, sh_a), 7)
+                blit_scaled_alpha(s, win.framebuffer, dx, dy, dw, dh, anim["alpha"])
+            } else {
+                drop_shadow(s, win.x, win.y, win.width, win.height, WIN_RADIUS, rgba(0, 0, 0, 150), 7)
+                blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS)
+            }
         }
         this._paint_dock(s)
         if this.launcher_open { this._paint_launcher(s) }
         this.frames = this.frames + 1
+        this._dirty = false
         return s
     }
 
@@ -407,9 +494,10 @@ class KyanDesktop {
         let dy = layout["y"]
         let dw = layout["w"]
         let dh = layout["h"]
-        -- floating glass pill with a soft shadow
+        -- floating frosted-glass pill with a soft shadow: blur what's
+        -- behind it, then a translucent tint so the blur reads through
         drop_shadow(fb, dx, dy, dw, dh, 18, rgba(0, 0, 0, 120), 7)
-        rounded_rect_blend(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 205))
+        frosted_panel(fb, dx, dy, dw, dh, 18, rgba(13, 17, 26, 150), 6)
         -- icons (cached, AA) + running indicators
         for ic in layout["icons"] {
             let bg = fb.get_pixel(ic["x"], ic["y"])   -- the glass under this icon
@@ -422,20 +510,29 @@ class KyanDesktop {
 
     fn _paint_launcher(fb) {
         let t = this.theme
+        -- open animation: scrim fades in, content settles down with a slight
+        -- overshoot. At rest (or on the clock-less native render) p == 1.
+        mut p = 1.0
+        if this._launcher_t0 >= 0.0 and this._last_tick != null {
+            p = (this._last_tick - this._launcher_t0) / LAUNCHER_ANIM_MS
+            if p > 1.0 { p = 1.0 }
+        }
+        let off = int((1.0 - _ease_out_back(p)) * -14.0)   -- start ~14px high, settle
+        let scrim_a = int(170 * _ease_out_cubic(p))
         -- dim scrim over everything
-        fill_rect_blend(fb, 0, 0, this.width, this.height, rgba(5, 6, 10, 170))
+        fill_rect_blend(fb, 0, 0, this.width, this.height, rgba(5, 6, 10, scrim_a))
         -- search bar
         let bw = int(this.width * 0.5)
         let bx = int(this.width / 2) - int(bw / 2)
-        let by = int(this.height * 0.24)
+        let by = int(this.height * 0.24) + off
         drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8)
-        rounded_rect_blend(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 235))
+        frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7)
         linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h")
         draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, t["foreground_muted"], {"size": 18})
         -- icon grid of pinned apps (geometry shared with hit-testing)
         let layout = this._launcher_layout()
         let cell = layout["cell"]
-        let gy = layout["gy"]
+        let gy = layout["gy"] + off
         for c in layout["cells"] {
             let ix = c["x"] + int((cell - 52) / 2)
             let bg = fb.get_pixel(ix, gy)

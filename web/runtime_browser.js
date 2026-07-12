@@ -669,6 +669,90 @@ export function _ffi_blend_u32(p, byte_offset, count, color) {
   }
 }
 
+// Separable box blur of a framebuffer's BGRA buffer, in place. `passes`
+// box passes approximate a gaussian (2 ≈ soft frosted glass). Running-sum,
+// so cost is O(pixels) regardless of radius; edges replicate. The
+// frosted-glass hot path — must run every frame, so it's native, not an
+// interpreted per-pixel loop.
+export function _ffi_box_blur(p, width, height, radius, passes) {
+  if (!p || !p._buffer) {
+    throw new Error('FFIError: box_blur requires a runtime-allocated pointer');
+  }
+  if (radius < 1) return;
+  const buf = p._buffer;
+  const w = width | 0, h = height | 0, r = radius | 0;
+  const win = 2 * r + 1;
+  const line = new Int32Array(Math.max(w, h) * 3);
+  for (let pass = 0; pass < passes; pass++) {
+    // horizontal
+    for (let y = 0; y < h; y++) {
+      const row = y * w * 4;
+      for (let x = 0; x < w; x++) { const o = row + x * 4; line[x*3]=buf[o+2]; line[x*3+1]=buf[o+1]; line[x*3+2]=buf[o]; }
+      let sr = 0, sg = 0, sb = 0;
+      for (let i = -r; i <= r; i++) { const c = i < 0 ? 0 : (i >= w ? w-1 : i); sr+=line[c*3]; sg+=line[c*3+1]; sb+=line[c*3+2]; }
+      for (let x = 0; x < w; x++) {
+        const o = row + x * 4;
+        buf[o]=(sb/win)|0; buf[o+1]=(sg/win)|0; buf[o+2]=(sr/win)|0; buf[o+3]=255;
+        const oi = x - r, ii = x + r + 1;
+        const oc = oi < 0 ? 0 : oi, ic = ii >= w ? w-1 : ii;
+        sr += line[ic*3]-line[oc*3]; sg += line[ic*3+1]-line[oc*3+1]; sb += line[ic*3+2]-line[oc*3+2];
+      }
+    }
+    // vertical
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < h; y++) { const o = (y*w+x)*4; line[y*3]=buf[o+2]; line[y*3+1]=buf[o+1]; line[y*3+2]=buf[o]; }
+      let sr = 0, sg = 0, sb = 0;
+      for (let i = -r; i <= r; i++) { const c = i < 0 ? 0 : (i >= h ? h-1 : i); sr+=line[c*3]; sg+=line[c*3+1]; sb+=line[c*3+2]; }
+      for (let y = 0; y < h; y++) {
+        const o = (y*w+x)*4;
+        buf[o]=(sb/win)|0; buf[o+1]=(sg/win)|0; buf[o+2]=(sr/win)|0; buf[o+3]=255;
+        const oi = y - r, ii = y + r + 1;
+        const oc = oi < 0 ? 0 : oi, ic = ii >= h ? h-1 : ii;
+        sr += line[ic*3]-line[oc*3]; sg += line[ic*3+1]-line[oc*3+1]; sb += line[ic*3+2]-line[oc*3+2];
+      }
+    }
+  }
+}
+
+// Composite `src` (srcW×srcH BGRA) into `dst` (dstW×dstH) at rect
+// (dx,dy,dw,dh), bilinear-scaled, source-over at global `alpha` (0-255).
+// The compositor's animation path — a window scales up and fades in on
+// open — native so it can run every frame of the animation.
+export function _ffi_blit_scaled_alpha(dstP, dstW, dstH, srcP, srcW, srcH, dx, dy, dw, dh, alpha) {
+  if (!dstP || !dstP._buffer || !srcP || !srcP._buffer) {
+    throw new Error('FFIError: blit_scaled_alpha requires runtime-allocated pointers');
+  }
+  const a = alpha | 0;
+  if (a <= 0 || dw <= 0 || dh <= 0) return;
+  const d = dstP._buffer, s = srcP._buffer;
+  const DW = dstW | 0, DH = dstH | 0, SW = srcW | 0, SH = srcH | 0;
+  const x0 = Math.max(0, dx | 0), y0 = Math.max(0, dy | 0);
+  const x1 = Math.min(DW, (dx + dw) | 0), y1 = Math.min(DH, (dy + dh) | 0);
+  if (x1 <= x0 || y1 <= y0) return;
+  const ia = 255 - a;
+  for (let y = y0; y < y1; y++) {
+    let fv = ((y - dy) / dh) * SH; if (fv < 0) fv = 0;
+    let sy = fv | 0; let vy = fv - sy;
+    let sy2 = sy + 1; if (sy2 >= SH) { sy2 = SH - 1; }
+    if (sy >= SH) { sy = SH - 1; }
+    const rowd = y * DW * 4, row0 = sy * SW * 4, row1 = sy2 * SW * 4;
+    for (let x = x0; x < x1; x++) {
+      let fu = ((x - dx) / dw) * SW; if (fu < 0) fu = 0;
+      let sx = fu | 0; let ux = fu - sx;
+      let sx2 = sx + 1; if (sx2 >= SW) { sx2 = SW - 1; }
+      if (sx >= SW) { sx = SW - 1; }
+      const c0 = row0 + sx * 4, c1 = row0 + sx2 * 4, c2 = row1 + sx * 4, c3 = row1 + sx2 * 4;
+      const w00 = (1 - ux) * (1 - vy), w10 = ux * (1 - vy), w01 = (1 - ux) * vy, w11 = ux * vy;
+      const b = (s[c0]*w00 + s[c1]*w10 + s[c2]*w01 + s[c3]*w11) | 0;
+      const g = (s[c0+1]*w00 + s[c1+1]*w10 + s[c2+1]*w01 + s[c3+1]*w11) | 0;
+      const r = (s[c0+2]*w00 + s[c1+2]*w10 + s[c2+2]*w01 + s[c3+2]*w11) | 0;
+      const o = rowd + x * 4;
+      if (a === 255) { d[o]=b; d[o+1]=g; d[o+2]=r; d[o+3]=255; }
+      else { d[o]=(b*a+d[o]*ia)/255|0; d[o+1]=(g*a+d[o+1]*ia)/255|0; d[o+2]=(r*a+d[o+2]*ia)/255|0; d[o+3]=255; }
+    }
+  }
+}
+
 // Bulk copy from one owned (or wrapped) pointer to an owned destination.
 export function _ffi_copy(dst, dst_offset, src, src_offset, length) {
   if (!dst || !dst._buffer) {

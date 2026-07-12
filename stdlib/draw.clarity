@@ -14,6 +14,8 @@
 -- midpoint for circles) — no anti-aliasing yet; that lands as a follow-up
 -- once we have a font and can compare against ground-truth output.
 
+from "graphics.clarity" import framebuffer
+
 -- ── Line: Bresenham's algorithm ──────────────────────────
 
 fn line(fb, x0, y0, x1, y1, color) {
@@ -112,33 +114,65 @@ fn circle(fb, cx, cy, r, color) {
     }
 }
 
--- ── Rounded rectangle (filled) ──────────────────────────
+-- ── Rounded rectangle (filled, anti-aliased) ────────────
+
+-- Paint the four quarter-round corners with per-pixel coverage. The
+-- caller has already filled the straight interior; each corner box is an
+-- r×r square whose arc-centre sits at its inner join. Coverage
+-- (distance from that centre, softened over one pixel) scales the
+-- colour's alpha and composites over whatever's already there — so the
+-- diagonal edge is a smooth ramp instead of a staircase, and it works on
+-- an opaque panel or against a live background alike.
+fn _aa_corners(fb, x, y, w, h, r, color) {
+    let base_a = int(color / 16777216) & 0xFF
+    let rgb = color & 0xFFFFFF
+    -- each quad: [box_x, box_y, centre_x, centre_y]
+    let quads = [
+        [x,         y,         x + r,     y + r],
+        [x + w - r, y,         x + w - r, y + r],
+        [x,         y + h - r, x + r,     y + h - r],
+        [x + w - r, y + h - r, x + w - r, y + h - r]
+    ]
+    for q in quads {
+        let bx = q[0]
+        let by = q[1]
+        let ccx = q[2]
+        let ccy = q[3]
+        mut yy = 0
+        while yy < r {
+            mut xx = 0
+            while xx < r {
+                let px = bx + xx
+                let py = by + yy
+                let ex = px + 0.5 - ccx
+                let ey = py + 0.5 - ccy
+                let d = sqrt(ex * ex + ey * ey)
+                mut cov = r + 0.5 - d
+                if cov > 1.0 { cov = 1.0 }
+                if cov > 0.0 {
+                    let a = int(base_a * cov)
+                    if a > 0 { blend_pixel(fb, px, py, a * 16777216 + rgb) }
+                }
+                xx = xx + 1
+            }
+            yy = yy + 1
+        }
+    }
+}
 
 fn rounded_rect(fb, x, y, w, h, radius, color) {
-    let r = if radius * 2 > w { w / 2 } else { radius }
-    let r2 = if r * 2 > h { h / 2 } else { r }
-    if r2 <= 0 {
+    let r0 = if radius * 2 > w { int(w / 2) } else { radius }
+    let r = if r0 * 2 > h { int(h / 2) } else { r0 }
+    if r <= 0 {
         fb.fill_rect(x, y, w, h, color)
         return null
     }
-    -- Centre rectangle (full height, between the two arc columns)
-    fb.fill_rect(x + r2, y, w - 2 * r2, h, color)
-    -- Left/right rectangles (between the two arc rows)
-    fb.fill_rect(x, y + r2, r2, h - 2 * r2, color)
-    fb.fill_rect(x + w - r2, y + r2, r2, h - 2 * r2, color)
-    -- Four corner quadrants drawn as filled circle scanlines
-    mut dy = 0 - r2
-    while dy <= 0 {
-        mut dx = 0
-        while (dx + 1) * (dx + 1) + dy * dy <= r2 * r2 {
-            dx += 1
-        }
-        let row_top = y + r2 + dy
-        let row_bot = y + h - 1 - r2 - dy
-        hline(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color)
-        hline(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color)
-        dy += 1
-    }
+    -- Straight interior: centre column full height, side bars between arcs.
+    fb.fill_rect(x + r, y, w - 2 * r, h, color)
+    fb.fill_rect(x, y + r, r, h - 2 * r, color)
+    fb.fill_rect(x + w - r, y + r, r, h - 2 * r, color)
+    -- Anti-aliased quarter-round corners.
+    _aa_corners(fb, x, y, w, h, r, color)
 }
 
 -- ── Arc: angular slice of a circle outline ──────────────
@@ -389,26 +423,44 @@ fn _hline_blend(fb, x0, y, x1, color) {
 }
 
 -- Alpha-aware rounded rectangle — a translucent glass panel. Opaque
--- colours fall through to the fast rounded_rect. Regions are disjoint,
--- so each pixel is composited once.
+-- colours fall through to the fast rounded_rect. The straight interior
+-- composites once; the corners use the same coverage-based AA as the
+-- opaque path, with coverage folded into the source alpha so a
+-- translucent panel keeps a smooth edge.
 fn rounded_rect_blend(fb, x, y, w, h, radius, color) {
     let sa = int(color / 16777216) & 0xFF
     if sa == 0 { return null }
     if sa == 255 { rounded_rect(fb, x, y, w, h, radius, color); return null }
-    let r = if radius * 2 > w { w / 2 } else { radius }
-    let r2 = if r * 2 > h { h / 2 } else { r }
-    if r2 <= 0 { fill_rect_blend(fb, x, y, w, h, color); return null }
-    fill_rect_blend(fb, x + r2, y, w - 2 * r2, h, color)
-    fill_rect_blend(fb, x, y + r2, r2, h - 2 * r2, color)
-    fill_rect_blend(fb, x + w - r2, y + r2, r2, h - 2 * r2, color)
-    mut dy = 0 - r2
+    let r0 = if radius * 2 > w { int(w / 2) } else { radius }
+    let r = if r0 * 2 > h { int(h / 2) } else { r0 }
+    if r <= 0 { fill_rect_blend(fb, x, y, w, h, color); return null }
+    fill_rect_blend(fb, x + r, y, w - 2 * r, h, color)
+    fill_rect_blend(fb, x, y + r, r, h - 2 * r, color)
+    fill_rect_blend(fb, x + w - r, y + r, r, h - 2 * r, color)
+    -- corners: reuse _aa_corners (it already folds coverage into alpha
+    -- and composites via blend_pixel, so a translucent colour stays glassy)
+    _aa_corners(fb, x, y, w, h, r, color)
+}
+
+-- Fast rounded translucent fill with integer-scanline corners (no AA).
+-- The soft-shadow builder stacks several of these per panel with large
+-- radii; the staircase is invisible under the blur, so paying per-pixel
+-- sqrt AA on every layer would just burn frame time.
+fn _rounded_blend_noaa(fb, x, y, w, h, radius, color) {
+    let r0 = if radius * 2 > w { int(w / 2) } else { radius }
+    let r = if r0 * 2 > h { int(h / 2) } else { r0 }
+    if r <= 0 { fill_rect_blend(fb, x, y, w, h, color); return null }
+    fill_rect_blend(fb, x + r, y, w - 2 * r, h, color)
+    fill_rect_blend(fb, x, y + r, r, h - 2 * r, color)
+    fill_rect_blend(fb, x + w - r, y + r, r, h - 2 * r, color)
+    mut dy = 0 - r
     while dy <= 0 {
         mut dx = 0
-        while (dx + 1) * (dx + 1) + dy * dy <= r2 * r2 { dx += 1 }
-        let row_top = y + r2 + dy
-        let row_bot = y + h - 1 - r2 - dy
-        _hline_blend(fb, x + r2 - dx, row_top, x + w - r2 + dx - 1, color)
-        _hline_blend(fb, x + r2 - dx, row_bot, x + w - r2 + dx - 1, color)
+        while (dx + 1) * (dx + 1) + dy * dy <= r * r { dx += 1 }
+        let row_top = y + r + dy
+        let row_bot = y + h - 1 - r - dy
+        _hline_blend(fb, x + r - dx, row_top, x + w - r + dx - 1, color)
+        _hline_blend(fb, x + r - dx, row_bot, x + w - r + dx - 1, color)
         dy += 1
     }
 }
@@ -425,7 +477,94 @@ fn drop_shadow(fb, x, y, w, h, radius, color, blur) {
     let off = int(blur / 2)
     mut i = blur
     while i >= 1 {
-        rounded_rect_blend(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb)
+        _rounded_blend_noaa(fb, x - i, y - i + off, w + 2 * i, h + 2 * i, radius + i, per * 16777216 + rgb)
         i -= 1
     }
+}
+
+-- ── Rounded compositing (rounded window corners) ────────
+-- One rounded corner of a source→destination copy. The r×r box lives in
+-- `dst` coordinates; `cx,cy` is the arc centre; the matching source pixel
+-- is (px - ox, py - oy). Interior pixels copy straight; the diagonal edge
+-- composites the source over the destination background at fractional
+-- coverage, so the corner is smooth against whatever it floats over.
+fn _blit_corner(dst, src, ox, oy, box_x, box_y, cx, cy, r) {
+    mut yy = 0
+    while yy < r {
+        mut xx = 0
+        while xx < r {
+            let px = box_x + xx
+            let py = box_y + yy
+            let ex = px + 0.5 - cx
+            let ey = py + 0.5 - cy
+            let d = sqrt(ex * ex + ey * ey)
+            mut cov = r + 0.5 - d
+            if cov > 1.0 { cov = 1.0 }
+            if cov > 0.0 {
+                let sp = src.get_pixel(px - ox, py - oy)
+                if cov >= 1.0 {
+                    dst.put_pixel(px, py, sp)
+                } else {
+                    let a = int(255 * cov)
+                    blend_pixel(dst, px, py, a * 16777216 + (sp & 0xFFFFFF))
+                }
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+-- Blit `src` onto `dst` at (dx,dy) with anti-aliased rounded corners —
+-- the copy a window compositor wants so its panels float with soft edges
+-- instead of hard rectangles. The straight interior takes the fast row
+-- copy (blit); only the four corner boxes are composited per pixel.
+fn blit_rounded(dst, src, dx, dy, w, h, radius) {
+    let r0 = if radius * 2 > w { int(w / 2) } else { radius }
+    let r = if r0 * 2 > h { int(h / 2) } else { r0 }
+    if r <= 0 { dst.blit(src, 0, 0, dx, dy, w, h); return null }
+    -- fast interior: centre column + side bars (skips the corner boxes)
+    dst.blit(src, r, 0, dx + r, dy, w - 2 * r, h)
+    dst.blit(src, 0, r, dx, dy + r, r, h - 2 * r)
+    dst.blit(src, w - r, r, dx + w - r, dy + r, r, h - 2 * r)
+    -- four anti-aliased corners
+    _blit_corner(dst, src, dx, dy, dx,         dy,         dx + r,     dy + r,     r)
+    _blit_corner(dst, src, dx, dy, dx + w - r, dy,         dx + w - r, dy + r,     r)
+    _blit_corner(dst, src, dx, dy, dx,         dy + h - r, dx + r,     dy + h - r, r)
+    _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r)
+}
+
+-- ── Scaled + faded compositing (window animations) ──────
+-- Composite `src` into `dst` scaled to `dw`×`dh` at (dx,dy), source-over
+-- at `alpha` (0-255). Bilinear, native. This is how a window scales up
+-- and fades in on open — the whole thing runs each animation frame.
+fn blit_scaled_alpha(dst, src, dx, dy, dw, dh, alpha) {
+    _ffi_blit_scaled_alpha(dst.buffer._handle, dst.width, dst.height,
+                           src.buffer._handle, src.width, src.height,
+                           int(dx), int(dy), int(dw), int(dh), int(alpha))
+}
+
+-- ── Frosted glass (separable box blur) ──────────────────
+-- A running-sum box blur is O(pixels) regardless of radius. It runs every
+-- frame under the dock and launcher, so the pixel loop is a native builtin
+-- (_ffi_box_blur) working straight on the framebuffer's BGRA bytes — an
+-- interpreted per-pixel loop was ~50x too slow. `passes` box passes
+-- approximate a gaussian (2 ≈ soft glass); edges replicate.
+fn box_blur(fb, radius, passes) {
+    if radius < 1 { return null }
+    _ffi_box_blur(fb.buffer._handle, fb.width, fb.height, radius, passes)
+}
+
+-- Frosted-glass panel: blur what's behind the panel, drop it back in with
+-- rounded anti-aliased corners, then lay a translucent tint on top so the
+-- blur reads through. The signature macOS/vibrancy look. `blur` is the box
+-- radius; `tint` is the glass colour (translucent). Draw before any panel
+-- content (icons, text) — this establishes the surface.
+fn frosted_panel(fb, x, y, w, h, radius, tint, blur) {
+    if w <= 0 or h <= 0 { return null }
+    let snap = framebuffer(w, h)
+    snap.blit(fb, x, y, 0, 0, w, h)
+    box_blur(snap, blur, 2)
+    blit_rounded(fb, snap, x, y, w, h, radius)
+    rounded_rect_blend(fb, x, y, w, h, radius, tint)
 }
