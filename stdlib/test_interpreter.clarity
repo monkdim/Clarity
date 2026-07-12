@@ -324,6 +324,12 @@ assert_output("map comprehension over a map",
     "let m = {\"a\": 1, \"b\": 2}\nlet doubled = {k: m[k] * 2 for k in m}\nshow doubled[\"a\"] + doubled[\"b\"]",
     ["6"])
 
+-- Comprehensions over a string iterate its characters (used to crash the
+-- same way as maps: each() called .forEach on a non-list).
+assert_output("comprehension over a string",
+    "show [c for c in \"abc\"]",
+    ["[\"a\", \"b\", \"c\"]"])
+
 -- ── Higher-order functions ───────────────────────────────
 show ""
 show "── Higher-order Functions ──"
