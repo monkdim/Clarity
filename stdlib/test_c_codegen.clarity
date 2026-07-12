@@ -1,0 +1,75 @@
+-- Clarity → C native-compilation tests (stage 1).
+--
+-- For each program: run it through the tree-walking interpreter AND compile
+-- it to C, build the C with a real compiler, run the binary — then assert the
+-- native output matches the interpreter exactly. This proves the generated C
+-- is not just well-formed but semantically faithful.
+--
+-- Skipped gracefully where no C compiler is on PATH.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "c_codegen.clarity" import compile_to_c
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg}\n    interp: {expected}\n    native: {actual}" }
+}
+
+-- Pick a C compiler that's actually present.
+fn _find_cc() {
+    for cc in ["cc", "gcc", "clang"] {
+        let r = exec_full(cc + " --version")
+        if len(trim(r.stdout)) > 0 { return cc }
+    }
+    return null
+}
+let CC = _find_cc()
+
+fn interp_run(src) {
+    let i = Interpreter(null, null)
+    i.run(parse(tokenize(src, "<t>"), src))
+    return join(i.output, "\n")
+}
+
+-- Compile `src` to a native binary and return its stdout (trimmed).
+fn native_run(src, tag) {
+    let c = compile_to_c(parse(tokenize(src, "<t>"), src))
+    let cfile = "/tmp/_clc_" + tag + ".c"
+    let bin = "/tmp/_clc_" + tag
+    write(cfile, c)
+    exec_full(CC + " -O2 -w " + cfile + " -o " + bin + " -lm")
+    return trim(exec_full(bin).stdout)
+}
+
+fn same(tag, src) {
+    assert_eq(native_run(src, tag), trim(interp_run(src)), tag)
+}
+
+if CC == null {
+    show "-- C codegen: no C compiler on PATH — native compile tests skipped --"
+} else {
+    show "-- C codegen: compiling with '" + CC + "' --"
+
+    same("arithmetic", "show 2 + 3 * 4\nshow 10 - 6 / 2\nshow 2 ** 10\nshow 17 % 5\nshow -(4 + 1)")
+    same("integer_div_float", "show 12 / 4\nshow 7 / 2")
+    same("float_math", "show 1.5 + 2.5\nshow 3.0 * 2.0\nshow 10.0 / 4.0")
+    same("booleans", "show true\nshow false\nshow not true\nshow 5 > 3 and 2 < 1")
+    same("comparisons", "show 5 > 3\nshow 3 >= 3\nshow 2 == 2\nshow 2 != 3\nshow \"a\" < \"b\"")
+    same("variables", "let x = 40\nmut y = 2\ny = y + x\ny += 1\nshow y")
+    same("strings", "let n = \"Clarity\"\nshow \"hi \" + n + \"!\"\nshow \"a\" + \"b\" + \"c\"")
+    same("if_elif_else", "fn grade(n) { if n >= 90 { return \"A\" } elif n >= 80 { return \"B\" } else { return \"C\" } }\nshow grade(95)\nshow grade(85)\nshow grade(70)")
+    same("while_loop", "mut i = 0\nmut s = 0\nwhile i < 5 { if i % 2 == 0 { s = s + i }\ni = i + 1 }\nshow s")
+    same("recursion", "fn fib(n) { if n < 2 { return n }\nreturn fib(n - 1) + fib(n - 2) }\nshow fib(20)")
+    same("mutual_recursion", "fn is_even(n) { if n == 0 { return true }\nreturn is_odd(n - 1) }\nfn is_odd(n) { if n == 0 { return false }\nreturn is_even(n - 1) }\nshow is_even(10)\nshow is_odd(7)")
+    same("factorial_loop", "fn fact(n) { mut r = 1\nmut i = 1\nwhile i <= n { r = r * i\ni = i + 1 }\nreturn r }\nshow fact(10)")
+
+    exec("rm -f /tmp/_clc_*")
+}
+
+show ""
+show "C codegen: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " C codegen test(s) failed" }
