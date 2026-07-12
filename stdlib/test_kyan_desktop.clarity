@@ -9,7 +9,7 @@ from "kyan_desktop.clarity" import kyan_desktop, KyanDesktop
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 from "mouse.clarity" import MouseEvent
-from "kyan_apps.clarity" import _calc_layout, _settings_layout
+from "kyan_apps.clarity" import _calc_layout, _settings_layout, _files_layout
 
 mut PASSED = 0
 mut FAILED = 0
@@ -299,6 +299,27 @@ assert(ds.theme["background"] != theme["background"], "the desktop theme actuall
 -- animations pref gates the open animation
 ds.prefs["animations"] = false
 assert(not ds._anim_state("prism")["active"], "disabling animations makes windows draw at rest")
+
+-- ── Files: clicking a folder row navigates into it ──
+let df = kyan_desktop(1000, 640, theme)
+df.boot(null)
+let fwin = df.open("files", 80, 60, 420, 340)
+assert(df._app_ui["files"] != null, "opening files seeds its navigation state")
+assert_eq(len(df._app_ui["files"]["path"]), 0, "files opens at the Home root")
+let fcr = fwin.content_rect()
+let FL = _files_layout(df._app_ui["files"], fwin.x + fcr[0], fwin.y + fcr[1], fcr[2], fcr[3])
+-- the first row is a folder; clicking it descends
+let frow = FL["rows"][0]
+df.handle_mouse(mk_mouse(frow["x"] + 20, frow["y"] + 8, "press", 1))
+assert_eq(len(df._app_ui["files"]["path"]), 1, "clicking a folder row descends into it")
+-- clicking the Home breadcrumb returns to the root
+let FL2 = _files_layout(df._app_ui["files"], fwin.x + fcr[0], fwin.y + fcr[1], fcr[2], fcr[3])
+let hc = FL2["crumbs"][0]
+df.handle_mouse(mk_mouse(hc["x"] + 4, hc["y"] + 4, "press", 1))
+assert_eq(len(df._app_ui["files"]["path"]), 0, "clicking the Home crumb returns to the root")
+-- closing files frees its navigation state
+df.close("files")
+assert(not has(df._app_ui, "files"), "closing files frees its navigation state")
 
 -- ── close ────────────────────────────────────────
 

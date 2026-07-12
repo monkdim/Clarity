@@ -2275,26 +2275,159 @@ function paint_terminal_content(fb, x, y, w, h, theme, focused) {
   }
   fill_rect(fb, x + 12, ly + 2, 8, 13, $index(t, "accent"));
 }
-var _FILE_ROWS = [{ ["name"]: "clarity", ["meta"]: "173 items", ["dir"]: true }, { ["name"]: "kyanos-themes", ["meta"]: "12 items", ["dir"]: true }, { ["name"]: "theme_kyan.clarity", ["meta"]: "8.2 KB", ["dir"]: false }, { ["name"]: "prism_library.clarity", ["meta"]: "14.6 KB", ["dir"]: false }, { ["name"]: "voidrunner.clarity", ["meta"]: "31.0 KB", ["dir"]: false }];
-function paint_files_content(fb, x, y, w, h, theme, focused) {
+function _kyan_fs() {
+  return { ["name"]: "Home", ["dir"]: true, ["children"]: [{ ["name"]: "Projects", ["dir"]: true, ["children"]: [{ ["name"]: "clarity", ["dir"]: true, ["children"]: [{ ["name"]: "stdlib", ["dir"]: true, ["children"]: [{ ["name"]: "kyan_desktop.clarity", ["dir"]: false, ["size"]: "44.3 KB" }, { ["name"]: "kyan_apps.clarity", ["dir"]: false, ["size"]: "31.5 KB" }, { ["name"]: "graphics.clarity", ["dir"]: false, ["size"]: "10.7 KB" }] }, { ["name"]: "README.md", ["dir"]: false, ["size"]: "6.1 KB" }, { ["name"]: "transpile.clarity", ["dir"]: false, ["size"]: "48.2 KB" }, { ["name"]: "interpreter.clarity", ["dir"]: false, ["size"]: "92.7 KB" }] }, { ["name"]: "voidrunner", ["dir"]: true, ["children"]: [{ ["name"]: "sprites", ["dir"]: true, ["children"]: [{ ["name"]: "ship.png", ["dir"]: false, ["size"]: "2.4 KB" }, { ["name"]: "asteroid.png", ["dir"]: false, ["size"]: "5.1 KB" }] }, { ["name"]: "game.clarity", ["dir"]: false, ["size"]: "31.0 KB" }] }] }, { ["name"]: "Documents", ["dir"]: true, ["children"]: [{ ["name"]: "design-notes.md", ["dir"]: false, ["size"]: "12.4 KB" }, { ["name"]: "roadmap.md", ["dir"]: false, ["size"]: "4.8 KB" }] }, { ["name"]: "Pictures", ["dir"]: true, ["children"]: [{ ["name"]: "wallpaper-obsidian.png", ["dir"]: false, ["size"]: "1.2 MB" }, { ["name"]: "wallpaper-quartz.png", ["dir"]: false, ["size"]: "1.1 MB" }] }, { ["name"]: "Music", ["dir"]: true, ["children"]: [{ ["name"]: "synthwave.flac", ["dir"]: false, ["size"]: "38.2 MB" }] }, { ["name"]: "theme_kyan.clarity", ["dir"]: false, ["size"]: "8.2 KB" }, { ["name"]: "notes.txt", ["dir"]: false, ["size"]: "1.1 KB" }] };
+}
+function new_files() {
+  return { ["path"]: [] };
+}
+function _fs_child(dir, name) {
+  for (let c of $index(dir, "children")) {
+    if (truthy($eq($index(c, "name"), name))) {
+      return c;
+    }
+  }
+  return null;
+}
+function _files_dir(state) {
+  let node = _kyan_fs();
+  for (let name of $index(state, "path")) {
+    let nxt = _fs_child(node, name);
+    if (truthy($eq(nxt, null) || !truthy($index(nxt, "dir")))) {
+      return node;
+    }
+    node = nxt;
+  }
+  return node;
+}
+function _files_sorted(dir) {
+  let out = [];
+  for (let c of $index(dir, "children")) {
+    if (truthy($index(c, "dir"))) {
+      push(out, c);
+    }
+  }
+  for (let c of $index(dir, "children")) {
+    if (truthy(!truthy($index(c, "dir")))) {
+      push(out, c);
+    }
+  }
+  return out;
+}
+function _entry_meta(e2) {
+  if (truthy($index(e2, "dir"))) {
+    return str(len($index(e2, "children"))) + " items";
+  }
+  return $index(e2, "size");
+}
+function files_nav(state, name) {
+  let dir = _files_dir(state);
+  let child = _fs_child(dir, name);
+  if (truthy($ne(child, null) && $index(child, "dir"))) {
+    push($index(state, "path"), name);
+  }
+  return state;
+}
+function files_goto(state, idx) {
+  let np = [];
+  let i = 0;
+  while (truthy(i < idx && i < len($index(state, "path")))) {
+    push(np, $index($index(state, "path"), i));
+    i = i + 1;
+  }
+  state["path"] = np;
+  return state;
+}
+function _files_crumbs(state) {
+  let out = ["Home"];
+  for (let name of $index(state, "path")) {
+    push(out, name);
+  }
+  return out;
+}
+var _FILES_ROW_H = 26;
+var _FILES_HEAD_H = 34;
+function _files_layout(state, x, y, w, h) {
+  let atlas = shared_atlas();
+  let crumbs = [];
+  let cx = x + 14;
+  let cy = y + 10;
+  let labels = _files_crumbs(state);
+  let i = 0;
+  for (let label of labels) {
+    let cw = $index(measure_atlas_text(atlas, label, 13, 0), 0);
+    push(crumbs, { ["label"]: label, ["index"]: i, ["x"]: cx, ["y"]: cy, ["w"]: cw, ["h"]: 16 });
+    cx = cx + cw + 16;
+    i = i + 1;
+  }
+  let rows = [];
+  let ry = y + _FILES_HEAD_H + 6;
+  for (let e2 of _files_sorted(_files_dir(state))) {
+    push(rows, { ["name"]: $index(e2, "name"), ["dir"]: $index(e2, "dir"), ["meta"]: _entry_meta(e2), ["x"]: x + 6, ["y"]: ry, ["w"]: w - 12, ["h"]: _FILES_ROW_H - 2 });
+    ry = ry + _FILES_ROW_H;
+  }
+  return { ["crumbs"]: crumbs, ["rows"]: rows };
+}
+function files_hit(state, x, y, w, h, px, py) {
+  let lay = _files_layout(state, x, y, w, h);
+  for (let c of $index(lay, "crumbs")) {
+    if (truthy(px >= $index(c, "x") - 4 && px <= $index(c, "x") + $index(c, "w") + 4 && py >= $index(c, "y") - 4 && py <= $index(c, "y") + $index(c, "h") + 4)) {
+      return { ["kind"]: "crumb", ["index"]: $index(c, "index") };
+    }
+  }
+  for (let r of $index(lay, "rows")) {
+    if (truthy(px >= $index(r, "x") && px <= $index(r, "x") + $index(r, "w") && py >= $index(r, "y") && py <= $index(r, "y") + $index(r, "h"))) {
+      return { ["kind"]: "row", ["name"]: $index(r, "name"), ["dir"]: $index(r, "dir") };
+    }
+  }
+  return null;
+}
+function files_click(state, x, y, w, h, px, py) {
+  let hit = files_hit(state, x, y, w, h, px, py);
+  if (truthy($eq(hit, null))) {
+    return false;
+  }
+  if (truthy($eq($index(hit, "kind"), "crumb"))) {
+    let before = len($index(state, "path"));
+    files_goto(state, $index(hit, "index"));
+    return $ne(len($index(state, "path")), before);
+  }
+  if (truthy($eq($index(hit, "kind"), "row") && $index(hit, "dir"))) {
+    files_nav(state, $index(hit, "name"));
+    return true;
+  }
+  return false;
+}
+function paint_files(fb, x, y, w, h, theme, state) {
   let t = theme;
   let atlas = shared_atlas();
   fill_rect(fb, x, y, w, h, $index(t, "surface"));
-  let ry = y + 10;
-  let i = 0;
-  for (let row of _FILE_ROWS) {
-    if (truthy($eq(i, 1))) {
-      fill_rect(fb, x + 6, ry - 3, w - 12, 24, $index(t, "accent_tertiary"));
+  let lay = _files_layout(state, x, y, w, h);
+  fill_rect(fb, x, y, w, _FILES_HEAD_H, $index(t, "surface_elevated"));
+  fill_rect(fb, x, y + _FILES_HEAD_H - 1, w, 1, $index(t, "border"));
+  let last = len($index(lay, "crumbs")) - 1;
+  let ci = 0;
+  for (let c of $index(lay, "crumbs")) {
+    let col = truthy($eq(ci, last)) ? $index(t, "foreground") : $index(t, "accent");
+    draw_atlas_text(fb, $index(c, "x"), $index(c, "y"), $index(c, "label"), atlas, col, { ["size"]: 13 });
+    if (truthy($ne(ci, last))) {
+      draw_atlas_text(fb, $index(c, "x") + $index(c, "w") + 5, $index(c, "y"), "/", atlas, $index(t, "foreground_muted"), { ["size"]: 13 });
     }
-    let ic = truthy($index(row, "dir")) ? $index(t, "accent_secondary") : $index(t, "accent");
-    fill_rect(fb, x + 12, ry + 3, 12, 10, ic);
-    let name_col = truthy($eq(i, 1)) ? 4294967295 : $index(t, "foreground");
-    draw_atlas_text(fb, x + 32, ry, $index(row, "name"), atlas, name_col, { ["size"]: 15 });
-    let mw = $index(measure_atlas_text(atlas, $index(row, "meta"), 14, 0), 0);
-    draw_atlas_text(fb, x + w - mw - 14, ry + 1, $index(row, "meta"), atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
-    ry = ry + 26;
-    i = i + 1;
+    ci = ci + 1;
   }
+  for (let r of $index(lay, "rows")) {
+    let ic = truthy($index(r, "dir")) ? $index(t, "accent_secondary") : $index(t, "accent");
+    fill_rect(fb, $index(r, "x") + 6, $index(r, "y") + 6, 12, 10, ic);
+    draw_atlas_text(fb, $index(r, "x") + 26, $index(r, "y") + 3, $index(r, "name"), atlas, $index(t, "foreground"), { ["size"]: 15 });
+    let mw = $index(measure_atlas_text(atlas, $index(r, "meta"), 14, 0), 0);
+    draw_atlas_text(fb, x + w - mw - 14, $index(r, "y") + 4, $index(r, "meta"), atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+  }
+  if (truthy($eq(len($index(lay, "rows")), 0))) {
+    draw_atlas_text(fb, x + 20, y + _FILES_HEAD_H + 14, "This folder is empty", atlas, $index(t, "foreground_muted"), { ["size"]: 14 });
+  }
+}
+function paint_files_content(fb, x, y, w, h, theme, focused) {
+  paint_files(fb, x, y, w, h, theme, new_files());
 }
 var _CPU_BARS = [0.32, 0.58, 0.24, 0.71, 0.44, 0.63, 0.38, 0.52];
 var _PROCS = [{ ["name"]: "clarity-init", ["cpu"]: "2.4%", ["mem"]: "38 MB" }, { ["name"]: "compositor", ["cpu"]: "6.1%", ["mem"]: "72 MB" }, { ["name"]: "prism", ["cpu"]: "11.7%", ["mem"]: "144 MB" }, { ["name"]: "voidrunner", ["cpu"]: "18.3%", ["mem"]: "96 MB" }, { ["name"]: "terminal", ["cpu"]: "0.9%", ["mem"]: "24 MB" }];
@@ -3347,6 +3480,9 @@ class KyanDesktop {
     if (truthy($eq(app_id, "calc") && !truthy(has(this._app_ui, "calc")))) {
       this._app_ui["calc"] = new_calc();
     }
+    if (truthy($eq(app_id, "files") && !truthy(has(this._app_ui, "files")))) {
+      this._app_ui["files"] = new_files();
+    }
     return win;
   }
   close(app_id) {
@@ -3476,6 +3612,12 @@ class KyanDesktop {
           this.prefs[$index(hit, "key")] = !truthy($index(this.prefs, $index(hit, "key")));
           this._dirty = true;
         }
+        return true;
+      }
+    }
+    if (truthy($eq(app_id, "files") && has(this._app_ui, "files"))) {
+      if (truthy(files_click($index(this._app_ui, "files"), ax, ay, aw, ah, px, py))) {
+        this._dirty = true;
         return true;
       }
     }
@@ -3708,7 +3850,7 @@ class KyanDesktop {
         continue;
       }
       let app_id = this._app_of(win);
-      let live = $ne(app_id, null) && has(this.app_state, app_id);
+      let live = $ne(app_id, null) && (has(this.app_state, app_id) || has(this._app_ui, app_id) || $eq(app_id, "settings"));
       let sig = str(win.focused) + ":" + str(win.width) + ":" + str(win.height);
       let cached = $ne(app_id, null) && has(this._win_sig, app_id) && $eq($index(this._win_sig, app_id), sig);
       if (truthy(live || !truthy(cached))) {
@@ -3809,6 +3951,10 @@ class KyanDesktop {
     }
     if (truthy($eq(app_id, "settings"))) {
       paint_settings(fb, cx, cy, cw, ch, t, this.prefs);
+      return null;
+    }
+    if (truthy($eq(app_id, "files") && has(this._app_ui, "files"))) {
+      paint_files(fb, cx, cy, cw, ch, t, $index(this._app_ui, "files"));
       return null;
     }
     if (truthy($ne(app_id, null) && has(this.painters, app_id))) {

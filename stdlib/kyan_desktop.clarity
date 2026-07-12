@@ -27,7 +27,7 @@ from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_sha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters, prism_play_rect, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit
+from "kyan_apps.clarity" import app_painters, prism_play_rect, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_spawn_shell, pty_supported
@@ -210,6 +210,9 @@ class KyanDesktop {
         if app_id == "calc" and not has(this._app_ui, "calc") {
             this._app_ui["calc"] = new_calc()
         }
+        if app_id == "files" and not has(this._app_ui, "files") {
+            this._app_ui["files"] = new_files()
+        }
         return win
     }
 
@@ -311,6 +314,12 @@ class KyanDesktop {
                     this.prefs[hit["key"]] = not this.prefs[hit["key"]]
                     this._dirty = true
                 }
+                return true
+            }
+        }
+        if app_id == "files" and has(this._app_ui, "files") {
+            if files_click(this._app_ui["files"], ax, ay, aw, ah, px, py) {
+                this._dirty = true
                 return true
             }
         }
@@ -545,7 +554,12 @@ class KyanDesktop {
         for win in this.comp.windows {
             if not win.visible or win.minimized { continue }
             let app_id = this._app_of(win)
-            let live = app_id != null and has(this.app_state, app_id)
+            -- "live" windows repaint their content every compose: real-time
+            -- apps (games) plus the interactive apps whose UI reflects click
+            -- state (calc/files in _app_ui, settings in prefs). compose only
+            -- runs on dirty frames, so this is paid only when something moved.
+            let live = app_id != null and (has(this.app_state, app_id)
+                       or has(this._app_ui, app_id) or app_id == "settings")
             let sig = str(win.focused) + ":" + str(win.width) + ":" + str(win.height)
             let cached = app_id != null and has(this._win_sig, app_id) and this._win_sig[app_id] == sig
             if live or not cached {
@@ -671,6 +685,11 @@ class KyanDesktop {
         -- Settings paints from the live desktop preferences
         if app_id == "settings" {
             paint_settings(fb, cx, cy, cw, ch, t, this.prefs)
+            return null
+        }
+        -- Files paints its current directory from live navigation state
+        if app_id == "files" and has(this._app_ui, "files") {
+            paint_files(fb, cx, cy, cw, ch, t, this._app_ui["files"])
             return null
         }
         if app_id != null and has(this.painters, app_id) {

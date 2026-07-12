@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, app_painters, new_calc, calc_press, calc_key_at
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -67,7 +67,9 @@ show "-- Kyan apps: files --"
 let ff = framebuffer(380, 240)
 ff.clear(0xFF000000)
 paint_files_content(ff, 0, 0, 380, 240, t, true)
-assert_eq(ff.get_pixel(2, 2), t["surface"], "files fills the surface")
+-- the top band is the breadcrumb header (elevated), the body is the surface
+assert_eq(ff.get_pixel(2, 2), t["surface_elevated"], "files draws the breadcrumb header")
+assert_eq(ff.get_pixel(2, 120), t["surface"], "files fills the surface below the header")
 assert(painted(ff, 0xFF000000), "files draws rows")
 
 -- ── System Monitor ──
@@ -123,6 +125,57 @@ assert_eq(calc_seq(["5", "/", "0", "="]), "0", "divide by zero returns 0, no cra
 let hk = calc_key_at(0, 0, 300, 400, 40, 120)
 assert(hk != null, "calc_key_at finds a key inside the pad")
 assert_eq(calc_key_at(0, 0, 300, 400, -5, -5), null, "calc_key_at misses outside the pad")
+
+-- ── Files navigation ──
+show "-- Kyan apps: files navigation --"
+fn names_of(entries) {
+    mut out = []
+    for e in entries { push(out, e["name"]) }
+    return out
+}
+let fst = new_files()
+assert_eq(len(fst["path"]), 0, "files start at the Home root")
+let root = files_entries(fst)
+-- folders sort ahead of files
+assert_eq(root[0]["dir"], true, "first entry is a folder")
+assert(contains(names_of(root), "Projects"), "root shows Projects")
+assert(contains(names_of(root), "notes.txt"), "root shows a file")
+-- a folder's meta is its item count
+assert_eq(root[0]["dir"] and root[0]["name"] == "Projects", true, "Projects is the first folder")
+-- descend into Projects → clarity → stdlib
+files_nav(fst, "Projects")
+assert_eq(len(fst["path"]), 1, "navigating into Projects deepens the path")
+assert(contains(names_of(files_entries(fst)), "clarity"), "Projects contains clarity")
+files_nav(fst, "clarity")
+files_nav(fst, "stdlib")
+assert_eq(len(fst["path"]), 3, "three levels deep")
+assert(contains(names_of(files_entries(fst)), "kyan_apps.clarity"), "stdlib lists its files")
+-- navigating into a file is a no-op
+files_nav(fst, "kyan_apps.clarity")
+assert_eq(len(fst["path"]), 3, "clicking a file does not change the directory")
+-- back pops one level
+files_up(fst)
+assert_eq(len(fst["path"]), 2, "up pops one level")
+assert(contains(names_of(files_entries(fst)), "stdlib"), "back returns to clarity")
+-- breadcrumb jump goes straight to the root
+files_goto(fst, 0)
+assert_eq(len(fst["path"]), 0, "breadcrumb crumb 0 jumps to Home")
+
+-- click-driven navigation via the shared layout / hit-test
+let fc2 = new_files()
+let lay = files_hit(fc2, 0, 0, 400, 300, -50, -50)
+assert_eq(lay, null, "a click in dead space hits nothing")
+-- click the first row (a folder) and confirm it descends
+let l0 = _files_layout(fc2, 0, 0, 400, 300)
+let row0 = l0["rows"][0]
+let moved = files_click(fc2, 0, 0, 400, 300, row0["x"] + 20, row0["y"] + 8)
+assert(moved, "clicking a folder row navigates")
+assert_eq(len(fc2["path"]), 1, "click descended one level")
+-- click the Home crumb to go back
+let l1 = _files_layout(fc2, 0, 0, 400, 300)
+let home_crumb = l1["crumbs"][0]
+files_click(fc2, 0, 0, 400, 300, home_crumb["x"] + 4, home_crumb["y"] + 4)
+assert_eq(len(fc2["path"]), 0, "clicking the Home crumb returns to root")
 
 -- ── Summary ──
 show ""
