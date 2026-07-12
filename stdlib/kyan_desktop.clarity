@@ -93,6 +93,7 @@ class KyanDesktop {
         this._dirty = true         -- recompose only when state changed (frost is costly)
         this._anim = {}            -- app_id -> open-anim start ms (-1 = pending stamp)
         this._launcher_t0 = -1.0   -- launcher open-anim start ms (-1 = pending / closed)
+        this._launcher_query = ""  -- live search text in the launcher
         this._terminals = {}       -- app_id -> {term, pty, dead}: live PTY-backed shells
         this._app_ui = {}          -- app_id -> interactive UI state (calc, etc.); redraws on click, not every frame
         this.prefs = new_prefs()   -- desktop preferences the Settings app drives (theme, frosted, animations, dock labels)
@@ -381,8 +382,49 @@ class KyanDesktop {
     fn toggle_launcher() {
         this.launcher_open = not this.launcher_open
         this._launcher_t0 = -1.0   -- (re)stamp the open animation on next tick
+        this._launcher_query = ""  -- always open with an empty search
         this._dirty = true
         return this.launcher_open
+    }
+
+    -- Pinned apps whose title/id matches the current search query.
+    fn _filtered_apps() {
+        let q = lower(this._launcher_query)
+        if len(q) == 0 { return this.pinned }
+        mut out = []
+        for app in this.pinned {
+            let title = if has(APP_TITLES, app) { APP_TITLES[app] } else { app }
+            if contains(lower(title), q) or contains(lower(app), q) { push(out, app) }
+        }
+        return out
+    }
+
+    -- Launcher text input (only meaningful while the launcher is open).
+    fn launcher_type(text) {
+        if not this.launcher_open { return false }
+        this._launcher_query = this._launcher_query + text
+        this._dirty = true
+        return true
+    }
+
+    fn launcher_backspace() {
+        if not this.launcher_open { return false }
+        let n = len(this._launcher_query)
+        if n > 0 { this._launcher_query = substring(this._launcher_query, 0, n - 1) }
+        this._dirty = true
+        return true
+    }
+
+    -- Enter: open the top match and dismiss the launcher.
+    fn launcher_submit() {
+        if not this.launcher_open { return false }
+        let matches = this._filtered_apps()
+        if len(matches) > 0 {
+            this.launcher_open = false
+            this._activate(matches[0])
+            return true
+        }
+        return false
     }
 
     -- Resize the whole desktop to a new resolution (a live host-window
@@ -730,23 +772,42 @@ class KyanDesktop {
         drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8)
         frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7)
         linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h")
-        draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, t["foreground_muted"], {"size": 18})
-        -- icon grid of pinned apps (geometry shared with hit-testing)
+        -- live query text (or a muted placeholder), with a caret
+        if len(this._launcher_query) > 0 {
+            draw_atlas_text(fb, bx + 18, by + 13, this._launcher_query, this._atlas, t["foreground"], {"size": 18})
+            let qw = measure_atlas_text(this._atlas, this._launcher_query, 18, 0)[0]
+            fill_rect(fb, bx + 20 + qw, by + 12, 2, 20, t["accent"])
+        } else {
+            draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, t["foreground_muted"], {"size": 18})
+        }
+        -- filtered icon grid (geometry shared with hit-testing)
         let layout = this._launcher_layout()
         let cell = layout["cell"]
         let gy = layout["gy"] + off
+        if len(layout["cells"]) == 0 {
+            let msg = "No results for \"" + this._launcher_query + "\""
+            let mw = measure_atlas_text(this._atlas, msg, 16, 0)[0]
+            draw_atlas_text(fb, int(this.width / 2) - int(mw / 2), gy + 20, msg, this._atlas, t["foreground_muted"], {"size": 16})
+        }
+        mut idx = 0
         for c in layout["cells"] {
             let ix = c["x"] + int((cell - 52) / 2)
             let bg = fb.get_pixel(ix, gy)
+            -- highlight the top match (what Enter opens)
+            if idx == 0 and len(this._launcher_query) > 0 {
+                rounded_rect_blend(fb, c["x"] + 6, gy - 6, cell - 12, 76, 12, rgba(124, 58, 237, 60))
+            }
             fb.blit(this._icon(c["app"], 52, bg), 0, 0, ix, gy, 52, 52)
             let label = if has(APP_TITLES, c["app"]) { APP_TITLES[c["app"]] } else { c["app"] }
             let lw = measure_atlas_text(this._atlas, label, 14, 0)[0]
             draw_atlas_text(fb, c["x"] + int((cell - lw) / 2), gy + 58, label, this._atlas, t["foreground"], {"size": 14})
+            idx = idx + 1
         }
     }
 
     fn _launcher_layout() {
-        let cols = len(this.pinned)
+        let apps = this._filtered_apps()
+        let cols = len(apps)
         let cell = 84
         let gw = cols * cell
         let gx = int(this.width / 2) - int(gw / 2)
@@ -754,7 +815,7 @@ class KyanDesktop {
         let gy = by + 92
         mut cells = []
         mut cx = gx
-        for app in this.pinned {
+        for app in apps {
             push(cells, {"app": app, "x": cx, "y": gy - 6, "w": cell, "h": 80})
             cx = cx + cell
         }

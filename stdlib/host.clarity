@@ -59,7 +59,9 @@ fn route_event(desktop, ev) {
         return null
     }
     if ty == "text" {
-        -- printable characters go to the focused terminal's shell
+        -- while the launcher is open it owns typed text (live search)
+        if desktop.launcher_open { desktop.launcher_type(ev["text"]); return null }
+        -- otherwise printable characters go to the focused terminal's shell
         if _terminal_focused(desktop) { desktop.terminal_input(ev["text"]) }
         return null
     }
@@ -70,7 +72,12 @@ fn route_event(desktop, ev) {
         if ev["down"] {
             -- launcher hotkey: Super/GUI toggles it; Escape closes it if open
             if name == "Meta" { desktop.toggle_launcher(); return null }
-            if name == "Escape" and desktop.launcher_open { desktop.toggle_launcher(); return null }
+            if desktop.launcher_open {
+                -- the open launcher captures navigation/editing keys
+                if name == "Escape" { desktop.toggle_launcher(); return null }
+                if name == "Enter" { desktop.launcher_submit(); return null }
+                if name == "Backspace" { desktop.launcher_backspace(); return null }
+            }
         }
         -- special keys the shell needs, on key-down, when it's focused
         if ev["down"] and _terminal_focused(desktop) {

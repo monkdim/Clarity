@@ -105,6 +105,9 @@ function split(s, sep = " ") {
 function trim(s) {
   return s.trim();
 }
+function lower(s) {
+  return s.toLowerCase();
+}
 function contains(s, sub) {
   if (Array.isArray(s))
     return s.includes(sub);
@@ -118,6 +121,9 @@ function char_at(s, i) {
 }
 function char_code(s) {
   return s.charCodeAt(0);
+}
+function substring(s, start, end) {
+  return s.substring(start, end);
 }
 var sqrt = Math.sqrt;
 function abs(n) {
@@ -3240,6 +3246,7 @@ class KyanDesktop {
     this._dirty = true;
     this._anim = {};
     this._launcher_t0 = -1;
+    this._launcher_query = "";
     this._terminals = {};
     this._app_ui = {};
     this.prefs = new_prefs();
@@ -3537,8 +3544,54 @@ class KyanDesktop {
   toggle_launcher() {
     this.launcher_open = !truthy(this.launcher_open);
     this._launcher_t0 = -1;
+    this._launcher_query = "";
     this._dirty = true;
     return this.launcher_open;
+  }
+  _filtered_apps() {
+    let q = lower(this._launcher_query);
+    if (truthy($eq(len(q), 0))) {
+      return this.pinned;
+    }
+    let out = [];
+    for (let app of this.pinned) {
+      let title = truthy(has(APP_TITLES, app)) ? $index(APP_TITLES, app) : app;
+      if (truthy(contains(lower(title), q) || contains(lower(app), q))) {
+        push(out, app);
+      }
+    }
+    return out;
+  }
+  launcher_type(text) {
+    if (truthy(!truthy(this.launcher_open))) {
+      return false;
+    }
+    this._launcher_query = this._launcher_query + text;
+    this._dirty = true;
+    return true;
+  }
+  launcher_backspace() {
+    if (truthy(!truthy(this.launcher_open))) {
+      return false;
+    }
+    let n = len(this._launcher_query);
+    if (truthy(n > 0)) {
+      this._launcher_query = substring(this._launcher_query, 0, n - 1);
+    }
+    this._dirty = true;
+    return true;
+  }
+  launcher_submit() {
+    if (truthy(!truthy(this.launcher_open))) {
+      return false;
+    }
+    let matches = this._filtered_apps();
+    if (truthy(len(matches) > 0)) {
+      this.launcher_open = false;
+      this._activate($index(matches, 0));
+      return true;
+    }
+    return false;
   }
   resize(w, h) {
     let nw = w;
@@ -3851,21 +3904,38 @@ class KyanDesktop {
     drop_shadow(fb, bx, by, bw, 44, 12, rgba(0, 0, 0, 140), 8);
     frosted_panel(fb, bx, by, bw, 44, 12, rgba(13, 17, 26, 205), 7);
     linear_gradient(fb, bx, by, bw, 3, kyan_gradient_stops(), "h");
-    draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, $index(t, "foreground_muted"), { ["size"]: 18 });
+    if (truthy(len(this._launcher_query) > 0)) {
+      draw_atlas_text(fb, bx + 18, by + 13, this._launcher_query, this._atlas, $index(t, "foreground"), { ["size"]: 18 });
+      let qw = $index(measure_atlas_text(this._atlas, this._launcher_query, 18, 0), 0);
+      fill_rect(fb, bx + 20 + qw, by + 12, 2, 20, $index(t, "accent"));
+    } else {
+      draw_atlas_text(fb, bx + 18, by + 13, "Search apps, files, commands", this._atlas, $index(t, "foreground_muted"), { ["size"]: 18 });
+    }
     let layout = this._launcher_layout();
     let cell = $index(layout, "cell");
     let gy = $index(layout, "gy") + off;
+    if (truthy($eq(len($index(layout, "cells")), 0))) {
+      let msg = 'No results for "' + this._launcher_query + '"';
+      let mw = $index(measure_atlas_text(this._atlas, msg, 16, 0), 0);
+      draw_atlas_text(fb, $int(this.width / 2) - $int(mw / 2), gy + 20, msg, this._atlas, $index(t, "foreground_muted"), { ["size"]: 16 });
+    }
+    let idx = 0;
     for (let c of $index(layout, "cells")) {
       let ix = $index(c, "x") + $int((cell - 52) / 2);
       let bg = fb.get_pixel(ix, gy);
+      if (truthy($eq(idx, 0) && len(this._launcher_query) > 0)) {
+        rounded_rect_blend(fb, $index(c, "x") + 6, gy - 6, cell - 12, 76, 12, rgba(124, 58, 237, 60));
+      }
       fb.blit(this._icon($index(c, "app"), 52, bg), 0, 0, ix, gy, 52, 52);
       let label = truthy(has(APP_TITLES, $index(c, "app"))) ? $index(APP_TITLES, $index(c, "app")) : $index(c, "app");
       let lw = $index(measure_atlas_text(this._atlas, label, 14, 0), 0);
       draw_atlas_text(fb, $index(c, "x") + $int((cell - lw) / 2), gy + 58, label, this._atlas, $index(t, "foreground"), { ["size"]: 14 });
+      idx = idx + 1;
     }
   }
   _launcher_layout() {
-    let cols = len(this.pinned);
+    let apps = this._filtered_apps();
+    let cols = len(apps);
     let cell = 84;
     let gw = cols * cell;
     let gx = $int(this.width / 2) - $int(gw / 2);
@@ -3873,7 +3943,7 @@ class KyanDesktop {
     let gy = by + 92;
     let cells = [];
     let cx = gx;
-    for (let app of this.pinned) {
+    for (let app of apps) {
       push(cells, { ["app"]: app, ["x"]: cx, ["y"]: gy - 6, ["w"]: cell, ["h"]: 80 });
       cx = cx + cell;
     }
@@ -3928,6 +3998,15 @@ function openApp(desk, appId, x, y, w, h) {
 function toggleLauncher(desk) {
   return desk.toggle_launcher();
 }
+function launcherType(desk, text) {
+  return desk.launcher_type(text);
+}
+function launcherBackspace(desk) {
+  return desk.launcher_backspace();
+}
+function launcherSubmit(desk) {
+  return desk.launcher_submit();
+}
 function setKey(desk, name, down) {
   desk.set_key(name, !!down);
 }
@@ -3937,7 +4016,7 @@ function tick(desk, nowMs) {
 function needsRedraw(desk) {
   return desk.needs_redraw();
 }
-globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw, MouseEvent };
+globalThis.KyanOS = { createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, launcherType, launcherBackspace, launcherSubmit, setKey, tick, needsRedraw, MouseEvent };
 export {
   toggleLauncher,
   tick,
@@ -3945,6 +4024,9 @@ export {
   sendMouse,
   openApp,
   needsRedraw,
+  launcherType,
+  launcherSubmit,
+  launcherBackspace,
   createDesktop,
   composeToBytes,
   MouseEvent

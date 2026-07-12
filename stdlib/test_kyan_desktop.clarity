@@ -167,6 +167,48 @@ assert(d4.launcher_open, "launcher reopened")
 d4.handle_mouse(mk_mouse(2, 2, "press", 1))
 assert(not d4.launcher_open, "click outside dismisses launcher")
 
+-- ── Launcher search: type to filter, Enter opens the top match ──
+let ds = kyan_desktop(1000, 640, theme)
+ds.boot(null)
+-- typing while closed is a no-op
+assert(not ds.launcher_type("x"), "typing does nothing while launcher is closed")
+ds.toggle_launcher()
+assert_eq(len(ds._filtered_apps()), len(ds.pinned), "empty query shows every pinned app")
+-- "cal" narrows to Calculator only
+ds.launcher_type("c")
+ds.launcher_type("a")
+ds.launcher_type("l")
+let hits = ds._filtered_apps()
+assert_eq(len(hits), 1, "query 'cal' matches one app")
+assert_eq(hits[0], "calc", "query 'cal' matches the Calculator")
+-- the filtered launcher still composes without crashing
+let scq = ds.compose()
+assert(scq != null, "launcher composes with an active query")
+-- backspace widens the match set again
+ds.launcher_backspace()
+ds.launcher_backspace()
+ds.launcher_backspace()
+assert_eq(len(ds._filtered_apps()), len(ds.pinned), "backspacing to empty restores all apps")
+-- Enter opens the top match and dismisses the launcher
+ds.launcher_type("t")
+ds.launcher_type("e")
+ds.launcher_type("r")
+assert(ds.launcher_submit(), "submit succeeds when a match exists")
+assert(not ds.launcher_open, "submit closes the launcher")
+assert(contains(ds.running(), "terminal"), "submit opened the matched Terminal")
+-- a query that matches nothing: submit is a safe no-op
+ds.toggle_launcher()
+ds.launcher_type("z")
+ds.launcher_type("z")
+ds.launcher_type("z")
+assert_eq(len(ds._filtered_apps()), 0, "nonsense query matches nothing")
+assert(not ds.launcher_submit(), "submit on no matches returns false")
+assert(ds.launcher_open, "launcher stays open when submit finds nothing")
+-- reopening always clears the previous query
+ds.toggle_launcher()
+ds.toggle_launcher()
+assert_eq(len(ds._filtered_apps()), len(ds.pinned), "reopening the launcher clears the query")
+
 -- ── Voidrunner: launch, tick, Prism Play button ──
 
 show "-- KyanDesktop: game integration --"

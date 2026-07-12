@@ -70,6 +70,25 @@ assert(d.launcher_open, "Meta opens the launcher")
 route_event(d, {"type": "key", "name": "Escape", "down": true})
 assert(not d.launcher_open, "Escape closes the launcher")
 
+-- while open, the launcher captures typed text, Backspace and Enter
+route_event(d, {"type": "key", "name": "Meta", "down": true})
+assert(d.launcher_open, "launcher reopened for search test")
+route_event(d, {"type": "text", "text": "c"})
+route_event(d, {"type": "text", "text": "a"})
+route_event(d, {"type": "text", "text": "l"})
+assert(d._launcher_query == "cal", "text events feed the launcher query")
+assert(len(d._filtered_apps()) == 1, "the typed query filters the launcher")
+route_event(d, {"type": "key", "name": "Backspace", "down": true})
+assert(d._launcher_query == "ca", "Backspace edits the launcher query")
+route_event(d, {"type": "text", "text": "l"})
+route_event(d, {"type": "key", "name": "Enter", "down": true})
+assert(not d.launcher_open, "Enter opens the match and closes the launcher")
+assert(contains(d.running(), "calc"), "Enter opened the Calculator match")
+-- typed text with the launcher closed does NOT feed the query
+let q_closed = d._launcher_query
+route_event(d, {"type": "text", "text": "zzz"})
+assert(d._launcher_query == q_closed, "closed launcher ignores typed text")
+
 -- the emulator reshapes its grid on resize, keeping content that fits
 let tm = Terminal(20, 5)
 tm.feed("hello")

@@ -52,7 +52,8 @@
 
   <script type="module">
     import {
-      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher, setKey, tick, needsRedraw
+      createDesktop, composeToBytes, sendMouse, openApp, toggleLauncher,
+      launcherType, launcherBackspace, launcherSubmit, setKey, tick, needsRedraw
     } from './kyanos.bundle.js';
 
     const W = 1280, H = 800;
@@ -92,9 +93,20 @@
     present();               // first paint
     requestAnimationFrame(loop);
 
-    // ── Keyboard → live apps (Voidrunner) ──
+    // ── Keyboard → launcher search, then live apps (Voidrunner) ──
     const GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','a','d','r',' ']);
     window.addEventListener('keydown', (e) => {
+      // While the launcher is open it owns the keyboard: type to filter,
+      // Enter opens the top match, Backspace edits, Escape dismisses.
+      if (desk.launcher_open) {
+        if (e.key === 'Escape') { toggleLauncher(desk); e.preventDefault(); return; }
+        if (e.key === 'Enter') { launcherSubmit(desk); e.preventDefault(); return; }
+        if (e.key === 'Backspace') { launcherBackspace(desk); e.preventDefault(); return; }
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) { launcherType(desk, e.key); e.preventDefault(); return; }
+        return;
+      }
+      // Meta/Super or Space opens the launcher when nothing is capturing text.
+      if (e.key === 'Meta' || e.key === 'OS') { toggleLauncher(desk); e.preventDefault(); return; }
       setKey(desk, e.key, true);
       if (GAME_KEYS.has(e.key)) e.preventDefault();
     });
