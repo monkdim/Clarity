@@ -1,0 +1,70 @@
+-- Test: the self-hosted Clarity → JavaScript transpiler.
+-- These guard the string-interpolation edge cases where the emitted JS
+-- template literals are easy to get subtly wrong.
+
+from "transpile.clarity" import transpile_source
+
+mut passed = 0
+mut failed = 0
+mut total = 0
+
+fn assert_contains(name, source, needle) {
+    total += 1
+    let js = transpile_source(source, "<test>")
+    if contains(js, needle) {
+        show "  [pass] {name}"
+        passed += 1
+    } else {
+        show "  [FAIL] {name} — emitted JS did not contain {needle}"
+        show "         got: {js}"
+        failed += 1
+    }
+}
+
+fn assert_absent(name, source, needle) {
+    total += 1
+    let js = transpile_source(source, "<test>")
+    if contains(js, needle) {
+        show "  [FAIL] {name} — emitted JS unexpectedly contained {needle}"
+        show "         got: {js}"
+        failed += 1
+    } else {
+        show "  [pass] {name}"
+        passed += 1
+    }
+}
+
+show "── Transpiler: string interpolation ──"
+
+-- Plain interpolation becomes a JS template placeholder.
+assert_contains("simple interpolation", "let name = \"x\"\nshow \"Hi {name}\"", "${name}")
+
+-- Literal braces produced by concatenation must survive verbatim. This is
+-- the shape the interpreter's map display uses: `\{` + value + `\}`. The
+-- transpiler must NOT collapse the two adjacent braces into `{{`.
+assert_absent("map-style braces are not doubled",
+    "let pairs = \"a: 1\"\nshow \"\\{\" + pairs + \"\\}\"",
+    "{{")
+
+-- An interpolation wedged directly between escaped braces (`\{{x}\}`) is the
+-- anti-pattern that used to render as a literal `{{x}}` because the greedy
+-- brace matcher swallowed both. We no longer write it that way, but guard the
+-- concatenation form the map display replaced it with.
+assert_contains("brace-wrapped value concatenates",
+    "let pairs = \"a: 1\"\nshow \"\\{\" + pairs + \"\\}\"",
+    "pairs")
+
+-- Embedded JS object braces (a `{` followed by a non-identifier char) stay
+-- literal — the transpiler must not treat them as interpolation.
+assert_absent("brace before space stays literal",
+    "show \"a { 1 } b\"",
+    "${")
+
+show ""
+show "═══════════════════════════════════════"
+show "Results: {passed}/{total} passed, {failed} failed"
+if failed == 0 {
+    show "All transpiler tests passed!"
+} else {
+    show "{failed} test(s) FAILED"
+}
