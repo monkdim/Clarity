@@ -118,23 +118,55 @@ static char* cl_obj_display(Value v);
    sits on the stack or inside another live object. Our codegen never hides a
    pointer in a non-pointer or points into the middle of an allocation, and any
    pointer live across a cl_alloc call is spilled to the stack by the ABI, so
-   the root set the scan sees is complete. gc_alloc is the single hook a
-   precise/generational collector would later replace. */
+   the root set the scan sees is complete. cl_alloc is the single hook a
+   precise/generational collector would later replace.
+
+   The mark phase resolves each scanned word through gc_find, which binary-
+   searches a payload-address-sorted snapshot of the live set (rebuilt once per
+   collection) — so collecting with many simultaneously-live objects is
+   O(n log n), not the quadratic a per-word linear walk would cost. */
 typedef struct GCObj { struct GCObj* next; size_t size; unsigned char marked; } GCObj;
 static GCObj* gc_head = 0;
 static size_t gc_live = 0;
 static size_t gc_threshold = 1<<20;      /* first collection after ~1 MiB live */
 static char* gc_stack_base = 0;          /* set once at main entry */
 
-/* mark worklist (plain malloc — not GC-tracked) */
+/* mark worklist + address index (plain malloc — not GC-tracked) */
 static GCObj** gc_work = 0;
 static size_t gc_work_len = 0, gc_work_cap = 0;
+static GCObj** gc_index = 0;              /* all live objects, sorted by payload address */
+static size_t gc_index_len = 0, gc_index_cap = 0;
 
-static GCObj* gc_find(void* p){
+static int gc_cmp(const void* a, const void* b){
+  char* pa = (char*)(*(GCObj* const*)a + 1);
+  char* pb = (char*)(*(GCObj* const*)b + 1);
+  return (pa > pb) - (pa < pb);
+}
+/* snapshot the object list into a payload-address-sorted array so gc_find can
+   binary-search instead of walking every object per scanned word */
+static void gc_reindex(void){
+  gc_index_len = 0;
   for(GCObj* o=gc_head; o; o=o->next){
-    char* s=(char*)(o+1);
-    if((char*)p>=s && (char*)p < s + o->size) return o;   /* interior-pointer safe */
+    if(gc_index_len >= gc_index_cap){
+      gc_index_cap = gc_index_cap ? gc_index_cap*2 : 1024;
+      gc_index = (GCObj**)realloc(gc_index, sizeof(GCObj*)*gc_index_cap);
+    }
+    gc_index[gc_index_len++] = o;
   }
+  qsort(gc_index, gc_index_len, sizeof(GCObj*), gc_cmp);
+}
+/* the tracked allocation containing p, or 0 — interior pointers included */
+static GCObj* gc_find(void* p){
+  char* c = (char*)p;
+  size_t lo = 0, hi = gc_index_len;      /* largest payload start <= c */
+  while(lo < hi){
+    size_t mid = lo + (hi - lo)/2;
+    if((char*)(gc_index[mid]+1) <= c) lo = mid + 1; else hi = mid;
+  }
+  if(lo == 0) return 0;
+  GCObj* o = gc_index[lo-1];
+  char* s = (char*)(o+1);
+  if(c >= s && c < s + o->size) return o;
   return 0;
 }
 GC_NOSAN static void gc_scan(char* lo, char* hi){
@@ -156,6 +188,7 @@ GC_NOSAN static void gc_collect(void){
   jmp_buf regs; setjmp(regs);                    /* spill callee-saved regs */
   char probe; char* sp = &probe;
   gc_work_len = 0;
+  gc_reindex();                                  /* sorted index for O(log n) gc_find */
   char* lo = sp < gc_stack_base ? sp : gc_stack_base;
   char* hi = sp < gc_stack_base ? gc_stack_base : sp;
   gc_scan(lo, hi);                               /* roots: the live C stack */
@@ -191,7 +224,7 @@ static char* cl_strdup(const char* s){
 static void cl_arena_free(void){                 /* release everything at exit */
   GCObj* o = gc_head;
   while(o){ GCObj* nx = o->next; free(o); o = nx; }
-  gc_head = 0; free(gc_work); gc_work = 0;
+  gc_head = 0; free(gc_work); gc_work = 0; free(gc_index); gc_index = 0;
 }
 
 static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; v.o=0; return v; }
