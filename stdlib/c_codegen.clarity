@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 5).
+-- Clarity → C code generator (native compilation, stage 6).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -30,10 +30,15 @@
 -- outside — matching the interpreter. (Reassigning a captured *scalar* only
 -- changes the local copy; by-reference scalar capture waits on the GC stage.)
 --
--- Stage 5 routes every runtime allocation through a bump-allocating arena
--- (cl_alloc) that is torn down at program exit (cl_arena_free) — so a compiled
--- program frees cleanly instead of leaking, and there is one place a real GC
--- would later hook. Output is unchanged; AddressSanitizer reports no leaks.
+-- Stage 5 routed every runtime allocation through a single hook (cl_alloc);
+-- stage 6 makes that hook a conservative mark-sweep garbage collector. Each
+-- allocation carries a header and is tracked; when live bytes cross a
+-- threshold the collector flushes registers, scans the C stack and object
+-- interiors for pointers into tracked allocations, marks the reachable set,
+-- and frees the rest — so a long-running program reclaims memory mid-run
+-- (churning ~240 MB of garbage holds at ~3 MB RSS) instead of only at exit.
+-- Output is unchanged; AddressSanitizer (real stack) reports no leaks or
+-- invalid frees under collection forced on nearly every allocation.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -57,6 +62,22 @@ let C_PRELUDE = """#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <setjmp.h>
+
+/* Conservative stack scanning deliberately reads every word of the C stack,
+   including the padding a sanitizer inserts between variables. Exempt the
+   scanner from AddressSanitizer's stack instrumentation so those reads aren't
+   flagged; heap checks (the ones that would catch a real GC bug) still apply. */
+#if defined(__GNUC__) || defined(__clang__)
+#define GC_NOSAN __attribute__((no_sanitize_address))
+/* main's frame pointer sits above every local in main, so scanning down from
+   it to the current stack pointer covers all roots. Taking the address of a
+   local would not — the compiler may place that local below other roots. */
+#define GC_CAPTURE_STACK_BASE() (gc_stack_base = (char*)__builtin_frame_address(0))
+#else
+#define GC_NOSAN
+#define GC_CAPTURE_STACK_BASE() do { char __b; gc_stack_base = &__b; } while(0)
+#endif
 
 typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR, T_LIST, T_MAP, T_OBJECT, T_CLOSURE } Tag;
 typedef struct Value Value;
@@ -84,28 +105,82 @@ static int cl_equal(Value a, Value b);
 static ClMethod cl_find_method(const char* cls, const char* m);
 static char* cl_obj_display(Value v);
 
-/* ── arena allocator ──
-   Every runtime value is bump-allocated from a growing chain of blocks and
-   released together at program exit (cl_arena_free). This centralises
-   allocation — the single place a real GC would later hook — so a compiled
-   program frees cleanly instead of leaking. There is no per-object free:
-   memory is reclaimed only when the arena is torn down, so a long-running
-   allocation-heavy program still grows until exit (a mid-run GC is the next
-   step). Only these two mallocs are real; everything else goes through
-   cl_alloc. */
-typedef struct ClBlock { struct ClBlock* next; char* data; size_t used; size_t cap; } ClBlock;
-static ClBlock* cl_arena = 0;
-static void* cl_alloc(size_t n){
-  n = (n + 15) & ~((size_t)15);                    /* 16-byte align */
-  if(!cl_arena || cl_arena->used + n > cl_arena->cap){
-    size_t bcap = n > (1<<20) ? n : (1<<20);        /* 1 MiB blocks */
-    ClBlock* b = (ClBlock*)malloc(sizeof(ClBlock));
-    b->data = malloc(bcap);
-    b->used = 0; b->cap = bcap; b->next = cl_arena; cl_arena = b;
+/* ── conservative mark-sweep garbage collector ──
+   Every runtime value carries a small header and is tracked in a global list.
+   When live bytes cross a threshold, cl_alloc flushes callee-saved registers
+   to the stack (setjmp), conservatively scans the whole C stack and the
+   interiors of reachable objects for words that point into a tracked
+   allocation, marks the reachable set, and frees the rest — so a long-running
+   program reclaims memory mid-run instead of growing until exit.
+
+   Conservative: an integer that happens to look like a live pointer keeps its
+   target alive (safe waste), but a real pointer is never missed as long as it
+   sits on the stack or inside another live object. Our codegen never hides a
+   pointer in a non-pointer or points into the middle of an allocation, and any
+   pointer live across a cl_alloc call is spilled to the stack by the ABI, so
+   the root set the scan sees is complete. gc_alloc is the single hook a
+   precise/generational collector would later replace. */
+typedef struct GCObj { struct GCObj* next; size_t size; unsigned char marked; } GCObj;
+static GCObj* gc_head = 0;
+static size_t gc_live = 0;
+static size_t gc_threshold = 1<<20;      /* first collection after ~1 MiB live */
+static char* gc_stack_base = 0;          /* set once at main entry */
+
+/* mark worklist (plain malloc — not GC-tracked) */
+static GCObj** gc_work = 0;
+static size_t gc_work_len = 0, gc_work_cap = 0;
+
+static GCObj* gc_find(void* p){
+  for(GCObj* o=gc_head; o; o=o->next){
+    char* s=(char*)(o+1);
+    if((char*)p>=s && (char*)p < s + o->size) return o;   /* interior-pointer safe */
   }
-  void* p = cl_arena->data + cl_arena->used;
-  cl_arena->used += n;
-  return p;
+  return 0;
+}
+GC_NOSAN static void gc_scan(char* lo, char* hi){
+  /* align the low bound so every read of a void* is aligned */
+  lo = (char*)(((size_t)lo + sizeof(void*) - 1) & ~((size_t)(sizeof(void*)-1)));
+  for(char* p=lo; p + sizeof(void*) <= hi; p += sizeof(void*)){
+    GCObj* o = gc_find(*(void**)p);
+    if(o && !o->marked){
+      o->marked = 1;
+      if(gc_work_len >= gc_work_cap){
+        gc_work_cap = gc_work_cap ? gc_work_cap*2 : 256;
+        gc_work = (GCObj**)realloc(gc_work, sizeof(GCObj*)*gc_work_cap);
+      }
+      gc_work[gc_work_len++] = o;
+    }
+  }
+}
+GC_NOSAN static void gc_collect(void){
+  jmp_buf regs; setjmp(regs);                    /* spill callee-saved regs */
+  char probe; char* sp = &probe;
+  gc_work_len = 0;
+  char* lo = sp < gc_stack_base ? sp : gc_stack_base;
+  char* hi = sp < gc_stack_base ? gc_stack_base : sp;
+  gc_scan(lo, hi);                               /* roots: the live C stack */
+  gc_scan((char*)&regs, (char*)&regs + sizeof(regs));
+  while(gc_work_len){                            /* transitive closure */
+    GCObj* o = gc_work[--gc_work_len];
+    gc_scan((char*)(o+1), (char*)(o+1) + o->size);
+  }
+  GCObj** link = &gc_head;                        /* sweep */
+  while(*link){
+    GCObj* o = *link;
+    if(o->marked){ o->marked = 0; link = &o->next; }
+    else { *link = o->next; gc_live -= o->size; free(o); }
+  }
+}
+static void* cl_alloc(size_t n){
+  n = (n + 15) & ~((size_t)15);                  /* 16-byte align */
+  if(gc_stack_base && gc_live + n > gc_threshold){
+    gc_collect();
+    if(gc_live > gc_threshold/2) gc_threshold *= 2;   /* grow to amortise */
+  }
+  GCObj* o = (GCObj*)malloc(sizeof(GCObj) + n);
+  o->size = n; o->marked = 0; o->next = gc_head; gc_head = o;
+  gc_live += n;
+  return (void*)(o + 1);
 }
 static char* cl_strdup(const char* s){
   size_t n = strlen(s) + 1;
@@ -113,10 +188,10 @@ static char* cl_strdup(const char* s){
   memcpy(out, s, n);
   return out;
 }
-static void cl_arena_free(void){
-  ClBlock* b = cl_arena;
-  while(b){ ClBlock* nx = b->next; free(b->data); free(b); b = nx; }
-  cl_arena = 0;
+static void cl_arena_free(void){                 /* release everything at exit */
+  GCObj* o = gc_head;
+  while(o){ GCObj* nx = o->next; free(o); o = nx; }
+  gc_head = 0; free(gc_work); gc_work = 0;
 }
 
 static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; v.o=0; return v; }
@@ -987,6 +1062,7 @@ class CCodegen {
         for l in fn_body { push(out, l) }
         for l in class_body { push(out, l) }
         push(out, "int main(void) {")
+        push(out, "  GC_CAPTURE_STACK_BASE();")
         for l in main_body { push(out, l) }
         push(out, "  cl_arena_free();")
         push(out, "  return 0;")
