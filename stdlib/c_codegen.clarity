@@ -1,0 +1,325 @@
+-- Clarity → C code generator (native compilation, stage 1).
+--
+-- Emits a single self-contained C translation unit for a Clarity program:
+-- a small tagged-Value runtime (prelude) plus the program itself, so the
+-- output compiles with any C compiler into a real native binary — no Bun,
+-- no bytecode VM. Stage 1 covers the scalar core: int/float/bool/string/
+-- null values, arithmetic/comparison/logical operators, string
+-- concatenation, variables, if/while, and user functions with recursion.
+--
+--   let c = compile_to_c(parse(tokenize(src, "x"), src))
+--   write("out.c", c)   →   cc out.c -o prog   →   ./prog
+--
+-- Names are prefixed (v_ for variables/params, f_ for functions) so a
+-- Clarity identifier can never collide with a C keyword.
+
+-- ── C runtime prelude ───────────────────────────────────
+-- A dynamically-typed Value as a tagged struct. Heap strings are malloc'd
+-- and never freed (stage 1 leaks intentionally; a GC/arena comes later).
+
+let C_PRELUDE = """#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR } Tag;
+typedef struct { Tag t; long i; double f; const char* s; } Value;
+
+static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; return v; }
+static Value cl_bool(long b){ Value v=cl_null(); v.t=T_BOOL; v.i=(b!=0); return v; }
+static Value cl_int(long i){ Value v=cl_null(); v.t=T_INT; v.i=i; return v; }
+static Value cl_float(double f){ Value v=cl_null(); v.t=T_FLOAT; v.f=f; return v; }
+static Value cl_str(const char* s){ Value v=cl_null(); v.t=T_STR; v.s=s; return v; }
+
+static int cl_is_num(Value v){ return v.t==T_INT || v.t==T_FLOAT; }
+static double cl_num(Value v){ return v.t==T_FLOAT ? v.f : (double)v.i; }
+
+static char* cl_to_cstr(Value v){
+  char* buf = (char*)malloc(64);
+  switch(v.t){
+    case T_NULL: strcpy(buf, "null"); return buf;
+    case T_BOOL: strcpy(buf, v.i ? "true" : "false"); return buf;
+    case T_INT: snprintf(buf, 64, "%ld", v.i); return buf;
+    case T_FLOAT:
+      if(v.f == (double)(long)v.f) snprintf(buf, 64, "%ld", (long)v.f);
+      else snprintf(buf, 64, "%.17g", v.f);
+      return buf;
+    case T_STR: free(buf); return (char*)v.s;
+  }
+  return buf;
+}
+
+static Value cl_concat(Value a, Value b){
+  char* sa = cl_to_cstr(a); char* sb = cl_to_cstr(b);
+  char* out = (char*)malloc(strlen(sa)+strlen(sb)+1);
+  strcpy(out, sa); strcat(out, sb);
+  return cl_str(out);
+}
+
+static Value cl_add(Value a, Value b){
+  if(a.t==T_STR || b.t==T_STR) return cl_concat(a, b);
+  if(a.t==T_FLOAT || b.t==T_FLOAT) return cl_float(cl_num(a)+cl_num(b));
+  return cl_int(a.i+b.i);
+}
+static Value cl_sub(Value a, Value b){
+  if(a.t==T_FLOAT || b.t==T_FLOAT) return cl_float(cl_num(a)-cl_num(b));
+  return cl_int(a.i-b.i);
+}
+static Value cl_mul(Value a, Value b){
+  if(a.t==T_FLOAT || b.t==T_FLOAT) return cl_float(cl_num(a)*cl_num(b));
+  return cl_int(a.i*b.i);
+}
+static Value cl_div(Value a, Value b){
+  double d = cl_num(b);
+  if(d == 0.0) return cl_int(0);
+  return cl_float(cl_num(a)/d);
+}
+static Value cl_mod(Value a, Value b){
+  if(b.i == 0) return cl_int(0);
+  if(a.t==T_FLOAT || b.t==T_FLOAT) return cl_float(fmod(cl_num(a), cl_num(b)));
+  return cl_int(a.i % b.i);
+}
+static Value cl_pow(Value a, Value b){
+  if(a.t==T_INT && b.t==T_INT && b.i>=0){
+    long r=1, base=a.i, e=b.i; while(e-->0) r*=base; return cl_int(r);
+  }
+  return cl_float(pow(cl_num(a), cl_num(b)));
+}
+static Value cl_neg(Value a){
+  if(a.t==T_FLOAT) return cl_float(-a.f);
+  return cl_int(-a.i);
+}
+
+static int cl_truthy(Value v){
+  switch(v.t){
+    case T_NULL: return 0;
+    case T_BOOL: case T_INT: return v.i!=0;
+    case T_FLOAT: return v.f!=0.0;
+    case T_STR: return v.s && v.s[0];
+  }
+  return 0;
+}
+static Value cl_not(Value a){ return cl_bool(!cl_truthy(a)); }
+
+static int cl_equal(Value a, Value b){
+  if(a.t==T_STR && b.t==T_STR) return strcmp(a.s, b.s)==0;
+  if(cl_is_num(a) && cl_is_num(b)) return cl_num(a)==cl_num(b);
+  if(a.t != b.t) return 0;
+  return a.i==b.i;
+}
+static Value cl_eq(Value a, Value b){ return cl_bool(cl_equal(a,b)); }
+static Value cl_neq(Value a, Value b){ return cl_bool(!cl_equal(a,b)); }
+static Value cl_lt(Value a, Value b){
+  if(a.t==T_STR && b.t==T_STR) return cl_bool(strcmp(a.s,b.s)<0);
+  return cl_bool(cl_num(a)<cl_num(b));
+}
+static Value cl_gt(Value a, Value b){
+  if(a.t==T_STR && b.t==T_STR) return cl_bool(strcmp(a.s,b.s)>0);
+  return cl_bool(cl_num(a)>cl_num(b));
+}
+static Value cl_lte(Value a, Value b){
+  if(a.t==T_STR && b.t==T_STR) return cl_bool(strcmp(a.s,b.s)<=0);
+  return cl_bool(cl_num(a)<=cl_num(b));
+}
+static Value cl_gte(Value a, Value b){
+  if(a.t==T_STR && b.t==T_STR) return cl_bool(strcmp(a.s,b.s)>=0);
+  return cl_bool(cl_num(a)>=cl_num(b));
+}
+
+static void cl_show(Value v){ printf("%s\n", cl_to_cstr(v)); }
+"""
+
+-- ── Helpers ─────────────────────────────────────────────
+
+-- Statement list of a block. Parsed bodies (if/while/fn) are Block nodes
+-- carrying `.statements`; tolerate a bare list or null too.
+fn _block_stmts(b) {
+    if b == null { return [] }
+    try { return b.statements } catch e {}
+    return b
+}
+
+fn _c_escape(s) {
+    mut out = ""
+    for ch in s {
+        if ch == "\"" { out = out + "\\\"" }
+        elif ch == "\\" { out = out + "\\\\" }
+        elif ch == "\n" { out = out + "\\n" }
+        elif ch == "\t" { out = out + "\\t" }
+        elif ch == "\r" { out = out + "\\r" }
+        else { out = out + ch }
+    }
+    return out
+}
+
+let _BINOPS = {
+    "+": "cl_add", "-": "cl_sub", "*": "cl_mul", "/": "cl_div", "%": "cl_mod",
+    "**": "cl_pow", "==": "cl_eq", "!=": "cl_neq", "<": "cl_lt", ">": "cl_gt",
+    "<=": "cl_lte", ">=": "cl_gte"
+}
+
+-- ── Code generator ──────────────────────────────────────
+
+class CCodegen {
+    fn init() {
+        this.errors = []
+    }
+
+    fn unsupported(what, line) {
+        push(this.errors, "native compile: unsupported " + what + " (line " + str(line ?? 0) + ")")
+    }
+
+    -- Emit a C expression (of type Value) for an AST expression node.
+    fn expr(node) {
+        let nt = node.node_type
+        if nt == "NumberLiteral" {
+            let v = node.value
+            if type(v) == "float" or str(v) != str(int(v)) { return "cl_float(" + str(v) + ")" }
+            return "cl_int(" + str(int(v)) + ")"
+        }
+        if nt == "StringLiteral" { return "cl_str(\"" + _c_escape(node.value) + "\")" }
+        if nt == "BoolLiteral" { return if node.value { "cl_bool(1)" } else { "cl_bool(0)" } }
+        if nt == "NullLiteral" { return "cl_null()" }
+        if nt == "Identifier" { return "v_" + node.name }
+        if nt == "UnaryOp" {
+            if node.operator == "not" { return "cl_not(" + this.expr(node.operand) + ")" }
+            if node.operator == "-" { return "cl_neg(" + this.expr(node.operand) + ")" }
+            this.unsupported("unary '" + node.operator + "'", node.line)
+            return "cl_null()"
+        }
+        if nt == "BinaryOp" {
+            if node.operator == "and" {
+                -- short-circuit: (cl_truthy(a) ? b : a)
+                let a = this.expr(node.left)
+                return "(cl_truthy(" + a + ") ? " + this.expr(node.right) + " : " + a + ")"
+            }
+            if node.operator == "or" {
+                let a = this.expr(node.left)
+                return "(cl_truthy(" + a + ") ? " + a + " : " + this.expr(node.right) + ")"
+            }
+            if has(_BINOPS, node.operator) {
+                return _BINOPS[node.operator] + "(" + this.expr(node.left) + ", " + this.expr(node.right) + ")"
+            }
+            this.unsupported("operator '" + node.operator + "'", node.line)
+            return "cl_null()"
+        }
+        if nt == "CallExpression" {
+            if node.callee.node_type == "Identifier" {
+                mut args = []
+                for a in node.arguments { push(args, this.expr(a)) }
+                return "f_" + node.callee.name + "(" + join(args, ", ") + ")"
+            }
+            this.unsupported("indirect call", node.line)
+            return "cl_null()"
+        }
+        this.unsupported("expression " + nt, node.line)
+        return "cl_null()"
+    }
+
+    -- Emit C statement lines (a list of strings) for an AST statement.
+    fn stmt(node, indent) {
+        let pad = repeat("  ", indent)
+        let nt = node.node_type
+        if nt == "LetStatement" {
+            return [pad + "Value v_" + node.name + " = " + this.expr(node.value) + ";"]
+        }
+        if nt == "AssignStatement" {
+            if node.target.node_type == "Identifier" {
+                let op = node.operator
+                if op == "=" {
+                    return [pad + "v_" + node.target.name + " = " + this.expr(node.value) + ";"]
+                }
+                -- compound assignment (+=, -=, ...): map to the binop
+                let base = substring(op, 0, len(op) - 1)
+                if has(_BINOPS, base) {
+                    return [pad + "v_" + node.target.name + " = " + _BINOPS[base] + "(v_" + node.target.name + ", " + this.expr(node.value) + ");"]
+                }
+            }
+            this.unsupported("assignment target", node.line)
+            return []
+        }
+        if nt == "ShowStatement" {
+            mut lines = []
+            for v in node.values { push(lines, pad + "cl_show(" + this.expr(v) + ");") }
+            return lines
+        }
+        if nt == "ExpressionStatement" {
+            return [pad + "(void)(" + this.expr(node.expression) + ");"]
+        }
+        if nt == "ReturnStatement" {
+            if node.value != null { return [pad + "return " + this.expr(node.value) + ";"] }
+            return [pad + "return cl_null();"]
+        }
+        if nt == "IfStatement" {
+            mut lines = [pad + "if(cl_truthy(" + this.expr(node.condition) + ")) {"]
+            for s in _block_stmts(node.body) { for l in this.stmt(s, indent + 1) { push(lines, l) } }
+            if node.elif_clauses != null {
+                for clause in node.elif_clauses {
+                    push(lines, pad + "} else if(cl_truthy(" + this.expr(clause[0]) + ")) {")
+                    for s in _block_stmts(clause[1]) { for l in this.stmt(s, indent + 1) { push(lines, l) } }
+                }
+            }
+            if node.else_body != null {
+                push(lines, pad + "} else {")
+                for s in _block_stmts(node.else_body) { for l in this.stmt(s, indent + 1) { push(lines, l) } }
+            }
+            push(lines, pad + "}")
+            return lines
+        }
+        if nt == "WhileStatement" {
+            mut lines = [pad + "while(cl_truthy(" + this.expr(node.condition) + ")) {"]
+            for s in _block_stmts(node.body) { for l in this.stmt(s, indent + 1) { push(lines, l) } }
+            push(lines, pad + "}")
+            return lines
+        }
+        if nt == "BreakStatement" { return [pad + "break;"] }
+        if nt == "ContinueStatement" { return [pad + "continue;"] }
+        if nt == "FnStatement" { return [] }   -- hoisted separately
+        this.unsupported("statement " + nt, node.line)
+        return []
+    }
+
+    fn _fn_signature(node) {
+        mut params = []
+        for p in node.params {
+            let pname = if type(p) == "list" { p[0] } else { p }
+            push(params, "Value v_" + pname)
+        }
+        return "Value f_" + node.name + "(" + join(params, ", ") + ")"
+    }
+
+    fn function(node) {
+        mut lines = [this._fn_signature(node) + " {"]
+        for s in _block_stmts(node.body) { for l in this.stmt(s, 1) { push(lines, l) } }
+        push(lines, "  return cl_null();")
+        push(lines, "}")
+        return lines
+    }
+
+    fn compile(tree) {
+        mut fns = []
+        mut top = []
+        for stmt in tree.body {
+            if stmt.node_type == "FnStatement" { push(fns, stmt) } else { push(top, stmt) }
+        }
+        mut out = [C_PRELUDE, ""]
+        -- forward declarations, so call order and mutual recursion are free
+        for f in fns { push(out, this._fn_signature(f) + ";") }
+        push(out, "")
+        for f in fns { for l in this.function(f) { push(out, l) } push(out, "") }
+        push(out, "int main(void) {")
+        for s in top { for l in this.stmt(s, 1) { push(out, l) } }
+        push(out, "  return 0;")
+        push(out, "}")
+        return join(out, "\n")
+    }
+}
+
+-- Compile a parsed program to a complete C translation unit. Throws if the
+-- program uses a construct stage 1 doesn't support yet.
+fn compile_to_c(tree) {
+    let cg = CCodegen()
+    let src = cg.compile(tree)
+    if len(cg.errors) > 0 { throw join(cg.errors, "\n") }
+    return src
+}

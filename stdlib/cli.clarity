@@ -18,6 +18,9 @@ from "install.clarity" import install_self
 from "repl.clarity" import repl_start
 from "app_scaffold.clarity" import scaffold_app
 from "app_store.clarity" import app_store
+from "errors.clarity" import format_error
+from "c_codegen.clarity" import compile_to_c
+from "path.clarity" import stem
 
 -- ── Version ─────────────────────────────────────────────
 
@@ -68,6 +71,7 @@ fn _help() {
     show "  os iso                Build the ISO only (alias for `os build`)"
     show "  desktop               Launch the KyanOS desktop in a window (SDL2)"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
+    show "  cc <file.clarity>     Compile straight to a native binary via C (-o)"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
     show "  gen-runtime           Regenerate native/runtime.js from spec"
@@ -155,7 +159,7 @@ fn run_file(path) {
         let interp = Interpreter(null, source_dir)
         interp.run(tree)
     } catch e {
-        show red("\nClarity Error in {path}: {e}")
+        show red("\n" + format_error(e, source, path))
         exit(1)
     }
 }
@@ -178,12 +182,69 @@ fn run_file_fast(path) {
         let vm = VM()
         vm.run(code)
     } catch e {
-        show red("\nClarity Error in {path}: {e}")
+        show red("\n" + format_error(e, source, path))
         exit(1)
     }
 }
 
 -- ── Syntax checker ──────────────────────────────────────
+
+-- Pick a C compiler that's actually installed.
+fn _find_cc() {
+    for candidate in ["cc", "gcc", "clang"] {
+        let r = exec_full(candidate + " --version")
+        if len(trim(r.stdout)) > 0 { return candidate }
+    }
+    return null
+}
+
+-- `clarity cc <file.clarity> [-o out]` — compile a Clarity program straight
+-- to a native binary through C. No Bun, no bytecode VM: real machine code.
+-- (Stage 1: the scalar core — numbers, strings, booleans, variables,
+-- if/while, and functions. Richer features are still landing.)
+fn cc_file(cli_args) {
+    if len(cli_args) < 2 {
+        show red("  Usage: clarity cc <file.clarity> [-o <output>]")
+        exit(1)
+    }
+    let path = cli_args[1]
+    if not exists(path) {
+        show red("  >> File not found: {path}")
+        exit(1)
+    }
+    -- output name: -o <name>, else the source stem
+    mut out = stem(path)
+    mut i = 2
+    while i < len(cli_args) {
+        if cli_args[i] == "-o" and i + 1 < len(cli_args) { out = cli_args[i + 1]; i += 2 }
+        else { i += 1 }
+    }
+
+    let cc = _find_cc()
+    if cc == null {
+        show red("  >> No C compiler found (need cc, gcc, or clang on PATH)")
+        exit(1)
+    }
+
+    let source = read(path)
+    mut c_src = ""
+    try {
+        c_src = compile_to_c(parse(tokenize(source, path), source))
+    } catch e {
+        show red("\n" + format_error(e, source, path))
+        exit(1)
+    }
+
+    let cfile = out + ".c"
+    write(cfile, c_src)
+    let comp = exec_full(cc + " -O2 -w " + _quote(cfile) + " -o " + _quote(out) + " -lm")
+    if len(trim(comp.stderr)) > 0 and not exists(out) {
+        show red("  >> C compilation failed:")
+        show comp.stderr
+        exit(1)
+    }
+    show green("  compiled") + " {path} → {out}  " + dim("(via {cc}; C at {cfile})")
+}
 
 fn check_file(path, type_check) {
     if not exists(path) {
@@ -220,7 +281,7 @@ fn check_file(path, type_check) {
             }
         }
     } catch e {
-        show red("  ERROR") + " — {path}: {e}"
+        show red("  ERROR") + "\n" + red(format_error(e, source, path))
         exit(1)
     }
 }
@@ -908,6 +969,12 @@ fn main() {
     -- Build
     if command == "build" {
         build(cli_args)
+        return null
+    }
+
+    -- Native compile: Clarity → C → a real native binary (no runtime).
+    if command == "cc" {
+        cc_file(cli_args)
         return null
     }
 

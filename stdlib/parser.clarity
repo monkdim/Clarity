@@ -1194,6 +1194,17 @@ class Parser {
             return NumberLiteral(key_tok.value, key_tok.line, key_tok.column)
         }
 
+        -- A keyword used as a bare map key (`show:`, `type:`, `fn:`, ...).
+        -- Keywords lex to their own token types but still carry the word in
+        -- `.value`; when a colon follows, treat the word as a string key.
+        if this.peek(1).type == TokenType.COLON and len(key_tok.value) > 0 {
+            let c0 = char_at(key_tok.value, 0)
+            if is_alpha(c0) or c0 == "_" {
+                this.advance()
+                return StringLiteral(key_tok.value, key_tok.line, key_tok.column, false)
+            }
+        }
+
         return this.parse_expression()
     }
 

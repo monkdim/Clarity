@@ -1,0 +1,57 @@
+-- Language-server tests — the editor-facing hover and go-to-definition
+-- logic. The JSON-RPC transport can't run headlessly, but the resolution
+-- functions are pure over (source, line, character), so we drive them
+-- directly. (Importing lsp.clarity here also proves the self-hosted parser
+-- can parse it — it uses keyword names like `show:` as map keys.)
+
+from "lsp.clarity" import get_hover_info, find_definition, collect_definitions, extract_word
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+let SRC = "fn area(w, h) {\n  return w * h\n}\nlet scale = 3\nclass Box {\n  fn init() { this.x = 0 }\n}\nenum Dir { North, South }\nshow area(scale, 2)"
+-- line indices (0-based): 0 fn area, 3 let scale, 4 class Box, 7 enum Dir, 8 show area(scale,2)
+
+show "-- LSP: extract_word --"
+assert_eq(extract_word(SRC, 0, 4), "area", "word under the cursor in a declaration")
+assert_eq(extract_word(SRC, 8, 6), "area", "word under the cursor in a call")
+assert_eq(extract_word(SRC, 8, 0), "show", "word at the very start of a line")
+
+show "-- LSP: collect_definitions --"
+let defs = collect_definitions(parse(tokenize(SRC, "<t>"), SRC))
+assert(has(defs, "area"), "function collected")
+assert(has(defs, "scale"), "variable collected")
+assert(has(defs, "Box"), "class collected")
+assert(has(defs, "Dir"), "enum collected")
+assert_eq(defs["area"]["kind"], "function", "area is a function")
+assert_eq(defs["area"]["signature"], "fn area(w, h)", "function signature includes its params")
+assert_eq(defs["scale"]["kind"], "variable", "scale is a variable")
+
+show "-- LSP: hover --"
+assert_eq(get_hover_info(SRC, 8, 6), "```clarity\nfn area(w, h)\n```", "hover over a call shows the fn signature")
+assert_eq(get_hover_info(SRC, 8, 11), "```clarity\nlet scale\n```", "hover over a variable shows its binding")
+assert_eq(get_hover_info(SRC, 4, 7), "```clarity\nclass Box\n```", "hover over a class shows the class")
+assert(get_hover_info(SRC, 0, 0) != null, "hover over the 'fn' keyword returns keyword help")
+assert_eq(get_hover_info(SRC, 1, 2), "**return** -- Clarity keyword", "hover over a keyword names it")
+
+show "-- LSP: go-to-definition --"
+-- 0-based positions of the declaration (lexer coords minus 1)
+assert_eq(find_definition(SRC, 8, 6)["line"], 0, "jump from a call to the fn definition")
+assert_eq(find_definition(SRC, 8, 11)["line"], 3, "jump from a use to the variable definition")
+assert_eq(find_definition(SRC, 4, 7)["line"], 4, "jump to a class definition")
+assert_eq(find_definition(SRC, 7, 6)["line"], 7, "jump to an enum definition")
+assert_eq(find_definition(SRC, 8, 0), null, "no definition for a keyword")
+assert_eq(find_definition("show missing", 0, 6), null, "no definition for an unknown name")
+
+show ""
+show "LSP: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " LSP test(s) failed" }

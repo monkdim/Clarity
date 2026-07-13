@@ -3,7 +3,7 @@
 
 from "lexer.clarity" import tokenize
 from "parser.clarity" import parse
-from "type_checker.clarity" import TypeChecker
+from "type_checker.clarity" import TypeChecker, fn_arity
 
 mut PASSED = 0
 mut FAILED = 0
@@ -15,6 +15,11 @@ fn assert(val, msg) {
         FAILED += 1
         show "  FAIL: " + msg
     }
+}
+
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
 }
 
 fn get_errors(source) {
@@ -107,6 +112,72 @@ show "-- Type Checker: No False Positives --"
 
 assert(len(get_errors("let x = 42\nlet s = \"hello\"\nfn foo(a, b) { return a + b }\nshow foo(x, 10)")) == 0, "no annotations no errors")
 assert(len(get_errors("class Animal {\n    fn init(name) { this.name = name }\n    fn speak() { return this.name }\n}\nlet a = Animal(\"Dog\")\nshow a.speak()\nfor i in [1, 2, 3] { show i }")) == 0, "complex program no errors")
+
+-- ── Argument-count (arity) checking ─────────────────────
+
+show "-- Type Checker: Arity --"
+
+fn arity_errors(source) {
+    mut n = 0
+    for e in get_errors(source) {
+        if contains(e["message"], "argument(s), got") { n += 1 }
+    }
+    return n
+}
+
+assert_eq(arity_errors("fn add(a, b) { return a + b }\nshow add(1)"), 1, "too few arguments flagged")
+assert_eq(arity_errors("fn add(a, b) { return a + b }\nshow add(1, 2, 3)"), 1, "too many arguments flagged")
+assert_eq(arity_errors("fn add(a, b) { return a + b }\nshow add(1, 2)"), 0, "exact count is fine")
+-- a forward reference (call before definition) is still checked
+assert_eq(arity_errors("show f(1)\nfn f(a, b) { return a }"), 1, "forward reference is arity-checked")
+-- variadic functions accept any count at/above the required prefix
+assert_eq(arity_errors("fn sum(...ns) { return 0 }\nshow sum(1, 2, 3, 4)"), 0, "variadic accepts many args")
+assert_eq(arity_errors("fn sum(...ns) { return 0 }\nshow sum()"), 0, "variadic accepts zero args")
+assert_eq(arity_errors("fn tag(label, ...ns) { return 0 }\nshow tag()"), 1, "variadic still needs its required prefix")
+-- a spread argument makes the count unknowable → don't guess
+assert_eq(arity_errors("fn add(a, b) { return a }\nlet xs = [1, 2]\nshow add(...xs)"), 0, "spread argument skips the arity check")
+-- recursion doesn't false-positive
+assert_eq(arity_errors("fn fib(n) { if n < 2 { return n }\nreturn fib(n - 1) + fib(n - 2) }\nshow fib(6)"), 0, "recursive call is fine")
+-- builtins (variadic at the host level) are never arity-checked
+assert_eq(arity_errors("show 1\nprint(1, 2, 3)\nlet n = max(1, 2, 3, 4)"), 0, "builtins are not arity-checked")
+
+-- fn_arity helper directly
+assert_eq(fn_arity(["a", "b", "c"])["required"], 3, "fn_arity counts required params")
+assert_eq(fn_arity(["a", "b", "c"])["variadic"], false, "fn_arity: no variadic")
+assert_eq(fn_arity(["a", "...rest"])["required"], 1, "fn_arity: variadic drops the rest param from required")
+assert_eq(fn_arity(["a", "...rest"])["variadic"], true, "fn_arity: detects variadic")
+assert_eq(fn_arity([])["required"], 0, "fn_arity: no params")
+
+-- ── Undefined-name detection ────────────────────────────
+
+show "-- Type Checker: Undefined Names --"
+
+fn undefined_count(source) {
+    mut n = 0
+    for d in get_diags(source) {
+        if contains(d["message"], "is not defined") { n += 1 }
+    }
+    return n
+}
+
+-- typos are caught, as variables and as function calls
+assert_eq(undefined_count("let username = 1\nshow usrename"), 1, "typo'd variable flagged")
+assert_eq(undefined_count("fn greet(n) { return n }\nshow greeet(1)"), 1, "typo'd function call flagged")
+-- correct references never flagged
+assert_eq(undefined_count("let username = 1\nshow username"), 0, "correct variable is fine")
+assert_eq(undefined_count("fn greet(n) { return n }\nshow greet(1)"), 0, "correct call is fine")
+-- builtins (both the typed table and the name-only list) are known
+assert_eq(undefined_count("print(1)\nlet r = exec_full(\"ls\")\nlet n = len([1])"), 0, "builtins are known")
+-- every legitimate binding form stays quiet
+assert_eq(undefined_count("let xs = [1, 2]\nshow [x * 2 for x in xs]"), 0, "comprehension variable is bound")
+assert_eq(undefined_count("show {k: k for k in [1, 2]}"), 0, "map-comprehension variable is bound")
+assert_eq(undefined_count("let f = fn(a, b) { return a + b }\nshow f(1, 2)"), 0, "fn-expression params are bound")
+assert_eq(undefined_count("fn outer(x) { let g = fn(y) { return x + y }\nreturn g(2) }\nshow outer(1)"), 0, "closure over an outer variable is fine")
+assert_eq(undefined_count("let [a, b] = [1, 2]\nshow a + b"), 0, "list destructuring binds its names")
+assert_eq(undefined_count("let {name, age} = {\"name\": \"x\", \"age\": 1}\nshow name + str(age)"), 0, "map destructuring binds its names")
+assert_eq(undefined_count("fn tag(label, ...rest) { return label }\nshow tag(\"a\", 1, 2)"), 0, "a variadic ...rest is usable by its bare name")
+-- forward references to a later definition are not "undefined"
+assert_eq(undefined_count("show make()\nfn make() { return Widget() }\nclass Widget { fn init() { this.x = 1 } }"), 0, "forward references to a fn and class are resolved")
 
 -- ── Summary ─────────────────────────────────────────────
 

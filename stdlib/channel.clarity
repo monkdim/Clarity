@@ -2,6 +2,19 @@
 -- Provides Channel (unbuffered) and BufferedChannel for producer/consumer patterns.
 -- Channels are typed message queues with send/receive/close semantics.
 
+-- Return a list without its first element — the dequeue-from-front the queues
+-- need. (Earlier this called a global slice() that has never existed in the
+-- runtime, so every dequeue would have thrown; caught by the type checker.)
+fn _drop_first(lst) {
+    mut out = []
+    mut i = 1
+    while i < len(lst) {
+        push(out, lst[i])
+        i += 1
+    }
+    return out
+}
+
 -- ── Channel (unbuffered) ────────────────────────────────
 -- An unbuffered channel holds at most one pending message.
 -- Send blocks (spins) until the message is received.
@@ -24,7 +37,7 @@ class Channel {
         -- If there are waiting receivers, notify them
         if len(this._receivers) > 0 {
             let callback = this._receivers[0]
-            this._receivers = slice(this._receivers, 1)
+            this._receivers = _drop_first(this._receivers)
             callback(value)
         }
     }
@@ -34,7 +47,7 @@ class Channel {
         -- Returns null if channel is closed and empty.
         if len(this._queue) > 0 {
             let val = this._queue[0]
-            this._queue = slice(this._queue, 1)
+            this._queue = _drop_first(this._queue)
             return val
         }
         if this._closed {
@@ -47,7 +60,7 @@ class Channel {
         -- Non-blocking receive. Returns {ok: true, value: v} or {ok: false}.
         if len(this._queue) > 0 {
             let val = this._queue[0]
-            this._queue = slice(this._queue, 1)
+            this._queue = _drop_first(this._queue)
             return {"ok": true, "value": val}
         }
         return {"ok": false, "value": null}
@@ -109,7 +122,7 @@ class BufferedChannel {
         }
         if len(this._queue) >= this._capacity {
             -- Drop oldest (ring buffer behavior)
-            this._queue = slice(this._queue, 1)
+            this._queue = _drop_first(this._queue)
             this._dropped = this._dropped + 1
         }
         push(this._queue, value)
@@ -117,7 +130,7 @@ class BufferedChannel {
         -- Notify receivers
         if len(this._receivers) > 0 {
             let callback = this._receivers[0]
-            this._receivers = slice(this._receivers, 1)
+            this._receivers = _drop_first(this._receivers)
             callback(value)
         }
     }
@@ -142,7 +155,7 @@ class BufferedChannel {
     fn receive() {
         if len(this._queue) > 0 {
             let val = this._queue[0]
-            this._queue = slice(this._queue, 1)
+            this._queue = _drop_first(this._queue)
             return val
         }
         if this._closed {
@@ -154,7 +167,7 @@ class BufferedChannel {
     fn try_receive() {
         if len(this._queue) > 0 {
             let val = this._queue[0]
-            this._queue = slice(this._queue, 1)
+            this._queue = _drop_first(this._queue)
             return {"ok": true, "value": val}
         }
         return {"ok": false, "value": null}

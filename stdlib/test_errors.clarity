@@ -1,0 +1,59 @@
+-- Tests for friendly error rendering.
+
+from "errors.clarity" import format_error, error_position
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+show "-- errors: position parsing --"
+let p1 = error_position("ParseError: Unexpected token at line 7, column 3")
+assert_eq(p1["line"], 7, "parses the line number")
+assert_eq(p1["column"], 3, "parses the column number")
+let p2 = error_position("NameError: 'x' is not defined (line 12)")
+assert_eq(p2["line"], 12, "parses a line with no column")
+assert_eq(p2["column"], null, "column is null when absent")
+let p3 = error_position("something with no position at all")
+assert_eq(p3["line"], null, "line is null when absent")
+assert_eq(p3["column"], null, "column is null when absent")
+-- multi-digit numbers
+let p4 = error_position("boom at line 128, column 40")
+assert_eq(p4["line"], 128, "parses multi-digit line")
+assert_eq(p4["column"], 40, "parses multi-digit column")
+
+show "-- errors: rendering --"
+let src = "show 1\nlet x = 5 +\nshow 2"
+let out = format_error("ParseError: bad at line 2, column 11", src, "foo.clarity")
+assert(contains(out, "foo.clarity"), "names the file")
+assert(contains(out, "ParseError: bad"), "includes the message")
+assert(contains(out, "2 | let x = 5 +"), "shows the offending source line with a gutter")
+assert(contains(out, "^"), "draws a caret when the column is known")
+-- the caret sits under column 11 (gutter '  2 | ' is 6 chars, + 10 spaces = 16)
+let caret_line = split(out, "\n")[len(split(out, "\n")) - 2]
+assert_eq(index_of(caret_line, "^"), 16, "caret aligns under the reported column")
+
+-- runtime error: line known, column not → show the line, no caret
+let out2 = format_error("NameError: 'price' is not defined (line 1)", "let total = price * qty", "bar.clarity")
+assert(contains(out2, "1 | let total = price * qty"), "runtime error shows its source line")
+assert(not contains(out2, "^"), "no caret when the column is unknown")
+
+-- no position, or out-of-range line → graceful fallback to just the message
+let out3 = format_error("mystery failure", "let a = 1", "baz.clarity")
+assert(contains(out3, "mystery failure"), "fallback keeps the message")
+assert(not contains(out3, "|"), "fallback shows no source gutter")
+let out4 = format_error("oops at line 99", "let a = 1", "baz.clarity")
+assert(not contains(out4, "99 |"), "an out-of-range line is skipped, not crashed")
+
+-- null source/path must not crash
+let out5 = format_error("boom (line 3)", null, null)
+assert(contains(out5, "boom"), "tolerates null source and path")
+
+show ""
+show "errors: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " error-rendering test(s) failed" }
