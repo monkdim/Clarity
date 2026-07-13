@@ -84,6 +84,15 @@ if CC == null {
     same("str_builtin", "show str(42) + \"!\"\nshow \"n=\" + str(3 + 4)")
     same("nested_loops", "mut total = 0\nfor i in range(3) { for j in range(3) { total = total + i * j } }\nshow total")
 
+    -- ── stage 3: classes ──
+    same("class_counter", "class Counter { fn init(start) { this.n = start }\nfn inc() { this.n = this.n + 1 }\nfn get() { return this.n } }\nlet c = Counter(5)\nc.inc()\nc.inc()\nshow c.get()")
+    same("class_to_string", "class Point { fn init(x, y) { this.x = x\nthis.y = y }\nfn to_string() { return \"(\" + str(this.x) + \", \" + str(this.y) + \")\" } }\nshow Point(3, 4)")
+    same("class_default_display", "class Empty { fn init() {} }\nshow Empty()")
+    same("class_mutation", "class Calc { fn init() { this.total = 0 }\nfn add(x) { this.total = this.total + x }\nfn double() { this.total = this.total * 2 }\nfn result() { return this.total } }\nlet k = Calc()\nk.add(3)\nk.double()\nshow k.result()")
+    same("class_field_list", "class Stack { fn init() { this.items = [] }\nfn put(x) { push(this.items, x) }\nfn size() { return len(this.items) } }\nlet s = Stack()\ns.put(10)\ns.put(20)\nshow s.size()\nshow s.items")
+    same("class_method_calls_method", "class Greeter { fn init(name) { this.name = name }\nfn greeting() { return \"Hello, \" + this.name }\nfn shout() { return this.greeting() + \"!\" } }\nshow Greeter(\"Kyan\").shout()")
+    same("class_inheritance", "class Animal { fn init(name) { this.name = name }\nfn speak() { return \"...\" }\nfn describe() { return this.name + \" says \" + this.speak() } }\nclass Dog < Animal { fn speak() { return \"woof\" } }\nlet d = Dog(\"Rex\")\nshow d.describe()")
+
     exec("rm -f /tmp/_clc_*")
 }
 

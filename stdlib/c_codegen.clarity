@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 2).
+-- Clarity → C code generator (native compilation, stage 3).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -13,6 +13,13 @@
 -- pointer), indexing and index-assignment, `for` over lists/maps/strings/
 -- ranges, and the common builtins (len/push/str/int/float/range/keys/has/
 -- contains). Collections display like the interpreter (`[1, 2]`, `{k: v}`).
+--
+-- Stage 3 adds classes: instances are a class name + a field map (T_OBJECT),
+-- methods share a uniform `Value f_Class_method(Value v_this, Value* argv)`
+-- convention and dispatch through a runtime table keyed on the instance's
+-- class, constructors run `init`, `this.field` reads/writes the field map,
+-- and single inheritance resolves methods (and `init`) up the parent chain.
+-- Instances print via a `to_string` method if present, else `<Cls instance>`.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -30,17 +37,26 @@ let C_PRELUDE = """#include <stdio.h>
 #include <string.h>
 #include <math.h>
 
-typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR, T_LIST, T_MAP } Tag;
+typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR, T_LIST, T_MAP, T_OBJECT } Tag;
 typedef struct Value Value;
 struct Value { Tag t; long i; double f; const char* s; void* o; };
 typedef struct { Value* items; long len; long cap; } List;
 typedef struct { char** keys; Value* vals; long len; long cap; } Map;
+typedef struct { const char* cls; Value fields; } Obj;
+
+/* uniform method calling convention: (self, arg-array) -> Value */
+typedef Value (*ClMethod)(Value, Value*);
+typedef struct { const char* cls; const char* m; ClMethod fn; } ClMethodEntry;
+static ClMethodEntry cl_method_table[1024];
+static int cl_method_count = 0;
 
 /* mutually-recursive display + deep-equality forward declarations */
 static char* cl_to_cstr(Value v);
 static char* cl_repr(Value v);
 static char* cl_display(Value v);
 static int cl_equal(Value a, Value b);
+static ClMethod cl_find_method(const char* cls, const char* m);
+static char* cl_obj_display(Value v);
 
 static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; v.o=0; return v; }
 static Value cl_bool(long b){ Value v=cl_null(); v.t=T_BOOL; v.i=(b!=0); return v; }
@@ -86,6 +102,7 @@ static char* cl_cat(char* a, const char* b){
 
 static char* cl_to_cstr(Value v){
   if(v.t==T_LIST || v.t==T_MAP) return cl_repr(v);
+  if(v.t==T_OBJECT) return cl_obj_display(v);
   char* buf = (char*)malloc(64);
   switch(v.t){
     case T_NULL: strcpy(buf, "null"); return buf;
@@ -121,6 +138,7 @@ static char* cl_repr(Value v){
 /* display leaves top-level strings unquoted but reprs nested collections */
 static char* cl_display(Value v){
   if(v.t==T_LIST || v.t==T_MAP) return cl_repr(v);
+  if(v.t==T_OBJECT) return cl_obj_display(v);
   return cl_to_cstr(v);
 }
 
@@ -173,6 +191,7 @@ static int cl_truthy(Value v){
     case T_STR: return v.s && v.s[0];
     case T_LIST: return ((List*)v.o)->len!=0;
     case T_MAP: return ((Map*)v.o)->len!=0;
+    case T_OBJECT: return 1;
   }
   return 0;
 }
@@ -182,6 +201,8 @@ static int cl_equal(Value a, Value b){
   if(a.t==T_STR && b.t==T_STR) return strcmp(a.s, b.s)==0;
   if(cl_is_num(a) && cl_is_num(b)) return cl_num(a)==cl_num(b);
   if(a.t != b.t) return 0;
+  /* pointer-backed values compare by identity (deep-equality is deferred) */
+  if(a.t==T_OBJECT || a.t==T_LIST || a.t==T_MAP) return a.o==b.o;
   return a.i==b.i;
 }
 static Value cl_eq(Value a, Value b){ return cl_bool(cl_equal(a,b)); }
@@ -238,6 +259,52 @@ static Value cl_contains(Value a, Value b){
   return cl_bool(0);
 }
 
+/* ── objects: instances, fields, method dispatch ── */
+static Value cl_object_new(const char* cls){
+  Obj* o=(Obj*)malloc(sizeof(Obj));
+  o->cls=cls; o->fields=cl_map_new();
+  Value v=cl_null(); v.t=T_OBJECT; v.o=o; return v;
+}
+static Value cl_get_field(Value obj, const char* name){
+  if(obj.t!=T_OBJECT) return cl_null();
+  Obj* o=(Obj*)obj.o; Map* m=(Map*)o->fields.o;
+  for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],name)==0) return m->vals[j];
+  return cl_null();
+}
+static Value cl_set_field(Value obj, const char* name, Value val){
+  if(obj.t==T_OBJECT){ Obj* o=(Obj*)obj.o; cl_map_put(o->fields, (char*)name, val); }
+  return val;
+}
+static void cl_register(const char* cls, const char* m, ClMethod fn){
+  if(cl_method_count >= 1024){ fprintf(stderr, "clarity: method table overflow (>1024 methods)\n"); exit(1); }
+  cl_method_table[cl_method_count].cls=cls;
+  cl_method_table[cl_method_count].m=m;
+  cl_method_table[cl_method_count].fn=fn;
+  cl_method_count++;
+}
+static ClMethod cl_find_method(const char* cls, const char* m){
+  for(int i=0;i<cl_method_count;i++)
+    if(strcmp(cl_method_table[i].cls,cls)==0 && strcmp(cl_method_table[i].m,m)==0)
+      return cl_method_table[i].fn;
+  return 0;
+}
+/* obj.method(args): resolve on the instance's class, call with the arg array */
+static Value cl_dispatch(Value self, const char* m, Value* a){
+  const char* cls = (self.t==T_OBJECT) ? ((Obj*)self.o)->cls : "";
+  ClMethod fn = cl_find_method(cls, m);
+  if(fn) return fn(self, a);
+  return cl_null();
+}
+/* instances print via a to_string method if defined, else <Cls instance> */
+static char* cl_obj_display(Value v){
+  Obj* o=(Obj*)v.o;
+  ClMethod ts = cl_find_method(o->cls, "to_string");
+  if(ts){ Value r = ts(v, 0); return cl_display(r); }
+  char* out=(char*)malloc(strlen(o->cls)+16);
+  sprintf(out, "<%s instance>", o->cls);
+  return out;
+}
+
 static void cl_show(Value v){ char* s=cl_display(v); printf("%s\n", s); }
 """
 
@@ -276,6 +343,15 @@ class CCodegen {
     fn init() {
         this.errors = []
         this.loop_id = 0
+        this.classes = []       -- known class names (for constructor calls)
+        this.class_defs = {}    -- name → ClassStatement node (for inheritance)
+    }
+
+    -- Build a C Value-array argument for a method/constructor call. Zero args
+    -- pass NULL (0): a method reading no params never dereferences it.
+    fn _argv(arg_exprs) {
+        if len(arg_exprs) == 0 { return "0" }
+        return "(Value[]){" + join(arg_exprs, ", ") + "}"
     }
 
     fn unsupported(what, line) {
@@ -316,6 +392,7 @@ class CCodegen {
         if nt == "BoolLiteral" { return if node.value { "cl_bool(1)" } else { "cl_bool(0)" } }
         if nt == "NullLiteral" { return "cl_null()" }
         if nt == "Identifier" { return "v_" + node.name }
+        if nt == "ThisExpression" { return "v_this" }
         if nt == "UnaryOp" {
             if node.operator == "not" { return "cl_not(" + this.expr(node.operand) + ")" }
             if node.operator == "-" { return "cl_neg(" + this.expr(node.operand) + ")" }
@@ -365,13 +442,29 @@ class CCodegen {
         if nt == "IndexExpression" {
             return "cl_index(" + this.expr(node.object) + ", " + this.expr(node.index) + ")"
         }
+        if nt == "MemberExpression" {
+            -- Field/property read: `obj.field`. Method *calls* are handled in
+            -- CallExpression below; a bare member is always a field lookup.
+            return "cl_get_field(" + this.expr(node.object) + ", \"" + node.property + "\")"
+        }
         if nt == "CallExpression" {
-            if node.callee.node_type == "Identifier" {
+            let callee = node.callee
+            -- obj.method(args) → dynamic dispatch on the instance's class
+            if callee.node_type == "MemberExpression" {
+                mut margs = []
+                for a in node.arguments { push(margs, this.expr(a)) }
+                return "cl_dispatch(" + this.expr(callee.object) + ", \"" + callee.property + "\", " + this._argv(margs) + ")"
+            }
+            if callee.node_type == "Identifier" {
                 mut args = []
                 for a in node.arguments { push(args, this.expr(a)) }
-                let builtin = this._builtin_call(node.callee.name, args)
+                -- ClassName(args) → construct an instance
+                if contains(this.classes, callee.name) {
+                    return "cl_ctor_" + callee.name + "(" + this._argv(args) + ")"
+                }
+                let builtin = this._builtin_call(callee.name, args)
                 if builtin != "" { return builtin }
-                return "f_" + node.callee.name + "(" + join(args, ", ") + ")"
+                return "f_" + callee.name + "(" + join(args, ", ") + ")"
             }
             this.unsupported("indirect call", node.line)
             return "cl_null()"
@@ -409,6 +502,18 @@ class CCodegen {
                 let base = substring(op, 0, len(op) - 1)
                 if has(_BINOPS, base) {
                     return [pad + "cl_index_set(" + obj + ", " + idx + ", " + _BINOPS[base] + "(cl_index(" + obj + ", " + idx + "), " + this.expr(node.value) + "));"]
+                }
+            }
+            if node.target.node_type == "MemberExpression" {
+                let obj = this.expr(node.target.object)
+                let prop = node.target.property
+                let op = node.operator
+                if op == "=" {
+                    return [pad + "cl_set_field(" + obj + ", \"" + prop + "\", " + this.expr(node.value) + ");"]
+                }
+                let base = substring(op, 0, len(op) - 1)
+                if has(_BINOPS, base) {
+                    return [pad + "cl_set_field(" + obj + ", \"" + prop + "\", " + _BINOPS[base] + "(cl_get_field(" + obj + ", \"" + prop + "\"), " + this.expr(node.value) + "));"]
                 }
             }
             this.unsupported("assignment target", node.line)
@@ -483,18 +588,98 @@ class CCodegen {
         return lines
     }
 
+    -- Resolve a class's callable methods, walking the parent chain so an
+    -- own method overrides an inherited one. Returns [methodName, ownerClass]
+    -- pairs; ownerClass is where the actual C function lives.
+    fn _resolve_methods(class_node) {
+        mut seen = {}
+        mut result = []
+        mut cls = class_node
+        while cls != null {
+            for m in cls.methods {
+                if m.node_type == "FnStatement" and not has(seen, m.name) {
+                    seen[m.name] = true
+                    push(result, [m.name, cls.name])
+                }
+            }
+            cls = if cls.parent != null and has(this.class_defs, cls.parent) { this.class_defs[cls.parent] } else { null }
+        }
+        return result
+    }
+
+    -- The class that actually defines `mname` (own or inherited), or null.
+    fn _method_owner(class_node, mname) {
+        mut cls = class_node
+        while cls != null {
+            for m in cls.methods {
+                if m.node_type == "FnStatement" and m.name == mname { return cls.name }
+            }
+            cls = if cls.parent != null and has(this.class_defs, cls.parent) { this.class_defs[cls.parent] } else { null }
+        }
+        return null
+    }
+
+    -- Emit a class's method functions and its constructor.
+    fn class_code(class_node) {
+        mut lines = []
+        for m in class_node.methods {
+            if m.node_type == "FnStatement" {
+                push(lines, "Value f_" + class_node.name + "_" + m.name + "(Value v_this, Value* __a) {")
+                mut idx = 0
+                for p in m.params {
+                    let pname = if type(p) == "list" { p[0] } else { p }
+                    push(lines, "  Value v_" + pname + " = __a[" + str(idx) + "];")
+                    idx += 1
+                }
+                for s in _block_stmts(m.body) { for l in this.stmt(s, 1) { push(lines, l) } }
+                push(lines, "  return cl_null();")
+                push(lines, "}")
+            }
+        }
+        push(lines, "Value cl_ctor_" + class_node.name + "(Value* __a) {")
+        push(lines, "  Value self = cl_object_new(\"" + class_node.name + "\");")
+        let init_owner = this._method_owner(class_node, "init")
+        if init_owner != null {
+            push(lines, "  f_" + init_owner + "_init(self, __a);")
+        }
+        push(lines, "  return self;")
+        push(lines, "}")
+        return lines
+    }
+
     fn compile(tree) {
         mut fns = []
+        mut classes = []
         mut top = []
         for stmt in tree.body {
-            if stmt.node_type == "FnStatement" { push(fns, stmt) } else { push(top, stmt) }
+            if stmt.node_type == "FnStatement" { push(fns, stmt) }
+            elif stmt.node_type == "ClassStatement" {
+                push(classes, stmt)
+                push(this.classes, stmt.name)
+                this.class_defs[stmt.name] = stmt
+            } else { push(top, stmt) }
         }
         mut out = [C_PRELUDE, ""]
         -- forward declarations, so call order and mutual recursion are free
         for f in fns { push(out, this._fn_signature(f) + ";") }
+        for c in classes {
+            for m in c.methods {
+                if m.node_type == "FnStatement" {
+                    push(out, "Value f_" + c.name + "_" + m.name + "(Value v_this, Value* __a);")
+                }
+            }
+            push(out, "Value cl_ctor_" + c.name + "(Value* __a);")
+        }
         push(out, "")
         for f in fns { for l in this.function(f) { push(out, l) } push(out, "") }
+        for c in classes { for l in this.class_code(c) { push(out, l) } push(out, "") }
         push(out, "int main(void) {")
+        -- register every class's resolved methods before running top-level code
+        for c in classes {
+            for pair in this._resolve_methods(c) {
+                push(out, "  cl_register(\"" + c.name + "\", \"" + pair[0] + "\", &f_" + pair[1] + "_" + pair[0] + ");")
+            }
+        }
         for s in top { for l in this.stmt(s, 1) { push(out, l) } }
         push(out, "  return 0;")
         push(out, "}")
