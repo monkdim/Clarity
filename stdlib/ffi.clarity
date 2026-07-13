@@ -1,8 +1,11 @@
 -- FFI — Foreign Function Interface for Clarity.
 --
 -- Wraps Bun's bun:ffi to call C/Zig/Rust shared libraries directly.
--- Phase 56 task 1: binding layer + library handles. Type marshalling,
--- pointers, structs, and callbacks land in subsequent tasks.
+-- Covers the binding layer + library handles, scalar/pointer/string
+-- marshalling, owned buffers, bulk numeric arrays (read_array/write_array,
+-- ffi.array), C structs with natural alignment — including nested structs
+-- and contiguous struct arrays — and Clarity-function callbacks across the
+-- boundary.
 --
 -- Example:
 --     from "ffi.clarity" import bind
@@ -127,10 +130,95 @@ class Pointer {
     fn write_float(offset, val)  { this.write_f32(offset, val) }
     fn write_double(offset, val) { this.write_f64(offset, val) }
 
+    -- ── Bulk arrays ──────────────────────────────────────
+    -- Marshal a contiguous C array of a scalar element type to/from a
+    -- Clarity list. `type` is any scalar FFI type ("f32", "i32", …); the
+    -- element stride is that type's natural size. This is the workhorse for
+    -- numeric interop — passing an embedding/logit buffer to a C library and
+    -- reading the result back — without a per-element FFI round-trip in the
+    -- caller.
+
+    fn _read_scalar(t, offset) {
+        if t == "bool" { return this.read_u8(offset) != 0 }
+        if t == "i8"   { return this.read_i8(offset) }
+        if t == "u8" or t == "char" { return this.read_u8(offset) }
+        if t == "i16"  { return this.read_i16(offset) }
+        if t == "u16"  { return this.read_u16(offset) }
+        if t == "i32" or t == "int" { return this.read_i32(offset) }
+        if t == "u32"  { return this.read_u32(offset) }
+        if t == "i64"  { return this.read_i64(offset) }
+        if t == "u64"  { return this.read_u64(offset) }
+        if t == "f32" or t == "float"  { return this.read_f32(offset) }
+        if t == "f64" or t == "double" { return this.read_f64(offset) }
+        if t == "ptr" or t == "pointer" { return this.read_ptr(offset) }
+        throw "FFIError: unsupported array element type '" + t + "'"
+    }
+
+    fn _write_scalar(t, offset, value) {
+        if t == "bool" { this.write_u8(offset, if value { 1 } else { 0 }) }
+        elif t == "i8" { this.write_i8(offset, value) }
+        elif t == "u8" or t == "char" { this.write_u8(offset, value) }
+        elif t == "i16" { this.write_i16(offset, value) }
+        elif t == "u16" { this.write_u16(offset, value) }
+        elif t == "i32" or t == "int" { this.write_i32(offset, value) }
+        elif t == "u32" { this.write_u32(offset, value) }
+        elif t == "i64" { this.write_i64(offset, value) }
+        elif t == "u64" { this.write_u64(offset, value) }
+        elif t == "f32" or t == "float" { this.write_f32(offset, value) }
+        elif t == "f64" or t == "double" { this.write_f64(offset, value) }
+        elif t == "ptr" or t == "pointer" { this.write_i64(offset, value) }
+        else { throw "FFIError: unsupported array element type '" + t + "'" }
+    }
+
+    -- Read `count` elements of `type` starting at `offset` (bytes) into a list.
+    fn read_array(type, count, offset) {
+        let stride = _FFI_TYPE_SIZE[type]
+        if stride == null { throw "FFIError: unknown array element type '" + type + "'" }
+        let base = offset ?? 0
+        mut out = []
+        mut i = 0
+        while i < count {
+            push(out, this._read_scalar(type, base + i * stride))
+            i += 1
+        }
+        return out
+    }
+
+    -- Write a list of `type` values starting at `offset` (bytes). Returns the
+    -- number of elements written.
+    fn write_array(type, values, offset) {
+        let stride = _FFI_TYPE_SIZE[type]
+        if stride == null { throw "FFIError: unknown array element type '" + type + "'" }
+        let base = offset ?? 0
+        mut i = 0
+        while i < len(values) {
+            this._write_scalar(type, base + i * stride, values[i])
+            i += 1
+        }
+        return len(values)
+    }
+
     -- Drop the JS-side buffer reference so GC can reclaim it.
     fn free() {
         _ffi_pointer_release(this._handle)
     }
+}
+
+-- Allocate a buffer holding `count` elements of a scalar `type`, optionally
+-- pre-filled from a Clarity list. Handy for numeric interop:
+--     let buf = ffi.array("f32", [1.0, 2.0, 3.0])
+--     some_c_fn(buf.addr(), 3)
+--     show buf.read_array("f32", 3, 0)
+fn array(elem_type, count_or_values) {
+    let stride = _FFI_TYPE_SIZE[elem_type]
+    if stride == null { throw "FFIError: unknown array element type '" + elem_type + "'" }
+    if type(count_or_values) == "list" {
+        let vals = count_or_values
+        let p = alloc(stride * len(vals))
+        p.write_array(elem_type, vals, 0)
+        return p
+    }
+    return alloc(stride * count_or_values)
 }
 
 -- Allocate `size` bytes of zero-initialised memory. The Pointer owns the
@@ -194,13 +282,22 @@ class StructDef {
         for f in fields {
             let fname = f[0]
             let ftype = f[1]
-            let size = _FFI_TYPE_SIZE[ftype]
-            if size == null {
-                throw "FFIError: unknown field type '" + ftype + "' in struct " + name
+            -- A field type may be a scalar type name or a nested StructDef.
+            mut size = 0
+            mut align = 0
+            if type(ftype) == "StructDef" {
+                size = ftype.size
+                align = ftype.alignment
+            } else {
+                size = _FFI_TYPE_SIZE[ftype]
+                if size == null {
+                    throw "FFIError: unknown field type '" + ftype + "' in struct " + name
+                }
+                align = size
             }
-            if size > max_align { max_align = size }
-            let rem = offset % size
-            if rem != 0 { offset += size - rem }
+            if align > max_align { max_align = align }
+            let rem = offset % align
+            if rem != 0 { offset += align - rem }
             this.offsets[fname] = offset
             this.field_types[fname] = ftype
             offset += size
@@ -217,11 +314,43 @@ class StructDef {
     fn from_ptr(addr_or_pointer) {
         return StructInstance(this, addr_or_pointer)
     }
+
+    -- Allocate a contiguous array of `count` of these structs.
+    fn array(count) { return StructArray(this, count) }
+}
+
+-- A contiguous C array of structs. `.at(i)` returns a StructInstance that
+-- views element i in-place (no copy), so writes land in the shared buffer —
+-- exactly what a C function iterating `T items[n]` expects.
+class StructArray {
+    fn init(struct_def, count) {
+        this.def = struct_def
+        this.count = count
+        this.ptr = alloc(struct_def.size * count)
+    }
+
+    fn addr() { return this.ptr.addr() }
+    fn size() { return this.def.size * this.count }
+
+    fn at(i) {
+        if i < 0 or i >= this.count {
+            throw "FFIError: struct array index " + str(i) + " out of range [0, " + str(this.count) + ")"
+        }
+        let inst = StructInstance(this.def, this.ptr)
+        inst.base = i * this.def.size
+        return inst
+    }
+
+    fn free() { this.ptr.free() }
 }
 
 class StructInstance {
     fn init(struct_def, src) {
         this.def = struct_def
+        -- Byte offset of this instance within its buffer. Nonzero only for
+        -- struct-array elements and nested-struct field views, which share a
+        -- parent's Pointer instead of owning their own allocation.
+        this.base = 0
         if src == null {
             this.ptr = alloc(struct_def.size)
         } elif type(src) == "Pointer" {
@@ -231,7 +360,7 @@ class StructInstance {
         }
     }
 
-    fn addr() { return this.ptr.addr() }
+    fn addr() { return this.ptr.addr() + this.base }
     fn size() { return this.def.size }
 
     fn get(name) {
@@ -240,7 +369,13 @@ class StructInstance {
             throw "FFIError: no field '" + name + "' on " + this.def.name
         }
         let t = this.def.field_types[name]
-        return this._read(t, offset)
+        -- A nested struct field is returned as a view sharing this buffer.
+        if type(t) == "StructDef" {
+            let inst = StructInstance(t, this.ptr)
+            inst.base = this.base + offset
+            return inst
+        }
+        return this._read(t, this.base + offset)
     }
 
     fn set(name, value) {
@@ -249,7 +384,10 @@ class StructInstance {
             throw "FFIError: no field '" + name + "' on " + this.def.name
         }
         let t = this.def.field_types[name]
-        this._write(t, offset, value)
+        if type(t) == "StructDef" {
+            throw "FFIError: cannot assign nested struct '" + name + "' directly — use .get(\"" + name + "\").set(...) on the view"
+        }
+        this._write(t, this.base + offset, value)
     }
 
     fn _read(t, offset) {

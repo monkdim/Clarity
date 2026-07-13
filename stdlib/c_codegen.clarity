@@ -1,11 +1,18 @@
--- Clarity → C code generator (native compilation, stage 1).
+-- Clarity → C code generator (native compilation, stage 2).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
 -- output compiles with any C compiler into a real native binary — no Bun,
--- no bytecode VM. Stage 1 covers the scalar core: int/float/bool/string/
--- null values, arithmetic/comparison/logical operators, string
--- concatenation, variables, if/while, and user functions with recursion.
+-- no bytecode VM.
+--
+-- Stage 1 covers the scalar core: int/float/bool/string/null values,
+-- arithmetic/comparison/logical operators, string concatenation, variables,
+-- if/while, and user functions with recursion.
+--
+-- Stage 2 adds lists and maps (dynamic arrays / assoc arrays behind a
+-- pointer), indexing and index-assignment, `for` over lists/maps/strings/
+-- ranges, and the common builtins (len/push/str/int/float/range/keys/has/
+-- contains). Collections display like the interpreter (`[1, 2]`, `{k: v}`).
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -14,27 +21,71 @@
 -- Clarity identifier can never collide with a C keyword.
 
 -- ── C runtime prelude ───────────────────────────────────
--- A dynamically-typed Value as a tagged struct. Heap strings are malloc'd
--- and never freed (stage 1 leaks intentionally; a GC/arena comes later).
+-- A dynamically-typed Value as a tagged struct; lists/maps hang off `o`.
+-- Heap is malloc'd and never freed (stage 2 leaks intentionally, like
+-- stage 1; an arena/GC comes with stage 3).
 
 let C_PRELUDE = """#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR } Tag;
-typedef struct { Tag t; long i; double f; const char* s; } Value;
+typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR, T_LIST, T_MAP } Tag;
+typedef struct Value Value;
+struct Value { Tag t; long i; double f; const char* s; void* o; };
+typedef struct { Value* items; long len; long cap; } List;
+typedef struct { char** keys; Value* vals; long len; long cap; } Map;
 
-static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; return v; }
+/* mutually-recursive display + deep-equality forward declarations */
+static char* cl_to_cstr(Value v);
+static char* cl_repr(Value v);
+static char* cl_display(Value v);
+static int cl_equal(Value a, Value b);
+
+static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; v.o=0; return v; }
 static Value cl_bool(long b){ Value v=cl_null(); v.t=T_BOOL; v.i=(b!=0); return v; }
 static Value cl_int(long i){ Value v=cl_null(); v.t=T_INT; v.i=i; return v; }
 static Value cl_float(double f){ Value v=cl_null(); v.t=T_FLOAT; v.f=f; return v; }
 static Value cl_str(const char* s){ Value v=cl_null(); v.t=T_STR; v.s=s; return v; }
 
+/* Lists and maps live behind a pointer, so a Value copy shares the backing
+   store — push/index-set mutate through it. Heap is never freed (stage 2
+   leaks intentionally, like stage 1; a GC/arena comes later). */
+static Value cl_list_new(void){
+  List* l=(List*)malloc(sizeof(List));
+  l->len=0; l->cap=4; l->items=(Value*)malloc(sizeof(Value)*l->cap);
+  Value v=cl_null(); v.t=T_LIST; v.o=l; return v;
+}
+static Value cl_list_add(Value lv, Value item){
+  List* l=(List*)lv.o;
+  if(l->len>=l->cap){ l->cap*=2; l->items=(Value*)realloc(l->items, sizeof(Value)*l->cap); }
+  l->items[l->len++]=item; return lv;
+}
+static Value cl_map_new(void){
+  Map* m=(Map*)malloc(sizeof(Map));
+  m->len=0; m->cap=4; m->keys=(char**)malloc(sizeof(char*)*m->cap); m->vals=(Value*)malloc(sizeof(Value)*m->cap);
+  Value v=cl_null(); v.t=T_MAP; v.o=m; return v;
+}
+static Value cl_map_put(Value mv, char* key, Value val){
+  Map* m=(Map*)mv.o;
+  for(long j=0;j<m->len;j++){ if(strcmp(m->keys[j],key)==0){ m->vals[j]=val; return mv; } }
+  if(m->len>=m->cap){ m->cap*=2; m->keys=(char**)realloc(m->keys, sizeof(char*)*m->cap); m->vals=(Value*)realloc(m->vals, sizeof(Value)*m->cap); }
+  m->keys[m->len]=strdup(key); m->vals[m->len]=val; m->len++; return mv;
+}
+
 static int cl_is_num(Value v){ return v.t==T_INT || v.t==T_FLOAT; }
 static double cl_num(Value v){ return v.t==T_FLOAT ? v.f : (double)v.i; }
 
+/* grow-and-append: frees the accumulator, keeps the appended source */
+static char* cl_cat(char* a, const char* b){
+  size_t la=strlen(a), lb=strlen(b);
+  char* out=(char*)malloc(la+lb+1);
+  memcpy(out, a, la); memcpy(out+la, b, lb+1);
+  free(a); return out;
+}
+
 static char* cl_to_cstr(Value v){
+  if(v.t==T_LIST || v.t==T_MAP) return cl_repr(v);
   char* buf = (char*)malloc(64);
   switch(v.t){
     case T_NULL: strcpy(buf, "null"); return buf;
@@ -45,8 +96,32 @@ static char* cl_to_cstr(Value v){
       else snprintf(buf, 64, "%.17g", v.f);
       return buf;
     case T_STR: free(buf); return (char*)v.s;
+    default: return buf;
   }
-  return buf;
+}
+
+/* repr quotes strings and recurses into collections (used inside [] and {}) */
+static char* cl_repr(Value v){
+  if(v.t==T_STR){
+    size_t n=strlen(v.s); char* out=(char*)malloc(n+3);
+    out[0]='"'; memcpy(out+1, v.s, n); out[n+1]='"'; out[n+2]=0; return out;
+  }
+  if(v.t==T_LIST){
+    List* l=(List*)v.o; char* out=(char*)malloc(2); strcpy(out, "[");
+    for(long j=0;j<l->len;j++){ if(j) out=cl_cat(out, ", "); out=cl_cat(out, cl_repr(l->items[j])); }
+    return cl_cat(out, "]");
+  }
+  if(v.t==T_MAP){
+    Map* m=(Map*)v.o; char* out=(char*)malloc(2); strcpy(out, "{");
+    for(long j=0;j<m->len;j++){ if(j) out=cl_cat(out, ", "); out=cl_cat(out, m->keys[j]); out=cl_cat(out, ": "); out=cl_cat(out, cl_repr(m->vals[j])); }
+    return cl_cat(out, "}");
+  }
+  return cl_to_cstr(v);
+}
+/* display leaves top-level strings unquoted but reprs nested collections */
+static char* cl_display(Value v){
+  if(v.t==T_LIST || v.t==T_MAP) return cl_repr(v);
+  return cl_to_cstr(v);
 }
 
 static Value cl_concat(Value a, Value b){
@@ -96,6 +171,8 @@ static int cl_truthy(Value v){
     case T_BOOL: case T_INT: return v.i!=0;
     case T_FLOAT: return v.f!=0.0;
     case T_STR: return v.s && v.s[0];
+    case T_LIST: return ((List*)v.o)->len!=0;
+    case T_MAP: return ((Map*)v.o)->len!=0;
   }
   return 0;
 }
@@ -126,7 +203,42 @@ static Value cl_gte(Value a, Value b){
   return cl_bool(cl_num(a)>=cl_num(b));
 }
 
-static void cl_show(Value v){ printf("%s\n", cl_to_cstr(v)); }
+/* ── collections: length, indexing, iteration ── */
+static long cl_length(Value v){
+  if(v.t==T_LIST) return ((List*)v.o)->len;
+  if(v.t==T_MAP) return ((Map*)v.o)->len;
+  if(v.t==T_STR) return (long)strlen(v.s);
+  return 0;
+}
+static Value cl_index(Value c, Value k){
+  if(c.t==T_LIST){ List* l=(List*)c.o; long idx=k.i; if(idx<0) idx+=l->len; if(idx<0||idx>=l->len) return cl_null(); return l->items[idx]; }
+  if(c.t==T_MAP){ Map* m=(Map*)c.o; char* ks=cl_to_cstr(k); for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],ks)==0) return m->vals[j]; return cl_null(); }
+  if(c.t==T_STR){ long n=(long)strlen(c.s); long idx=k.i; if(idx<0) idx+=n; if(idx<0||idx>=n) return cl_null(); char* ch=(char*)malloc(2); ch[0]=c.s[idx]; ch[1]=0; return cl_str(ch); }
+  return cl_null();
+}
+static void cl_index_set(Value c, Value k, Value val){
+  if(c.t==T_LIST){ List* l=(List*)c.o; long idx=k.i; if(idx<0) idx+=l->len; if(idx>=0&&idx<l->len) l->items[idx]=val; }
+  else if(c.t==T_MAP){ char* ks=cl_to_cstr(k); cl_map_put(c, ks, val); }
+}
+/* materialise the thing a for-loop walks: lists as-is, map keys, string chars */
+static Value cl_iter(Value v){
+  if(v.t==T_LIST) return v;
+  if(v.t==T_MAP){ Map* m=(Map*)v.o; Value out=cl_list_new(); for(long j=0;j<m->len;j++) cl_list_add(out, cl_str(m->keys[j])); return out; }
+  if(v.t==T_STR){ Value out=cl_list_new(); long n=(long)strlen(v.s); for(long j=0;j<n;j++){ char* ch=(char*)malloc(2); ch[0]=v.s[j]; ch[1]=0; cl_list_add(out, cl_str(ch)); } return out; }
+  return cl_list_new();
+}
+
+/* ── builtins reachable from native code ── */
+static Value cl_range2(Value a, Value b){ Value out=cl_list_new(); for(long j=a.i;j<b.i;j++) cl_list_add(out, cl_int(j)); return out; }
+static Value cl_keys(Value v){ Value out=cl_list_new(); if(v.t==T_MAP){ Map* m=(Map*)v.o; for(long j=0;j<m->len;j++) cl_list_add(out, cl_str(m->keys[j])); } return out; }
+static Value cl_has(Value v, Value k){ if(v.t==T_MAP){ Map* m=(Map*)v.o; char* ks=cl_to_cstr(k); for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],ks)==0) return cl_bool(1); } return cl_bool(0); }
+static Value cl_contains(Value a, Value b){
+  if(a.t==T_STR){ char* ns=cl_to_cstr(b); return cl_bool(strstr((char*)a.s, ns)!=0); }
+  if(a.t==T_LIST){ List* l=(List*)a.o; for(long j=0;j<l->len;j++) if(cl_equal(l->items[j], b)) return cl_bool(1); return cl_bool(0); }
+  return cl_bool(0);
+}
+
+static void cl_show(Value v){ char* s=cl_display(v); printf("%s\n", s); }
 """
 
 -- ── Helpers ─────────────────────────────────────────────
@@ -163,10 +275,33 @@ let _BINOPS = {
 class CCodegen {
     fn init() {
         this.errors = []
+        this.loop_id = 0
     }
 
     fn unsupported(what, line) {
         push(this.errors, "native compile: unsupported " + what + " (line " + str(line ?? 0) + ")")
+    }
+
+    -- Unique id for the temporaries a for-loop needs (iterable + index).
+    fn next_loop() {
+        this.loop_id += 1
+        return this.loop_id
+    }
+
+    -- A builtin call → runtime C, or "" if `name`/arity isn't a known builtin.
+    fn _builtin_call(name, args) {
+        let n = len(args)
+        if name == "len" and n == 1 { return "cl_int(cl_length(" + args[0] + "))" }
+        if name == "push" and n == 2 { return "cl_list_add(" + args[0] + ", " + args[1] + ")" }
+        if name == "str" and n == 1 { return "cl_str(cl_to_cstr(" + args[0] + "))" }
+        if name == "int" and n == 1 { return "cl_int((long)cl_num(" + args[0] + "))" }
+        if name == "float" and n == 1 { return "cl_float(cl_num(" + args[0] + "))" }
+        if name == "range" and n == 1 { return "cl_range2(cl_int(0), " + args[0] + ")" }
+        if name == "range" and n == 2 { return "cl_range2(" + args[0] + ", " + args[1] + ")" }
+        if name == "keys" and n == 1 { return "cl_keys(" + args[0] + ")" }
+        if name == "has" and n == 2 { return "cl_has(" + args[0] + ", " + args[1] + ")" }
+        if name == "contains" and n == 2 { return "cl_contains(" + args[0] + ", " + args[1] + ")" }
+        return ""
     }
 
     -- Emit a C expression (of type Value) for an AST expression node.
@@ -203,10 +338,39 @@ class CCodegen {
             this.unsupported("operator '" + node.operator + "'", node.line)
             return "cl_null()"
         }
+        if nt == "ListLiteral" {
+            mut e = "cl_list_new()"
+            for el in node.elements {
+                if el.node_type == "SpreadExpression" {
+                    this.unsupported("spread in list literal", node.line)
+                } else {
+                    e = "cl_list_add(" + e + ", " + this.expr(el) + ")"
+                }
+            }
+            return e
+        }
+        if nt == "MapLiteral" {
+            mut e = "cl_map_new()"
+            for pair in node.pairs {
+                let k = pair[0]
+                let v = pair[1]
+                if k == null {
+                    this.unsupported("spread in map literal", node.line)
+                } else {
+                    e = "cl_map_put(" + e + ", cl_to_cstr(" + this.expr(k) + "), " + this.expr(v) + ")"
+                }
+            }
+            return e
+        }
+        if nt == "IndexExpression" {
+            return "cl_index(" + this.expr(node.object) + ", " + this.expr(node.index) + ")"
+        }
         if nt == "CallExpression" {
             if node.callee.node_type == "Identifier" {
                 mut args = []
                 for a in node.arguments { push(args, this.expr(a)) }
+                let builtin = this._builtin_call(node.callee.name, args)
+                if builtin != "" { return builtin }
                 return "f_" + node.callee.name + "(" + join(args, ", ") + ")"
             }
             this.unsupported("indirect call", node.line)
@@ -233,6 +397,18 @@ class CCodegen {
                 let base = substring(op, 0, len(op) - 1)
                 if has(_BINOPS, base) {
                     return [pad + "v_" + node.target.name + " = " + _BINOPS[base] + "(v_" + node.target.name + ", " + this.expr(node.value) + ");"]
+                }
+            }
+            if node.target.node_type == "IndexExpression" {
+                let obj = this.expr(node.target.object)
+                let idx = this.expr(node.target.index)
+                let op = node.operator
+                if op == "=" {
+                    return [pad + "cl_index_set(" + obj + ", " + idx + ", " + this.expr(node.value) + ");"]
+                }
+                let base = substring(op, 0, len(op) - 1)
+                if has(_BINOPS, base) {
+                    return [pad + "cl_index_set(" + obj + ", " + idx + ", " + _BINOPS[base] + "(cl_index(" + obj + ", " + idx + "), " + this.expr(node.value) + "));"]
                 }
             }
             this.unsupported("assignment target", node.line)
@@ -268,6 +444,17 @@ class CCodegen {
         }
         if nt == "WhileStatement" {
             mut lines = [pad + "while(cl_truthy(" + this.expr(node.condition) + ")) {"]
+            for s in _block_stmts(node.body) { for l in this.stmt(s, indent + 1) { push(lines, l) } }
+            push(lines, pad + "}")
+            return lines
+        }
+        if nt == "ForStatement" {
+            let lid = this.next_loop()
+            let it = "__it" + str(lid)
+            let ix = "__i" + str(lid)
+            mut lines = [pad + "Value " + it + " = cl_iter(" + this.expr(node.iterable) + ");"]
+            push(lines, pad + "for(long " + ix + "=0; " + ix + " < cl_length(" + it + "); " + ix + "++) {")
+            push(lines, pad + "  Value v_" + node.variable + " = cl_index(" + it + ", cl_int(" + ix + "));")
             for s in _block_stmts(node.body) { for l in this.stmt(s, indent + 1) { push(lines, l) } }
             push(lines, pad + "}")
             return lines

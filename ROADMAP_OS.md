@@ -82,6 +82,25 @@ The toolkit ships the widgets needed to build the eleven default apps. Filling o
 
 ---
 
+## Hearth — a local-AI base app (long-term, after the desktop is solid)
+
+A first-class, private, on-device AI studio shipped *with* KyanOS — port of the existing PC "Hearth" (Python/PySide6 cockpit over local model engines). Not near-term: this waits until boot-to-desktop and the UI toolkit are in a nice spot. Captured here so the shape is on record.
+
+**Architecture (proven by the PC build).** Hearth is a *cockpit*, not a model — it drives model engines that run as separate concerns and talks to them locally. That decoupling is what makes a Clarity port sane: rebuild the cockpit, not the math.
+
+- **App layer → 100% Clarity.** The launcher/panel UI, chat with markdown + syntax-highlighted code, model management, prompt/style config, projects, tools, settings, the OpenAI-compatible API surface, and the pipeline orchestration are all ordinary Clarity + KyanOS-toolkit work. This is the bulk of the app and it is entirely writable in Clarity.
+- **LLM brain → Clarity + `llama.cpp` via FFI.** `brain.py` is ~250 lines of prompt templates over a thin `POST /v1/chat/completions`; the Clarity version FFIs `llama.cpp` (portable C, GGUF models) instead of HTTP-to-Ollama. This is the one AI engine with a real path to running **CPU-only inside bare-metal KyanOS** (slow on large models, usable on small quantized ones). Everything *we* write stays Clarity; `llama.cpp` is a linked dependency doing the SIMD matmuls, the way numpy backs Python.
+- **Image generation (SDXL) → stays external.** Nobody reimplements SDXL in Clarity — it needs a GPU and a Metal/Vulkan-class compute stack. On a *hosted* KyanOS desktop the Clarity app talks to ComfyUI over HTTP (works today in principle); *inside* bare-metal KyanOS it is gated on GPU drivers + a compute stack, i.e. an OS-level prerequisite, not app work. This is the honest ceiling.
+- **Pipelines (upscale / video / PDF / marketing / 3D-print / mods) → split.** Orchestration, templating, and **customizable branding** (swap the hardcoded brand names for user config — the clean, easy part) port to Clarity; the heavy compute does not (ESRGAN is a neural net, cv2 MP4 is a codec → FFI, Blender parametric 3D is effectively a CAD kernel). Each heavy pipeline is its own sub-project.
+
+**Honest verdict.** *Can Hearth be written and used entirely in Clarity?* The **app**: yes, fully. The **LLM brain**: yes in practice as Clarity + a `llama.cpp` FFI (and *technically* even as pure Clarity — a GGUF loader + transformer loop compiled via `clarity cc` produces correct tokens, just far too slow without SIMD/GPU to be more than a proof). **Image/3D**: no — they stay external until KyanOS grows a GPU/compute story. So the LLM half is genuinely reachable OS-native long-term; the image/3D half rides on the same track as GPU support landing in the kernel.
+
+**Phasing when the time comes.** (1) Hosted Clarity Hearth on the KyanOS desktop — Clarity cockpit + `llama.cpp` FFI chat + HTTP to an existing ComfyUI — proves the whole spine. (2) Generalize the pipelines (branding → config) and port the non-GPU parts. (3) Chase the OS-native endgame: `llama.cpp` built for KyanOS → CPU chat inside the OS, with image/3D hosted until the GPU stack exists.
+
+**Ties to the language track.** The Clarity→C native compiler (see [GAPS.md](GAPS.md)) is the enabler for any pure-Clarity inference experiment — as it grows SIMD intrinsics / a BLAS FFI, a Clarity-native inference path gets progressively less absurd. A fun north-star, not a dependency.
+
+---
+
 ## Out of scope
 
 Decisions that should stay decisions.

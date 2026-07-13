@@ -1568,7 +1568,11 @@ class Interpreter {
             let pairs = join(map(ks, fn(k) {
                 return "{k}: {this._to_repr(value[k])}"
             }), ", ")
-            return "\{{pairs}\}"
+            -- Build the braces by concatenation rather than interpolating
+            -- inside `\{...\}`: the JS transpiler's greedy brace matcher
+            -- renders `\{{pairs}\}` as a literal `{{pairs}}`, so keep the
+            -- literal braces and the interpolated value separate.
+            return "\{" + pairs + "\}"
         }
         if t == "ClarityFunction" { return value.to_string() }
         if t == "ClarityClass" { return value.to_string() }
