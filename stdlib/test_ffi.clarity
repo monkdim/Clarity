@@ -2,7 +2,7 @@
 -- Calls a few well-known libc functions to confirm dlopen, type
 -- marshalling for the simple primitives, and the Library wrapper.
 
-from "ffi.clarity" import bind, open, Library, Pointer, alloc, cstring, wrap_addr, read_cstring, struct, StructDef, StructInstance, callback, Callback
+from "ffi.clarity" import bind, open, Library, Pointer, alloc, cstring, wrap_addr, read_cstring, struct, StructDef, StructInstance, StructArray, callback, Callback, array
 
 mut PASSED = 0
 mut FAILED = 0
@@ -252,6 +252,76 @@ assert_eq(arr.read_i32(16), 5, "qsort[4] = 5")
 assert(compare_calls > 0, "comparator was actually invoked")
 
 cmp.close()
+
+-- ── Bulk arrays ─────────────────────────────────────────
+
+show "-- FFI: bulk arrays --"
+
+-- write_array / read_array round-trip through a raw buffer (f32).
+let fbuf = alloc(4 * 4)
+fbuf.write_array("f32", [1.5, 2.5, 3.5, 4.5], 0)
+let fout = fbuf.read_array("f32", 4, 0)
+assert_eq(len(fout), 4, "read_array length")
+assert_eq(fout[0], 1.5, "read_array[0]")
+assert_eq(fout[3], 4.5, "read_array[3]")
+
+-- i32 round-trip with an offset into the middle of the buffer.
+let ibuf = alloc(4 * 5)
+ibuf.write_array("i32", [10, 20, 30], 8)
+assert_eq(ibuf.read_i32(8), 10, "write_array honours byte offset")
+assert_eq(ibuf.read_array("i32", 3, 8), [10, 20, 30], "read_array honours byte offset")
+
+-- ffi.array() convenience: allocate + prefill from a list.
+let av = array("f64", [0.25, 0.5, 0.75])
+assert_eq(av.read_array("f64", 3, 0), [0.25, 0.5, 0.75], "array(type, list) prefills")
+-- ffi.array() with a count allocates zeroed space.
+let az = array("i32", 4)
+assert_eq(az.read_array("i32", 4, 0), [0, 0, 0, 0], "array(type, count) zeroes")
+
+mut threw_arr_type = false
+try { alloc(8).read_array("nope", 1, 0) } catch e { threw_arr_type = true }
+assert(threw_arr_type, "read_array throws on unknown element type")
+
+-- ── Struct arrays ───────────────────────────────────────
+
+show "-- FFI: struct arrays --"
+
+let Vec2 = struct("Vec2", [["x", "f32"], ["y", "f32"]])
+let vecs = Vec2.array(3)
+assert_eq(vecs.size(), Vec2.size * 3, "struct array total size")
+vecs.at(0).set("x", 1.0)
+vecs.at(0).set("y", 2.0)
+vecs.at(2).set("x", 9.0)
+-- A fresh view of the same element sees the written value (shared buffer).
+assert_eq(vecs.at(0).get("x"), 1.0, "struct array element 0 x")
+assert_eq(vecs.at(0).get("y"), 2.0, "struct array element 0 y")
+assert_eq(vecs.at(2).get("x"), 9.0, "struct array element 2 x")
+-- Element 2 is Vec2.size*2 bytes past the base.
+assert_eq(vecs.at(2).addr(), vecs.addr() + Vec2.size * 2, "struct array element addr stride")
+
+mut threw_oob = false
+try { vecs.at(3) } catch e { threw_oob = true }
+assert(threw_oob, "struct array index out of range throws")
+
+-- ── Nested structs ──────────────────────────────────────
+
+show "-- FFI: nested structs --"
+
+let Line = struct("Line", [["start", Vec2], ["end", Vec2]])
+assert_eq(Line.size, Vec2.size * 2, "nested struct size is sum of parts")
+let ln = Line.new()
+ln.get("start").set("x", 3.0)
+ln.get("start").set("y", 4.0)
+ln.get("end").set("x", 5.0)
+assert_eq(ln.get("start").get("x"), 3.0, "nested struct start.x")
+assert_eq(ln.get("start").get("y"), 4.0, "nested struct start.y")
+assert_eq(ln.get("end").get("x"), 5.0, "nested struct end.x")
+-- The nested view addresses into the parent buffer at the field offset.
+assert_eq(ln.get("end").addr(), ln.addr() + Vec2.size, "nested field addr offset")
+
+mut threw_nested_set = false
+try { ln.set("start", Vec2.new()) } catch e { threw_nested_set = true }
+assert(threw_nested_set, "direct assignment of a nested struct field throws")
 
 -- ── Errors ──────────────────────────────────────────────
 
