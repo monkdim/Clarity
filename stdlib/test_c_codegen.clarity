@@ -67,6 +67,23 @@ if CC == null {
     same("mutual_recursion", "fn is_even(n) { if n == 0 { return true }\nreturn is_odd(n - 1) }\nfn is_odd(n) { if n == 0 { return false }\nreturn is_even(n - 1) }\nshow is_even(10)\nshow is_odd(7)")
     same("factorial_loop", "fn fact(n) { mut r = 1\nmut i = 1\nwhile i <= n { r = r * i\ni = i + 1 }\nreturn r }\nshow fact(10)")
 
+    -- ── stage 2: lists, maps, for-loops, builtins ──
+    same("list_literal", "show [1, 2, 3]\nshow [\"a\", \"b\"]\nshow []")
+    same("list_index", "let xs = [10, 20, 30]\nshow xs[0]\nshow xs[2]\nshow xs[-1]")
+    same("list_len_push", "mut xs = [1, 2]\npush(xs, 3)\npush(xs, 4)\nshow len(xs)\nshow xs")
+    same("list_index_assign", "mut xs = [1, 2, 3]\nxs[1] = 99\nxs[0] += 5\nshow xs")
+    same("map_literal", "show {\"a\": 1, \"b\": 2}\nshow {\"x\": [1, 2], \"y\": \"hi\"}")
+    same("map_index", "let m = {\"a\": 1, \"b\": 2}\nshow m[\"a\"]\nshow m[\"b\"]")
+    same("map_ops", "mut m = {\"a\": 1}\nm[\"b\"] = 2\nshow len(m)\nshow has(m, \"a\")\nshow has(m, \"z\")")
+    same("for_list", "mut s = 0\nfor x in [1, 2, 3, 4] { s = s + x }\nshow s")
+    same("for_range", "mut s = 0\nfor i in range(5) { s = s + i }\nshow s\nfor j in range(2, 5) { show j }")
+    same("for_string", "for c in \"abc\" { show c }")
+    same("for_map_keys", "let m = {\"a\": 1, \"b\": 2}\nmut s = 0\nfor k in m { s = s + m[k] }\nshow s")
+    same("contains_str", "show contains(\"hello world\", \"world\")\nshow contains(\"abc\", \"z\")")
+    same("contains_list", "show contains([1, 2, 3], 2)\nshow contains([1, 2, 3], 9)")
+    same("str_builtin", "show str(42) + \"!\"\nshow \"n=\" + str(3 + 4)")
+    same("nested_loops", "mut total = 0\nfor i in range(3) { for j in range(3) { total = total + i * j } }\nshow total")
+
     exec("rm -f /tmp/_clc_*")
 }
 
