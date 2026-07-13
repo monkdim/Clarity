@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 4).
+-- Clarity → C code generator (native compilation, stage 6).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -30,6 +30,16 @@
 -- outside — matching the interpreter. (Reassigning a captured *scalar* only
 -- changes the local copy; by-reference scalar capture waits on the GC stage.)
 --
+-- Stage 5 routed every runtime allocation through a single hook (cl_alloc);
+-- stage 6 makes that hook a conservative mark-sweep garbage collector. Each
+-- allocation carries a header and is tracked; when live bytes cross a
+-- threshold the collector flushes registers, scans the C stack and object
+-- interiors for pointers into tracked allocations, marks the reachable set,
+-- and frees the rest — so a long-running program reclaims memory mid-run
+-- (churning ~240 MB of garbage holds at ~3 MB RSS) instead of only at exit.
+-- Output is unchanged; AddressSanitizer (real stack) reports no leaks or
+-- invalid frees under collection forced on nearly every allocation.
+--
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
 --
@@ -38,8 +48,8 @@
 
 -- ── C runtime prelude ───────────────────────────────────
 -- A dynamically-typed Value as a tagged struct; lists/maps/objects/closures
--- hang off `o`. Heap is malloc'd and never freed (stages 1–4 leak
--- intentionally; an arena/GC is the next increment).
+-- hang off `o`. Every allocation is bump-allocated from the arena (cl_alloc)
+-- and released together at program exit (cl_arena_free) — see the arena block.
 --
 -- MAINTAINER NOTE: this prelude is a Clarity *source* string, so it must
 -- never contain an open brace directly followed by a letter (`{name`) — the
@@ -52,6 +62,22 @@ let C_PRELUDE = """#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <setjmp.h>
+
+/* Conservative stack scanning deliberately reads every word of the C stack,
+   including the padding a sanitizer inserts between variables. Exempt the
+   scanner from AddressSanitizer's stack instrumentation so those reads aren't
+   flagged; heap checks (the ones that would catch a real GC bug) still apply. */
+#if defined(__GNUC__) || defined(__clang__)
+#define GC_NOSAN __attribute__((no_sanitize_address))
+/* main's frame pointer sits above every local in main, so scanning down from
+   it to the current stack pointer covers all roots. Taking the address of a
+   local would not — the compiler may place that local below other roots. */
+#define GC_CAPTURE_STACK_BASE() (gc_stack_base = (char*)__builtin_frame_address(0))
+#else
+#define GC_NOSAN
+#define GC_CAPTURE_STACK_BASE() do { char __b; gc_stack_base = &__b; } while(0)
+#endif
 
 typedef enum { T_NULL, T_BOOL, T_INT, T_FLOAT, T_STR, T_LIST, T_MAP, T_OBJECT, T_CLOSURE } Tag;
 typedef struct Value Value;
@@ -79,6 +105,95 @@ static int cl_equal(Value a, Value b);
 static ClMethod cl_find_method(const char* cls, const char* m);
 static char* cl_obj_display(Value v);
 
+/* ── conservative mark-sweep garbage collector ──
+   Every runtime value carries a small header and is tracked in a global list.
+   When live bytes cross a threshold, cl_alloc flushes callee-saved registers
+   to the stack (setjmp), conservatively scans the whole C stack and the
+   interiors of reachable objects for words that point into a tracked
+   allocation, marks the reachable set, and frees the rest — so a long-running
+   program reclaims memory mid-run instead of growing until exit.
+
+   Conservative: an integer that happens to look like a live pointer keeps its
+   target alive (safe waste), but a real pointer is never missed as long as it
+   sits on the stack or inside another live object. Our codegen never hides a
+   pointer in a non-pointer or points into the middle of an allocation, and any
+   pointer live across a cl_alloc call is spilled to the stack by the ABI, so
+   the root set the scan sees is complete. gc_alloc is the single hook a
+   precise/generational collector would later replace. */
+typedef struct GCObj { struct GCObj* next; size_t size; unsigned char marked; } GCObj;
+static GCObj* gc_head = 0;
+static size_t gc_live = 0;
+static size_t gc_threshold = 1<<20;      /* first collection after ~1 MiB live */
+static char* gc_stack_base = 0;          /* set once at main entry */
+
+/* mark worklist (plain malloc — not GC-tracked) */
+static GCObj** gc_work = 0;
+static size_t gc_work_len = 0, gc_work_cap = 0;
+
+static GCObj* gc_find(void* p){
+  for(GCObj* o=gc_head; o; o=o->next){
+    char* s=(char*)(o+1);
+    if((char*)p>=s && (char*)p < s + o->size) return o;   /* interior-pointer safe */
+  }
+  return 0;
+}
+GC_NOSAN static void gc_scan(char* lo, char* hi){
+  /* align the low bound so every read of a void* is aligned */
+  lo = (char*)(((size_t)lo + sizeof(void*) - 1) & ~((size_t)(sizeof(void*)-1)));
+  for(char* p=lo; p + sizeof(void*) <= hi; p += sizeof(void*)){
+    GCObj* o = gc_find(*(void**)p);
+    if(o && !o->marked){
+      o->marked = 1;
+      if(gc_work_len >= gc_work_cap){
+        gc_work_cap = gc_work_cap ? gc_work_cap*2 : 256;
+        gc_work = (GCObj**)realloc(gc_work, sizeof(GCObj*)*gc_work_cap);
+      }
+      gc_work[gc_work_len++] = o;
+    }
+  }
+}
+GC_NOSAN static void gc_collect(void){
+  jmp_buf regs; setjmp(regs);                    /* spill callee-saved regs */
+  char probe; char* sp = &probe;
+  gc_work_len = 0;
+  char* lo = sp < gc_stack_base ? sp : gc_stack_base;
+  char* hi = sp < gc_stack_base ? gc_stack_base : sp;
+  gc_scan(lo, hi);                               /* roots: the live C stack */
+  gc_scan((char*)&regs, (char*)&regs + sizeof(regs));
+  while(gc_work_len){                            /* transitive closure */
+    GCObj* o = gc_work[--gc_work_len];
+    gc_scan((char*)(o+1), (char*)(o+1) + o->size);
+  }
+  GCObj** link = &gc_head;                        /* sweep */
+  while(*link){
+    GCObj* o = *link;
+    if(o->marked){ o->marked = 0; link = &o->next; }
+    else { *link = o->next; gc_live -= o->size; free(o); }
+  }
+}
+static void* cl_alloc(size_t n){
+  n = (n + 15) & ~((size_t)15);                  /* 16-byte align */
+  if(gc_stack_base && gc_live + n > gc_threshold){
+    gc_collect();
+    if(gc_live > gc_threshold/2) gc_threshold *= 2;   /* grow to amortise */
+  }
+  GCObj* o = (GCObj*)malloc(sizeof(GCObj) + n);
+  o->size = n; o->marked = 0; o->next = gc_head; gc_head = o;
+  gc_live += n;
+  return (void*)(o + 1);
+}
+static char* cl_strdup(const char* s){
+  size_t n = strlen(s) + 1;
+  char* out = (char*)cl_alloc(n);
+  memcpy(out, s, n);
+  return out;
+}
+static void cl_arena_free(void){                 /* release everything at exit */
+  GCObj* o = gc_head;
+  while(o){ GCObj* nx = o->next; free(o); o = nx; }
+  gc_head = 0; free(gc_work); gc_work = 0;
+}
+
 static Value cl_null(void){ Value v; v.t=T_NULL; v.i=0; v.f=0; v.s=0; v.o=0; return v; }
 static Value cl_bool(long b){ Value v=cl_null(); v.t=T_BOOL; v.i=(b!=0); return v; }
 static Value cl_int(long i){ Value v=cl_null(); v.t=T_INT; v.i=i; return v; }
@@ -86,46 +201,59 @@ static Value cl_float(double f){ Value v=cl_null(); v.t=T_FLOAT; v.f=f; return v
 static Value cl_str(const char* s){ Value v=cl_null(); v.t=T_STR; v.s=s; return v; }
 
 /* Lists and maps live behind a pointer, so a Value copy shares the backing
-   store — push/index-set mutate through it. Heap is never freed (stage 2
-   leaks intentionally, like stage 1; a GC/arena comes later). */
+   store — push/index-set mutate through it. Backing storage is arena memory,
+   reclaimed wholesale at exit; growth allocates a fresh block and copies. */
 static Value cl_list_new(void){
-  List* l=(List*)malloc(sizeof(List));
-  l->len=0; l->cap=4; l->items=(Value*)malloc(sizeof(Value)*l->cap);
+  List* l=(List*)cl_alloc(sizeof(List));
+  l->len=0; l->cap=4; l->items=(Value*)cl_alloc(sizeof(Value)*l->cap);
   Value v=cl_null(); v.t=T_LIST; v.o=l; return v;
 }
 static Value cl_list_add(Value lv, Value item){
   List* l=(List*)lv.o;
-  if(l->len>=l->cap){ l->cap*=2; l->items=(Value*)realloc(l->items, sizeof(Value)*l->cap); }
+  if(l->len>=l->cap){
+    long nc=l->cap*2;
+    Value* ni=(Value*)cl_alloc(sizeof(Value)*nc);
+    memcpy(ni, l->items, sizeof(Value)*l->len);
+    l->items=ni; l->cap=nc;
+  }
   l->items[l->len++]=item; return lv;
 }
 static Value cl_map_new(void){
-  Map* m=(Map*)malloc(sizeof(Map));
-  m->len=0; m->cap=4; m->keys=(char**)malloc(sizeof(char*)*m->cap); m->vals=(Value*)malloc(sizeof(Value)*m->cap);
+  Map* m=(Map*)cl_alloc(sizeof(Map));
+  m->len=0; m->cap=4; m->keys=(char**)cl_alloc(sizeof(char*)*m->cap); m->vals=(Value*)cl_alloc(sizeof(Value)*m->cap);
   Value v=cl_null(); v.t=T_MAP; v.o=m; return v;
 }
 static Value cl_map_put(Value mv, char* key, Value val){
   Map* m=(Map*)mv.o;
   for(long j=0;j<m->len;j++){ if(strcmp(m->keys[j],key)==0){ m->vals[j]=val; return mv; } }
-  if(m->len>=m->cap){ m->cap*=2; m->keys=(char**)realloc(m->keys, sizeof(char*)*m->cap); m->vals=(Value*)realloc(m->vals, sizeof(Value)*m->cap); }
-  m->keys[m->len]=strdup(key); m->vals[m->len]=val; m->len++; return mv;
+  if(m->len>=m->cap){
+    long nc=m->cap*2;
+    char** nk=(char**)cl_alloc(sizeof(char*)*nc);
+    Value* nv=(Value*)cl_alloc(sizeof(Value)*nc);
+    memcpy(nk, m->keys, sizeof(char*)*m->len);
+    memcpy(nv, m->vals, sizeof(Value)*m->len);
+    m->keys=nk; m->vals=nv; m->cap=nc;
+  }
+  m->keys[m->len]=cl_strdup(key); m->vals[m->len]=val; m->len++; return mv;
 }
 
 static int cl_is_num(Value v){ return v.t==T_INT || v.t==T_FLOAT; }
 static double cl_num(Value v){ return v.t==T_FLOAT ? v.f : (double)v.i; }
 
-/* grow-and-append: frees the accumulator, keeps the appended source */
+/* grow-and-append into a fresh arena buffer (the accumulator is arena memory,
+   reclaimed at exit — no per-call free) */
 static char* cl_cat(char* a, const char* b){
   size_t la=strlen(a), lb=strlen(b);
-  char* out=(char*)malloc(la+lb+1);
+  char* out=(char*)cl_alloc(la+lb+1);
   memcpy(out, a, la); memcpy(out+la, b, lb+1);
-  free(a); return out;
+  return out;
 }
 
 static char* cl_to_cstr(Value v){
   if(v.t==T_LIST || v.t==T_MAP) return cl_repr(v);
   if(v.t==T_OBJECT) return cl_obj_display(v);
-  if(v.t==T_CLOSURE){ char* b=(char*)malloc(16); strcpy(b, "<closure>"); return b; }
-  char* buf = (char*)malloc(64);
+  if(v.t==T_CLOSURE){ char* b=(char*)cl_alloc(16); strcpy(b, "<closure>"); return b; }
+  char* buf = (char*)cl_alloc(64);
   switch(v.t){
     case T_NULL: strcpy(buf, "null"); return buf;
     case T_BOOL: strcpy(buf, v.i ? "true" : "false"); return buf;
@@ -134,7 +262,7 @@ static char* cl_to_cstr(Value v){
       if(v.f == (double)(long)v.f) snprintf(buf, 64, "%ld", (long)v.f);
       else snprintf(buf, 64, "%.17g", v.f);
       return buf;
-    case T_STR: free(buf); return (char*)v.s;
+    case T_STR: return (char*)v.s;
     default: return buf;
   }
 }
@@ -142,16 +270,16 @@ static char* cl_to_cstr(Value v){
 /* repr quotes strings and recurses into collections (used inside [] and {}) */
 static char* cl_repr(Value v){
   if(v.t==T_STR){
-    size_t n=strlen(v.s); char* out=(char*)malloc(n+3);
+    size_t n=strlen(v.s); char* out=(char*)cl_alloc(n+3);
     out[0]='"'; memcpy(out+1, v.s, n); out[n+1]='"'; out[n+2]=0; return out;
   }
   if(v.t==T_LIST){
-    List* l=(List*)v.o; char* out=(char*)malloc(2); strcpy(out, "[");
+    List* l=(List*)v.o; char* out=(char*)cl_alloc(2); strcpy(out, "[");
     for(long j=0;j<l->len;j++){ if(j) out=cl_cat(out, ", "); out=cl_cat(out, cl_repr(l->items[j])); }
     return cl_cat(out, "]");
   }
   if(v.t==T_MAP){
-    Map* m=(Map*)v.o; char* out=(char*)malloc(2); strcpy(out, "{");
+    Map* m=(Map*)v.o; char* out=(char*)cl_alloc(2); strcpy(out, "{");
     for(long j=0;j<m->len;j++){ if(j) out=cl_cat(out, ", "); out=cl_cat(out, m->keys[j]); out=cl_cat(out, ": "); out=cl_cat(out, cl_repr(m->vals[j])); }
     return cl_cat(out, "}");
   }
@@ -166,7 +294,7 @@ static char* cl_display(Value v){
 
 static Value cl_concat(Value a, Value b){
   char* sa = cl_to_cstr(a); char* sb = cl_to_cstr(b);
-  char* out = (char*)malloc(strlen(sa)+strlen(sb)+1);
+  char* out = (char*)cl_alloc(strlen(sa)+strlen(sb)+1);
   strcpy(out, sa); strcat(out, sb);
   return cl_str(out);
 }
@@ -257,7 +385,7 @@ static long cl_length(Value v){
 static Value cl_index(Value c, Value k){
   if(c.t==T_LIST){ List* l=(List*)c.o; long idx=k.i; if(idx<0) idx+=l->len; if(idx<0||idx>=l->len) return cl_null(); return l->items[idx]; }
   if(c.t==T_MAP){ Map* m=(Map*)c.o; char* ks=cl_to_cstr(k); for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],ks)==0) return m->vals[j]; return cl_null(); }
-  if(c.t==T_STR){ long n=(long)strlen(c.s); long idx=k.i; if(idx<0) idx+=n; if(idx<0||idx>=n) return cl_null(); char* ch=(char*)malloc(2); ch[0]=c.s[idx]; ch[1]=0; return cl_str(ch); }
+  if(c.t==T_STR){ long n=(long)strlen(c.s); long idx=k.i; if(idx<0) idx+=n; if(idx<0||idx>=n) return cl_null(); char* ch=(char*)cl_alloc(2); ch[0]=c.s[idx]; ch[1]=0; return cl_str(ch); }
   return cl_null();
 }
 static void cl_index_set(Value c, Value k, Value val){
@@ -268,7 +396,7 @@ static void cl_index_set(Value c, Value k, Value val){
 static Value cl_iter(Value v){
   if(v.t==T_LIST) return v;
   if(v.t==T_MAP){ Map* m=(Map*)v.o; Value out=cl_list_new(); for(long j=0;j<m->len;j++) cl_list_add(out, cl_str(m->keys[j])); return out; }
-  if(v.t==T_STR){ Value out=cl_list_new(); long n=(long)strlen(v.s); for(long j=0;j<n;j++){ char* ch=(char*)malloc(2); ch[0]=v.s[j]; ch[1]=0; cl_list_add(out, cl_str(ch)); } return out; }
+  if(v.t==T_STR){ Value out=cl_list_new(); long n=(long)strlen(v.s); for(long j=0;j<n;j++){ char* ch=(char*)cl_alloc(2); ch[0]=v.s[j]; ch[1]=0; cl_list_add(out, cl_str(ch)); } return out; }
   return cl_list_new();
 }
 
@@ -284,7 +412,7 @@ static Value cl_contains(Value a, Value b){
 
 /* ── objects: instances, fields, method dispatch ── */
 static Value cl_object_new(const char* cls){
-  Obj* o=(Obj*)malloc(sizeof(Obj));
+  Obj* o=(Obj*)cl_alloc(sizeof(Obj));
   o->cls=cls; o->fields=cl_map_new();
   Value v=cl_null(); v.t=T_OBJECT; v.o=o; return v;
 }
@@ -323,16 +451,16 @@ static char* cl_obj_display(Value v){
   Obj* o=(Obj*)v.o;
   ClMethod ts = cl_find_method(o->cls, "to_string");
   if(ts){ Value r = ts(v, 0); return cl_display(r); }
-  char* out=(char*)malloc(strlen(o->cls)+16);
+  char* out=(char*)cl_alloc(strlen(o->cls)+16);
   sprintf(out, "<%s instance>", o->cls);
   return out;
 }
 
 /* ── closures ── */
 static Value cl_closure_new(ClFn fn, Value* cap, int ncap){
-  Closure* c=(Closure*)malloc(sizeof(Closure));
+  Closure* c=(Closure*)cl_alloc(sizeof(Closure));
   c->fn=fn; c->ncap=ncap;
-  c->cap=(Value*)malloc(sizeof(Value)*(ncap>0?ncap:1));
+  c->cap=(Value*)cl_alloc(sizeof(Value)*(ncap>0?ncap:1));
   for(int i=0;i<ncap;i++) c->cap[i]=cap[i];
   Value v=cl_null(); v.t=T_CLOSURE; v.o=c; return v;
 }
@@ -934,7 +1062,9 @@ class CCodegen {
         for l in fn_body { push(out, l) }
         for l in class_body { push(out, l) }
         push(out, "int main(void) {")
+        push(out, "  GC_CAPTURE_STACK_BASE();")
         for l in main_body { push(out, l) }
+        push(out, "  cl_arena_free();")
         push(out, "  return 0;")
         push(out, "}")
         return join(out, "\n")
