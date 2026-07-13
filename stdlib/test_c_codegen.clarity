@@ -106,6 +106,12 @@ if CC == null {
     same("closure_captures_list", "let acc = []\neach([1, 2, 3], fn(x) { push(acc, x * x) })\nshow acc")
     same("closure_captures_object", "class Box { fn init() { this.n = 0 }\nfn add(x) { this.n = this.n + x } }\nlet b = Box()\neach([1, 2, 3, 4], fn(x) { b.add(x) })\nshow b.n")
 
+    -- ── stage 5: arena allocator ──
+    -- Heavy allocation crosses the arena's 1 MiB block boundary and exercises
+    -- list-growth-by-copy; output must still match the interpreter exactly.
+    same("arena_bulk_alloc", "mut acc = []\nmut i = 0\nwhile i < 30000 { push(acc, i * 2)\ni = i + 1 }\nshow len(acc)\nshow acc[29999]\nshow acc[0]")
+    same("arena_string_churn", "mut s = \"\"\nmut i = 0\nwhile i < 2000 { s = s + \"ab\"\ni = i + 1 }\nshow len(s)")
+
     exec("rm -f /tmp/_clc_*")
 }
 
