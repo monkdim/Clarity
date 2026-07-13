@@ -111,12 +111,13 @@ if CC == null {
     -- copy; output must still match the interpreter exactly.
     same("arena_bulk_alloc", "mut acc = []\nmut i = 0\nwhile i < 30000 { push(acc, i * 2)\ni = i + 1 }\nshow len(acc)\nshow acc[29999]\nshow acc[0]")
     same("arena_string_churn", "mut s = \"\"\nmut i = 0\nwhile i < 2000 { s = s + \"ab\"\ni = i + 1 }\nshow len(s)")
-    -- Live data (`kept`) must survive collections triggered by the discarded
-    -- per-iteration garbage lists — a premature free would corrupt the output.
-    same("gc_live_survives_churn", "mut kept = []\nmut i = 0\nwhile i < 20000 { let junk = [i, i, i, i]\npush(kept, i * 2)\ni = i + 1 }\nshow len(kept)\nshow kept[0]\nshow kept[19999]")
-    -- A captured, mutated collection inside a returned closure must stay live
-    -- across the collections triggered by the discarded per-iteration garbage.
-    same("gc_closure_state_survives", "fn counter() { mut c = [0]\nreturn fn() { c[0] = c[0] + 1\nreturn c[0] } }\nlet next = counter()\nmut i = 0\nwhile i < 20000 { let g = [i, i, i]\nnext()\ni = i + 1 }\nshow next()")
+    -- Heavy allocation through the GC-tracked allocator (mid-run collection is
+    -- off by default — see CLARITY_GC): live data must remain correct while a
+    -- lot of per-iteration garbage is allocated and dropped.
+    same("gc_live_data_correct", "mut kept = []\nmut i = 0\nwhile i < 20000 { let junk = [i, i, i, i]\npush(kept, i * 2)\ni = i + 1 }\nshow len(kept)\nshow kept[0]\nshow kept[19999]")
+    -- A captured, mutated collection inside a returned closure stays correct
+    -- across a lot of allocation.
+    same("gc_closure_state_correct", "fn counter() { mut c = [0]\nreturn fn() { c[0] = c[0] + 1\nreturn c[0] } }\nlet next = counter()\nmut i = 0\nwhile i < 20000 { let g = [i, i, i]\nnext()\ni = i + 1 }\nshow next()")
 
     exec("rm -f /tmp/_clc_*")
 }

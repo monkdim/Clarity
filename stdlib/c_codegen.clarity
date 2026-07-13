@@ -32,13 +32,15 @@
 --
 -- Stage 5 routed every runtime allocation through a single hook (cl_alloc);
 -- stage 6 makes that hook a conservative mark-sweep garbage collector. Each
--- allocation carries a header and is tracked; when live bytes cross a
--- threshold the collector flushes registers, scans the C stack and object
--- interiors for pointers into tracked allocations, marks the reachable set,
--- and frees the rest — so a long-running program reclaims memory mid-run
--- (churning ~240 MB of garbage holds at ~3 MB RSS) instead of only at exit.
--- Output is unchanged; AddressSanitizer (real stack) reports no leaks or
--- invalid frees under collection forced on nearly every allocation.
+-- allocation carries a header and is tracked, and the whole set is freed at
+-- exit — so by default the runtime is the leak-free arena (safe on every
+-- platform). Setting CLARITY_GC turns on *mid-run* collection: the collector
+-- flushes registers, scans the C stack and object interiors for pointers,
+-- marks the reachable set, and frees the rest (churning ~240 MB of garbage
+-- then holds at ~3 MB RSS). Mid-run collection is off by default because
+-- conservative scanning is optimiser/ABI sensitive — it showed instability
+-- under clang -O2 on arm64 — and stays experimental until a precise
+-- (shadow-stack) collector replaces it.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -105,13 +107,20 @@ static int cl_equal(Value a, Value b);
 static ClMethod cl_find_method(const char* cls, const char* m);
 static char* cl_obj_display(Value v);
 
-/* ── conservative mark-sweep garbage collector ──
+/* ── conservative mark-sweep garbage collector (opt-in) ──
    Every runtime value carries a small header and is tracked in a global list.
-   When live bytes cross a threshold, cl_alloc flushes callee-saved registers
+   The whole set is always released at exit (cl_arena_free), so the default
+   behaviour is the leak-free arena: allocate, free once at the end. That is
+   what ships on by default, and it is safe on every platform.
+
+   Setting the CLARITY_GC environment variable turns on *mid-run* collection:
+   when live bytes cross a threshold, cl_alloc flushes callee-saved registers
    to the stack (setjmp), conservatively scans the whole C stack and the
    interiors of reachable objects for words that point into a tracked
-   allocation, marks the reachable set, and frees the rest — so a long-running
-   program reclaims memory mid-run instead of growing until exit.
+   allocation, marks the reachable set, and frees the rest. This reclaims
+   memory during the run, but conservative scanning is layout/optimiser
+   sensitive (it has shown instability under clang -O2 on arm64), so it stays
+   experimental and off until a precise (shadow-stack) collector replaces it.
 
    Conservative: an integer that happens to look like a live pointer keeps its
    target alive (safe waste), but a real pointer is never missed as long as it
@@ -130,6 +139,7 @@ static GCObj* gc_head = 0;
 static size_t gc_live = 0;
 static size_t gc_threshold = 1<<20;      /* first collection after ~1 MiB live */
 static char* gc_stack_base = 0;          /* set once at main entry */
+static int gc_enabled = 0;               /* opt-in: mid-run collection off by default */
 
 /* mark worklist + address index (plain malloc — not GC-tracked) */
 static GCObj** gc_work = 0;
@@ -206,7 +216,7 @@ GC_NOSAN static void gc_collect(void){
 }
 static void* cl_alloc(size_t n){
   n = (n + 15) & ~((size_t)15);                  /* 16-byte align */
-  if(gc_stack_base && gc_live + n > gc_threshold){
+  if(gc_enabled && gc_stack_base && gc_live + n > gc_threshold){
     gc_collect();
     if(gc_live > gc_threshold/2) gc_threshold *= 2;   /* grow to amortise */
   }
@@ -1096,6 +1106,7 @@ class CCodegen {
         for l in class_body { push(out, l) }
         push(out, "int main(void) {")
         push(out, "  GC_CAPTURE_STACK_BASE();")
+        push(out, "  if(getenv(\"CLARITY_GC\")) gc_enabled = 1;")
         for l in main_body { push(out, l) }
         push(out, "  cl_arena_free();")
         push(out, "  return 0;")
