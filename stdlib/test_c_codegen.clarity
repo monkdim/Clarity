@@ -93,6 +93,19 @@ if CC == null {
     same("class_method_calls_method", "class Greeter { fn init(name) { this.name = name }\nfn greeting() { return \"Hello, \" + this.name }\nfn shout() { return this.greeting() + \"!\" } }\nshow Greeter(\"Kyan\").shout()")
     same("class_inheritance", "class Animal { fn init(name) { this.name = name }\nfn speak() { return \"...\" }\nfn describe() { return this.name + \" says \" + this.speak() } }\nclass Dog < Animal { fn speak() { return \"woof\" } }\nlet d = Dog(\"Rex\")\nshow d.describe()")
 
+    -- ── stage 4: closures ──
+    same("closure_map", "show map([1, 2, 3], fn(x) { return x * 2 })")
+    same("closure_capture", "let factor = 10\nshow map([1, 2, 3], fn(x) { return x * factor })")
+    same("closure_filter", "show filter([1, 2, 3, 4, 5, 6], fn(x) { return x % 2 == 0 })")
+    same("closure_reduce", "show reduce([1, 2, 3, 4], fn(a, b) { return a + b }, 0)")
+    same("closure_var_call", "let add = fn(a, b) { return a + b }\nshow add(3, 4)")
+    same("closure_returns_closure", "fn adder(n) { return fn(x) { return x + n } }\nlet add5 = adder(5)\nshow add5(10)\nshow add5(100)")
+    same("closure_multi_capture", "let a = 1\nlet b = 100\nshow map([1, 2, 3], fn(x) { return x * a + b })")
+    -- closures capture collections/objects by their (shared) pointer, so
+    -- mutating through the capture is visible outside — matching the interpreter.
+    same("closure_captures_list", "let acc = []\neach([1, 2, 3], fn(x) { push(acc, x * x) })\nshow acc")
+    same("closure_captures_object", "class Box { fn init() { this.n = 0 }\nfn add(x) { this.n = this.n + x } }\nlet b = Box()\neach([1, 2, 3, 4], fn(x) { b.add(x) })\nshow b.n")
+
     exec("rm -f /tmp/_clc_*")
 }
 
