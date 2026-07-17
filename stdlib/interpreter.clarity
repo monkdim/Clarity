@@ -361,7 +361,7 @@ class Interpreter {
 
         -- Math
         this.global_env.set("abs", fn(n) { return abs(n) }, true)
-        this.global_env.set("round", fn(n) { return round(n) }, true)
+        this.global_env.set("round", fn(n, d) { return round(n, d ?? 0) }, true)
         this.global_env.set("floor", fn(n) { return floor(n) }, true)
         this.global_env.set("ceil", fn(n) { return ceil(n) }, true)
         this.global_env.set("min", fn(...a) { if len(a) == 1 and type(a[0]) == "list" { return min(a[0]) } return min(...a) }, true)
