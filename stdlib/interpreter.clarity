@@ -355,6 +355,9 @@ class Interpreter {
         this.global_env.set("is_alnum", fn(c) { return is_alnum(c) }, true)
         this.global_env.set("is_space", fn(c) { return is_space(c) }, true)
         this.global_env.set("repeat", fn(s, n) { return repeat(s, n) }, true)
+        this.global_env.set("pad_left", fn(s, n, ch) { return pad_left(s, n, ch ?? " ") }, true)
+        this.global_env.set("pad_right", fn(s, n, ch) { return pad_right(s, n, ch ?? " ") }, true)
+        this.global_env.set("hash", fn(text, algo) { return hash(text, algo ?? "sha256") }, true)
 
         -- Math
         this.global_env.set("abs", fn(n) { return abs(n) }, true)

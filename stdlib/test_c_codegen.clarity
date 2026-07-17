@@ -119,6 +119,22 @@ if CC == null {
     -- across a lot of allocation.
     same("gc_closure_state_correct", "fn counter() { mut c = [0]\nreturn fn() { c[0] = c[0] + 1\nreturn c[0] } }\nlet next = counter()\nmut i = 0\nwhile i < 20000 { let g = [i, i, i]\nnext()\ni = i + 1 }\nshow next()")
 
+    -- ── stage 7: native app stdlib — strings, file I/O, args/env ──
+    same("str_case_trim", "show upper(trim(\"  hi there  \"))\nshow lower(\"MixEd\")")
+    same("str_split_join", "show split(\"a,b,c\", \",\")\nshow join([\"x\", \"y\", \"z\"], \"-\")\nshow split(\"one two three\", \" \")")
+    same("str_replace", "show replace(\"foo bar foo baz\", \"foo\", \"X\")")
+    same("str_starts_ends", "show starts(\"hello\", \"he\")\nshow ends(\"hello\", \"lo\")\nshow starts(\"hello\", \"x\")")
+    same("str_substring", "show substring(\"clarity\", 0, 5)\nshow substring(\"clarity\", 3, 7)\nshow substring(\"clarity\", -3, 5)")
+    same("str_chars_index", "show char_at(\"abc\", 1)\nshow char_code(\"A\")\nshow from_char_code(66)\nshow index_of(\"hello world\", \"world\")\nshow index_of(\"abc\", \"z\")")
+    same("str_pad_repeat_chars", "show pad_left(\"7\", 4) + \"|\"\nshow pad_right(\"7\", 4) + \"|\"\nshow repeat(\"ab\", 3)\nshow chars(\"hi\")")
+    same("str_predicates", "show is_digit(\"123\")\nshow is_digit(\"12a\")\nshow is_alpha(\"abc\")\nshow is_alnum(\"a1b2\")\nshow is_space(\"   \")")
+    same("str_int_float_conv", "show int(\"42\") + 8\nshow float(\"3.5\") * 2.0\nlet nums = map(split(\"5 10 15\", \" \"), fn(x) { return int(x) })\nshow reduce(nums, fn(a, b) { return a + b }, 0)")
+
+    -- File I/O: write then read back, exists, line count. Both the interpreter
+    -- and the native binary hit the real filesystem, so results must match.
+    same("file_write_read", "let p = \"/tmp/_clc_s7_file.txt\"\nwrite(p, \"line1\\nline2\\nline3\")\nshow read(p)\nshow exists(p)\nshow exists(\"/tmp/_clc_nope_xyz\")\nshow len(lines(p))")
+    same("file_append", "let p = \"/tmp/_clc_s7_app.txt\"\nwrite(p, \"a\")\nappend(p, \"b\")\nappend(p, \"c\")\nshow read(p)")
+
     exec("rm -f /tmp/_clc_*")
 }
 
