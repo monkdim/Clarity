@@ -142,6 +142,14 @@ if CC == null {
     same("exec_echo", "show exec(\"echo hello\")\nshow exec(\"echo one; echo two\")")
     same("exec_full_cmd", "show trim(exec_full(\"echo hi\").stdout)\nshow exec_full(\"echo hi\").exit_code\nshow exec_full(\"exit 3\").exit_code")
 
+    -- ── stage 9: JSON (single-quoted JSON literals keep the escaping sane) ──
+    same("json_parse_display", "let o = json_parse('{\"name\": \"Kyan\", \"age\": 3, \"pi\": 3.14, \"ok\": true, \"nil\": null, \"tags\": [\"a\", \"b\"]}')\nshow o\nshow o.name\nshow o.tags[1]\nshow o.pi")
+    same("json_parse_nested", "let o = json_parse('{\"a\": 1, \"nested\": {\"x\": [10, 20, 30]}}')\nshow o.a\nshow o.nested.x[2]\nshow len(keys(o))")
+    same("json_string_basic", "show json_string({\"a\": 1, \"b\": [true, null, \"x\"], \"c\": {\"d\": 2.5}})")
+    same("json_string_types", "show json_string([1, \"two\", false])\nshow json_string(\"hi\\nthere\")")
+    same("json_roundtrip", "let s = '{\"k\": [1, 2, 3], \"s\": \"hello\", \"n\": 42}'\nshow json_string(json_parse(s))")
+    same("json_numbers", "let o = json_parse('[1, 2.5, -3, 100]')\nshow o\nshow sum(o)")
+
     exec("rm -f /tmp/_clc_*")
 }
 

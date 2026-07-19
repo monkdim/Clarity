@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 8).
+-- Clarity → C code generator (native compilation, stage 9).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -54,7 +54,14 @@
 -- {stdout, stderr, exit_code}), sleep, time, and abs/floor/ceil/round/sqrt/
 -- sin/cos/tan/log/min/max/sum. Float display now prints the shortest
 -- round-tripping form (3.14, not 3.1400000000000001), matching the
--- interpreter. Later stages add JSON, binary I/O + FFI, and the network stack.
+-- interpreter.
+--
+-- Stage 9 adds JSON: a recursive-descent json_parse (objects→maps, arrays→
+-- lists, strings with escapes + \uXXXX→UTF-8, numbers→int/float) and a
+-- json_string serialiser matching JSON.stringify (compact, insertion order),
+-- both over an amortised-O(n) string builder. A native tool reads a JSON
+-- config, computes, and emits JSON. Later stages add binary I/O + FFI and the
+-- network stack.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -672,6 +679,103 @@ static Value cl_max2(Value a, Value b){ return cl_num(a)>=cl_num(b) ? a : b; }
 static Value cl_min_list(Value lv){ List* l=(List*)lv.o; if(l->len==0) return cl_null(); Value m=l->items[0]; for(long j=1;j<l->len;j++) if(cl_num(l->items[j])<cl_num(m)) m=l->items[j]; return m; }
 static Value cl_max_list(Value lv){ List* l=(List*)lv.o; if(l->len==0) return cl_null(); Value m=l->items[0]; for(long j=1;j<l->len;j++) if(cl_num(l->items[j])>cl_num(m)) m=l->items[j]; return m; }
 
+/* ── app stdlib: JSON ── */
+/* amortized-O(n) string builder over arena memory */
+typedef struct { char* buf; size_t len; size_t cap; } SB;
+static void sb_init(SB* s){ s->cap=16; s->len=0; s->buf=(char*)cl_alloc(s->cap); s->buf[0]=0; }
+static void sb_putc(SB* s, char c){ if(s->len+2>s->cap){ s->cap*=2; char* nb=(char*)cl_alloc(s->cap); memcpy(nb, s->buf, s->len); s->buf=nb; } s->buf[s->len++]=c; s->buf[s->len]=0; }
+static void sb_puts(SB* s, const char* t){ while(*t) sb_putc(s, *t++); }
+
+static Value j_value(const char** pp);
+static void j_ws(const char** pp){ const char* p=*pp; while(*p==' '||*p=='\t'||*p=='\n'||*p=='\r') p++; *pp=p; }
+static Value j_string(const char** pp){
+  const char* p=*pp; p++;                          /* opening quote */
+  SB s; sb_init(&s);
+  while(*p && *p!='"'){
+    if(*p=='\\'){
+      p++; char c=*p++;
+      if(c=='n') sb_putc(&s, '\n'); else if(c=='t') sb_putc(&s, '\t'); else if(c=='r') sb_putc(&s, '\r');
+      else if(c=='b') sb_putc(&s, '\b'); else if(c=='f') sb_putc(&s, '\f');
+      else if(c=='u'){
+        int cp=0; for(int k=0;k<4 && *p;k++){ char h=*p++; cp=cp*16 + (h<='9'?h-'0':(tolower((unsigned char)h)-'a'+10)); }
+        if(cp<0x80){ sb_putc(&s, (char)cp); }
+        else if(cp<0x800){ sb_putc(&s, (char)(0xC0|(cp>>6))); sb_putc(&s, (char)(0x80|(cp&0x3F))); }
+        else { sb_putc(&s, (char)(0xE0|(cp>>12))); sb_putc(&s, (char)(0x80|((cp>>6)&0x3F))); sb_putc(&s, (char)(0x80|(cp&0x3F))); }
+      }
+      else sb_putc(&s, c);                          /* " \ / and any other */
+    } else sb_putc(&s, *p++);
+  }
+  if(*p=='"') p++;
+  *pp=p; return cl_str(s.buf);
+}
+static Value j_number(const char** pp){
+  const char* p=*pp; const char* start=p; int isf=0;
+  if(*p=='-') p++;
+  while(isdigit((unsigned char)*p)) p++;
+  if(*p=='.'){ isf=1; p++; while(isdigit((unsigned char)*p)) p++; }
+  if(*p=='e'||*p=='E'){ isf=1; p++; if(*p=='+'||*p=='-') p++; while(isdigit((unsigned char)*p)) p++; }
+  char tmp[64]; size_t L=(size_t)(p-start); if(L>63) L=63; memcpy(tmp, start, L); tmp[L]=0;
+  *pp=p; return isf ? cl_float(strtod(tmp, 0)) : cl_int(strtol(tmp, 0, 10));
+}
+static Value j_value(const char** pp){
+  j_ws(pp); const char* p=*pp; char c=*p;
+  if(c=='"') return j_string(pp);
+  if(c=='{'){
+    p++; Value m=cl_map_new(); *pp=p; j_ws(pp); p=*pp;
+    if(*p=='}'){ *pp=p+1; return m; }
+    while(1){
+      j_ws(pp); Value k=j_string(pp); j_ws(pp); p=*pp; if(*p==':'){ p++; *pp=p; }
+      Value v=j_value(pp); cl_map_put(m, (char*)k.s, v); j_ws(pp); p=*pp;
+      if(*p==','){ *pp=p+1; continue; }
+      if(*p=='}'){ *pp=p+1; }
+      break;
+    }
+    return m;
+  }
+  if(c=='['){
+    p++; Value a=cl_list_new(); *pp=p; j_ws(pp); p=*pp;
+    if(*p==']'){ *pp=p+1; return a; }
+    while(1){
+      Value v=j_value(pp); cl_list_add(a, v); j_ws(pp); p=*pp;
+      if(*p==','){ *pp=p+1; continue; }
+      if(*p==']'){ *pp=p+1; }
+      break;
+    }
+    return a;
+  }
+  if(c=='t'){ *pp=p+4; return cl_bool(1); }
+  if(c=='f'){ *pp=p+5; return cl_bool(0); }
+  if(c=='n'){ *pp=p+4; return cl_null(); }
+  if(c=='-' || isdigit((unsigned char)c)) return j_number(pp);
+  return cl_null();
+}
+static Value cl_json_parse(Value sv){ const char* p=sv.s; return j_value(&p); }
+
+static void j_ser(SB* s, Value v);
+static void j_ser_str(SB* s, const char* str){
+  sb_putc(s, '"');
+  for(const char* p=str; *p; p++){
+    char c=*p;
+    if(c=='"') sb_puts(s, "\\\"");
+    else if(c=='\\') sb_puts(s, "\\\\");
+    else if(c=='\n') sb_puts(s, "\\n");
+    else if(c=='\t') sb_puts(s, "\\t");
+    else if(c=='\r') sb_puts(s, "\\r");
+    else sb_putc(s, c);
+  }
+  sb_putc(s, '"');
+}
+static void j_ser(SB* s, Value v){
+  if(v.t==T_NULL){ sb_puts(s, "null"); return; }
+  if(v.t==T_BOOL){ sb_puts(s, v.i ? "true" : "false"); return; }
+  if(v.t==T_INT || v.t==T_FLOAT){ sb_puts(s, cl_to_cstr(v)); return; }
+  if(v.t==T_STR){ j_ser_str(s, v.s); return; }
+  if(v.t==T_LIST){ List* l=(List*)v.o; sb_putc(s, '['); for(long j=0;j<l->len;j++){ if(j) sb_putc(s, ','); j_ser(s, l->items[j]); } sb_putc(s, ']'); return; }
+  if(v.t==T_MAP){ Map* m=(Map*)v.o; sb_putc(s, '{'); for(long j=0;j<m->len;j++){ if(j) sb_putc(s, ','); j_ser_str(s, m->keys[j]); sb_putc(s, ':'); j_ser(s, m->vals[j]); } sb_putc(s, '}'); return; }
+  sb_puts(s, "null");
+}
+static Value cl_json_string(Value v){ SB s; sb_init(&s); j_ser(&s, v); return cl_str(s.buf); }
+
 static void cl_show(Value v){ char* s=cl_display(v); printf("%s\n", s); }
 """
 
@@ -718,7 +822,8 @@ let _NATIVE_BUILTINS = {
     "lines": 1, "env": 1, "args": 1, "exit": 1,
     "exec": 1, "exec_full": 1, "sleep": 1, "time": 1,
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
-    "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1
+    "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
+    "json_parse": 1, "json_string": 1
 }
 
 -- ── Code generator ──────────────────────────────────────
@@ -981,6 +1086,9 @@ class CCodegen {
         if name == "min" and n == 2 { return "cl_min2(" + args[0] + ", " + args[1] + ")" }
         if name == "max" and n == 1 { return "cl_max_list(" + args[0] + ")" }
         if name == "max" and n == 2 { return "cl_max2(" + args[0] + ", " + args[1] + ")" }
+        -- JSON
+        if name == "json_parse" and n == 1 { return "cl_json_parse(" + args[0] + ")" }
+        if name == "json_string" and n == 1 { return "cl_json_string(" + args[0] + ")" }
         return ""
     }
 
