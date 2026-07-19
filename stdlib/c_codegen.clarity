@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 9).
+-- Clarity → C code generator (native compilation, stage 10).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -60,8 +60,15 @@
 -- lists, strings with escapes + \uXXXX→UTF-8, numbers→int/float) and a
 -- json_string serialiser matching JSON.stringify (compact, insertion order),
 -- both over an amortised-O(n) string builder. A native tool reads a JSON
--- config, computes, and emits JSON. Later stages add binary I/O + FFI and the
--- network stack.
+-- config, computes, and emits JSON.
+--
+-- Stage 10 adds the binary-data foundation for RE tools & game mods:
+-- read_bytes/write_bytes (a file ↔ a list of ints 0..255, matching the
+-- interpreter) and the bitwise operators (& | ^ << >>). Together they let
+-- pure-Clarity code parse and emit binary formats — magic-byte sniffing,
+-- little/big-endian integer decoding, hexdumps — all compiling to a native
+-- binary. Later stages add native FFI (dlopen, with platform-conditional
+-- linking) and the network stack.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -402,6 +409,15 @@ static Value cl_pow(Value a, Value b){
   }
   return cl_float(pow(cl_num(a), cl_num(b)));
 }
+/* Bitwise ops match the interpreter's JS semantics: operands are truncated to
+   signed 32-bit, shift counts masked to 5 bits, results are signed 32-bit.
+   (`int` is 32-bit on every platform we target.) 64-bit/unsigned bitwise is a
+   tracked follow-up — it needs the numeric tower to grow past JS doubles. */
+static Value cl_band(Value a, Value b){ return cl_int((long)((int)a.i & (int)b.i)); }
+static Value cl_bor(Value a, Value b){ return cl_int((long)((int)a.i | (int)b.i)); }
+static Value cl_bxor(Value a, Value b){ return cl_int((long)((int)a.i ^ (int)b.i)); }
+static Value cl_shl(Value a, Value b){ return cl_int((long)((int)a.i << ((int)b.i & 31))); }
+static Value cl_shr(Value a, Value b){ return cl_int((long)((int)a.i >> ((int)b.i & 31))); }
 static Value cl_neg(Value a){
   if(a.t==T_FLOAT) return cl_float(-a.f);
   return cl_int(-a.i);
@@ -626,6 +642,24 @@ static Value cl_write_file(Value pv, Value cv){ FILE* f=fopen(pv.s, "wb"); if(!f
 static Value cl_append_file(Value pv, Value cv){ FILE* f=fopen(pv.s, "ab"); if(!f) return cl_bool(0); char* s=cl_to_cstr(cv); fwrite(s, 1, strlen(s), f); fclose(f); return cl_bool(1); }
 static Value cl_exists(Value pv){ return cl_bool(access(pv.s, F_OK)==0); }
 static Value cl_lines(Value pv){ Value c=cl_read_file(pv); if(c.t==T_NULL) return cl_list_new(); Value nl=cl_str("\n"); return cl_str_split(c, nl); }
+/* read_bytes(path): raw file bytes as a list of ints (0..255), matching the
+   interpreter's Array.from(readFileSync) for the common (file-exists) case. A
+   missing file returns an empty list here rather than aborting — the native
+   binary has no exception model to mirror the interpreter's ENOENT throw, and
+   graceful [] is the friendlier behaviour for a compiled tool. */
+static Value cl_read_bytes(Value pv){
+  FILE* f=fopen(pv.s, "rb"); Value out=cl_list_new(); if(!f) return out;
+  unsigned char buf[4096]; size_t n;
+  while((n=fread(buf, 1, sizeof(buf), f))>0){ for(size_t i=0;i<n;i++) cl_list_add(out, cl_int((long)buf[i])); }
+  fclose(f); return out;
+}
+/* write_bytes(path, list): each list element is coerced to a byte (& 0xFF).
+   Returns true on success (matches the interpreter). */
+static Value cl_write_bytes(Value pv, Value lv){
+  FILE* f=fopen(pv.s, "wb"); if(!f) return cl_bool(0);
+  if(lv.t==T_LIST){ List* l=(List*)lv.o; for(long j=0;j<l->len;j++){ unsigned char c=(unsigned char)(l->items[j].i & 0xFF); fwrite(&c, 1, 1, f); } }
+  fclose(f); return cl_bool(1);
+}
 
 /* ── app stdlib: process/env ── */
 static Value cl_env(Value kv, Value dv){ const char* v=getenv(kv.s); if(v) return cl_str(cl_strdup(v)); return dv; }
@@ -805,7 +839,8 @@ fn _c_escape(s) {
 let _BINOPS = {
     "+": "cl_add", "-": "cl_sub", "*": "cl_mul", "/": "cl_div", "%": "cl_mod",
     "**": "cl_pow", "==": "cl_eq", "!=": "cl_neq", "<": "cl_lt", ">": "cl_gt",
-    "<=": "cl_lte", ">=": "cl_gte"
+    "<=": "cl_lte", ">=": "cl_gte",
+    "&": "cl_band", "|": "cl_bor", "^": "cl_bxor", "<<": "cl_shl", ">>": "cl_shr"
 }
 
 -- Names that resolve to native runtime helpers rather than a captured
@@ -819,7 +854,7 @@ let _NATIVE_BUILTINS = {
     "from_char_code": 1, "index_of": 1, "pad_left": 1, "pad_right": 1,
     "chars": 1, "repeat": 1, "is_digit": 1, "is_alpha": 1, "is_alnum": 1,
     "is_space": 1, "read": 1, "write": 1, "append": 1, "exists": 1,
-    "lines": 1, "env": 1, "args": 1, "exit": 1,
+    "lines": 1, "read_bytes": 1, "write_bytes": 1, "env": 1, "args": 1, "exit": 1,
     "exec": 1, "exec_full": 1, "sleep": 1, "time": 1,
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
     "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
@@ -1060,6 +1095,8 @@ class CCodegen {
         if name == "append" and n == 2 { return "cl_append_file(" + args[0] + ", " + args[1] + ")" }
         if name == "exists" and n == 1 { return "cl_exists(" + args[0] + ")" }
         if name == "lines" and n == 1 { return "cl_lines(" + args[0] + ")" }
+        if name == "read_bytes" and n == 1 { return "cl_read_bytes(" + args[0] + ")" }
+        if name == "write_bytes" and n == 2 { return "cl_write_bytes(" + args[0] + ", " + args[1] + ")" }
         -- process / env
         if name == "env" and n == 1 { return "cl_env(" + args[0] + ", cl_null())" }
         if name == "env" and n == 2 { return "cl_env(" + args[0] + ", " + args[1] + ")" }

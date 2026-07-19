@@ -150,6 +150,20 @@ if CC == null {
     same("json_roundtrip", "let s = '{\"k\": [1, 2, 3], \"s\": \"hello\", \"n\": 42}'\nshow json_string(json_parse(s))")
     same("json_numbers", "let o = json_parse('[1, 2.5, -3, 100]')\nshow o\nshow sum(o)")
 
+    -- ── stage 10: binary I/O + bitwise ops (RE/mod foundation) ──
+    same("bitwise_ops", "show 12 & 10\nshow 12 | 10\nshow 12 ^ 10\nshow 1 << 4\nshow 255 >> 4\nshow 6 & 3 | 8")
+    same("bitwise_precedence", "show 1 + 2 << 3\nshow (255 & 15) + (1 << 2)")
+    -- little-endian u32 decode from raw bytes — the core RE primitive. The high
+    -- byte sets bit 31, so the current 32-bit-signed semantics wrap it negative;
+    -- native must match the interpreter exactly (pins the semantics for the
+    -- planned 64-bit-bitwise follow-up).
+    same("le_u32_decode", "let b = [33, 67, 101, 135]\nshow b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)")
+    -- big-endian u16 decode
+    same("be_u16_decode", "let b = [1, 44]\nshow (b[0] << 8) | b[1]")
+    same("bytes_roundtrip", "write_bytes(\"/tmp/_clc_b10.bin\", [72, 105, 33, 0, 255])\nlet r = read_bytes(\"/tmp/_clc_b10.bin\")\nshow r\nshow len(r)\nshow r[0]\nshow r[4]")
+    -- magic-byte sniffing: does the file start with the PNG signature?
+    same("magic_sniff", "write_bytes(\"/tmp/_clc_png.bin\", [137, 80, 78, 71, 13, 10, 26, 10, 99])\nlet b = read_bytes(\"/tmp/_clc_png.bin\")\nlet png = [137, 80, 78, 71]\nmut ok = true\nfor i in range(4) { if b[i] != png[i] { ok = false } }\nshow ok\nshow b[1]")
+
     exec("rm -f /tmp/_clc_*")
 }
 
