@@ -237,7 +237,11 @@ fn cc_file(cli_args) {
 
     let cfile = out + ".c"
     write(cfile, c_src)
-    let comp = exec_full(cc + " -O2 -w " + _quote(cfile) + " -o " + _quote(out) + " -lm")
+    -- FFI (dlsym) needs libdl on Linux; on modern glibc it's a harmless stub,
+    -- on macOS dlsym lives in libSystem so no extra flag is needed. Unused FFI
+    -- helpers are stripped at -O2, so non-FFI programs don't actually pull it.
+    let ldl = if contains(exec("uname"), "Linux") { " -ldl" } else { "" }
+    let comp = exec_full(cc + " -O2 -w " + _quote(cfile) + " -o " + _quote(out) + " -lm" + ldl)
     if len(trim(comp.stderr)) > 0 and not exists(out) {
         show red("  >> C compilation failed:")
         show comp.stderr

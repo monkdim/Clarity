@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 10).
+-- Clarity → C code generator (native compilation, stage 11).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -67,8 +67,16 @@
 -- interpreter) and the bitwise operators (& | ^ << >>). Together they let
 -- pure-Clarity code parse and emit binary formats — magic-byte sniffing,
 -- little/big-endian integer decoding, hexdumps — all compiling to a native
--- binary. Later stages add native FFI (dlopen, with platform-conditional
--- linking) and the network stack.
+-- binary.
+--
+-- Stage 11 adds native FFI: ffi_sym/ffi_call resolve a symbol via
+-- dlsym(RTLD_DEFAULT) (covering libc, libm, and anything linked or dlopen'd)
+-- and call it through a typed shim (sig = <ret><args>, l/d/s/v). A compiled
+-- binary can now call C directly — strlen/abs/toupper from libc, pow from
+-- libm. The dlfcn helpers are dead-code-eliminated at -O2 unless the program
+-- uses FFI, so non-FFI binaries still link with -lm alone on every platform;
+-- FFI binaries add -ldl on Linux (a harmless stub on modern glibc, the real
+-- libdl on older). Later stages add the network stack.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -88,7 +96,8 @@
 -- here, but the transpiled binary silently mangles the whole string, so after
 -- editing the prelude, rebuild and run `clarity cc` on a sample to verify.
 
-let C_PRELUDE = """#include <stdio.h>
+let C_PRELUDE = """#define _GNU_SOURCE 1
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -97,6 +106,7 @@ let C_PRELUDE = """#include <stdio.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <dlfcn.h>
 
 /* command-line argv, captured in main for the args() builtin */
 static int cl_argc = 0;
@@ -810,6 +820,45 @@ static void j_ser(SB* s, Value v){
 }
 static Value cl_json_string(Value v){ SB s; sb_init(&s); j_ser(&s, v); return cl_str(s.buf); }
 
+/* ── app stdlib: native FFI (dlopen/dlsym) ── */
+/* ffi_sym(name): raw address of a symbol in the process (RTLD_DEFAULT covers
+   libc/libm and anything linked or dlopen'd), as an int (0 if not found). */
+static Value cl_ffi_sym(Value namev){ return cl_int((long)dlsym(RTLD_DEFAULT, namev.s)); }
+/* ffi_call(name, sig, args): resolve `name` and call it through a typed shim.
+   `sig` is <ret><args>: l=long/int, d=double, s=cstring, v=void. Returns an int
+   (l), float (d), fresh string (s return), or null (void / unknown sig).
+   RTLD_DEFAULT resolves any symbol in a *loaded* library. libc is always
+   loaded, so its symbols (strlen/abs/toupper/…) always resolve; a symbol from a
+   library the program never otherwise references (e.g. libm's pow under the
+   linker's default --as-needed) won't be loaded — an explicit ffi_open(path)
+   for such libraries is a follow-up. Unknown symbol → null. */
+static Value cl_ffi_call(Value namev, Value sigv, Value argsv){
+  void* fp = dlsym(RTLD_DEFAULT, namev.s);
+  if(!fp) return cl_null();
+  const char* sig = sigv.s;
+  List* l = (argsv.t==T_LIST) ? (List*)argsv.o : (List*)0;
+  long n = l ? l->len : 0;
+  long a0 = n>0 ? l->items[0].i : 0, a1 = n>1 ? l->items[1].i : 0, a2 = n>2 ? l->items[2].i : 0;
+  double d0 = n>0 ? cl_num(l->items[0]) : 0.0, d1 = n>1 ? cl_num(l->items[1]) : 0.0;
+  const char* s0 = n>0 ? l->items[0].s : "";
+  const char* s1 = n>1 ? l->items[1].s : "";
+  if(!strcmp(sig, "l"))    return cl_int(((long(*)(void))fp)());
+  if(!strcmp(sig, "ll"))   return cl_int(((long(*)(long))fp)(a0));
+  if(!strcmp(sig, "lll"))  return cl_int(((long(*)(long,long))fp)(a0, a1));
+  if(!strcmp(sig, "llll")) return cl_int(((long(*)(long,long,long))fp)(a0, a1, a2));
+  if(!strcmp(sig, "ls"))   return cl_int(((long(*)(const char*))fp)(s0));
+  if(!strcmp(sig, "lss"))  return cl_int(((long(*)(const char*,const char*))fp)(s0, s1));
+  if(!strcmp(sig, "lsl"))  return cl_int(((long(*)(const char*,long))fp)(s0, a1));
+  if(!strcmp(sig, "d"))    return cl_float(((double(*)(void))fp)());
+  if(!strcmp(sig, "dd"))   return cl_float(((double(*)(double))fp)(d0));
+  if(!strcmp(sig, "ddd"))  return cl_float(((double(*)(double,double))fp)(d0, d1));
+  if(!strcmp(sig, "ss"))   { const char* r = ((const char*(*)(const char*))fp)(s0); return r ? cl_str(cl_strdup(r)) : cl_null(); }
+  if(!strcmp(sig, "v"))    { ((void(*)(void))fp)(); return cl_null(); }
+  if(!strcmp(sig, "vl"))   { ((void(*)(long))fp)(a0); return cl_null(); }
+  if(!strcmp(sig, "vs"))   { ((void(*)(const char*))fp)(s0); return cl_null(); }
+  return cl_null();
+}
+
 static void cl_show(Value v){ char* s=cl_display(v); printf("%s\n", s); }
 """
 
@@ -858,7 +907,8 @@ let _NATIVE_BUILTINS = {
     "exec": 1, "exec_full": 1, "sleep": 1, "time": 1,
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
     "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
-    "json_parse": 1, "json_string": 1
+    "json_parse": 1, "json_string": 1,
+    "ffi_sym": 1, "ffi_call": 1
 }
 
 -- ── Code generator ──────────────────────────────────────
@@ -1126,6 +1176,9 @@ class CCodegen {
         -- JSON
         if name == "json_parse" and n == 1 { return "cl_json_parse(" + args[0] + ")" }
         if name == "json_string" and n == 1 { return "cl_json_string(" + args[0] + ")" }
+        -- native FFI
+        if name == "ffi_sym" and n == 1 { return "cl_ffi_sym(" + args[0] + ")" }
+        if name == "ffi_call" and n == 3 { return "cl_ffi_call(" + args[0] + ", " + args[1] + ", " + args[2] + ")" }
         return ""
     }
 
