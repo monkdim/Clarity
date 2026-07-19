@@ -135,6 +135,13 @@ if CC == null {
     same("file_write_read", "let p = \"/tmp/_clc_s7_file.txt\"\nwrite(p, \"line1\\nline2\\nline3\")\nshow read(p)\nshow exists(p)\nshow exists(\"/tmp/_clc_nope_xyz\")\nshow len(lines(p))")
     same("file_append", "let p = \"/tmp/_clc_s7_app.txt\"\nwrite(p, \"a\")\nappend(p, \"b\")\nappend(p, \"c\")\nshow read(p)")
 
+    -- ── stage 8: exec/process + math ──
+    same("math_basic", "show abs(-5)\nshow abs(-3.5)\nshow floor(3.7)\nshow ceil(3.2)\nshow round(2.5)\nshow round(3.14159, 2)\nshow sqrt(16.0)")
+    same("math_agg", "show sum([1, 2, 3, 4])\nshow min([3, 1, 2])\nshow max([3, 1, 2])\nshow min(5, 3)\nshow max(5, 3)\nshow sum([1.5, 2.5])")
+    -- exec: both the interpreter and the native binary run the real shell command
+    same("exec_echo", "show exec(\"echo hello\")\nshow exec(\"echo one; echo two\")")
+    same("exec_full_cmd", "show trim(exec_full(\"echo hi\").stdout)\nshow exec_full(\"echo hi\").exit_code\nshow exec_full(\"exit 3\").exit_code")
+
     exec("rm -f /tmp/_clc_*")
 }
 
