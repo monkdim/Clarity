@@ -1,0 +1,32 @@
+-- Tests for hook.clarity's pure logic and graceful failure. Actual live-code
+-- hooking needs a resolved function address (ffi_sym, native-only), so that path
+-- is proven by the codegen suite (test_c_codegen.clarity, stage 18); here we
+-- exercise the arch-aware patch encoding and the safe-failure paths, which run
+-- in the interpreter on every platform.
+
+from "hook.clarity" import arch, ret_patch, hook_return, unhook, patch
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert_eq(a, e, m) {
+    if a == e { PASSED += 1 } else { FAILED += 1; show "  FAIL: {m} (expected {e}, got {a})" }
+}
+
+show "-- ret_patch (arch=" + arch() + ") --"
+if arch() == "x86_64" {
+    assert_eq(str(ret_patch(99)), "[184, 99, 0, 0, 0, 195]", "ret_patch(99)")
+    assert_eq(str(ret_patch(0x1234)), "[184, 52, 18, 0, 0, 195]", "ret_patch(0x1234) little-endian imm32")
+    assert_eq(len(ret_patch(42)), 6, "patch is 6 bytes")
+} else {
+    assert_eq(str(ret_patch(99)), "[]", "ret_patch on non-x86_64 -> []")
+}
+
+show "-- graceful failure --"
+if arch() == "x86_64" {
+    assert_eq(str(hook_return(0, 0, 99)), "[]", "hook_return on unmapped address -> []")
+}
+assert_eq(unhook(0, 0, []), 0, "unhook with no saved bytes -> 0")
+
+show ""
+if FAILED == 0 { show "  " + str(PASSED) + " passed, 0 failed" }
+else { show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"; exit(1) }

@@ -34,6 +34,9 @@ let CC = _find_cc()
 let LDL = if CC != null and contains(exec("uname"), "Linux") { " -ldl" } else { "" }
 -- /proc-backed features (read_mem) only work on Linux; gate their native checks.
 let IS_LINUX = CC != null and contains(exec("uname"), "Linux")
+-- x86-64 Linux only: inline function-code patching (hook.clarity) emits x86-64
+-- machine code, and self-modifying code elsewhere needs extra care.
+let IS_X64 = IS_LINUX and contains(exec("uname -m"), "x86_64")
 
 fn interp_run(src) {
     let i = Interpreter(null, null)
@@ -274,6 +277,17 @@ if CC == null {
     -- which now route through the same path.)
     nat_eq("ffi_buffer_memset", "let b=ffi_buffer(8)\nffi_call(\"memset\",\"vpll\",[b,65,5])\nshow ffi_read(b,5)\nffi_free(b)", "[65, 65, 65, 65, 65]")
     nat_eq("ffi_buffer_memcpy", "let src=ffi_buffer(4)\nffi_write(src,[1,2,3,4])\nlet dst=ffi_buffer(4)\nffi_call(\"memcpy\",\"pppl\",[dst,src,4])\nshow ffi_read(dst,4)\nffi_free(src)\nffi_free(dst)", "[1, 2, 3, 4]")
+
+    -- ── stage 18: function hooking (hook.clarity) ──
+    -- x86-64 Linux only: resolve abs() via FFI, patch its prologue in live .text
+    -- (through /proc/self/mem, which reaches read-only executable pages) so it
+    -- returns 99, then restore the saved bytes. Proves inline code hooking works
+    -- native and is reversible.
+    if IS_X64 {
+        nat_eq("hook_return", "fn ret_patch(v){return [184,v&255,(v>>8)&255,(v>>16)&255,(v>>24)&255,195]}\nfn hook_return(pid,addr,value){let p=ret_patch(value)\nlet orig=read_mem(pid,addr,len(p))\nif len(orig)!=len(p){return []}\nwrite_mem(pid,addr,p)\nreturn orig}\nlet addr=ffi_sym(\"abs\")\nshow ffi_call(\"abs\",\"ll\",[-7])\nlet saved=hook_return(0,addr,99)\nshow ffi_call(\"abs\",\"ll\",[-7])\nwrite_mem(0,addr,saved)\nshow ffi_call(\"abs\",\"ll\",[-7])", "7\n99\n7")
+    } else {
+        show "-- stage 18 hook: not x86-64 Linux, native check skipped --"
+    }
 
     exec("rm -f /tmp/_clc_*")
 }
