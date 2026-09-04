@@ -1,0 +1,107 @@
+-- binformat_demo — describe binary layouts declaratively, then parse and emit
+-- them, compiled to a native binary. Demonstrates stage-19 binformat.clarity.
+--
+--     clarity cc examples/binformat_demo.clarity -o binformat_demo
+--     ./binformat_demo /bin/ls
+--
+-- Two demos: a made-up packet format round-tripped (emit -> parse), and a real
+-- ELF64 header parsed from a file you name. Single-file (clarity cc doesn't
+-- resolve imports yet), so the DSL + byte helpers are inlined from
+-- stdlib/binformat.clarity and stdlib/bytes.clarity.
+
+-- ── byte readers/writers (from bytes.clarity) ──
+fn u8(b,o){return b[o]}
+fn u16le(b,o){return b[o]+b[o+1]*256}
+fn u32le(b,o){return b[o]+b[o+1]*256+b[o+2]*65536+b[o+3]*16777216}
+fn u32be(b,o){return b[o]*16777216+b[o+1]*65536+b[o+2]*256+b[o+3]}
+fn u64le(b,o){return u32le(b,o)+u32le(b,o+4)*4294967296}
+fn put_u8(b,v){push(b,v&255)}
+fn put_u16le(b,v){push(b,v&255);push(b,(v>>8)&255)}
+fn put_u32be(b,v){push(b,(v>>24)&255);push(b,(v>>16)&255);push(b,(v>>8)&255);push(b,v&255)}
+
+-- ── the DSL (from binformat.clarity) ──
+fn tsize(t){
+    if t=="u8"{return 1}
+    if t=="u16le" or t=="u16be"{return 2}
+    if t=="u32le" or t=="u32be"{return 4}
+    if t=="u64le"{return 8}
+    return 0
+}
+fn rd(b,o,t){
+    if t=="u8"{return u8(b,o)}
+    if t=="u16le"{return u16le(b,o)}
+    if t=="u32le"{return u32le(b,o)}
+    if t=="u32be"{return u32be(b,o)}
+    if t=="u64le"{return u64le(b,o)}
+    return 0
+}
+fn wr(b,v,t){
+    if t=="u8"{put_u8(b,v)}
+    elif t=="u16le"{put_u16le(b,v)}
+    elif t=="u32be"{put_u32be(b,v)}
+}
+fn emit(fmt,vals){
+    mut b=[]
+    for f in fmt{wr(b,vals[f["name"]],f["type"])}
+    return b
+}
+fn parse(fmt,buf,start){
+    mut out={}
+    mut off=start
+    for f in fmt{
+        let t=f["type"]
+        if t=="bytes"{out[f["name"]]=sub(buf,off,f["len"]);off=off+f["len"]}
+        elif t=="pad"{off=off+f["len"]}
+        else{out[f["name"]]=rd(buf,off,t);off=off+tsize(t)}
+    }
+    return out
+}
+fn sub(buf,start,n){
+    mut o=[]
+    mut i=0
+    while i<n and start+i<len(buf){push(o,buf[start+i]);i=i+1}
+    return o
+}
+fn hex(n,digits){
+    mut v=n
+    mut s=""
+    mut c=0
+    while c<digits{s=char_at("0123456789abcdef",v%16)+s;v=int(v/16);c=c+1}
+    return s
+}
+
+fn main() {
+    -- Demo 1: round-trip a made-up packet header (emit then parse it back).
+    let PKT = [{name:"magic",type:"u32be"},{name:"ver",type:"u16le"},{name:"flags",type:"u16le"}]
+    let raw = emit(PKT, {"magic": 3405691582, "ver": 7, "flags": 3})
+    let back = parse(PKT, raw, 0)
+    show "packet round-trip:"
+    show "  magic=0x" + hex(back["magic"], 8) + " ver=" + str(back["ver"]) + " flags=" + str(back["flags"])
+
+    -- Demo 2: parse a real ELF64 header, declaratively.
+    let argv = args()
+    if len(argv) < 1 { show ""; show "(pass an ELF64 file to parse its header, e.g. /bin/ls)"; exit(0) }
+    let path = argv[0]
+    if not exists(path) { show "no such file: " + path; exit(1) }
+    let ELF64 = [
+        {name:"magic",type:"bytes",len:4},
+        {name:"class",type:"u8"},
+        {name:"_pad",type:"pad",len:11},
+        {name:"etype",type:"u16le"},
+        {name:"machine",type:"u16le"},
+        {name:"_pad2",type:"pad",len:4},
+        {name:"entry",type:"u64le"},
+        {name:"phoff",type:"u64le"}
+    ]
+    let hdr = parse(ELF64, read_bytes(path), 0)
+    show ""
+    show "ELF64 header of " + path + ":"
+    show "  magic   = " + str(hdr["magic"])
+    show "  class   = " + str(hdr["class"]) + " (2 = 64-bit)"
+    show "  e_type  = " + str(hdr["etype"]) + " (2=EXEC, 3=DYN/PIE)"
+    show "  machine = " + str(hdr["machine"]) + " (62 = x86-64)"
+    show "  entry   = 0x" + hex(hdr["entry"], 12)
+    show "  phoff   = " + str(hdr["phoff"])
+}
+
+main()
