@@ -1,0 +1,147 @@
+-- Tests for the byte-buffer toolkit (bytes.clarity): endianness readers/
+-- writers, hex formatting, and AOB signature scanning — the Track B RE
+-- foundation. These run in the interpreter; the codegen suite
+-- (test_c_codegen.clarity, stage 12) proves the same functions compile to a
+-- native binary and produce identical output.
+
+from "bytes.clarity" import u8, u16le, u32le, u64le, u16be, u32be
+from "bytes.clarity" import i8, i16le, i32le
+from "bytes.clarity" import put_u8, put_u16le, put_u32le, put_u16be, put_u32be
+from "bytes.clarity" import slice, hex_byte, to_hex
+from "bytes.clarity" import parse_pattern, match_at, find_pattern, find_all
+from "bytes.clarity" import find_bytes, scan, scan_all, hexdump
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn assert(val, msg) {
+    if val { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + msg }
+}
+fn assert_eq(actual, expected, msg) {
+    if actual == expected { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg} (expected {expected}, got {actual})" }
+}
+
+-- ── Unsigned readers ──────────────────────────────
+show "-- unsigned readers --"
+
+let b = [0x21, 0x43, 0x65, 0x87, 0x01, 0x00, 0x00, 0x00]
+assert_eq(u8(b, 0), 0x21, "u8")
+assert_eq(u16le(b, 0), 0x4321, "u16le")
+assert_eq(u16be(b, 0), 0x2143, "u16be")
+
+-- The high byte (0x87) sets bit 31. u32le must stay UNSIGNED (0x87654321 =
+-- 2271560481), not wrap negative like a raw `b3 << 24` would.
+assert_eq(u32le(b, 0), 2271560481, "u32le stays unsigned across bit 31")
+assert(u32le(b, 0) > 0, "u32le high value is positive, not sign-wrapped")
+assert_eq(u32be(b, 0), 0x21436587, "u32be")
+assert_eq(u64le(b, 0), 0x0000000187654321, "u64le")
+
+-- ── Signed readers ────────────────────────────────
+show "-- signed readers --"
+
+assert_eq(i8([0x80], 0), -128, "i8 min")
+assert_eq(i8([0xFF], 0), -1, "i8 -1")
+assert_eq(i8([0x7F], 0), 127, "i8 max positive")
+assert_eq(i16le([0x00, 0x80], 0), -32768, "i16le min")
+assert_eq(i16le([0xFF, 0xFF], 0), -1, "i16le -1")
+-- 0xFFFFFF9C little-endian = -100 (a typical relative jump target)
+assert_eq(i32le([0x9C, 0xFF, 0xFF, 0xFF], 0), -100, "i32le negative")
+assert_eq(i32le([0x21, 0x43, 0x65, 0x07], 0), 0x07654321, "i32le positive")
+
+-- ── Writers round-trip through the readers ────────
+show "-- writers --"
+
+mut w = []
+put_u8(w, 0x21)
+put_u16le(w, 0xBEEF)
+put_u32le(w, 0xDEADBEEF)
+assert_eq(len(w), 7, "writer emitted 7 bytes")
+assert_eq(u16le(w, 1), 0xBEEF, "put_u16le round-trips")
+assert_eq(u32le(w, 3), 0xDEADBEEF, "put_u32le round-trips unsigned")
+
+mut wb = []
+put_u16be(wb, 0x1234)
+put_u32be(wb, 0xAABBCCDD)
+assert_eq(u16be(wb, 0), 0x1234, "put_u16be round-trips")
+assert_eq(u32be(wb, 2), 0xAABBCCDD, "put_u32be round-trips")
+
+-- ── Slice ─────────────────────────────────────────
+show "-- slice --"
+
+assert_eq(str(slice([10, 20, 30, 40, 50], 1, 3)), "[20, 30, 40]", "slice middle")
+assert_eq(str(slice([1, 2, 3], 1, 99)), "[2, 3]", "slice clamps past end")
+assert_eq(str(slice([1, 2, 3], 5, 2)), "[]", "slice past end is empty")
+
+-- ── Hex ───────────────────────────────────────────
+show "-- hex --"
+
+assert_eq(hex_byte(0x0F), "0f", "hex_byte low")
+assert_eq(hex_byte(0xA7), "a7", "hex_byte high")
+assert_eq(hex_byte(256 + 0x42), "42", "hex_byte masks to a byte")
+assert_eq(to_hex([0x7F, 0x45, 0x4C, 0x46]), "7f 45 4c 46", "to_hex of ELF magic")
+
+-- ── Signature parsing ─────────────────────────────
+show "-- parse_pattern --"
+
+assert_eq(str(parse_pattern("48 8B ?? E8")), "[72, 139, -1, 232]", "parse with wildcard")
+assert_eq(str(parse_pattern("48  8b")), "[72, 139]", "parse collapses double spaces, case-insensitive")
+assert_eq(str(parse_pattern("de * ad")), "[222, -1, 173]", "star is a wildcard too")
+
+-- ── Scanning ──────────────────────────────────────
+show "-- scanning --"
+
+-- E8 xx xx xx xx is a near-CALL; the target dword is wildcarded.
+let code = [0x55, 0x48, 0x89, 0xE5, 0xE8, 0x11, 0x22, 0x33, 0x44, 0xC3]
+assert_eq(scan(code, "E8 ?? ?? ?? ??"), 4, "scan finds CALL signature")
+assert_eq(scan(code, "48 89 E5"), 1, "scan finds exact bytes")
+assert_eq(scan(code, "90 90 90"), -1, "scan miss returns -1")
+assert_eq(find_pattern(code, [0xC3]), 9, "find_pattern single byte")
+assert_eq(find_bytes(code, [0x48, 0x89]), 1, "find_bytes exact sequence")
+
+-- find_all / scan_all: two occurrences of 0xAB, overlapping-safe iteration.
+let rep = [0xAB, 0x00, 0xAB, 0x00, 0xAB]
+assert_eq(str(find_all(rep, [0xAB])), "[0, 2, 4]", "find_all all offsets")
+assert_eq(str(scan_all(rep, "ab 00")), "[0, 2]", "scan_all with signature")
+assert_eq(str(scan_all(code, "90")), "[]", "scan_all miss is empty list")
+
+-- match_at directly, including bounds and wildcard behaviour
+assert(match_at(code, [0x48, 0x89], 1), "match_at hit")
+assert(not match_at(code, [0x48, 0x89], 0), "match_at miss")
+assert(match_at(code, parse_pattern("48 ?? E5"), 1), "match_at with wildcard")
+assert(not match_at(code, [0xC3, 0x00], 9), "match_at past end is false")
+
+-- ── Hex dump ──────────────────────────────────────
+show "-- hexdump --"
+
+let dumped = hexdump([0x48, 0x69, 0x21, 0x00, 0xFF])
+-- one 16-byte row: offset, five bytes, then padding, then the ascii gutter
+assert(starts(dumped, "00000000  "), "hexdump starts at offset 0")
+assert(contains(dumped, "48 69 21 00 ff"), "hexdump shows the bytes")
+assert(contains(dumped, "|Hi!..|"), "hexdump ascii gutter (non-printables as '.')")
+
+let dumped2 = hexdump(range(20))
+assert(contains(dumped2, "00000010  "), "hexdump wraps to a second row at 0x10")
+
+-- ── Real-ish: recognise an ELF header from raw bytes ─
+show "-- integration: ELF sniff --"
+
+-- 0x7F 'E' 'L' 'F', class=2 (64-bit), data=1 (LE), then e_type=ET_EXEC at 16.
+mut elf = [0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01]
+mut pad = len(elf)
+while pad < 16 { push(elf, 0x00); pad = pad + 1 }
+put_u16le(elf, 2)          -- e_type = ET_EXEC
+put_u16le(elf, 62)         -- e_machine = EM_X86_64
+assert_eq(to_hex(slice(elf, 0, 4)), "7f 45 4c 46", "ELF magic via slice+to_hex")
+assert_eq(u16le(elf, 16), 2, "e_type reads back ET_EXEC")
+assert_eq(u16le(elf, 18), 62, "e_machine reads back x86-64")
+assert_eq(scan(elf, "7F 45 4C 46"), 0, "scan locates the ELF magic")
+
+-- ── Summary ───────────────────────────────────────
+show ""
+if FAILED == 0 {
+    show "  " + str(PASSED) + " passed, 0 failed"
+} else {
+    show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+    exit(1)
+}
