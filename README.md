@@ -138,6 +138,7 @@ For the full file-by-file structure, see the **Project structure** section of [G
 ## Roadmap & history
 
 - **Clarity** — see [GAPS.md](GAPS.md) for the language's path forward (binary I/O, v1.1 hardening, v2.0 compilation targets).
+- **Reverse engineering & game mods** — see [RE_TOOLING.md](RE_TOOLING.md) for the native RE toolkit (signature scanning, live-memory read/write, function hooking, disassembly via Capstone, binary-format DSL), all compiling to standalone binaries.
 - **KyanOS** — see [ROADMAP_OS.md](ROADMAP_OS.md) for the OS path forward (the `clarity os` developer workflow, hardware drivers, networking, UI polish).
 
 The language is at v1.0 and runs today; KyanOS is an active, experimental work in progress. Both are still being developed. Issues, PRs, and theme contributions are welcome.

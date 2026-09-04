@@ -27,6 +27,8 @@ Cleared during the mid-2026 hardening pass — recorded so the tiers below read 
 - **Interpreter.** `for k in someMap` iterates keys (was a run of nulls); comprehensions work over maps and strings.
 - **LSP.** Hover now shows user-symbol signatures; **go-to-definition** added.
 - **Parser.** Keyword names are usable as bare map keys (`show:`, `type:`…) — the parser can now read its own `lsp.clarity`.
+- **Generators actually run.** Calling a `yield`-based function now collects its yields and returns the list (`fib_gen() == [0, 1, 1, 2, 3, 5, 8, 13]`); it previously returned `null` because the yield-collection was never set up at call time.
+- **`env(name, default)` honours its default.** A missing environment variable now returns the supplied default (e.g. `env("NOTSET", "") == ""`) instead of `null`, matching the native `cl_env`; this also fixes shell `$VAR` expansion of unset variables.
 
 ---
 

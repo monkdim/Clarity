@@ -1204,13 +1204,26 @@ class Interpreter {
             }
 
             push(this._call_stack, {"name": callee.name, "line": line})
+            -- Generator support: run the body with a fresh yield-collection.
+            -- `yield` pushes into this._gen_collection (see eval_YieldExpression);
+            -- if the body yielded anything, the call returns the collected list
+            -- rather than its normal return value. Saved/restored so nested and
+            -- recursive calls compose. A body that never yields is unaffected.
+            let prev_gc = this._gen_collection
+            this._gen_collection = []
             try {
                 this.exec_Block(callee.body, fn_env)
                 pop(this._call_stack)
+                let collected = this._gen_collection
+                this._gen_collection = prev_gc
+                if len(collected) > 0 { return collected }
                 return null
             } catch sig {
                 pop(this._call_stack)
+                let collected = this._gen_collection
+                this._gen_collection = prev_gc
                 if is_signal(sig) and signal_type(sig) == "return" {
+                    if len(collected) > 0 { return collected }
                     return sig["value"]
                 }
                 throw sig
