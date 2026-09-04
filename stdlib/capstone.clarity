@@ -1,0 +1,113 @@
+-- Disassembly via Capstone — the RE analysis on-ramp (Track B). Binds
+-- libcapstone at runtime through the native FFI (ffi_open + raw buffers), so a
+-- compiled Clarity tool can decode machine code into instructions.
+--
+--     from "capstone.clarity" import disasm_x64, format_insn
+--     for ins in disasm_x64(read_bytes("shellcode.bin"), 0x1000) {
+--         show format_insn(ins)      -- e.g. "mov eax, 0x2a"
+--     }
+--
+-- **Native-only** (it uses the native FFI surface — ffi_open/ffi_call/ffi_buffer
+-- — which the tree-walking interpreter doesn't have), so it runs only in a
+-- `clarity cc`-compiled binary. It also needs libcapstone present at runtime:
+-- `libcapstone.so.4`/`.so.5` on Linux (apt: libcapstone-dev), `libcapstone.dylib`
+-- on macOS (brew: capstone). disasm_at returns [] if the library isn't found.
+--
+-- Capstone is a *cross* disassembler: it decodes for the target architecture you
+-- ask for regardless of the host CPU, so x86-64 code decodes correctly even on an
+-- arm64 machine. The cs_insn struct layout differs between Capstone 4 and 5, so
+-- the field offsets are chosen from the runtime cs_version.
+
+-- Capstone arch/mode constants (subset; pass to disasm_at).
+let CS_ARCH_X86 = 3
+let CS_ARCH_ARM64 = 1
+let CS_MODE_64 = 8
+let CS_MODE_ARM = 0
+
+fn _open_lib() {
+    for n in ["libcapstone.so.4", "libcapstone.so.5", "libcapstone.so", "libcapstone.dylib", "libcapstone.4.dylib", "libcapstone.5.dylib"] {
+        if ffi_open(n) != 0 { return true }
+    }
+    return false
+}
+
+-- Read a little-endian u64 (a pointer or address) from native memory at `ptr`.
+fn _rd_u64(ptr) {
+    let b = ffi_read(ptr, 8)
+    return b[0] + b[1] * 256 + b[2] * 65536 + b[3] * 16777216
+         + (b[4] + b[5] * 256 + b[6] * 65536 + b[7] * 16777216) * 4294967296
+}
+
+-- Read a NUL-terminated C string (up to `max` bytes) from native memory at `ptr`.
+fn _cstr(ptr, max) {
+    let b = ffi_read(ptr, max)
+    mut s = ""
+    for c in b {
+        if c == 0 { break }
+        s = s + from_char_code(c)
+    }
+    return s
+}
+
+-- [sizeof(cs_insn), offsetof(mnemonic), offsetof(op_str)] for the loaded
+-- Capstone. v5 grew cs_insn.bytes from 16 to 24, shifting the string fields;
+-- address (offset 8) and size (offset 16) are stable across versions.
+fn _layout() {
+    let v = ffi_call("cs_version", "lll", [0, 0])
+    if int(v / 256) >= 5 { return [248, 42, 74] }
+    return [240, 34, 66]
+}
+
+-- Disassemble `code` (a byte list) as `arch`/`mode`, with the first instruction
+-- at virtual address `addr`. Returns a list of instruction maps:
+--   {addr, size, mnemonic, op_str}
+-- Empty if libcapstone is unavailable or nothing decodes.
+fn disasm_at(code, addr, arch, mode) {
+    if not _open_lib() { return [] }
+    if len(code) == 0 { return [] }
+    let lay = _layout()
+    let INSN = lay[0]
+    let MNEM = lay[1]
+    let OPSTR = lay[2]
+
+    let hbuf = ffi_buffer(8)
+    let err = ffi_call("cs_open", "lllp", [arch, mode, hbuf])
+    if err != 0 { ffi_free(hbuf); return [] }
+    let handle = _rd_u64(hbuf)
+
+    let cbuf = ffi_buffer(len(code))
+    ffi_write(cbuf, code)
+    let ibuf = ffi_buffer(8)
+    let count = ffi_call("cs_disasm", "llplllp", [handle, cbuf, len(code), addr, 0, ibuf])
+    let base = _rd_u64(ibuf)
+
+    mut out = []
+    mut i = 0
+    while i < count {
+        let ins = base + i * INSN
+        let szb = ffi_read(ins + 16, 2)
+        push(out, {
+            addr: _rd_u64(ins + 8),
+            size: szb[0] + szb[1] * 256,
+            mnemonic: _cstr(ins + MNEM, 32),
+            op_str: _cstr(ins + OPSTR, 160)
+        })
+        i = i + 1
+    }
+
+    if count > 0 { ffi_call("cs_free", "vpl", [base, count]) }
+    ffi_call("cs_close", "lp", [hbuf])
+    ffi_free(hbuf)
+    ffi_free(cbuf)
+    ffi_free(ibuf)
+    return out
+}
+
+-- Convenience: disassemble x86-64 code.
+fn disasm_x64(code, addr) { return disasm_at(code, addr, 3, 8) }
+
+-- Format one instruction map as "mnemonic op_str".
+fn format_insn(ins) {
+    if len(ins["op_str"]) > 0 { return ins["mnemonic"] + " " + ins["op_str"] }
+    return ins["mnemonic"]
+}
