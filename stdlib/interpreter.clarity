@@ -457,6 +457,7 @@ class Interpreter {
         this.global_env.set("read_bytes", fn(p) { return read_bytes(p) }, true)
         this.global_env.set("write_bytes", fn(p, b) { return write_bytes(p, b) }, true)
         this.global_env.set("read_mem", fn(pid, addr, ln) { return read_mem(pid, addr, ln) }, true)
+        this.global_env.set("write_mem", fn(pid, addr, b) { return write_mem(pid, addr, b) }, true)
 
         -- Errors
         this.global_env.set("error", fn(msg) { return str(msg) }, true)

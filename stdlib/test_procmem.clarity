@@ -81,6 +81,33 @@ if not exists("/proc/self/maps") {
         assert_eq(scan(page, "7F 45 4C 46"), 0, "AOB scan finds the ELF magic at the mapped base")
         assert_eq(scan(page, "DE AD BE EF EF"), -1, "AOB scan miss returns -1")
     }
+
+    -- ── write_mem: round-trip + graceful failure ────
+    show "-- write_mem --"
+    -- Round-trip: read a writable region's first bytes and write them back
+    -- unchanged. This exercises the full write path and its byte-count return
+    -- without risking corruption (identical bytes in = same bytes out). The
+    -- native codegen suite proves an actual value *change* separately.
+    mut wrote_ok = false
+    for r in regions {
+        if wrote_ok { continue }
+        if r["writable"] and r["readable"] and r["size"] >= 8 {
+            let orig = read_mem(0, r["start"], 8)
+            if len(orig) == 8 {
+                let w = write_mem(0, r["start"], orig)
+                if w == 8 {
+                    let after = read_mem(0, r["start"], 8)
+                    mut same = len(after) == 8
+                    mut k = 0
+                    while k < 8 and same { if after[k] != orig[k] { same = false }; k = k + 1 }
+                    if same { wrote_ok = true }
+                }
+            }
+        }
+    }
+    assert(wrote_ok, "write_mem round-trips bytes into a writable region")
+    assert_eq(write_mem(0, 0, [1, 2, 3]), 0, "writing to unmapped address 0 returns 0")
+    assert_eq(write_mem(0, 4096, []), 0, "writing an empty list returns 0")
 }
 
 show ""

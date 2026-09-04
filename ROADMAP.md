@@ -24,17 +24,17 @@ actually want to build, and doing it faster and with less ceremony than the incu
 - **One binary, no external runtime for the *toolchain*.** `clarity` is a single Bun-compiled
   executable (macOS + Linux, x64 + ARM64).
 - **Native compilation is real and growing.** `clarity cc <file>` compiles Clarity → C → a true
-  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 13 it covers the scalar core,
+  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 14 it covers the scalar core,
   collections, classes, closures, a reclaiming GC, strings, file I/O, process/exec, math, JSON,
   raw binary I/O + bitwise ops, native FFI (`dlsym`/typed C calls), the RE byte toolkit (endianness
-  readers/writers + AOB signature scanning), and live-process memory access (`read_mem` over
-  `/proc/<pid>/mem`) — each capability verified by compiling the generated C and diffing its output
-  against the tree-walking interpreter. Native `wc`, a native sysinfo tool, a native JSON
-  transformer, a native `sigscan` AOB scanner, and a native `memscan` live-memory scanner all
-  compile to standalone binaries.
+  readers/writers + AOB signature scanning), and live-process memory read/write (`read_mem` /
+  `write_mem` over `/proc/<pid>/mem`) — each capability verified by compiling the generated C and
+  diffing its output against the tree-walking interpreter. Native `wc`, a native sysinfo tool, a
+  native JSON transformer, a native `sigscan` AOB scanner, a native `memscan` live-memory scanner,
+  and a native `memtrainer` (find-and-poke a value) all compile to standalone binaries.
 - **Track B is now open.** With native FFI (stage 11), the byte toolkit + AOB scanning (stage 12),
-  and live-process memory access (stage 13) landed, the gaming specialty is underway — **RE tooling
-  first** (see the resolved sub-ordering under Track B below).
+  and live-process memory read/write (stages 13–14) landed, the gaming specialty is underway —
+  **RE tooling first** (see the resolved sub-ordering under Track B below).
 
 The bet: keep pushing `clarity cc` until *any* Clarity program compiles to a native binary, then
 specialize hard into the two markets where a small, embeddable, native-compiling language has an
@@ -87,12 +87,13 @@ a small embeddable core):
 - **Binary-format DSL.** Declarative struct/format definitions that parse and emit binary blobs —
   save files, network packets, asset formats, executable headers. Clarity's existing struct/FFI
   layout work (`ffi.clarity`) is the seed.
-- **Process & memory access.** ✅ *Stage 13 (read side):* the `read_mem(pid, addr, len)` native
-  builtin reads another process's `/proc/<pid>/mem` (pid≤0 = self), and pure-Clarity `mem_regions`
-  (in `stdlib/procmem.clarity`) enumerates regions from `/proc/<pid>/maps`; `examples/memscan.clarity`
-  is a compiled live-memory AOB scanner. **Remaining:** a `write_mem` counterpart (poke/patch),
-  module enumeration niceties, and non-Linux backends (mach/`task_for_pid`, Windows
-  `ReadProcessMemory`).
+- **Process & memory access.** ✅ *Stages 13–14:* `read_mem(pid, addr, len)` and
+  `write_mem(pid, addr, bytes)` read and poke another process's `/proc/<pid>/mem` (pid≤0 = self),
+  and pure-Clarity `mem_regions` / `find_region` / `scan_process` / `patch_first` (in
+  `stdlib/procmem.clarity`) enumerate and scan regions from `/proc/<pid>/maps`;
+  `examples/memscan.clarity` (live AOB scanner) and `examples/memtrainer.clarity` (find-and-poke a
+  value) are compiled demos. **Remaining:** module-enumeration niceties and non-Linux backends
+  (mach/`task_for_pid`, Windows `ReadProcessMemory`/`WriteProcessMemory`).
 - **Hooking / detours.** Function interception primitives (inline hooks, IAT/GOT, trampolines) for
   instrumentation and modding.
 - **Disassembly / analysis on-ramp.** FFI bindings to an existing engine (Capstone-class) rather
@@ -110,10 +111,10 @@ a small embeddable core):
 > **Sub-ordering (resolved, Sept 2026): RE tooling first.** Within Track B we lead with
 > *native-RE-tooling* (make Clarity the language you write cheats/trainers/analyzers in) before
 > *embeddable-scripting-for-mods*. Stage 12 (byte toolkit + AOB scanning) is the first increment;
-> stage 13 adds live-process memory *reads* (`read_mem` + `/proc/<pid>/maps` enumeration); the path
-> from here is memory *writes* (`write_mem`) → hooking/detours → a disassembly on-ramp (FFI to a
-> Capstone-class engine). The mods/embedding direction (embedding API + Windows PE) follows once the
-> RE primitives are solid.
+> stages 13–14 add live-process memory *reads and writes* (`read_mem`/`write_mem` +
+> `/proc/<pid>/maps` enumeration + `patch_first`); the path from here is hooking/detours → a
+> disassembly on-ramp (FFI to a Capstone-class engine). The mods/embedding direction (embedding API
+> + Windows PE) follows once the RE primitives are solid.
 
 **Done when:** you can write a memory scanner / trainer, *or* embed Clarity as a game's mod
 scripting language, entirely in Clarity, compiled native.
@@ -159,9 +160,10 @@ A language is only as strong as the distance from "I want to use it" to "it's in
 1. **Done:** Track A stages 10–11 (binary I/O + bitwise, then native FFI) — the shared
    prerequisites for the whole Track B specialty.
 2. **In progress:** Track B, **RE-tooling first** (sub-ordering resolved above). Stage 12 (byte
-   toolkit + AOB scanning) and stage 13 (live-process memory reads) shipped; next are memory writes
-   (`write_mem`), hooking/detours, and a disassembly on-ramp, plus a binary-format DSL. Then the
-   mods/embedding direction.
+   toolkit + AOB scanning) and stages 13–14 (live-process memory read/write) shipped; next are
+   hooking/detours and a disassembly on-ramp, plus a binary-format DSL — with **64-bit bitwise** a
+   strong candidate to land first (the numeric gap RE math keeps hitting). Then the mods/embedding
+   direction.
 3. **In parallel, opportunistically:** Track A networking/services stages as specific apps need
    them, and Track C hardening as friction shows up.
 4. **Track D** rides along — every stage ships with tests and docs so the ecosystem can follow.

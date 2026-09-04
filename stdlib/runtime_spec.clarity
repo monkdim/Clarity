@@ -30,7 +30,8 @@ let IO_SECTION = {
         {name: "lines", params: "path", body: "return readFileSync(path, 'utf-8').split('\\n');"},
         {name: "read_bytes", params: "path", body: "return Array.from(readFileSync(path));"},
         {name: "write_bytes", params: "path, bytes", body: "writeFileSync(path, Buffer.from(bytes)); return true;"},
-        {name: "read_mem", params: "pid, addr, len", body: "if (len <= 0) return [];\n  const _fs = require('fs');\n  const path = (pid && pid > 0) ? `/proc/${pid}/mem` : '/proc/self/mem';\n  let fd;\n  try { fd = _fs.openSync(path, 'r'); } catch { return []; }\n  try {\n    const buf = Buffer.alloc(len);\n    const n = _fs.readSync(fd, buf, 0, len, addr);\n    return Array.from(buf.subarray(0, n));\n  } catch { return []; }\n  finally { try { _fs.closeSync(fd); } catch { } }"}
+        {name: "read_mem", params: "pid, addr, len", body: "if (len <= 0) return [];\n  const _fs = require('fs');\n  const path = (pid && pid > 0) ? `/proc/${pid}/mem` : '/proc/self/mem';\n  let fd;\n  try { fd = _fs.openSync(path, 'r'); } catch { return []; }\n  try {\n    const buf = Buffer.alloc(len);\n    const n = _fs.readSync(fd, buf, 0, len, addr);\n    return Array.from(buf.subarray(0, n));\n  } catch { return []; }\n  finally { try { _fs.closeSync(fd); } catch { } }"},
+        {name: "write_mem", params: "pid, addr, bytes", body: "if (!bytes || bytes.length === 0) return 0;\n  const _fs = require('fs');\n  const path = (pid && pid > 0) ? `/proc/${pid}/mem` : '/proc/self/mem';\n  let fd;\n  try { fd = _fs.openSync(path, 'r+'); } catch { return 0; }\n  try {\n    const buf = Buffer.from(bytes.map(b => b & 0xFF));\n    return _fs.writeSync(fd, buf, 0, buf.length, addr);\n  } catch { return 0; }\n  finally { try { _fs.closeSync(fd); } catch { } }"}
     ]
 }
 
