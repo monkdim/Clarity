@@ -1,0 +1,106 @@
+-- Binary-format DSL — describe a binary layout once, then parse and emit it.
+--
+-- A *format* is a list of field specs. Each field is a map:
+--   {name: "...", type: "<scalar>"}   scalar: u8 i8 u16le u16be i16le
+--                                              u32le u32be i32le u64le
+--   {name: "...", type: "bytes", len: N}   a fixed N-byte blob (a byte list)
+--   {name: "...", type: "pad",   len: N}   N bytes skipped on parse / zeroed on emit
+--
+-- Given a format you get parse (bytes -> a map of field values), emit (a map of
+-- values -> bytes), and sizeof. The pillar for save files, network packets,
+-- asset formats, and executable headers — the "understand a binary" half of RE,
+-- alongside scanning (bytes.clarity) and live memory (procmem.clarity).
+--
+--     let HDR = [{name: "magic", type: "u32be"}, {name: "ver", type: "u16le"},
+--                {name: "flags", type: "u16le"}, {name: "size", type: "u32le"}]
+--     let rec = parse(HDR, read_bytes("file.bin"), 0)
+--     show rec["ver"]
+--     write_bytes("out.bin", emit(HDR, rec))
+--
+-- Pure Clarity over bytes.clarity, so it compiles to a native binary under
+-- `clarity cc` for free. Values are exact to 2^53 (see bits.clarity); u64 fields
+-- above that lose precision.
+
+from "bytes.clarity" import u8, u16le, u32le, u64le, u16be, u32be, i8, i16le, i32le
+from "bytes.clarity" import put_u8, put_u16le, put_u32le, put_u16be, put_u32be, slice
+
+fn _type_size(t) {
+    if t == "u8" or t == "i8" { return 1 }
+    if t == "u16le" or t == "u16be" or t == "i16le" { return 2 }
+    if t == "u32le" or t == "u32be" or t == "i32le" { return 4 }
+    if t == "u64le" { return 8 }
+    return 0
+}
+
+fn _read_scalar(buf, off, t) {
+    if t == "u8" { return u8(buf, off) }
+    if t == "i8" { return i8(buf, off) }
+    if t == "u16le" { return u16le(buf, off) }
+    if t == "u16be" { return u16be(buf, off) }
+    if t == "i16le" { return i16le(buf, off) }
+    if t == "u32le" { return u32le(buf, off) }
+    if t == "u32be" { return u32be(buf, off) }
+    if t == "i32le" { return i32le(buf, off) }
+    if t == "u64le" { return u64le(buf, off) }
+    return 0
+}
+
+fn _write_scalar(buf, value, t) {
+    if t == "u8" or t == "i8" { put_u8(buf, value) }
+    elif t == "u16le" or t == "i16le" { put_u16le(buf, value) }
+    elif t == "u16be" { put_u16be(buf, value) }
+    elif t == "u32le" or t == "i32le" { put_u32le(buf, value) }
+    elif t == "u32be" { put_u32be(buf, value) }
+    elif t == "u64le" {
+        put_u32le(buf, value % 4294967296)
+        put_u32le(buf, int(value / 4294967296))
+    }
+}
+
+-- Total byte size of a format.
+fn sizeof(format) {
+    mut s = 0
+    for f in format {
+        let t = f["type"]
+        if t == "bytes" or t == "pad" { s = s + f["len"] }
+        else { s = s + _type_size(t) }
+    }
+    return s
+}
+
+-- Parse `format` from `buf` starting at `start`; return a map of field values.
+-- (pad fields are consumed but not stored; bytes fields become byte lists.)
+fn parse(format, buf, start) {
+    mut out = {}
+    mut off = start
+    for f in format {
+        let t = f["type"]
+        if t == "bytes" {
+            out[f["name"]] = slice(buf, off, f["len"])
+            off = off + f["len"]
+        } elif t == "pad" {
+            off = off + f["len"]
+        } else {
+            out[f["name"]] = _read_scalar(buf, off, t)
+            off = off + _type_size(t)
+        }
+    }
+    return out
+}
+
+-- Emit `format` from a map of field `values`; return a byte list.
+fn emit(format, values) {
+    mut buf = []
+    for f in format {
+        let t = f["type"]
+        if t == "bytes" {
+            for b in values[f["name"]] { put_u8(buf, b) }
+        } elif t == "pad" {
+            mut i = 0
+            while i < f["len"] { put_u8(buf, 0); i = i + 1 }
+        } else {
+            _write_scalar(buf, values[f["name"]], t)
+        }
+    }
+    return buf
+}

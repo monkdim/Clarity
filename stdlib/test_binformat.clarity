@@ -1,0 +1,95 @@
+-- Tests for binformat.clarity — the binary-format DSL. Round-trip (emit then
+-- parse), sizeof, endianness, pad/bytes fields, and a real ELF64-header parse.
+-- The codegen suite (test_c_codegen.clarity, stage 19) diffs native vs interp.
+
+from "binformat.clarity" import parse, emit, sizeof
+from "bytes.clarity" import to_hex
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert_eq(a, e, m) {
+    if a == e { PASSED += 1 } else { FAILED += 1; show "  FAIL: {m} (expected {e}, got {a})" }
+}
+
+-- ── sizeof ─────────────────────────────────────────
+show "-- sizeof --"
+let HDR = [
+    {name: "magic", type: "u32be"},
+    {name: "ver", type: "u16le"},
+    {name: "_pad", type: "pad", len: 2},
+    {name: "size", type: "u32le"},
+    {name: "tag", type: "bytes", len: 3}
+]
+assert_eq(sizeof(HDR), 15, "sizeof mixed format (4+2+2+4+3)")
+
+-- ── emit / parse round-trip ────────────────────────
+show "-- round-trip --"
+let vals = {"magic": 0xCAFEBABE, "ver": 7, "size": 0x11223344, "tag": [1, 2, 3]}
+let bytes = emit(HDR, vals)
+assert_eq(len(bytes), 15, "emitted length == sizeof")
+-- magic big-endian CA FE BA BE, ver LE 07 00, pad 00 00, size LE 44 33 22 11, tag 01 02 03
+assert_eq(to_hex(bytes), "ca fe ba be 07 00 00 00 44 33 22 11 01 02 03", "emitted bytes exact")
+
+let got = parse(HDR, bytes, 0)
+assert_eq(got["magic"], 0xCAFEBABE, "parse magic (u32be)")
+assert_eq(got["ver"], 7, "parse ver (u16le)")
+assert_eq(got["size"], 0x11223344, "parse size (u32le)")
+assert_eq(str(got["tag"]), "[1, 2, 3]", "parse tag (bytes)")
+
+-- ── endianness + signed ────────────────────────────
+show "-- endianness / signed --"
+let F = [{name: "a", type: "u16le"}, {name: "b", type: "u16be"}, {name: "c", type: "i8"}, {name: "d", type: "u64le"}]
+let v = {"a": 0x0102, "b": 0x0102, "c": -5, "d": 0x0000000187654321}
+let e = emit(F, v)
+let g = parse(F, e, 0)
+assert_eq(g["a"], 0x0102, "u16le round-trip")
+assert_eq(g["b"], 0x0102, "u16be round-trip")
+assert_eq(g["c"], -5, "i8 negative round-trip")
+assert_eq(g["d"], 0x0000000187654321, "u64le round-trip (> 2^32)")
+-- little vs big endian actually differ in the bytes:
+assert_eq(to_hex([e[0], e[1]]), "02 01", "u16le byte order")
+assert_eq(to_hex([e[2], e[3]]), "01 02", "u16be byte order")
+
+-- ── parse at an offset (records within a buffer) ───
+show "-- parse at offset --"
+let REC = [{name: "id", type: "u8"}, {name: "val", type: "u16le"}]
+let two = emit(REC, {"id": 1, "val": 100})
+for b in emit(REC, {"id": 2, "val": 200}) { push(two, b) }
+let r0 = parse(REC, two, 0)
+let r1 = parse(REC, two, 3)
+assert_eq(r0["id"], 1, "record 0 id")
+assert_eq(r0["val"], 100, "record 0 val")
+assert_eq(r1["id"], 2, "record 1 id")
+assert_eq(r1["val"], 200, "record 1 val")
+
+-- ── real format: ELF64 header prefix ───────────────
+show "-- ELF64 header --"
+-- Build a minimal ELF64 header and parse it declaratively.
+let ELF64 = [
+    {name: "magic", type: "bytes", len: 4},
+    {name: "class", type: "u8"},
+    {name: "data", type: "u8"},
+    {name: "eiver", type: "u8"},
+    {name: "_pad", type: "pad", len: 9},
+    {name: "etype", type: "u16le"},
+    {name: "machine", type: "u16le"},
+    {name: "eversion", type: "u32le"},
+    {name: "entry", type: "u64le"},
+    {name: "phoff", type: "u64le"}
+]
+let hdr = {
+    "magic": [0x7F, 0x45, 0x4C, 0x46], "class": 2, "data": 1, "eiver": 1,
+    "etype": 2, "machine": 62, "eversion": 1, "entry": 0x401000, "phoff": 64
+}
+let raw = emit(ELF64, hdr)
+assert_eq(sizeof(ELF64), 40, "ELF64 header prefix through e_phoff is 40 bytes")
+let p = parse(ELF64, raw, 0)
+assert_eq(str(p["magic"]), "[127, 69, 76, 70]", "ELF magic bytes")
+assert_eq(p["class"], 2, "ELF class 64-bit")
+assert_eq(p["machine"], 62, "e_machine x86-64")
+assert_eq(p["entry"], 0x401000, "e_entry (u64)")
+assert_eq(p["phoff"], 64, "e_phoff (u64)")
+
+show ""
+if FAILED == 0 { show "  " + str(PASSED) + " passed, 0 failed" }
+else { show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"; exit(1) }
