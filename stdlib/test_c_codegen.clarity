@@ -28,6 +28,10 @@ fn _find_cc() {
     return null
 }
 let CC = _find_cc()
+-- FFI programs pull dlsym, which needs libdl on Linux (a stub on modern glibc);
+-- on macOS dlsym is in libSystem. Non-FFI programs strip the helper at -O2, so
+-- the extra flag is harmless everywhere.
+let LDL = if CC != null and contains(exec("uname"), "Linux") { " -ldl" } else { "" }
 
 fn interp_run(src) {
     let i = Interpreter(null, null)
@@ -41,12 +45,19 @@ fn native_run(src, tag) {
     let cfile = "/tmp/_clc_" + tag + ".c"
     let bin = "/tmp/_clc_" + tag
     write(cfile, c)
-    exec_full(CC + " -O2 -w " + cfile + " -o " + bin + " -lm")
+    exec_full(CC + " -O2 -w " + cfile + " -o " + bin + " -lm" + LDL)
     return trim(exec_full(bin).stdout)
 }
 
 fn same(tag, src) {
     assert_eq(native_run(src, tag), trim(interp_run(src)), tag)
+}
+
+-- Native-only check: FFI calls into libc/libm have no interpreter counterpart
+-- (the interpreter's FFI is a different, Bun-based surface), so we assert the
+-- compiled binary's output against a known-good expected string.
+fn nat_eq(tag, src, expected) {
+    assert_eq(native_run(src, tag), expected, tag)
 }
 
 if CC == null {
@@ -163,6 +174,16 @@ if CC == null {
     same("bytes_roundtrip", "write_bytes(\"/tmp/_clc_b10.bin\", [72, 105, 33, 0, 255])\nlet r = read_bytes(\"/tmp/_clc_b10.bin\")\nshow r\nshow len(r)\nshow r[0]\nshow r[4]")
     -- magic-byte sniffing: does the file start with the PNG signature?
     same("magic_sniff", "write_bytes(\"/tmp/_clc_png.bin\", [137, 80, 78, 71, 13, 10, 26, 10, 99])\nlet b = read_bytes(\"/tmp/_clc_png.bin\")\nlet png = [137, 80, 78, 71]\nmut ok = true\nfor i in range(4) { if b[i] != png[i] { ok = false } }\nshow ok\nshow b[1]")
+
+    -- ── stage 11: native FFI — call C directly from a compiled binary ──
+    -- (native-only: the interpreter's FFI is a separate Bun-based surface)
+    nat_eq("ffi_strlen", "show ffi_call(\"strlen\", \"ls\", [\"hello, world\"])", "12")
+    nat_eq("ffi_abs", "show ffi_call(\"abs\", \"ll\", [-7])", "7")
+    nat_eq("ffi_toupper", "show ffi_call(\"toupper\", \"ll\", [97])", "65")
+    -- ffi_sym resolves a real symbol to a non-zero address
+    nat_eq("ffi_sym", "let a = ffi_sym(\"strlen\")\nshow a != 0\nshow ffi_sym(\"no_such_symbol_xyz\")", "true\n0")
+    -- compose: use an FFI result in ordinary Clarity control flow
+    nat_eq("ffi_compose", "let n = ffi_call(\"strlen\", \"ls\", [\"clarity\"])\nif n > 5 { show \"long: \" + str(n) } else { show \"short\" }", "long: 7")
 
     exec("rm -f /tmp/_clc_*")
 }
