@@ -1,0 +1,67 @@
+-- elf64info — decode an ELF64 header, including its 64-bit fields, compiled to
+-- a native binary. Shows the bytes toolkit (stage 12) and the 64-bit bit layer
+-- (stage 15) working together on a real format: the entry point and program-
+-- header offset are 64-bit values that the plain `<<`/`>>` operators would
+-- mangle, but u64le (arithmetic) + to_hex (arithmetic) handle exactly.
+--
+--     clarity cc examples/elf64info.clarity -o elf64info
+--     ./elf64info /bin/ls
+--
+-- Single-file (clarity cc doesn't resolve imports yet), so the few helpers are
+-- inlined from stdlib/bytes.clarity and stdlib/bits.clarity.
+
+fn u16le(b, o) { return b[o] + b[o + 1] * 256 }
+fn u32le(b, o) { return b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 16777216 }
+fn u64le(b, o) { return u32le(b, o) + u32le(b, o + 4) * 4294967296 }
+
+-- 64-bit-safe hex (arithmetic, not `>> k`).
+fn to_hex(x, digits) {
+    mut v = x
+    mut out = ""
+    mut c = 0
+    while c < digits {
+        out = char_at("0123456789abcdef", v % 16) + out
+        v = int(v / 16)
+        c = c + 1
+    }
+    return out
+}
+
+fn etype_name(t) {
+    if t == 1 { return "REL (relocatable)" }
+    if t == 2 { return "EXEC (executable)" }
+    if t == 3 { return "DYN (shared object / PIE)" }
+    if t == 4 { return "CORE" }
+    return "unknown (" + str(t) + ")"
+}
+
+fn main() {
+    let argv = args()
+    if len(argv) < 1 {
+        show "usage: elf64info <file>"
+        exit(1)
+    }
+    let path = argv[0]
+    if not exists(path) { show "no such file: " + path; exit(1) }
+
+    let b = read_bytes(path)
+    if len(b) < 64 { show "not an ELF64 file (too small)"; exit(1) }
+    if b[0] != 0x7F or b[1] != 0x45 or b[2] != 0x4C or b[3] != 0x46 {
+        show "not an ELF file (bad magic)"
+        exit(1)
+    }
+    if b[4] != 2 { show "not ELF64 (class != 2)"; exit(1) }
+
+    show "file      : " + path
+    show "class     : ELF64"
+    show "type      : " + etype_name(u16le(b, 16))
+    show "machine   : " + str(u16le(b, 18)) + "  (62 = x86-64)"
+    -- The 64-bit fields — the ones this stage makes correct:
+    show "entry     : 0x" + to_hex(u64le(b, 24), 12)
+    show "phoff     : 0x" + to_hex(u64le(b, 32), 12) + "  (" + str(u64le(b, 32)) + " bytes)"
+    show "shoff     : 0x" + to_hex(u64le(b, 40), 12)
+    show "phnum     : " + str(u16le(b, 56))
+    show "shnum     : " + str(u16le(b, 60))
+}
+
+main()

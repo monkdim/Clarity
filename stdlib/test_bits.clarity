@@ -1,0 +1,71 @@
+-- Tests for bits.clarity — 64-bit-capable bit manipulation (correct to 2^53).
+-- The codegen suite (test_c_codegen.clarity, stage 15) additionally compiles
+-- these and diffs native output against the interpreter.
+
+from "bits.clarity" import pow2, shl, shr, mask, get_bits, bit
+from "bits.clarity" import band, bor, bxor, bnot, to_hex
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert_eq(a, e, m) {
+    if a == e { PASSED += 1 } else { FAILED += 1; show "  FAIL: {m} (expected {e}, got {a})" }
+}
+fn assert(v, m) { if v { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + m } }
+
+-- ── pow2 / shifts / masks ──────────────────────────
+show "-- pow2 / shifts / masks --"
+assert_eq(pow2(0), 1, "pow2(0)")
+assert_eq(pow2(10), 1024, "pow2(10)")
+assert_eq(pow2(32), 4294967296, "pow2(32)")
+assert_eq(pow2(48), 281474976710656, "pow2(48)")
+
+assert_eq(shl(0xFF, 32), 1095216660480, "shl crosses the 32-bit boundary")
+assert_eq(shr(0xFF00000000, 32), 255, "shr from above 2^32")
+assert_eq(shl(1, 40), 1099511627776, "shl(1, 40) = 2^40")
+
+assert_eq(mask(0xDEADBEEF, 16), 0xBEEF, "mask low 16 bits")
+assert_eq(mask(0xABCDEF012345, 24), 0x012345, "mask low 24 of a 48-bit value")
+
+-- ── get_bits / bit ─────────────────────────────────
+show "-- get_bits / bit --"
+assert_eq(get_bits(0xDEADBEEF, 16, 16), 0xDEAD, "get_bits high half")
+assert_eq(get_bits(0xDEADBEEF, 0, 16), 0xBEEF, "get_bits low half")
+assert_eq(get_bits(0xABCD, 4, 8), 0xBC, "get_bits middle byte")
+-- a field that starts above bit 32 (would be impossible with 32-bit shifts)
+assert_eq(get_bits(0xAB0000000000, 40, 8), 0xAB, "get_bits above bit 32")
+assert(bit(5, 0), "bit 0 of 0b101 set")
+assert(not bit(5, 1), "bit 1 of 0b101 clear")
+assert(bit(5, 2), "bit 2 of 0b101 set")
+assert(bit(pow2(50), 50), "bit 50 of 2^50 set")
+
+-- ── band / bor / bxor (64-bit-capable) ─────────────
+show "-- band / bor / bxor --"
+assert_eq(band(0xABCDEF012345, 0xFFFFFF000000), 0xABCDEF000000, "band keeps the top 24 bits of a 48-bit value")
+assert_eq(bor(0xFF000000, 0x000000FF), 0xFF0000FF, "bor")
+assert_eq(bxor(0xAAAA, 0xFFFF), 0x5555, "bxor")
+-- operands above 2^32 — the whole point of this module
+assert_eq(band(4294967551, 511), 255, "band drops a high bit not in both (0x1000000FF & 0x1FF)")
+assert_eq(bor(0x100000000, 0xFF), 0x1000000FF, "bor preserves a bit above 2^32")
+assert_eq(bxor(0x1000000FF, 0x100000000), 0xFF, "bxor cancels the high bit, keeps the low byte")
+assert_eq(bxor(0x100000000, 0x100000000), 0, "bxor of equal high values is 0")
+
+-- ── bnot ───────────────────────────────────────────
+show "-- bnot --"
+assert_eq(bnot(0, 8), 255, "bnot 0 in 8 bits")
+assert_eq(bnot(0xF0, 8), 0x0F, "bnot 0xF0 in 8 bits")
+assert_eq(bnot(0, 16), 65535, "bnot 0 in 16 bits")
+
+-- ── to_hex ─────────────────────────────────────────
+show "-- to_hex --"
+assert_eq(to_hex(255, 2), "ff", "to_hex byte")
+assert_eq(to_hex(0, 4), "0000", "to_hex zero-padded")
+assert_eq(to_hex(0xABCDEF012345, 12), "abcdef012345", "to_hex of a 48-bit address (arithmetic, not >> 44)")
+
+-- ── Summary ────────────────────────────────────────
+show ""
+if FAILED == 0 {
+    show "  " + str(PASSED) + " passed, 0 failed"
+} else {
+    show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+    exit(1)
+}

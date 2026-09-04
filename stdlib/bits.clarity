@@ -1,0 +1,99 @@
+-- 64-bit-capable bit manipulation — the numeric layer RE / binary work needs.
+--
+-- Clarity's `&` `|` `^` `<<` `>>` operators are **32-bit-signed** (JS `|0`
+-- semantics): fine for byte/protocol work, but they mangle anything above
+-- 2^31 — a 48-bit pointer, a u64 header field, a hashed 40-bit id. This module
+-- gives correct bit manipulation on non-negative integers up to **2^53** (the
+-- exact-integer range of a Clarity number), which covers the whole 48-bit
+-- userspace address space and every u32/u48 field.
+--
+-- It's pure Clarity — arithmetic (`*`/`/`/`%`) for shifts/masks, plus a
+-- 32-bit-half decomposition for the true bit ops — so it compiles to a native
+-- binary under `clarity cc` for free, and the codegen suite diffs native vs
+-- interpreter for every function.
+--
+--     from "bits.clarity" import get_bits, band, to_hex
+--     let flags = get_bits(header, 40, 8)   -- 8 bits starting at bit 40
+--     let masked = band(addr, 0xFFFFFFFFF000)
+--     show to_hex(addr, 12)                  -- 48-bit address as 12 hex digits
+--
+-- Limit: values must be non-negative and ≤ 2^53. True 64-bit (bit 63, full u64
+-- arithmetic) needs a bignum path in the interpreter (JS doubles top out at
+-- 2^53) and is a tracked follow-up; these helpers deliberately stay within the
+-- exact-double range so interpreter and native agree bit-for-bit.
+
+-- 2^n as an exact integer (n in 0..53). Built by doubling so it stays exact.
+fn pow2(n) {
+    mut v = 1
+    mut i = 0
+    while i < n { v = v * 2; i = i + 1 }
+    return v
+}
+
+-- Normalise a 32-bit bitwise result (which the `&`/`|`/`^` operators return as
+-- a *signed* int32) to an unsigned 0..2^32-1 value.
+fn _u32(r) {
+    if r < 0 { return r + 4294967296 }
+    return r
+}
+
+-- ── Shifts & masks (pure arithmetic — exact to 2^53) ──
+
+-- Logical left shift: x << n. Caller keeps the result ≤ 2^53.
+fn shl(x, n) { return x * pow2(n) }
+
+-- Logical right shift: x >> n (floor division, i.e. unsigned).
+fn shr(x, n) { return int(x / pow2(n)) }
+
+-- Low `bits` bits of x (x & (2^bits - 1)).
+fn mask(x, bits) { return x % pow2(bits) }
+
+-- Extract `count` bits starting at bit `start` — the RE field decoder.
+--   get_bits(0xABCD, 4, 8) == 0xBC
+fn get_bits(x, start, count) { return int(x / pow2(start)) % pow2(count) }
+
+-- Is bit `n` of x set?
+fn bit(x, n) { return int(x / pow2(n)) % 2 == 1 }
+
+-- ── Bitwise AND/OR/XOR (64-bit-capable to 2^53) ──
+-- Split each operand into its low and high 32-bit halves, apply the (32-bit)
+-- operator to each half, and recombine. The halves' bit patterns are correct
+-- regardless of the operator's signed interpretation, so the result is exact.
+
+fn band(a, b) {
+    let lo = _u32((a % 4294967296) & (b % 4294967296))
+    let hi = _u32(int(a / 4294967296) & int(b / 4294967296))
+    return hi * 4294967296 + lo
+}
+
+fn bor(a, b) {
+    let lo = _u32((a % 4294967296) | (b % 4294967296))
+    let hi = _u32(int(a / 4294967296) | int(b / 4294967296))
+    return hi * 4294967296 + lo
+}
+
+fn bxor(a, b) {
+    let lo = _u32((a % 4294967296) ^ (b % 4294967296))
+    let hi = _u32(int(a / 4294967296) ^ int(b / 4294967296))
+    return hi * 4294967296 + lo
+}
+
+-- Bitwise NOT within `width` bits (width in 1..53): (2^width - 1) - x.
+fn bnot(x, width) { return (pow2(width) - 1) - mask(x, width) }
+
+-- ── Hex formatting (arithmetic — no 32-bit shift truncation) ──
+
+-- Format x as exactly `digits` lowercase hex digits. Unlike `(x >> k) & 15`,
+-- this stays correct for 48-bit addresses (the operators would mangle them).
+fn to_hex(x, digits) {
+    mut v = x
+    mut out = ""
+    mut count = 0
+    while count < digits {
+        let d = v % 16
+        out = char_at("0123456789abcdef", d) + out
+        v = int(v / 16)
+        count = count + 1
+    }
+    return out
+}
