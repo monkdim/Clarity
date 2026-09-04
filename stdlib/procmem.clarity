@@ -15,7 +15,7 @@
 -- returns an empty list and read_mem returns an empty buffer, so callers degrade
 -- gracefully rather than crashing.
 
-from "bytes.clarity" import find_all, parse_pattern
+from "bytes.clarity" import find_all, find_pattern, parse_pattern
 
 -- Parse one lowercase/uppercase hex string ("55f6c0e00000") into a number.
 -- Userspace addresses are ≤ 48-bit, exact in a Clarity int (IEEE double, 53-bit).
@@ -112,4 +112,25 @@ fn scan_process_limited(pid, sig, max_bytes) {
 -- cap). pid <= 0 = self.
 fn scan_process(pid, sig) {
     return scan_process_limited(pid, sig, 16777216)
+}
+
+-- Find `sig` in a process's readable memory and overwrite the match site with
+-- `new_bytes` (a plain byte list — it need not be the pattern's length). Returns
+-- the patched absolute address, or -1 if the signature wasn't found. This is the
+-- trainer primitive: locate a value/instruction by signature, then poke it. The
+-- target page must be writable and, for another process, ptrace-accessible.
+fn patch_first(pid, sig, new_bytes) {
+    let pat = parse_pattern(sig)
+    for r in mem_regions(pid) {
+        if not r["readable"] { continue }
+        let bytes = read_mem(pid, r["start"], r["size"])
+        if len(bytes) == 0 { continue }
+        let off = find_pattern(bytes, pat)
+        if off >= 0 {
+            let addr = r["start"] + off
+            write_mem(pid, addr, new_bytes)
+            return addr
+        }
+    }
+    return -1
 }

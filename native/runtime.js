@@ -56,6 +56,18 @@ export function read_mem(pid, addr, len) {
   } catch { return []; }
   finally { try { _fs.closeSync(fd); } catch { } }
 }
+export function write_mem(pid, addr, bytes) {
+  if (!bytes || bytes.length === 0) return 0;
+  const _fs = require('fs');
+  const path = (pid && pid > 0) ? `/proc/${pid}/mem` : '/proc/self/mem';
+  let fd;
+  try { fd = _fs.openSync(path, 'r+'); } catch { return 0; }
+  try {
+    const buf = Buffer.from(bytes.map(b => b & 0xFF));
+    return _fs.writeSync(fd, buf, 0, buf.length, addr);
+  } catch { return 0; }
+  finally { try { _fs.closeSync(fd); } catch { } }
+}
 
 // ── Type conversions ─────────────────────────────────────
 

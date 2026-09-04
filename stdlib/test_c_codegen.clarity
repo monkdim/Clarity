@@ -228,6 +228,20 @@ if CC == null {
         show "-- stage 13 read_mem: non-Linux, native check skipped --"
     }
 
+    -- ── stage 14: write_mem — poke a live process's memory ──
+    -- Error path is portable: writing to unmapped address 0 returns 0 on every
+    -- platform (open fails without /proc; pwrite fails with it).
+    nat_eq("write_mem_badaddr", "show write_mem(0, 0, [1, 2, 3])", "0")
+    -- Real mutation is Linux-only: build a unique marker string on the heap, find
+    -- it in a writable region via read_mem, overwrite its first byte with 'Z',
+    -- and confirm the string now reads 'Z' — self-modifying live memory, proving
+    -- write_mem actually writes. Safe: it only touches its own heap string.
+    if IS_LINUX {
+        nat_eq("write_mem_mutate", "fn hx(s){mut v=0\nfor ch in chars(s){let c=char_code(ch)\nmut d=-1\nif c>=48 and c<=57{d=c-48}\nif c>=97 and c<=102{d=c-87}\nif c>=65 and c<=70{d=c-55}\nif d>=0{v=v*16+d}}\nreturn v}\nfn find_marker(m){let ls=lines(\"/proc/self/maps\")\nfor line in ls{let sp=index_of(line,\" \")\nif sp>0{let range=substring(line,0,sp)\nlet dash=index_of(range,\"-\")\nif dash>0{let perms=substring(line,sp+1,sp+5)\nif char_at(perms,0)==\"r\" and char_at(perms,1)==\"w\"{let start=hx(substring(range,0,dash))\nlet size=hx(substring(range,dash+1,len(range)))-start\nif size>0 and size<8388608{let buf=read_mem(0,start,size)\nmut i=0\nlet mlen=len(m)\nwhile i+mlen<=len(buf){mut ok=true\nmut j=0\nwhile j<mlen and ok{if buf[i+j]!=char_code(char_at(m,j)){ok=false}\nj=j+1}\nif ok{return start+i}\ni=i+1}}}}}}\nreturn -1}\nlet marker=\"CLARITY_WM_\"+\"MARK_\"+str(31337)+\"_END\"\nlet addr=find_marker(marker)\nmut result=\"notfound\"\nif addr>=0{write_mem(0,addr,[char_code(\"Z\")])\nif char_at(marker,0)==\"Z\"{result=\"ok\"}else{result=\"unchanged\"}}\nshow result", "ok")
+    } else {
+        show "-- stage 14 write_mem mutation: non-Linux, native check skipped --"
+    }
+
     exec("rm -f /tmp/_clc_*")
 }
 

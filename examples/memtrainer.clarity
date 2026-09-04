@@ -1,0 +1,101 @@
+-- memtrainer — the classic "find a value in memory and change it" trainer
+-- loop, compiled to a native binary. Demonstrates stage-14 write_mem on top of
+-- stage-13 read_mem + /proc parsing.
+--
+--     clarity cc examples/memtrainer.clarity -o memtrainer
+--     ./memtrainer
+--
+-- To keep the demo self-contained and safe it patches THIS process: it holds a
+-- "score" as a heap string, locates that string in its own writable memory by
+-- signature, overwrites it with a new value, and reads it back — exactly the
+-- read → locate → write → verify loop a trainer runs against a game. To target
+-- another process instead, pass its pid to read_mem/write_mem (needs ptrace
+-- permission) — see stdlib/procmem.clarity's scan_process / patch_first.
+--
+-- Linux only (reads /proc). Single-file because `clarity cc` doesn't resolve
+-- module imports yet, so the helpers are inlined.
+
+fn hexnum(s) {
+    mut v = 0
+    for ch in chars(s) {
+        let c = char_code(ch)
+        mut d = -1
+        if c >= 48 and c <= 57 { d = c - 48 }
+        if c >= 97 and c <= 102 { d = c - 87 }
+        if c >= 65 and c <= 70 { d = c - 55 }
+        if d >= 0 { v = v * 16 + d }
+    }
+    return v
+}
+
+-- Find the byte sequence of `needle` (a string) in this process's writable
+-- memory; return its absolute address, or -1.
+fn find_writable(needle) {
+    let nlen = len(needle)
+    for line in lines("/proc/self/maps") {
+        let sp = index_of(line, " ")
+        if sp > 0 {
+            let range = substring(line, 0, sp)
+            let dash = index_of(range, "-")
+            if dash > 0 {
+                let perms = substring(line, sp + 1, sp + 5)
+                if char_at(perms, 0) == "r" and char_at(perms, 1) == "w" {
+                    let start = hexnum(substring(range, 0, dash))
+                    let size = hexnum(substring(range, dash + 1, len(range))) - start
+                    if size > 0 and size < 8388608 {
+                        let buf = read_mem(0, start, size)
+                        mut i = 0
+                        while i + nlen <= len(buf) {
+                            mut ok = true
+                            mut j = 0
+                            while j < nlen and ok {
+                                if buf[i + j] != char_code(char_at(needle, j)) { ok = false }
+                                j = j + 1
+                            }
+                            if ok { return start + i }
+                            i = i + 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return -1
+}
+
+fn main() {
+    if not exists("/proc/self/maps") {
+        show "memtrainer: needs Linux (/proc) — nothing to do here"
+        exit(0)
+    }
+
+    -- The "score", built by concatenation so it lives on the (writable) heap.
+    -- Tag it with a unique prefix so we can find exactly this string in memory.
+    let tag = "SCORE_7Q9Z="
+    mut score = tag + "00100"
+    show "score value : " + substring(score, len(tag), len(score))
+
+    let addr = find_writable(score)
+    if addr < 0 {
+        show "could not locate the score in memory"
+        exit(1)
+    }
+    show "located at  : addr " + str(addr)
+
+    -- Poke a new value in place: overwrite the 5 digits after the tag with 99999.
+    let value_off = addr + len(tag)
+    let new_digits = [char_code("9"), char_code("9"), char_code("9"), char_code("9"), char_code("9")]
+    let wrote = write_mem(0, value_off, new_digits)
+    show "wrote bytes : " + str(wrote)
+
+    -- Read it back through the ordinary string — the poke is now visible.
+    show "score value : " + substring(score, len(tag), len(score))
+    if substring(score, len(tag), len(score)) == "99999" {
+        show "trainer: OK — value patched in live memory"
+    } else {
+        show "trainer: value unchanged"
+        exit(1)
+    }
+}
+
+main()
