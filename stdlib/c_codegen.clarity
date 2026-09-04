@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 14).
+-- Clarity → C code generator (native compilation, stage 16).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -91,8 +91,16 @@
 -- Stage 14 adds the write side: write_mem(pid, addr, bytes) pwrite's into a
 -- target's /proc/<pid>/mem and returns the byte count (0 on failure), so a
 -- compiled tool can poke/patch a running process — the trainer counterpart to
--- read_mem. Later stages add hooking/detours, a disassembly on-ramp, and the
--- network stack.
+-- read_mem.
+--
+-- Stage 15 needed no compiler change — bits.clarity (64-bit-capable bit
+-- manipulation to 2^53) is pure Clarity.
+--
+-- Stage 16 matures native FFI: ffi_open(path) dlopen's a shared library with
+-- RTLD_GLOBAL, so its symbols become resolvable by ffi_sym/ffi_call — a
+-- compiled tool can now bind ANY C library (not just already-loaded ones),
+-- the on-ramp to real RE/mod library integrations (Capstone, etc.). Later
+-- stages add hooking/detours, a disassembly on-ramp, and the network stack.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -888,6 +896,17 @@ static void j_ser(SB* s, Value v){
 static Value cl_json_string(Value v){ SB s; sb_init(&s); j_ser(&s, v); return cl_str(s.buf); }
 
 /* ── app stdlib: native FFI (dlopen/dlsym) ── */
+/* ffi_open(path): dlopen a shared library so its symbols become resolvable by
+   ffi_sym/ffi_call. RTLD_GLOBAL folds them into the global scope that
+   RTLD_DEFAULT searches, so after ffi_open("libm.so.6") a plain
+   ffi_call("pow", …) works even though the program never referenced libm
+   directly (the --as-needed case ffi_sym alone couldn't reach). Returns the
+   library handle as an int (0 on failure). */
+static Value cl_ffi_open(Value pathv){
+  if(pathv.t!=T_STR) return cl_int(0);
+  void* h = dlopen(pathv.s, RTLD_NOW | RTLD_GLOBAL);
+  return cl_int((long)h);
+}
 /* ffi_sym(name): raw address of a symbol in the process (RTLD_DEFAULT covers
    libc/libm and anything linked or dlopen'd), as an int (0 if not found). */
 static Value cl_ffi_sym(Value namev){ return cl_int((long)dlsym(RTLD_DEFAULT, namev.s)); }
@@ -975,7 +994,7 @@ let _NATIVE_BUILTINS = {
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
     "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
     "json_parse": 1, "json_string": 1,
-    "ffi_sym": 1, "ffi_call": 1
+    "ffi_open": 1, "ffi_sym": 1, "ffi_call": 1
 }
 
 -- ── Code generator ──────────────────────────────────────
@@ -1246,6 +1265,7 @@ class CCodegen {
         if name == "json_parse" and n == 1 { return "cl_json_parse(" + args[0] + ")" }
         if name == "json_string" and n == 1 { return "cl_json_string(" + args[0] + ")" }
         -- native FFI
+        if name == "ffi_open" and n == 1 { return "cl_ffi_open(" + args[0] + ")" }
         if name == "ffi_sym" and n == 1 { return "cl_ffi_sym(" + args[0] + ")" }
         if name == "ffi_call" and n == 3 { return "cl_ffi_call(" + args[0] + ", " + args[1] + ", " + args[2] + ")" }
         return ""

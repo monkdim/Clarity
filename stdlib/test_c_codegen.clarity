@@ -252,6 +252,19 @@ if CC == null {
     same("bits_ops", "fn u32(r){if r<0{return r+4294967296}\nreturn r}\nfn band(a,b){let lo=u32((a%4294967296)&(b%4294967296))\nlet hi=u32(int(a/4294967296)&int(b/4294967296))\nreturn hi*4294967296+lo}\nfn bor(a,b){let lo=u32((a%4294967296)|(b%4294967296))\nlet hi=u32(int(a/4294967296)|int(b/4294967296))\nreturn hi*4294967296+lo}\nfn bxor(a,b){let lo=u32((a%4294967296)^(b%4294967296))\nlet hi=u32(int(a/4294967296)^int(b/4294967296))\nreturn hi*4294967296+lo}\nshow band(0x1000000FF,0x1FF)\nshow bor(0x100000000,0xFF)\nshow bxor(0x1000000FF,0x100000000)\nshow band(0xABCDEF012345,0xFFFFFF000000)")
     same("bits_tohex", "fn to_hex(x,d){mut v=x\nmut out=\"\"\nmut c=0\nwhile c<d{out=char_at(\"0123456789abcdef\",v%16)+out\nv=int(v/16)\nc=c+1}\nreturn out}\nshow to_hex(0xABCDEF012345,12)\nshow to_hex(255,2)\nshow to_hex(0,4)")
 
+    -- ── stage 16: native FFI ffi_open — bind any shared library ──
+    -- Native-only (the interpreter's FFI is a separate Bun surface), and
+    -- Linux-gated (libm.so.6 path + --as-needed behaviour). This is the exact
+    -- limitation stage 11 documented: under --as-needed the compiled binary
+    -- never references libm, so `pow` isn't loaded and RTLD_DEFAULT can't find it
+    -- (ffi_sym -> 0). ffi_open("libm.so.6") dlopen's it with RTLD_GLOBAL, and now
+    -- ffi_sym/ffi_call reach it — pow(2, 10) = 1024.
+    if IS_LINUX {
+        nat_eq("ffi_open_libm", "show ffi_sym(\"pow\") != 0\nlet h = ffi_open(\"libm.so.6\")\nshow h != 0\nshow ffi_sym(\"pow\") != 0\nshow ffi_call(\"pow\", \"ddd\", [2.0, 10.0])", "false\ntrue\ntrue\n1024")
+    } else {
+        show "-- stage 16 ffi_open: non-Linux, native check skipped --"
+    }
+
     exec("rm -f /tmp/_clc_*")
 }
 
