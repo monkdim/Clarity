@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 16).
+-- Clarity → C code generator (native compilation, stage 17).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -98,9 +98,15 @@
 --
 -- Stage 16 matures native FFI: ffi_open(path) dlopen's a shared library with
 -- RTLD_GLOBAL, so its symbols become resolvable by ffi_sym/ffi_call — a
--- compiled tool can now bind ANY C library (not just already-loaded ones),
--- the on-ramp to real RE/mod library integrations (Capstone, etc.). Later
--- stages add hooking/detours, a disassembly on-ramp, and the network stack.
+-- compiled tool can now bind ANY C library (not just already-loaded ones).
+--
+-- Stage 17 makes that FFI usable for real libraries: ffi_call now has a generic
+-- word-argument path (any mix of l/p/s args through one prototype, per the
+-- integer-register ABI) instead of a fixed signature table, and raw buffers
+-- (ffi_buffer/ffi_read/ffi_write/ffi_free) let a call pass a pointer to memory
+-- Clarity owns — out-params, structs, byte regions. Together they cover the
+-- pointer-heavy APIs a disassembler (Capstone) or codec needs. Later stages add
+-- hooking/detours, the disassembly on-ramp itself, and the network stack.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -907,6 +913,13 @@ static Value cl_ffi_open(Value pathv){
   void* h = dlopen(pathv.s, RTLD_NOW | RTLD_GLOBAL);
   return cl_int((long)h);
 }
+/* Raw native buffers for FFI: pass a pointer to a C function that reads/writes
+   through it (an out-param, a struct, a byte region), then marshal the result
+   back. Kept off the GC heap (malloc/free) so a library may hold the pointer. */
+static Value cl_ffi_buffer(Value nv){ long n=(long)cl_num(nv); if(n<=0) return cl_int(0); void* p=calloc(1,(size_t)n); return cl_int((long)p); }
+static Value cl_ffi_read(Value pv, Value nv){ Value out=cl_list_new(); unsigned char* p=(unsigned char*)(long)cl_num(pv); long n=(long)cl_num(nv); if(!p||n<=0) return out; for(long i=0;i<n;i++) cl_list_add(out, cl_int((long)p[i])); return out; }
+static Value cl_ffi_write(Value pv, Value lv){ unsigned char* p=(unsigned char*)(long)cl_num(pv); if(!p||lv.t!=T_LIST) return cl_int(0); List* l=(List*)lv.o; for(long i=0;i<l->len;i++) p[i]=(unsigned char)(((long)cl_num(l->items[i]))&0xFF); return cl_int(l->len); }
+static Value cl_ffi_free(Value pv){ void* p=(void*)(long)cl_num(pv); if(p) free(p); return cl_null(); }
 /* ffi_sym(name): raw address of a symbol in the process (RTLD_DEFAULT covers
    libc/libm and anything linked or dlopen'd), as an int (0 if not found). */
 static Value cl_ffi_sym(Value namev){ return cl_int((long)dlsym(RTLD_DEFAULT, namev.s)); }
@@ -924,24 +937,33 @@ static Value cl_ffi_call(Value namev, Value sigv, Value argsv){
   const char* sig = sigv.s;
   List* l = (argsv.t==T_LIST) ? (List*)argsv.o : (List*)0;
   long n = l ? l->len : 0;
-  long a0 = n>0 ? l->items[0].i : 0, a1 = n>1 ? l->items[1].i : 0, a2 = n>2 ? l->items[2].i : 0;
+  int has_float = 0; for(const char* c=sig; *c; c++) if(*c=='d') has_float=1;
+  /* Generic word-argument path: any mix of l (long/int), p (pointer/address),
+     and s (cstring) args. On the SysV-x86-64 and AArch64 integer-register ABIs
+     these all pass as machine words in the same registers, and surplus
+     prototype args are harmless, so one 6-word prototype calls any such
+     function — that's what pointer-heavy C libraries (Capstone, zlib, …) need.
+     Return per the sig's first char: l/p -> int (address for p), s -> fresh
+     string, v -> null. Float args keep the dedicated prototypes below (they use
+     a different register class). Not for variadic callees. */
+  if(!has_float){
+    long w[6] = {0,0,0,0,0,0};
+    char rc = sig[0] ? sig[0] : 'v';
+    int ai = 0;
+    for(const char* c = sig[0] ? sig+1 : sig; *c && ai < 6; c++, ai++){
+      Value it = (ai < n && l) ? l->items[ai] : cl_null();
+      if(*c=='s') w[ai] = (long)(it.t==T_STR ? it.s : "");
+      else        w[ai] = (long)(long long)cl_num(it);   /* l or p: value/address */
+    }
+    long ret = ((long(*)(long,long,long,long,long,long))fp)(w[0],w[1],w[2],w[3],w[4],w[5]);
+    if(rc=='v') return cl_null();
+    if(rc=='s') return ret ? cl_str(cl_strdup((char*)ret)) : cl_null();
+    return cl_int(ret);   /* l or p */
+  }
   double d0 = n>0 ? cl_num(l->items[0]) : 0.0, d1 = n>1 ? cl_num(l->items[1]) : 0.0;
-  const char* s0 = n>0 ? l->items[0].s : "";
-  const char* s1 = n>1 ? l->items[1].s : "";
-  if(!strcmp(sig, "l"))    return cl_int(((long(*)(void))fp)());
-  if(!strcmp(sig, "ll"))   return cl_int(((long(*)(long))fp)(a0));
-  if(!strcmp(sig, "lll"))  return cl_int(((long(*)(long,long))fp)(a0, a1));
-  if(!strcmp(sig, "llll")) return cl_int(((long(*)(long,long,long))fp)(a0, a1, a2));
-  if(!strcmp(sig, "ls"))   return cl_int(((long(*)(const char*))fp)(s0));
-  if(!strcmp(sig, "lss"))  return cl_int(((long(*)(const char*,const char*))fp)(s0, s1));
-  if(!strcmp(sig, "lsl"))  return cl_int(((long(*)(const char*,long))fp)(s0, a1));
   if(!strcmp(sig, "d"))    return cl_float(((double(*)(void))fp)());
   if(!strcmp(sig, "dd"))   return cl_float(((double(*)(double))fp)(d0));
   if(!strcmp(sig, "ddd"))  return cl_float(((double(*)(double,double))fp)(d0, d1));
-  if(!strcmp(sig, "ss"))   { const char* r = ((const char*(*)(const char*))fp)(s0); return r ? cl_str(cl_strdup(r)) : cl_null(); }
-  if(!strcmp(sig, "v"))    { ((void(*)(void))fp)(); return cl_null(); }
-  if(!strcmp(sig, "vl"))   { ((void(*)(long))fp)(a0); return cl_null(); }
-  if(!strcmp(sig, "vs"))   { ((void(*)(const char*))fp)(s0); return cl_null(); }
   return cl_null();
 }
 
@@ -994,7 +1016,7 @@ let _NATIVE_BUILTINS = {
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
     "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
     "json_parse": 1, "json_string": 1,
-    "ffi_open": 1, "ffi_sym": 1, "ffi_call": 1
+    "ffi_open": 1, "ffi_buffer": 1, "ffi_read": 1, "ffi_write": 1, "ffi_free": 1, "ffi_sym": 1, "ffi_call": 1
 }
 
 -- ── Code generator ──────────────────────────────────────
@@ -1266,6 +1288,10 @@ class CCodegen {
         if name == "json_string" and n == 1 { return "cl_json_string(" + args[0] + ")" }
         -- native FFI
         if name == "ffi_open" and n == 1 { return "cl_ffi_open(" + args[0] + ")" }
+        if name == "ffi_buffer" and n == 1 { return "cl_ffi_buffer(" + args[0] + ")" }
+        if name == "ffi_read" and n == 2 { return "cl_ffi_read(" + args[0] + ", " + args[1] + ")" }
+        if name == "ffi_write" and n == 2 { return "cl_ffi_write(" + args[0] + ", " + args[1] + ")" }
+        if name == "ffi_free" and n == 1 { return "cl_ffi_free(" + args[0] + ")" }
         if name == "ffi_sym" and n == 1 { return "cl_ffi_sym(" + args[0] + ")" }
         if name == "ffi_call" and n == 3 { return "cl_ffi_call(" + args[0] + ", " + args[1] + ", " + args[2] + ")" }
         return ""

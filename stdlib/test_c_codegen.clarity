@@ -265,6 +265,16 @@ if CC == null {
         show "-- stage 16 ffi_open: non-Linux, native check skipped --"
     }
 
+    -- ── stage 17: native FFI buffers + generic word-arg calls ──
+    -- Portable (libc memset/memcpy/calloc on Linux and macOS): allocate a raw
+    -- buffer, pass its pointer to a C function, and marshal the result back.
+    -- Proves pointer args ('p') and the ffi_buffer/read/write path — the layer a
+    -- real library binding (Capstone, a codec) needs. (Backward compat of the
+    -- generic caller is covered by the stage-11 ffi_strlen/abs/toupper cases,
+    -- which now route through the same path.)
+    nat_eq("ffi_buffer_memset", "let b=ffi_buffer(8)\nffi_call(\"memset\",\"vpll\",[b,65,5])\nshow ffi_read(b,5)\nffi_free(b)", "[65, 65, 65, 65, 65]")
+    nat_eq("ffi_buffer_memcpy", "let src=ffi_buffer(4)\nffi_write(src,[1,2,3,4])\nlet dst=ffi_buffer(4)\nffi_call(\"memcpy\",\"pppl\",[dst,src,4])\nshow ffi_read(dst,4)\nffi_free(src)\nffi_free(dst)", "[1, 2, 3, 4]")
+
     exec("rm -f /tmp/_clc_*")
 }
 
