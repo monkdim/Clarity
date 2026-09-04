@@ -1,0 +1,44 @@
+-- hookdemo — patch a live function's code so it returns whatever you want,
+-- compiled to a native binary. The essence of a game trainer / RE hook: find a
+-- function, overwrite its prologue in memory, and every later call returns your
+-- value — until you restore it.
+--
+--     clarity cc examples/hookdemo.clarity -o hookdemo
+--     ./hookdemo
+--
+-- Here the "target" is libc's abs(), resolved via the native FFI and patched in
+-- this process's own .text (write_mem reaches read-only executable pages through
+-- /proc/self/mem, the way a debugger does). x86-64 Linux only — the patch is
+-- x86-64 machine code. Single-file, so the hook.clarity helpers are inlined.
+
+fn arch() { return trim(exec("uname -m")) }
+
+-- x86-64: mov eax, <imm32> (B8 imm32) ; ret (C3)  -> the function returns value.
+fn ret_patch(value) {
+    return [184, value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF, (value >> 24) & 0xFF, 195]
+}
+
+fn main() {
+    if not exists("/proc/self/maps") or arch() != "x86_64" {
+        show "hookdemo: supported on x86-64 Linux only (arch=" + arch() + ")"
+        exit(0)
+    }
+
+    let addr = ffi_sym("abs")
+    if addr == 0 { show "could not resolve abs()"; exit(1) }
+
+    show "abs(-7) before hook : " + str(ffi_call("abs", "ll", [-7]))
+
+    -- Save the original prologue, then hook abs() to always return 42.
+    let patch = ret_patch(42)
+    let saved = read_mem(0, addr, len(patch))
+    write_mem(0, addr, patch)
+    show "abs(-7) while hooked: " + str(ffi_call("abs", "ll", [-7])) + "   <- forced return value"
+    show "abs(-123) while hooked: " + str(ffi_call("abs", "ll", [-123])) + " <- any input, same result"
+
+    -- Restore.
+    write_mem(0, addr, saved)
+    show "abs(-7) after unhook: " + str(ffi_call("abs", "ll", [-7]))
+}
+
+main()

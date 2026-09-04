@@ -1,0 +1,55 @@
+-- Function hooking / inline patching — the RE "change what a function does"
+-- layer (Track B). Built on stage-14 write_mem: writing through /proc/<pid>/mem
+-- reaches even read-only executable pages (the same mechanism a debugger uses to
+-- set a breakpoint), so a compiled Clarity tool can patch a live function's code.
+--
+--     from "hook.clarity" import hook_return, unhook
+--     let addr = ffi_sym("some_check")          -- resolve the target (native FFI)
+--     let saved = hook_return(0, addr, 1)        -- make it always return 1
+--     ... run the target code ...
+--     unhook(0, addr, saved)                     -- restore the original bytes
+--
+-- **x86-64 only for now.** The inline patch is x86-64 machine code, and self-
+-- modifying code on arm64 additionally needs explicit instruction-cache
+-- maintenance that isn't reachable here yet — so `ret_patch` returns [] on other
+-- architectures and `hook_return` reports failure rather than corrupting code.
+-- Linux only (write_mem uses /proc); resolving the target address uses the
+-- native FFI (ffi_sym), so this is a compiled-binary capability.
+
+-- The current machine architecture, e.g. "x86_64" or "aarch64".
+fn arch() { return trim(exec("uname -m")) }
+
+-- Machine code that makes a function return `value` immediately.
+-- x86-64: `mov eax, <imm32>` (B8 imm32) ; `ret` (C3). Returns [] on an
+-- unsupported architecture. `value` is a 32-bit return code (0..2^32-1).
+fn ret_patch(value) {
+    if arch() == "x86_64" {
+        return [184, value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF, (value >> 24) & 0xFF, 195]
+    }
+    return []
+}
+
+-- Overwrite the function at `addr` in process `pid` (pid <= 0 = self) so it
+-- returns `value`. Returns the original bytes (pass to `unhook` to restore), or
+-- [] if the architecture is unsupported or the write failed. Self needs no
+-- ptrace permission; another process needs it.
+fn hook_return(pid, addr, value) {
+    let patch = ret_patch(value)
+    if len(patch) == 0 { return [] }
+    let orig = read_mem(pid, addr, len(patch))
+    if len(orig) != len(patch) { return [] }
+    let w = write_mem(pid, addr, patch)
+    if w != len(patch) { return [] }
+    return orig
+}
+
+-- Restore bytes saved by hook_return (or any earlier patch). Returns the number
+-- of bytes written.
+fn unhook(pid, addr, saved) {
+    if len(saved) == 0 { return 0 }
+    return write_mem(pid, addr, saved)
+}
+
+-- Raw code patch: overwrite bytes at `addr` (a thin, intention-revealing wrapper
+-- over write_mem). Returns bytes written.
+fn patch(pid, addr, bytes) { return write_mem(pid, addr, bytes) }
