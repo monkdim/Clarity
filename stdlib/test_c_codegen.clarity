@@ -185,6 +185,35 @@ if CC == null {
     -- compose: use an FFI result in ordinary Clarity control flow
     nat_eq("ffi_compose", "let n = ffi_call(\"strlen\", \"ls\", [\"clarity\"])\nif n > 5 { show \"long: \" + str(n) } else { show \"short\" }", "long: 7")
 
+    -- ── stage 12: RE byte toolkit (bytes.clarity) compiles for free ──
+    -- These are the real bytes.clarity function bodies, inlined so the harness
+    -- (which doesn't resolve module imports) can compile them. Each proves the
+    -- pure-Clarity RE primitives produce identical output native vs interpreter.
+
+    -- Unsigned readers use arithmetic, not `<< 24`, so a high u32 stays UNSIGNED
+    -- (0x87654321 = 2271560481) instead of sign-wrapping like the stage-10
+    -- `le_u32_decode` case does; the signed reader wraps it back explicitly.
+    same("re_readers", "fn u16le(b,o){return b[o]+b[o+1]*256}\nfn u32le(b,o){return b[o]+b[o+1]*256+b[o+2]*65536+b[o+3]*16777216}\nfn i32le(b,o){let v=u32le(b,o)\nif v>=2147483648{return v-4294967296}\nreturn v}\nlet b=[33,67,101,135]\nshow u16le(b,0)\nshow u32le(b,0)\nshow i32le(b,0)")
+
+    -- big-endian readers + a 64-bit little-endian read (exact below 2^53)
+    same("re_be_u64", "fn u16be(b,o){return b[o]*256+b[o+1]}\nfn u32be(b,o){return b[o]*16777216+b[o+1]*65536+b[o+2]*256+b[o+3]}\nfn u32le(b,o){return b[o]+b[o+1]*256+b[o+2]*65536+b[o+3]*16777216}\nfn u64le(b,o){return u32le(b,o)+u32le(b,o+4)*4294967296}\nshow u16be([1,44],0)\nshow u32be([222,173,190,239],0)\nshow u64le([33,67,101,135,1,0,0,0],0)")
+
+    -- writers append encoded bytes onto a buffer; read them back unsigned
+    same("re_writers", "fn u32le(b,o){return b[o]+b[o+1]*256+b[o+2]*65536+b[o+3]*16777216}\nfn put_u32le(b,v){push(b,v&255)\npush(b,(v>>8)&255)\npush(b,(v>>16)&255)\npush(b,(v>>24)&255)}\nmut w=[]\nput_u32le(w,3735928559)\nshow w\nshow u32le(w,0)")
+
+    -- hex formatting
+    same("re_hex", "fn hexch(n){return char_at(\"0123456789abcdef\",n&15)}\nfn hex_byte(v){let b=v&255\nreturn hexch((b>>4)&15)+hexch(b&15)}\nfn to_hex(buf){mut p=[]\nfor b in buf{push(p,hex_byte(b))}\nreturn join(p,\" \")}\nshow hex_byte(15)\nshow hex_byte(167)\nshow to_hex([127,69,76,70])")
+
+    -- AOB signature scanning with wildcards — the RE centrepiece. code is a tiny
+    -- x86-64 prologue: 55 48 89 E5 (push rbp; mov rbp,rsp) then E8 rel32 (call).
+    same("re_scan", "fn hexval(ch){let c=char_code(ch)\nif c>=48 and c<=57{return c-48}\nif c>=97 and c<=102{return c-87}\nif c>=65 and c<=70{return c-55}\nreturn -1}\nfn parse_pattern(sig){mut out=[]\nfor tok in split(trim(sig),\" \"){if len(tok)==0{continue}\nif tok==\"??\" or tok==\"?\" or tok==\"*\"{push(out,-1)\ncontinue}\nif len(tok)==2{let hi=hexval(char_at(tok,0))\nlet lo=hexval(char_at(tok,1))\nif hi>=0 and lo>=0{push(out,hi*16+lo)\ncontinue}}\npush(out,-1)}\nreturn out}\nfn match_at(buf,pat,off){let n=len(pat)\nif off<0 or off+n>len(buf){return false}\nmut i=0\nwhile i<n{let p=pat[i]\nif p>=0 and buf[off+i]!=p{return false}\ni=i+1}\nreturn true}\nfn find_pattern(buf,pat){let n=len(pat)\nif n==0{return -1}\nlet last=len(buf)-n\nmut off=0\nwhile off<=last{if match_at(buf,pat,off){return off}\noff=off+1}\nreturn -1}\nfn scan(buf,sig){return find_pattern(buf,parse_pattern(sig))}\nlet code=[85,72,137,229,232,17,34,51,68,195]\nshow parse_pattern(\"48 8B ?? E8\")\nshow scan(code,\"E8 ?? ?? ?? ??\")\nshow scan(code,\"48 89 E5\")\nshow scan(code,\"90 90 90\")")
+
+    -- find_all: every offset a pattern matches
+    same("re_find_all", "fn match_at(buf,pat,off){let n=len(pat)\nif off<0 or off+n>len(buf){return false}\nmut i=0\nwhile i<n{let p=pat[i]\nif p>=0 and buf[off+i]!=p{return false}\ni=i+1}\nreturn true}\nfn find_all(buf,pat){mut hits=[]\nlet n=len(pat)\nif n==0{return hits}\nlet last=len(buf)-n\nmut off=0\nwhile off<=last{if match_at(buf,pat,off){push(hits,off)}\noff=off+1}\nreturn hits}\nshow find_all([171,0,171,0,171],[171])")
+
+    -- classic hex dump (all-printable input keeps the ascii gutter ASCII-clean)
+    same("re_hexdump", "fn hexch(n){return char_at(\"0123456789abcdef\",n&15)}\nfn hex_byte(v){let b=v&255\nreturn hexch((b>>4)&15)+hexch(b&15)}\nfn hexdump(buf){mut out=[]\nlet total=len(buf)\nmut row=0\nwhile row<total{mut oh=\"\"\nmut sh=28\nwhile sh>=0{oh=oh+hexch((row>>sh)&15)\nsh=sh-4}\nmut hp=\"\"\nmut ap=\"\"\nmut col=0\nwhile col<16{let idx=row+col\nif idx<total{let b=buf[idx]\nhp=hp+hex_byte(b)+\" \"\nif b>=32 and b<127{ap=ap+from_char_code(b)}else{ap=ap+\".\"}}else{hp=hp+\"   \"}\ncol=col+1}\npush(out,oh+\"  \"+hp+\" |\"+ap+\"|\")\nrow=row+16}\nreturn join(out,\"\\n\")}\nshow hexdump([72,105,33])")
+
     exec("rm -f /tmp/_clc_*")
 }
 

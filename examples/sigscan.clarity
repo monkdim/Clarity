@@ -1,0 +1,134 @@
+-- sigscan — an AOB (array-of-bytes) signature scanner, compiled to a native
+-- binary. A real reverse-engineering tool in ~60 lines of Clarity.
+--
+--     clarity cc examples/sigscan.clarity -o sigscan
+--     ./sigscan /bin/ls "48 8B ?? ?? E8"      # ?? = wildcard byte
+--
+-- It reads the target file's raw bytes, scans for the signature (with wildcard
+-- support), and prints every match offset plus a hex dump of the first hit.
+--
+-- The byte-toolkit functions below are the same ones in stdlib/bytes.clarity;
+-- they're inlined here because `clarity cc` compiles a single file (module
+-- import resolution for native builds is a tracked follow-up). Everything is
+-- pure Clarity over the stage-10 byte + bitwise primitives, so it compiles with
+-- no runtime and no VM.
+
+fn hexch(n) { return char_at("0123456789abcdef", n & 15) }
+
+fn hex_byte(v) {
+    let b = v & 255
+    return hexch((b >> 4) & 15) + hexch(b & 15)
+}
+
+fn hexval(ch) {
+    let c = char_code(ch)
+    if c >= 48 and c <= 57 { return c - 48 }
+    if c >= 97 and c <= 102 { return c - 87 }
+    if c >= 65 and c <= 70 { return c - 55 }
+    return -1
+}
+
+-- "48 8B ?? E8" -> [72, 139, -1, 232]  (-1 is a wildcard)
+fn parse_pattern(sig) {
+    mut out = []
+    for tok in split(trim(sig), " ") {
+        if len(tok) == 0 { continue }
+        if tok == "??" or tok == "?" or tok == "*" { push(out, -1); continue }
+        if len(tok) == 2 {
+            let hi = hexval(char_at(tok, 0))
+            let lo = hexval(char_at(tok, 1))
+            if hi >= 0 and lo >= 0 { push(out, hi * 16 + lo); continue }
+        }
+        push(out, -1)
+    }
+    return out
+}
+
+fn match_at(buf, pat, off) {
+    let n = len(pat)
+    if off + n > len(buf) { return false }
+    mut i = 0
+    while i < n {
+        let p = pat[i]
+        if p >= 0 and buf[off + i] != p { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn find_all(buf, pat) {
+    mut hits = []
+    let n = len(pat)
+    if n == 0 { return hits }
+    let last = len(buf) - n
+    mut off = 0
+    while off <= last {
+        if match_at(buf, pat, off) { push(hits, off) }
+        off = off + 1
+    }
+    return hits
+}
+
+-- Hex dump of `count` bytes starting at `start`, 16 per row.
+fn dump(buf, start, count) {
+    let total = len(buf)
+    mut row = start
+    let stop = start + count
+    while row < stop and row < total {
+        mut oh = ""
+        mut sh = 28
+        while sh >= 0 { oh = oh + hexch((row >> sh) & 15); sh = sh - 4 }
+        mut hp = ""
+        mut col = 0
+        while col < 16 {
+            let idx = row + col
+            if idx < total { hp = hp + hex_byte(buf[idx]) + " " }
+            col = col + 1
+        }
+        show oh + "  " + hp
+        row = row + 16
+    }
+}
+
+fn main() {
+    -- A compiled binary's args() is the user arguments only (no program name),
+    -- so argv[0] is the first argument.
+    let argv = args()
+    if len(argv) < 2 {
+        show "usage: sigscan <file> <signature>"
+        show "  e.g. sigscan /bin/ls \"48 8B ?? ?? E8\"   (?? = wildcard)"
+        exit(1)
+    }
+    let path = argv[0]
+    let sig = argv[1]
+    if not exists(path) {
+        show "sigscan: no such file: " + path
+        exit(1)
+    }
+
+    let buf = read_bytes(path)
+    let pat = parse_pattern(sig)
+    let hits = find_all(buf, pat)
+
+    show "scanned " + str(len(buf)) + " bytes for [" + sig + "]"
+    if len(hits) == 0 {
+        show "no matches"
+        exit(0)
+    }
+    show str(len(hits)) + " match(es):"
+    for off in hits { show "  0x" + to_hex_offset(off) }
+
+    show ""
+    show "first hit @ 0x" + to_hex_offset(hits[0]) + ":"
+    dump(buf, hits[0], len(pat))
+}
+
+-- 8-digit hex for an offset.
+fn to_hex_offset(n) {
+    mut s = ""
+    mut sh = 28
+    while sh >= 0 { s = s + hexch((n >> sh) & 15); sh = sh - 4 }
+    return s
+}
+
+main()

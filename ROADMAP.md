@@ -16,7 +16,7 @@ actually want to build, and doing it faster and with less ceremony than the incu
 
 ---
 
-## The state of play (July 2026)
+## The state of play (September 2026)
 
 - **Self-hosted, v1.0.** Lexer, parser, interpreter, bytecode VM, type checker, linter,
   formatter, debugger, profiler, doc generator, package manager, LSP, and shell — all written
@@ -24,11 +24,16 @@ actually want to build, and doing it faster and with less ceremony than the incu
 - **One binary, no external runtime for the *toolchain*.** `clarity` is a single Bun-compiled
   executable (macOS + Linux, x64 + ARM64).
 - **Native compilation is real and growing.** `clarity cc <file>` compiles Clarity → C → a true
-  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 9 it covers the scalar core,
-  collections, classes, closures, a reclaiming GC, strings, file I/O, process/exec, math, and
-  JSON — each capability verified by compiling the generated C and diffing its output against the
-  tree-walking interpreter. Native `wc`, a native sysinfo tool, and a native JSON transformer all
-  compile to standalone binaries that match the interpreter byte-for-byte.
+  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 12 it covers the scalar core,
+  collections, classes, closures, a reclaiming GC, strings, file I/O, process/exec, math, JSON,
+  raw binary I/O + bitwise ops, native FFI (`dlsym`/typed C calls), and the RE byte toolkit
+  (endianness readers/writers + AOB signature scanning) — each capability verified by compiling
+  the generated C and diffing its output against the tree-walking interpreter. Native `wc`, a
+  native sysinfo tool, a native JSON transformer, and a native `sigscan` AOB scanner all compile to
+  standalone binaries that match the interpreter byte-for-byte.
+- **Track B is now open.** With native FFI (stage 11) and the byte toolkit + AOB scanning (stage 12)
+  landed, the gaming specialty has started — **RE tooling first** (see the resolved sub-ordering
+  under Track B below).
 
 The bet: keep pushing `clarity cc` until *any* Clarity program compiles to a native binary, then
 specialize hard into the two markets where a small, embeddable, native-compiling language has an
@@ -42,12 +47,15 @@ The trunk everything else hangs off. Until an arbitrary Clarity program compiles
 natively, the specialty tracks can't ship. Driven stage-by-stage through `clarity cc`; each stage
 lands with codegen tests that diff native output against the interpreter.
 
-- **Stage 10 — binary I/O + native FFI.** `read_bytes`/`write_bytes` for raw buffers, and
-  `dlopen`/`dlsym` so compiled Clarity can call arbitrary C functions from shared libraries.
-  *This is the gateway to Track B* — pattern scanning, hooking, and format parsing all need raw
-  bytes and native calls.
-- **Stage 11+ — networking.** Sockets → an HTTP client that isn't a `curl` shell-out → an HTTP
-  server → TLS. Unlocks web/API backends as native binaries.
+- **Stage 10 (done) — binary I/O + bitwise.** `read_bytes`/`write_bytes` for raw buffers and the
+  bitwise operators (`& | ^ << >>`) — the gateway to Track B, since pattern scanning and format
+  parsing both need raw bytes and bit-twiddling.
+- **Stage 11 (done) — native FFI.** `ffi_sym`/`ffi_call` (`dlsym` + a typed C-call shim) so a
+  compiled binary calls C directly.
+- **Stage 12 (done) — RE byte toolkit.** `stdlib/bytes.clarity`: endianness readers/writers + AOB
+  signature scanning, pure Clarity so it compiles for free. First Track B increment (see below).
+- **Networking (next on the trunk).** Sockets → an HTTP client that isn't a `curl` shell-out → an
+  HTTP server → TLS. Unlocks web/API backends as native binaries.
 - **Stage 12+ — services stdlib.** Real crypto (not the toy cipher), a real embedded key/value or
   SQLite binding, CSV/YAML/TOML parsers. The "boring but load-bearing" tier for backends and data
   tools.
@@ -69,9 +77,12 @@ directly, and can be *embedded* has a genuine edge over Python (slow, needs an i
 and C++ (heavy, slow to iterate). Two sub-directions share the same primitives (raw memory + FFI +
 a small embeddable core):
 
-**RE / tooling direction**
-- **Raw memory + pattern scanning.** Byte buffers, endianness helpers, AOB/signature scanning,
-  pointer arithmetic against a target's address space.
+**RE / tooling direction** — *now the active sub-track (see the resolved ordering below).*
+- **Raw memory + pattern scanning.** ✅ *Stage 12:* `stdlib/bytes.clarity` gives byte buffers,
+  endianness helpers (unsigned + signed, LE + BE), and AOB/signature scanning with `??`/`*`
+  wildcards, all pure-Clarity so they compile native for free; `examples/sigscan.clarity` is a
+  standalone compiled AOB scanner. **Remaining:** pointer arithmetic against a live target's
+  address space (needs the process-memory piece below).
 - **Binary-format DSL.** Declarative struct/format definitions that parse and emit binary blobs —
   save files, network packets, asset formats, executable headers. Clarity's existing struct/FFI
   layout work (`ffi.clarity`) is the seed.
@@ -91,10 +102,12 @@ a small embeddable core):
 - **Windows as a first-class target.** RE and modding live on Windows. `clarity cc` currently
   targets ELF/Mach-O; a PE/COFF path (via mingw/clang) is on this track, not an afterthought.
 
-> **Open sub-ordering (needs a call):** within Track B, do we lead with *embeddable-scripting-for-mods*
-> (make Clarity the language you write game mods in) or *native-RE-tooling* (make Clarity the
-> language you write cheats/trainers/analyzers in) first? They share primitives but diverge on
-> polish priorities (embedding API + Windows PE vs. process-memory + hooking + disasm).
+> **Sub-ordering (resolved, Sept 2026): RE tooling first.** Within Track B we lead with
+> *native-RE-tooling* (make Clarity the language you write cheats/trainers/analyzers in) before
+> *embeddable-scripting-for-mods*. Stage 12 (byte toolkit + AOB scanning) is the first increment;
+> the path from here is process/memory access (`/proc` reads) → hooking/detours → a disassembly
+> on-ramp (FFI to a Capstone-class engine). The mods/embedding direction (embedding API + Windows
+> PE) follows once the RE primitives are solid.
 
 **Done when:** you can write a memory scanner / trainer, *or* embed Clarity as a game's mod
 scripting language, entirely in Clarity, compiled native.
@@ -137,10 +150,11 @@ A language is only as strong as the distance from "I want to use it" to "it's in
 
 ## Sequencing
 
-1. **Now → next:** Track A stage 10 (binary I/O + FFI) — it's the shared prerequisite for the
-   whole Track B specialty, so it comes first even though it's on the "trunk."
-2. **Then:** open Track B on top of stage 10 (raw memory + pattern scan + a binary-format DSL),
-   picking the RE-first vs. mods-first sub-ordering per the open question above.
+1. **Done:** Track A stages 10–11 (binary I/O + bitwise, then native FFI) — the shared
+   prerequisites for the whole Track B specialty.
+2. **In progress:** Track B, **RE-tooling first** (sub-ordering resolved above). Stage 12 (byte
+   toolkit + AOB scanning) shipped; next are process/memory access (`/proc`), hooking/detours, and
+   a disassembly on-ramp, plus a binary-format DSL. Then the mods/embedding direction.
 3. **In parallel, opportunistically:** Track A networking/services stages as specific apps need
    them, and Track C hardening as friction shows up.
 4. **Track D** rides along — every stage ships with tests and docs so the ecosystem can follow.

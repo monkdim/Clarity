@@ -1,0 +1,251 @@
+-- Byte-buffer toolkit — binary reading, emitting, and signature scanning.
+--
+-- This is the RE / game-mod foundation (Track B in ROADMAP.md). Everything
+-- operates on a *buffer*: a plain list of ints 0..255 — exactly what
+-- `read_bytes` returns and `write_bytes` consumes. Parse an executable header,
+-- decode a save file, or AOB-scan a binary for a code signature, all in pure
+-- Clarity.
+--
+-- Pure-Clarity by design: every function here is built from the stage-10 native
+-- primitives (byte lists + the bitwise operators), so this module compiles to a
+-- standalone native binary under `clarity cc` for *free* — it adds no runtime
+-- builtins. The codegen suite (stage 12 block in test_c_codegen.clarity)
+-- compiles these exact function bodies and diffs their native output against
+-- the interpreter, so "works in the interpreter" and "works compiled" stay
+-- pinned together.
+--
+--     from "bytes.clarity" import scan, u32le, hexdump
+--     let buf = read_bytes("target.bin")
+--     let off = scan(buf, "48 8B ?? ?? E8")   -- AOB signature, ?? = wildcard
+--     if off >= 0 { show "found at " + str(off) }
+--
+-- Numeric-width note: multi-byte *unsigned* readers use arithmetic (multiply +
+-- add), not `<< 24`. That matters — under Clarity's 32-bit-signed bitwise
+-- semantics `b3 << 24` sets the sign bit and wraps a high u32 negative, whereas
+-- `b3 * 16777216` keeps it in the positive 53-bit-safe range, so `u32le` really
+-- does return 0..2^32-1. `u64le` is exact to 2^53 (a full 64-bit numeric tower
+-- is a tracked follow-up). The signed readers (`i8`/`i16le`/`i32le`) apply the
+-- two's-complement wrap explicitly.
+
+-- ── Unsigned little-endian readers ──────────────────
+
+fn u8(buf, off) { return buf[off] }
+
+fn u16le(buf, off) { return buf[off] + buf[off + 1] * 256 }
+
+fn u32le(buf, off) {
+    return buf[off] + buf[off + 1] * 256 + buf[off + 2] * 65536 + buf[off + 3] * 16777216
+}
+
+fn u64le(buf, off) {
+    -- Exact up to 2^53; above that the high dword loses low bits (Clarity ints
+    -- are IEEE doubles). Fine for offsets/addresses in real userspace binaries.
+    return u32le(buf, off) + u32le(buf, off + 4) * 4294967296
+}
+
+-- ── Unsigned big-endian readers ─────────────────────
+
+fn u16be(buf, off) { return buf[off] * 256 + buf[off + 1] }
+
+fn u32be(buf, off) {
+    return buf[off] * 16777216 + buf[off + 1] * 65536 + buf[off + 2] * 256 + buf[off + 3]
+}
+
+-- ── Signed readers (two's complement) ───────────────
+
+fn i8(buf, off) {
+    let v = buf[off]
+    if v >= 128 { return v - 256 }
+    return v
+}
+
+fn i16le(buf, off) {
+    let v = u16le(buf, off)
+    if v >= 32768 { return v - 65536 }
+    return v
+}
+
+fn i32le(buf, off) {
+    let v = u32le(buf, off)
+    if v >= 2147483648 { return v - 4294967296 }
+    return v
+}
+
+-- ── Writers — append encoded values onto a `mut` buffer ─
+-- Each takes the target byte list and mutates it in place (like elf.clarity's
+-- _emit_*). `(v >> shift) & 0xFF` extracts each byte; the mask keeps it correct
+-- even when v's sign bit is set under 32-bit-signed shifting.
+
+fn put_u8(buf, v) { push(buf, v & 0xFF) }
+
+fn put_u16le(buf, v) {
+    push(buf, v & 0xFF)
+    push(buf, (v >> 8) & 0xFF)
+}
+
+fn put_u32le(buf, v) {
+    push(buf, v & 0xFF)
+    push(buf, (v >> 8) & 0xFF)
+    push(buf, (v >> 16) & 0xFF)
+    push(buf, (v >> 24) & 0xFF)
+}
+
+fn put_u16be(buf, v) {
+    push(buf, (v >> 8) & 0xFF)
+    push(buf, v & 0xFF)
+}
+
+fn put_u32be(buf, v) {
+    push(buf, (v >> 24) & 0xFF)
+    push(buf, (v >> 16) & 0xFF)
+    push(buf, (v >> 8) & 0xFF)
+    push(buf, v & 0xFF)
+}
+
+-- ── Sub-buffer ──────────────────────────────────────
+
+-- The `count` bytes starting at `start`, as a new buffer. Clamped to bounds, so
+-- a slice that runs past the end just returns what's there (never errors).
+fn slice(buf, start, count) {
+    mut out = []
+    let end = start + count
+    mut i = start
+    while i < end and i < len(buf) {
+        if i >= 0 { push(out, buf[i]) }
+        i = i + 1
+    }
+    return out
+}
+
+-- ── Hex ─────────────────────────────────────────────
+
+fn _hexch(nibble) { return char_at("0123456789abcdef", nibble & 0xF) }
+
+-- Two lowercase hex digits for one byte, e.g. 0x0F -> "0f".
+fn hex_byte(v) {
+    let b = v & 0xFF
+    return _hexch((b >> 4) & 0xF) + _hexch(b & 0xF)
+}
+
+-- Space-separated hex for a whole buffer, e.g. "7f 45 4c 46".
+fn to_hex(buf) {
+    mut parts = []
+    for b in buf { push(parts, hex_byte(b)) }
+    return join(parts, " ")
+}
+
+-- ── Signatures / AOB scanning ───────────────────────
+
+fn _hexval(ch) {
+    let code = char_code(ch)
+    if code >= 48 and code <= 57 { return code - 48 }     -- '0'..'9'
+    if code >= 97 and code <= 102 { return code - 87 }    -- 'a'..'f'
+    if code >= 65 and code <= 70 { return code - 55 }     -- 'A'..'F'
+    return -1
+}
+
+-- Parse an AOB signature string into a pattern: a list where each element is a
+-- concrete byte 0..255, or -1 for a wildcard. Tokens are whitespace-separated;
+-- "??", "?" and "*" are wildcards. Anything that isn't a clean two-hex-digit
+-- byte is treated as a wildcard, so a sloppy signature still scans.
+--
+--     parse_pattern("48 8B ?? E8")  ->  [72, 139, -1, 232]
+fn parse_pattern(sig) {
+    mut out = []
+    for tok in split(trim(sig), " ") {
+        if len(tok) == 0 { continue }
+        if tok == "??" or tok == "?" or tok == "*" { push(out, -1); continue }
+        if len(tok) == 2 {
+            let hi = _hexval(char_at(tok, 0))
+            let lo = _hexval(char_at(tok, 1))
+            if hi >= 0 and lo >= 0 { push(out, hi * 16 + lo); continue }
+        }
+        push(out, -1)
+    }
+    return out
+}
+
+-- Does `pat` (a parsed pattern) match `buf` starting at `off`? A -1 element
+-- matches any byte.
+fn match_at(buf, pat, off) {
+    let n = len(pat)
+    if off < 0 or off + n > len(buf) { return false }
+    mut i = 0
+    while i < n {
+        let p = pat[i]
+        if p >= 0 and buf[off + i] != p { return false }
+        i = i + 1
+    }
+    return true
+}
+
+-- First offset in `buf` where `pat` matches, or -1. `pat` is a parsed pattern
+-- (from parse_pattern) or any list of bytes.
+fn find_pattern(buf, pat) {
+    let n = len(pat)
+    if n == 0 { return -1 }
+    let last = len(buf) - n
+    mut off = 0
+    while off <= last {
+        if match_at(buf, pat, off) { return off }
+        off = off + 1
+    }
+    return -1
+}
+
+-- Every offset where `pat` matches (overlapping matches included).
+fn find_all(buf, pat) {
+    mut hits = []
+    let n = len(pat)
+    if n == 0 { return hits }
+    let last = len(buf) - n
+    mut off = 0
+    while off <= last {
+        if match_at(buf, pat, off) { push(hits, off) }
+        off = off + 1
+    }
+    return hits
+}
+
+-- Convenience: scan for an exact byte sequence (no wildcards).
+fn find_bytes(buf, needle) { return find_pattern(buf, needle) }
+
+-- Convenience: parse a signature string and scan for it in one call.
+fn scan(buf, sig) { return find_pattern(buf, parse_pattern(sig)) }
+fn scan_all(buf, sig) { return find_all(buf, parse_pattern(sig)) }
+
+-- ── Hex dump ────────────────────────────────────────
+
+-- Classic `OFFSET  hex bytes  |ascii|` dump, 16 bytes per row, as one string.
+fn hexdump(buf) {
+    mut out = []
+    let total = len(buf)
+    mut row = 0
+    while row < total {
+        -- 8-digit hex offset
+        mut off_hex = ""
+        mut shift = 28
+        while shift >= 0 {
+            off_hex = off_hex + _hexch((row >> shift) & 0xF)
+            shift = shift - 4
+        }
+        mut hexpart = ""
+        mut asciipart = ""
+        mut col = 0
+        while col < 16 {
+            let idx = row + col
+            if idx < total {
+                let b = buf[idx]
+                hexpart = hexpart + hex_byte(b) + " "
+                if b >= 32 and b < 127 { asciipart = asciipart + from_char_code(b) }
+                else { asciipart = asciipart + "." }
+            } else {
+                hexpart = hexpart + "   "
+            }
+            col = col + 1
+        }
+        push(out, off_hex + "  " + hexpart + " |" + asciipart + "|")
+        row = row + 16
+    }
+    return join(out, "\n")
+}
