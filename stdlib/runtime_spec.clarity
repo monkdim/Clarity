@@ -146,7 +146,7 @@ let SYSTEM_SECTION = {
         {name: "exit", params: "code = 0", body: "process.exit(code);"},
         {name: "sleep", params: "secs", body: "execSync('sleep ' + secs);"},
         {name: "time", params: "", body: "return Date.now() / 1000;"},
-        {name: "env", params: "name", body: "return process.env[name] || null;"},
+        {name: "env", params: "name, def", body: "const v = process.env[name]; if (v !== undefined) return v; return def === undefined ? null : def;"},
         {name: "args", params: "", body: "return process.argv.slice(2);"},
         {name: "cwd", params: "", body: "return process.cwd();"}
     ]

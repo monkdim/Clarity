@@ -518,7 +518,7 @@ export function _host_close() {
   _hostState = null;
   return true;
 }
-export function env(name) { return process.env[name] || null; }
+export function env(name, def) { const v = process.env[name]; if (v !== undefined) return v; return def === undefined ? null : def; }
 export function args() { return process.argv.slice(2); }
 export function cwd() { return process.cwd(); }
 
