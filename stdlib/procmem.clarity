@@ -1,0 +1,115 @@
+-- Live-process memory access — the RE "scan a running target" layer (Track B).
+--
+-- Pairs the native `read_mem(pid, addr, len)` builtin (stage 13; pread on
+-- /proc/<pid>/mem) with pure-Clarity parsing of /proc/<pid>/maps, so you can
+-- enumerate a process's memory regions and AOB-scan them for a signature — the
+-- core of a memory scanner / trainer.
+--
+--     from "procmem.clarity" import mem_regions, scan_process
+--     for r in mem_regions(0) { show r["perms"] + " " + r["path"] }   -- 0 = self
+--     let hits = scan_process(0, "7F 45 4C 46")                       -- ELF magic
+--
+-- Linux only (it reads /proc). Reading *another* process (pid > 0) needs ptrace
+-- permission — same user and a permissive `kernel.yama.ptrace_scope`, or root;
+-- reading *self* (pid <= 0) always works. On a non-Linux host mem_regions
+-- returns an empty list and read_mem returns an empty buffer, so callers degrade
+-- gracefully rather than crashing.
+
+from "bytes.clarity" import find_all, parse_pattern
+
+-- Parse one lowercase/uppercase hex string ("55f6c0e00000") into a number.
+-- Userspace addresses are ≤ 48-bit, exact in a Clarity int (IEEE double, 53-bit).
+fn _hexnum(s) {
+    mut v = 0
+    for ch in chars(s) {
+        let c = char_code(ch)
+        mut d = -1
+        if c >= 48 and c <= 57 { d = c - 48 }
+        elif c >= 97 and c <= 102 { d = c - 87 }
+        elif c >= 65 and c <= 70 { d = c - 55 }
+        if d >= 0 { v = v * 16 + d }
+    }
+    return v
+}
+
+-- Enumerate a process's mapped memory regions by parsing /proc/<pid>/maps.
+-- pid <= 0 means this process. Each region is a map:
+--   start, end, size, offset (all numbers), perms ("r-xp"), path (string),
+--   readable / writable / executable (bools).
+fn mem_regions(pid) {
+    mut src = "/proc/self/maps"
+    if pid > 0 { src = "/proc/" + str(pid) + "/maps" }
+    mut regions = []
+    if not exists(src) { return regions }
+    for line in lines(src) {
+        if len(trim(line)) == 0 { continue }
+        -- Fields: "start-end perms offset dev inode  pathname". Collapse the
+        -- variable padding by dropping empty split tokens.
+        mut fields = []
+        for tok in split(line, " ") { if len(tok) > 0 { push(fields, tok) } }
+        if len(fields) < 5 { continue }
+        let range = fields[0]
+        let dash = index_of(range, "-")
+        if dash < 0 { continue }
+        let start = _hexnum(substring(range, 0, dash))
+        let end = _hexnum(substring(range, dash + 1, len(range)))
+        let perms = fields[1]
+        -- pathname is everything from field 5 on (may itself contain spaces).
+        mut path = ""
+        if len(fields) > 5 {
+            mut parts = []
+            mut i = 5
+            while i < len(fields) { push(parts, fields[i]); i = i + 1 }
+            path = join(parts, " ")
+        }
+        push(regions, {
+            "start": start,
+            "end": end,
+            "size": end - start,
+            "offset": _hexnum(fields[2]),
+            "perms": perms,
+            "path": path,
+            "readable": char_at(perms, 0) == "r",
+            "writable": char_at(perms, 1) == "w",
+            "executable": char_at(perms, 2) == "x"
+        })
+    }
+    return regions
+}
+
+-- The region containing `addr`, or null if none does.
+fn find_region(regions, addr) {
+    for r in regions {
+        if addr >= r["start"] and addr < r["end"] { return r }
+    }
+    return null
+}
+
+-- Read a whole region's bytes (via read_mem). Returns a byte list (empty if the
+-- region is unreadable). Beware: a region can be many MB — for large targets,
+-- read in chunks instead.
+fn region_bytes(pid, region) {
+    return read_mem(pid, region["start"], region["size"])
+}
+
+-- Scan every readable region of a process for an AOB signature; return the
+-- absolute addresses where it matches. Regions larger than `max_bytes` are
+-- skipped (pass 0 for no limit) so a stray scan can't try to slurp gigabytes.
+fn scan_process_limited(pid, sig, max_bytes) {
+    let pat = parse_pattern(sig)
+    mut hits = []
+    for r in mem_regions(pid) {
+        if not r["readable"] { continue }
+        if max_bytes > 0 and r["size"] > max_bytes { continue }
+        let bytes = read_mem(pid, r["start"], r["size"])
+        if len(bytes) == 0 { continue }
+        for off in find_all(bytes, pat) { push(hits, r["start"] + off) }
+    }
+    return hits
+}
+
+-- Scan a process's readable regions for a signature (default 16 MB per-region
+-- cap). pid <= 0 = self.
+fn scan_process(pid, sig) {
+    return scan_process_limited(pid, sig, 16777216)
+}

@@ -29,7 +29,8 @@ let IO_SECTION = {
         {name: "exists", params: "path", body: "return existsSync(path);"},
         {name: "lines", params: "path", body: "return readFileSync(path, 'utf-8').split('\\n');"},
         {name: "read_bytes", params: "path", body: "return Array.from(readFileSync(path));"},
-        {name: "write_bytes", params: "path, bytes", body: "writeFileSync(path, Buffer.from(bytes)); return true;"}
+        {name: "write_bytes", params: "path, bytes", body: "writeFileSync(path, Buffer.from(bytes)); return true;"},
+        {name: "read_mem", params: "pid, addr, len", body: "if (len <= 0) return [];\n  const _fs = require('fs');\n  const path = (pid && pid > 0) ? `/proc/${pid}/mem` : '/proc/self/mem';\n  let fd;\n  try { fd = _fs.openSync(path, 'r'); } catch { return []; }\n  try {\n    const buf = Buffer.alloc(len);\n    const n = _fs.readSync(fd, buf, 0, len, addr);\n    return Array.from(buf.subarray(0, n));\n  } catch { return []; }\n  finally { try { _fs.closeSync(fd); } catch { } }"}
     ]
 }
 

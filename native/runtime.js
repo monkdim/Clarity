@@ -43,6 +43,19 @@ export function exists(path) { return existsSync(path); }
 export function lines(path) { return readFileSync(path, 'utf-8').split('\n'); }
 export function read_bytes(path) { return Array.from(readFileSync(path)); }
 export function write_bytes(path, bytes) { writeFileSync(path, Buffer.from(bytes)); return true; }
+export function read_mem(pid, addr, len) {
+  if (len <= 0) return [];
+  const _fs = require('fs');
+  const path = (pid && pid > 0) ? `/proc/${pid}/mem` : '/proc/self/mem';
+  let fd;
+  try { fd = _fs.openSync(path, 'r'); } catch { return []; }
+  try {
+    const buf = Buffer.alloc(len);
+    const n = _fs.readSync(fd, buf, 0, len, addr);
+    return Array.from(buf.subarray(0, n));
+  } catch { return []; }
+  finally { try { _fs.closeSync(fd); } catch { } }
+}
 
 // ── Type conversions ─────────────────────────────────────
 
