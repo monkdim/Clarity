@@ -1,0 +1,38 @@
+-- ffi_buffer — pass raw memory to C functions and read the result back,
+-- compiled to a native binary. Demonstrates stage-17 FFI: raw buffers plus the
+-- generic word-argument caller (any mix of pointer / cstring / int args).
+--
+--     clarity cc examples/ffi_buffer.clarity -o ffi_buffer
+--     ./ffi_buffer
+--
+-- This is the marshalling layer a real library binding needs: a C function that
+-- takes a pointer to memory you own (an out-param, a struct, a byte region) and
+-- fills it — exactly how you'd drive a disassembler like Capstone (cs_open's
+-- handle out-param, cs_disasm's instruction buffer).
+
+-- Read a C string out of a native buffer as a Clarity string.
+fn cstr(buf, n) {
+    let bytes = ffi_read(buf, n)
+    mut s = ""
+    for b in bytes { s = s + from_char_code(b) }
+    return s
+}
+
+fn main() {
+    let buf = ffi_buffer(64)
+
+    -- strcpy(buf, "hello, "): dst is a pointer we own ('p'), src a cstring ('s')
+    ffi_call("strcpy", "pps", [buf, "hello, "])
+    -- strcat(buf, "clarity"): append into the same buffer
+    ffi_call("strcat", "pps", [buf, "clarity"])
+
+    -- strlen(buf): pass the buffer as a pointer, get its length back
+    let n = ffi_call("strlen", "lp", [buf])
+    show "length via C strlen : " + str(n)
+    show "raw bytes           : " + str(ffi_read(buf, n))
+    show "decoded             : " + cstr(buf, n)
+
+    ffi_free(buf)
+}
+
+main()
