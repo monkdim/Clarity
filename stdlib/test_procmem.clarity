@@ -1,0 +1,92 @@
+-- Tests for live-process memory access (procmem.clarity + the read_mem
+-- builtin) — the Track B "scan a running target" layer. Linux-only: they read
+-- /proc, so on a non-Linux host the whole suite is skipped (mem_regions returns
+-- [] and read_mem returns [] there, which callers already handle). Reading
+-- *self* needs no ptrace permission, so these are safe in CI.
+
+from "procmem.clarity" import mem_regions, find_region, region_bytes
+from "procmem.clarity" import scan_process, scan_process_limited
+from "bytes.clarity" import scan
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(v, m) { if v { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + m } }
+fn assert_eq(a, e, m) {
+    if a == e { PASSED += 1 } else { FAILED += 1; show "  FAIL: {m} (expected {e}, got {a})" }
+}
+
+if not exists("/proc/self/maps") {
+    show "-- procmem: /proc absent (non-Linux) — skipped --"
+} else {
+    -- ── mem_regions(self) ──────────────────────────
+    show "-- mem_regions(self) --"
+    let regions = mem_regions(0)
+    assert(len(regions) > 0, "self has mapped regions")
+
+    mut readable = 0
+    for r in regions { if r["readable"] { readable = readable + 1 } }
+    assert(readable > 0, "self has at least one readable region")
+
+    let r0 = regions[0]
+    assert(r0["end"] > r0["start"], "region end > start")
+    assert_eq(r0["size"], r0["end"] - r0["start"], "size == end - start")
+    assert_eq(len(r0["perms"]), 4, "perms is a 4-char string (rwxp)")
+
+    -- ── read_mem: the in-memory image matches the file on disk ──
+    show "-- read_mem: mapped image == on-disk file --"
+    -- Find the first readable, file-backed region mapped at file offset 0 whose
+    -- first bytes are the ELF magic — that's an executable / shared object mapped
+    -- at its header. read_mem of it must equal the file's bytes at offset 0.
+    mut elf_start = -1
+    mut elf_path = ""
+    for r in regions {
+        if elf_start < 0 and r["readable"] and r["offset"] == 0 and len(r["path"]) > 0 and starts(r["path"], "/") and exists(r["path"]) {
+            let m = read_mem(0, r["start"], 4)
+            if len(m) == 4 and m[0] == 0x7F and m[1] == 0x45 and m[2] == 0x4C and m[3] == 0x46 {
+                elf_start = r["start"]
+                elf_path = r["path"]
+            }
+        }
+    }
+    assert(elf_start >= 0, "found an ELF-header region mapped from a file")
+
+    if elf_start >= 0 {
+        let mem64 = read_mem(0, elf_start, 64)
+        let disk = read_bytes(elf_path)
+        mut same = len(mem64) == 64 and len(disk) >= 64
+        mut i = 0
+        while i < 64 and same { if mem64[i] != disk[i] { same = false }; i = i + 1 }
+        assert(same, "read_mem(self, base, 64) matches the first 64 file bytes")
+    }
+
+    -- ── read_mem: graceful failure ─────────────────
+    show "-- read_mem: graceful on bad input --"
+    assert_eq(len(read_mem(0, 0, 8)), 0, "reading unmapped address 0 yields empty")
+    assert_eq(len(read_mem(0, 4096, -5)), 0, "negative length yields empty")
+    assert_eq(len(read_mem(0, 4096, 0)), 0, "zero length yields empty")
+
+    -- ── find_region ────────────────────────────────
+    show "-- find_region --"
+    let hit = find_region(regions, r0["start"])
+    assert(hit != null, "find_region locates a mapped address")
+    assert_eq(hit["start"], r0["start"], "find_region returns the containing region")
+    assert(find_region(regions, 1) == null, "find_region misses an unmapped address")
+
+    -- ── read_mem + AOB scan integration ────────────
+    show "-- read_mem + scan (find a signature in live memory) --"
+    if elf_start >= 0 {
+        -- Read a page at the ELF region and AOB-scan it: the magic is at offset 0.
+        let page = read_mem(0, elf_start, 4096)
+        assert(len(page) > 4, "read a page of live memory")
+        assert_eq(scan(page, "7F 45 4C 46"), 0, "AOB scan finds the ELF magic at the mapped base")
+        assert_eq(scan(page, "DE AD BE EF EF"), -1, "AOB scan miss returns -1")
+    }
+}
+
+show ""
+if FAILED == 0 {
+    show "  " + str(PASSED) + " passed, 0 failed"
+} else {
+    show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+    exit(1)
+}

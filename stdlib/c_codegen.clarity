@@ -1,4 +1,4 @@
--- Clarity → C code generator (native compilation, stage 11).
+-- Clarity → C code generator (native compilation, stage 13).
 --
 -- Emits a single self-contained C translation unit for a Clarity program:
 -- a small tagged-Value runtime (prelude) plus the program itself, so the
@@ -76,7 +76,18 @@
 -- libm. The dlfcn helpers are dead-code-eliminated at -O2 unless the program
 -- uses FFI, so non-FFI binaries still link with -lm alone on every platform;
 -- FFI binaries add -ldl on Linux (a harmless stub on modern glibc, the real
--- libdl on older). Later stages add the network stack.
+-- libdl on older).
+--
+-- Stage 12 needed no compiler change — the RE byte toolkit (stdlib/bytes.clarity:
+-- endianness readers/writers + AOB signature scanning) is pure Clarity over the
+-- stage-10 primitives, so it compiled for free.
+--
+-- Stage 13 opens live-process memory access: read_mem(pid, addr, len) pread's
+-- another process's /proc/<pid>/mem (pid<=0 = self) into a list of bytes, so a
+-- compiled tool can AOB-scan a running target's memory. Linux-backed; a graceful
+-- empty list elsewhere. Region enumeration (parsing /proc/<pid>/maps) is
+-- pure-Clarity in stdlib/procmem.clarity. Later stages add hooking/detours, a
+-- disassembly on-ramp, and the network stack.
 --
 --   let c = compile_to_c(parse(tokenize(src, "x"), src))
 --   write("out.c", c)   →   cc out.c -o prog   →   ./prog
@@ -104,6 +115,7 @@ let C_PRELUDE = """#define _GNU_SOURCE 1
 #include <setjmp.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <dlfcn.h>
@@ -644,9 +656,15 @@ static Value cl_conv_float(Value v){ if(v.t==T_STR) return cl_float(strtod(v.s, 
 /* ── app stdlib: file I/O ── */
 static Value cl_read_file(Value pv){
   FILE* f=fopen(pv.s, "rb"); if(!f) return cl_null();
-  fseek(f, 0, SEEK_END); long sz=ftell(f); if(sz<0) sz=0; fseek(f, 0, SEEK_SET);
-  char* buf=(char*)cl_alloc((size_t)sz+1); size_t rd=fread(buf, 1, (size_t)sz, f); buf[rd]=0; fclose(f);
-  return cl_str(buf);
+  /* Read in a growing loop rather than trusting ftell: virtual files under
+     /proc (and pipes/FIFOs) report size 0, so a size-then-read would come back
+     empty. This reads to real EOF, so read()/lines() work on /proc/<pid>/maps. */
+  size_t cap=4096, len=0; char* buf=(char*)cl_alloc(cap); size_t n;
+  while((n=fread(buf+len, 1, cap-len, f))>0){
+    len+=n;
+    if(len==cap){ size_t ncap=cap*2; char* nb=(char*)cl_alloc(ncap); memcpy(nb, buf, len); buf=nb; cap=ncap; }
+  }
+  fclose(f); buf[len]=0; return cl_str(buf);
 }
 static Value cl_write_file(Value pv, Value cv){ FILE* f=fopen(pv.s, "wb"); if(!f) return cl_bool(0); char* s=cl_to_cstr(cv); fwrite(s, 1, strlen(s), f); fclose(f); return cl_bool(1); }
 static Value cl_append_file(Value pv, Value cv){ FILE* f=fopen(pv.s, "ab"); if(!f) return cl_bool(0); char* s=cl_to_cstr(cv); fwrite(s, 1, strlen(s), f); fclose(f); return cl_bool(1); }
@@ -669,6 +687,29 @@ static Value cl_write_bytes(Value pv, Value lv){
   FILE* f=fopen(pv.s, "wb"); if(!f) return cl_bool(0);
   if(lv.t==T_LIST){ List* l=(List*)lv.o; for(long j=0;j<l->len;j++){ unsigned char c=(unsigned char)(l->items[j].i & 0xFF); fwrite(&c, 1, 1, f); } }
   fclose(f); return cl_bool(1);
+}
+/* read_mem(pid, addr, len): read `len` bytes of another process's virtual
+   memory at address `addr`, as a list of ints 0..255 (like read_bytes). pid<=0
+   means this process (/proc/self/mem). Linux only — on macOS/anywhere without
+   /proc, or on an unreadable region / permission failure, it returns the bytes
+   it managed to read (empty on total failure) rather than aborting: the same
+   friendly behaviour read_bytes gives a compiled tool. Addresses come in as a
+   number (int or double); doubles are exact through 2^53, covering the 48-bit
+   userspace address space. */
+static Value cl_read_mem(Value pidv, Value addrv, Value lenv){
+  Value out=cl_list_new();
+  long pid=(long)cl_num(pidv);
+  unsigned long long addr=(unsigned long long)cl_num(addrv);
+  long len=(long)cl_num(lenv); if(len<=0) return out;
+  char path[64];
+  if(pid>0) snprintf(path, sizeof(path), "/proc/%ld/mem", pid);
+  else snprintf(path, sizeof(path), "/proc/self/mem");
+  int fd=open(path, O_RDONLY); if(fd<0) return out;
+  unsigned char* buf=(unsigned char*)cl_alloc((size_t)len);
+  ssize_t n=pread(fd, buf, (size_t)len, (off_t)addr);
+  close(fd);
+  if(n>0){ for(ssize_t i=0;i<n;i++) cl_list_add(out, cl_int((long)buf[i])); }
+  return out;
 }
 
 /* ── app stdlib: process/env ── */
@@ -903,7 +944,7 @@ let _NATIVE_BUILTINS = {
     "from_char_code": 1, "index_of": 1, "pad_left": 1, "pad_right": 1,
     "chars": 1, "repeat": 1, "is_digit": 1, "is_alpha": 1, "is_alnum": 1,
     "is_space": 1, "read": 1, "write": 1, "append": 1, "exists": 1,
-    "lines": 1, "read_bytes": 1, "write_bytes": 1, "env": 1, "args": 1, "exit": 1,
+    "lines": 1, "read_bytes": 1, "write_bytes": 1, "read_mem": 1, "env": 1, "args": 1, "exit": 1,
     "exec": 1, "exec_full": 1, "sleep": 1, "time": 1,
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
     "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
@@ -1147,6 +1188,7 @@ class CCodegen {
         if name == "lines" and n == 1 { return "cl_lines(" + args[0] + ")" }
         if name == "read_bytes" and n == 1 { return "cl_read_bytes(" + args[0] + ")" }
         if name == "write_bytes" and n == 2 { return "cl_write_bytes(" + args[0] + ", " + args[1] + ")" }
+        if name == "read_mem" and n == 3 { return "cl_read_mem(" + args[0] + ", " + args[1] + ", " + args[2] + ")" }
         -- process / env
         if name == "env" and n == 1 { return "cl_env(" + args[0] + ", cl_null())" }
         if name == "env" and n == 2 { return "cl_env(" + args[0] + ", " + args[1] + ")" }

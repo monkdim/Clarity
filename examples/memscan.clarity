@@ -1,0 +1,167 @@
+-- memscan — scan a live process's memory for an AOB signature, compiled to a
+-- native binary. Combines stage-12 signature scanning with stage-13 live-memory
+-- access (read_mem + /proc/<pid>/maps parsing) — a real memory scanner / trainer
+-- primitive.
+--
+--     clarity cc examples/memscan.clarity -o memscan
+--     ./memscan "7F 45 4C 46"           # scan THIS process for the ELF magic
+--     ./memscan 1234 "48 8B ?? ?? E8"   # scan pid 1234 (?? = wildcard byte)
+--
+-- Reading another process (a pid argument) needs ptrace permission — the same
+-- user and a permissive kernel.yama.ptrace_scope, or root. Scanning self needs
+-- nothing. Linux only (it reads /proc).
+--
+-- Single-file because `clarity cc` doesn't resolve module imports yet, so the
+-- byte + maps helpers are inlined from stdlib/bytes.clarity and
+-- stdlib/procmem.clarity.
+
+-- ── signature scanning (from bytes.clarity) ──────────
+fn hexval(ch) {
+    let c = char_code(ch)
+    if c >= 48 and c <= 57 { return c - 48 }
+    if c >= 97 and c <= 102 { return c - 87 }
+    if c >= 65 and c <= 70 { return c - 55 }
+    return -1
+}
+
+fn parse_pattern(sig) {
+    mut out = []
+    for tok in split(trim(sig), " ") {
+        if len(tok) == 0 { continue }
+        if tok == "??" or tok == "?" or tok == "*" { push(out, -1); continue }
+        if len(tok) == 2 {
+            let hi = hexval(char_at(tok, 0))
+            let lo = hexval(char_at(tok, 1))
+            if hi >= 0 and lo >= 0 { push(out, hi * 16 + lo); continue }
+        }
+        push(out, -1)
+    }
+    return out
+}
+
+fn match_at(buf, pat, off) {
+    let n = len(pat)
+    if off + n > len(buf) { return false }
+    mut i = 0
+    while i < n {
+        let p = pat[i]
+        if p >= 0 and buf[off + i] != p { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn find_all(buf, pat) {
+    mut hits = []
+    let n = len(pat)
+    if n == 0 { return hits }
+    let last = len(buf) - n
+    mut off = 0
+    while off <= last {
+        if match_at(buf, pat, off) { push(hits, off) }
+        off = off + 1
+    }
+    return hits
+}
+
+-- ── /proc maps parsing (from procmem.clarity) ────────
+fn hexnum(s) {
+    mut v = 0
+    for ch in chars(s) {
+        let d = hexval(ch)
+        if d >= 0 { v = v * 16 + d }
+    }
+    return v
+}
+
+fn mem_regions(pid) {
+    mut src = "/proc/self/maps"
+    if pid > 0 { src = "/proc/" + str(pid) + "/maps" }
+    mut regions = []
+    if not exists(src) { return regions }
+    for line in lines(src) {
+        if len(trim(line)) == 0 { continue }
+        mut fields = []
+        for tok in split(line, " ") { if len(tok) > 0 { push(fields, tok) } }
+        if len(fields) < 5 { continue }
+        let range = fields[0]
+        let dash = index_of(range, "-")
+        if dash < 0 { continue }
+        let perms = fields[1]
+        mut path = ""
+        if len(fields) > 5 { path = fields[5] }
+        push(regions, {
+            "start": hexnum(substring(range, 0, dash)),
+            "end": hexnum(substring(range, dash + 1, len(range))),
+            "perms": perms,
+            "path": path,
+            "readable": char_at(perms, 0) == "r"
+        })
+    }
+    return regions
+}
+
+-- 12-digit hex address. Uses arithmetic (%/int-division), not bitwise shifts:
+-- addresses span 48 bits, and Clarity's `>>` is 32-bit-signed, so `n >> 44`
+-- would mangle the high bits. Division stays exact through 2^53.
+fn hexaddr(n) {
+    mut v = n
+    mut out = ""
+    mut count = 0
+    while count < 12 {
+        let d = v % 16
+        out = char_at("0123456789abcdef", d) + out
+        v = int(v / 16)
+        count = count + 1
+    }
+    return out
+}
+
+fn main() {
+    let argv = args()
+    mut pid = 0
+    mut sig = ""
+    if len(argv) == 1 { sig = argv[0] }
+    elif len(argv) >= 2 { pid = int(argv[0]); sig = argv[1] }
+    else {
+        show "usage: memscan [pid] <signature>"
+        show "  e.g. memscan \"7F 45 4C 46\"           scan self for the ELF magic"
+        show "       memscan 1234 \"48 8B ?? ?? E8\"   scan pid 1234 (?? = wildcard)"
+        exit(1)
+    }
+
+    let pat = parse_pattern(sig)
+    if len(pat) == 0 { show "empty signature"; exit(1) }
+
+    mut target = "self"
+    if pid > 0 { target = "pid " + str(pid) }
+    show "scanning " + target + " for [" + sig + "]"
+
+    let CHUNK = 1048576          -- 1 MiB reads keep memory bounded
+    let overlap = len(pat) - 1   -- so a match straddling a chunk edge is caught
+    mut hits = 0
+    mut scanned = 0
+    for r in mem_regions(pid) {
+        if not r["readable"] { continue }
+        mut base = r["start"]
+        let end = r["end"]
+        while base < end {
+            mut want = CHUNK
+            if base + want > end { want = end - base }
+            let buf = read_mem(pid, base, want)
+            if len(buf) > 0 {
+                scanned = scanned + len(buf)
+                for off in find_all(buf, pat) {
+                    show "  " + hexaddr(base + off) + "  " + r["perms"] + "  " + r["path"]
+                    hits = hits + 1
+                }
+            }
+            if want < CHUNK { base = end }
+            else { base = base + CHUNK - overlap }
+        }
+    }
+    show ""
+    show "scanned " + str(scanned) + " bytes; " + str(hits) + " match(es)"
+}
+
+main()
