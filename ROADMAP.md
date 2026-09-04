@@ -24,16 +24,16 @@ actually want to build, and doing it faster and with less ceremony than the incu
 - **One binary, no external runtime for the *toolchain*.** `clarity` is a single Bun-compiled
   executable (macOS + Linux, x64 + ARM64).
 - **Native compilation is real and growing.** `clarity cc <file>` compiles Clarity → C → a true
-  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 15 it covers the scalar core,
+  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 16 it covers the scalar core,
   collections, classes, closures, a reclaiming GC, strings, file I/O, process/exec, math, JSON,
-  raw binary I/O + bitwise ops, native FFI (`dlsym`/typed C calls), the RE byte toolkit (endianness
-  readers/writers + AOB signature scanning), live-process memory read/write (`read_mem` /
-  `write_mem` over `/proc/<pid>/mem`), and 64-bit-capable bit manipulation (`bits.clarity`, correct
-  to 2^53) — each capability verified by compiling the generated C and diffing its output against
-  the tree-walking interpreter. Native `wc`, a native sysinfo tool, a native JSON transformer, a
-  native `sigscan` AOB scanner, a native `memscan` live-memory scanner, a native `memtrainer`
-  (find-and-poke a value), and a native `elf64info` (decodes 64-bit ELF header fields) all compile
-  to standalone binaries.
+  raw binary I/O + bitwise ops, native FFI (`ffi_open`/`dlsym`/typed C calls), the RE byte toolkit
+  (endianness readers/writers + AOB signature scanning), live-process memory read/write (`read_mem`
+  / `write_mem` over `/proc/<pid>/mem`), and 64-bit-capable bit manipulation (`bits.clarity`,
+  correct to 2^53) — each capability verified by compiling the generated C and diffing its output
+  against the tree-walking interpreter. Native `wc`, a native sysinfo tool, a native JSON
+  transformer, a native `sigscan` AOB scanner, a native `memscan` live-memory scanner, a native
+  `memtrainer` (find-and-poke a value), a native `elf64info` (decodes 64-bit ELF header fields),
+  and a native `ffi_libm` (loads libm at runtime and calls it) all compile to standalone binaries.
 - **Track B is now open.** With native FFI (stage 11), the byte toolkit + AOB scanning (stage 12),
   and live-process memory read/write (stages 13–14) landed, the gaming specialty is underway —
   **RE tooling first** (see the resolved sub-ordering under Track B below).
@@ -99,7 +99,8 @@ a small embeddable core):
 - **Hooking / detours.** Function interception primitives (inline hooks, IAT/GOT, trampolines) for
   instrumentation and modding.
 - **Disassembly / analysis on-ramp.** FFI bindings to an existing engine (Capstone-class) rather
-  than a from-scratch disassembler.
+  than a from-scratch disassembler — now unblocked by `ffi_open` (stage 16), which can load an
+  arbitrary shared library into a compiled binary.
 
 **Mods / embedding direction**
 - **Embeddable runtime.** A small C-callable core so a game or host app can embed Clarity as its
@@ -114,9 +115,10 @@ a small embeddable core):
 > *native-RE-tooling* (make Clarity the language you write cheats/trainers/analyzers in) before
 > *embeddable-scripting-for-mods*. Stage 12 (byte toolkit + AOB scanning) is the first increment;
 > stages 13–14 add live-process memory *reads and writes* (`read_mem`/`write_mem` +
-> `/proc/<pid>/maps` enumeration + `patch_first`); the path from here is hooking/detours → a
-> disassembly on-ramp (FFI to a Capstone-class engine). The mods/embedding direction (embedding API
-> + Windows PE) follows once the RE primitives are solid.
+> `/proc/<pid>/maps` enumeration + `patch_first`), stage 15 adds 64-bit-capable bit math, and stage
+> 16 adds `ffi_open` (bind any shared library). The path from here is hooking/detours → a
+> disassembly on-ramp (now that `ffi_open` can load a Capstone-class engine). The mods/embedding
+> direction (embedding API + Windows PE) follows once the RE primitives are solid.
 
 **Done when:** you can write a memory scanner / trainer, *or* embed Clarity as a game's mod
 scripting language, entirely in Clarity, compiled native.
@@ -162,11 +164,12 @@ A language is only as strong as the distance from "I want to use it" to "it's in
 1. **Done:** Track A stages 10–11 (binary I/O + bitwise, then native FFI) — the shared
    prerequisites for the whole Track B specialty.
 2. **In progress:** Track B, **RE-tooling first** (sub-ordering resolved above). Stage 12 (byte
-   toolkit + AOB scanning), stages 13–14 (live-process memory read/write), and stage 15 (64-bit-
-   capable bit manipulation to 2^53) shipped; next are hooking/detours (GOT/PLT patching via
-   `write_mem`) and a disassembly on-ramp, plus a binary-format DSL. Then the mods/embedding
-   direction. (Making the bitwise *operators* themselves 64-bit, and full bit-63 u64, remain larger
-   deliberate numeric-tower efforts — see GAPS.md.)
+   toolkit + AOB scanning), stages 13–14 (live-process memory read/write), stage 15 (64-bit-capable
+   bit manipulation to 2^53), and stage 16 (`ffi_open` — bind any shared library) shipped; next are
+   hooking/detours (GOT/PLT patching via `write_mem`) and a disassembly on-ramp (a Capstone-class
+   engine via `ffi_open`), plus a binary-format DSL. Then the mods/embedding direction. (Making the
+   bitwise *operators* themselves 64-bit, and full bit-63 u64, remain larger deliberate
+   numeric-tower efforts — see GAPS.md.)
 3. **In parallel, opportunistically:** Track A networking/services stages as specific apps need
    them, and Track C hardening as friction shows up.
 4. **Track D** rides along — every stage ships with tests and docs so the ecosystem can follow.

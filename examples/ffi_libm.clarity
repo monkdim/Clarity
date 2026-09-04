@@ -1,0 +1,34 @@
+-- ffi_libm — bind an external C library from a compiled Clarity binary.
+--
+--     clarity cc examples/ffi_libm.clarity -o ffi_libm
+--     ./ffi_libm
+--
+-- Demonstrates stage-16 ffi_open: a standalone binary loads libm at runtime and
+-- calls its functions through the typed FFI shim. `pow`/`sqrt`/`floor` live in
+-- libm, which the linker's default --as-needed drops from a program that only
+-- calls them via FFI — so ffi_sym can't reach them until ffi_open loads the
+-- library (with RTLD_GLOBAL) into the resolvable set. This is the on-ramp to
+-- binding real RE/mod libraries (a disassembler, a game's own .so, …).
+--
+-- Linux paths shown; on macOS the equivalents live in libSystem (already
+-- loaded, so ffi_open isn't even needed there).
+
+fn main() {
+    show "before ffi_open: pow resolvable? " + str(ffi_sym("pow") != 0)
+
+    let h = ffi_open("libm.so.6")
+    if h == 0 {
+        show "ffi_open(libm.so.6) failed — is this Linux with glibc?"
+        exit(1)
+    }
+    show "opened libm, handle != 0: " + str(h != 0)
+    show "after ffi_open: pow resolvable?  " + str(ffi_sym("pow") != 0)
+
+    -- Call through the typed shim: 'ddd' = double return, two double args.
+    show "pow(2, 10)  = " + str(ffi_call("pow", "ddd", [2.0, 10.0]))
+    show "pow(2, 0.5) = " + str(ffi_call("pow", "ddd", [2.0, 0.5]))
+    show "sqrt(144)   = " + str(ffi_call("sqrt", "dd", [144.0]))
+    show "floor(3.9)  = " + str(ffi_call("floor", "dd", [3.9]))
+}
+
+main()
