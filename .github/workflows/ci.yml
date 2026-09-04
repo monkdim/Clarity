@@ -48,6 +48,10 @@ jobs:
         if: steps.bootstrap.outcome != 'success'
         run: python native/transpile.py --bundle
 
+      - name: Install libcapstone (Linux, for the disassembler test)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcapstone-dev
+
       - name: Compile native binary
         run: |
           cd native/dist

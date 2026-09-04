@@ -1,0 +1,91 @@
+-- disasm — a native disassembler: decode machine code into instructions,
+-- compiled to a standalone binary. Demonstrates stage-20 capstone.clarity,
+-- which binds libcapstone at runtime via the FFI (ffi_open + buffers).
+--
+--     clarity cc examples/disasm.clarity -o disasm
+--     ./disasm
+--
+-- Needs libcapstone (Linux: apt install libcapstone-dev; macOS: brew install
+-- capstone). Single-file, so the capstone helpers are inlined from
+-- stdlib/capstone.clarity.
+
+fn ru64(p) {
+    let b = ffi_read(p, 8)
+    return b[0] + b[1]*256 + b[2]*65536 + b[3]*16777216
+         + (b[4] + b[5]*256 + b[6]*65536 + b[7]*16777216) * 4294967296
+}
+fn cstr(p, m) {
+    let b = ffi_read(p, m)
+    mut s = ""
+    for c in b { if c == 0 { break }
+        s = s + from_char_code(c) }
+    return s
+}
+fn lay() {
+    let v = ffi_call("cs_version", "lll", [0, 0])
+    if int(v / 256) >= 5 { return [248, 42, 74] }
+    return [240, 34, 66]
+}
+fn have_capstone() {
+    return ffi_open("libcapstone.so.4") != 0 or ffi_open("libcapstone.so.5") != 0
+        or ffi_open("libcapstone.so") != 0 or ffi_open("libcapstone.dylib") != 0
+}
+-- Disassemble x86-64 `code` starting at `addr` -> list of {addr, size, text}.
+fn disasm(code, addr) {
+    let l = lay()
+    let hbuf = ffi_buffer(8)
+    if ffi_call("cs_open", "lllp", [3, 8, hbuf]) != 0 { ffi_free(hbuf); return [] }
+    let handle = ru64(hbuf)
+    let cbuf = ffi_buffer(len(code))
+    ffi_write(cbuf, code)
+    let ibuf = ffi_buffer(8)
+    let count = ffi_call("cs_disasm", "llplllp", [handle, cbuf, len(code), addr, 0, ibuf])
+    let base = ru64(ibuf)
+    mut out = []
+    mut i = 0
+    while i < count {
+        let ins = base + i * l[0]
+        let szb = ffi_read(ins + 16, 2)
+        push(out, {addr: ru64(ins + 8), size: szb[0] + szb[1]*256, text: trim(cstr(ins + l[1], 32) + " " + cstr(ins + l[2], 160))})
+        i = i + 1
+    }
+    if count > 0 { ffi_call("cs_free", "vpl", [base, count]) }
+    ffi_call("cs_close", "lp", [hbuf])
+    ffi_free(hbuf); ffi_free(cbuf); ffi_free(ibuf)
+    return out
+}
+fn hex12(n) {
+    mut v = n
+    mut s = ""
+    mut c = 0
+    while c < 12 { s = char_at("0123456789abcdef", v % 16) + s; v = int(v / 16); c = c + 1 }
+    return s
+}
+fn dump(title, code, base) {
+    show title
+    for ins in disasm(code, base) {
+        show "  0x" + hex12(ins["addr"]) + "  " + ins["text"]
+    }
+    show ""
+}
+
+fn main() {
+    if not have_capstone() {
+        show "disasm: libcapstone not found (Linux: apt install libcapstone-dev; macOS: brew install capstone)"
+        exit(0)
+    }
+
+    -- A hand-written x86-64 function prologue/epilogue.
+    dump("static snippet:", [0x55, 0x48, 0x89, 0xE5, 0xB8, 0x2A, 0x00, 0x00, 0x00, 0x5D, 0xC3], 0x401000)
+
+    -- A live function: read the first 24 bytes of libc abs() straight from memory
+    -- and disassemble them. (x86-64 hosts only — elsewhere the bytes aren't x86.)
+    if trim(exec("uname -m")) == "x86_64" {
+        let addr = ffi_sym("abs")
+        if addr != 0 {
+            dump("live libc abs() @ its real address:", read_mem(0, addr, 24), addr)
+        }
+    }
+}
+
+main()

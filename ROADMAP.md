@@ -24,19 +24,20 @@ actually want to build, and doing it faster and with less ceremony than the incu
 - **One binary, no external runtime for the *toolchain*.** `clarity` is a single Bun-compiled
   executable (macOS + Linux, x64 + ARM64).
 - **Native compilation is real and growing.** `clarity cc <file>` compiles Clarity → C → a true
-  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 19 it covers the scalar core,
+  native ELF/Mach-O binary with **no Bun and no VM**. As of stage 20 it covers the scalar core,
   collections, classes, closures, a reclaiming GC, strings, file I/O, process/exec, math, JSON,
   raw binary I/O + bitwise ops, native FFI (`ffi_open` + a generic word-arg caller + raw buffers),
   the RE byte toolkit (endianness readers/writers + AOB signature scanning), live-process memory
   read/write (`read_mem` / `write_mem` over `/proc/<pid>/mem`), 64-bit-capable bit manipulation
-  (`bits.clarity`, correct to 2^53), inline function hooking (`hook.clarity`, x86-64 Linux), and a binary-format DSL (`binformat.clarity`) — each capability verified by compiling the generated C and
+  (`bits.clarity`, correct to 2^53), inline function hooking (`hook.clarity`, x86-64 Linux), a binary-format DSL (`binformat.clarity`), and disassembly via a runtime libcapstone binding (`capstone.clarity`) — each capability verified by compiling the generated C and
   diffing its output against the tree-walking interpreter. Native `wc`, a native sysinfo tool, a
   native JSON transformer, a native `sigscan` AOB scanner, a native `memscan` live-memory scanner, a
   native `memtrainer` (find-and-poke a value), a native `elf64info` (decodes 64-bit ELF header
   fields), a native `ffi_libm` (loads libm at runtime), a native `ffi_buffer` (marshals raw
   memory through libc calls), a native `hookdemo` (patches a live function to force its return
-  value), and a native `binformat_demo` (declaratively parses an ELF64 header) all compile to
-  standalone binaries.
+  value), a native `binformat_demo` (declaratively parses an ELF64 header),
+  and a native `disasm` (decodes machine code, incl. a live libc function, via libcapstone) all
+  compile to standalone binaries.
 - **Track B is now open.** With native FFI (stage 11), the byte toolkit + AOB scanning (stage 12),
   and live-process memory read/write (stages 13–14) landed, the gaming specialty is underway —
   **RE tooling first** (see the resolved sub-ordering under Track B below).
@@ -106,10 +107,11 @@ a small embeddable core):
   read-only executable pages); `examples/hookdemo.clarity` is a compiled demo. x86-64 Linux for now.
   **Remaining:** trampoline detours (jump to a replacement, preserving the original), GOT/PLT
   redirection, arm64 (needs i-cache maintenance), and Windows.
-- **Disassembly / analysis on-ramp.** FFI bindings to an existing engine (Capstone-class) rather
-  than a from-scratch disassembler — now unblocked at the language level by `ffi_open` (stage 16) +
-  the pointer/buffer FFI (stage 17), which can load an arbitrary library and drive its
-  pointer/struct/out-param API. Its one remaining gate is having libcapstone available in CI.
+- **Disassembly / analysis on-ramp.** ✅ *Stage 20:* `stdlib/capstone.clarity` binds libcapstone at
+  runtime (via `ffi_open` + buffers) and decodes machine code into `{addr, size, mnemonic, op_str}`;
+  `examples/disasm.clarity` disassembles a static snippet and a live libc function. **Remaining:**
+  richer detail (registers/groups/operands from `cs_detail`), more architectures wired, and a
+  higher-level analysis layer (basic-block / control-flow) on top.
 
 **Mods / embedding direction**
 - **Embeddable runtime.** A small C-callable core so a game or host app can embed Clarity as its
@@ -176,9 +178,10 @@ A language is only as strong as the distance from "I want to use it" to "it's in
    toolkit + AOB scanning), stages 13–14 (live-process memory read/write), stage 15 (64-bit-capable
    bit manipulation to 2^53), stage 16 (`ffi_open` — bind any shared library), and stage 17
    (pointer/buffer FFI + generic word-arg caller), stage 18 (inline function hooking), and stage 19
-   (binary-format DSL) shipped; next are the disassembly on-ramp (bind a Capstone-class engine — a
-   deliberate effort: needs libcapstone in CI and version-pinning for the cs_insn layout) and
-   trampoline detours. Then the mods/embedding direction. (Making the
+   (binary-format DSL), and stage 20 (disassembly via a runtime libcapstone binding) shipped; the RE
+   primitive set (scan / read+write memory / hook / disassemble / describe formats / bind libraries)
+   is now broadly complete. Next: trampoline detours, richer disassembly detail, and consolidation
+   (an umbrella "RE in Clarity" module + tutorial). Then the mods/embedding direction. (Making the
    bitwise *operators* themselves 64-bit, and full bit-63 u64, remain larger deliberate
    numeric-tower efforts — see GAPS.md.)
 3. **In parallel, opportunistically:** Track A networking/services stages as specific apps need

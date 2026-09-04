@@ -1,0 +1,25 @@
+-- Tests for capstone.clarity. The disassembler itself is native-only (it uses
+-- the native FFI, absent from the interpreter) and is proven by the codegen
+-- suite (test_c_codegen.clarity, stage 20); here we validate that the module
+-- parses/imports and check its pure helper + constants, which run anywhere.
+
+from "capstone.clarity" import CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_64, format_insn
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert_eq(a, e, m) {
+    if a == e { PASSED += 1 } else { FAILED += 1; show "  FAIL: {m} (expected {e}, got {a})" }
+}
+
+show "-- constants --"
+assert_eq(CS_ARCH_X86, 3, "CS_ARCH_X86")
+assert_eq(CS_ARCH_ARM64, 1, "CS_ARCH_ARM64")
+assert_eq(CS_MODE_64, 8, "CS_MODE_64")
+
+show "-- format_insn --"
+assert_eq(format_insn({"mnemonic": "mov", "op_str": "eax, 0x2a"}), "mov eax, 0x2a", "with operands")
+assert_eq(format_insn({"mnemonic": "ret", "op_str": ""}), "ret", "no operands")
+
+show ""
+if FAILED == 0 { show "  " + str(PASSED) + " passed, 0 failed" }
+else { show "  " + str(PASSED) + " passed, " + str(FAILED) + " failed"; exit(1) }

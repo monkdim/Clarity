@@ -296,6 +296,19 @@ if CC == null {
     -- the unsigned >2^31 path (magic 0xCAFEBABE = 3405691582).
     same("binformat_roundtrip", "fn put_u8(b,v){push(b,v&255)}\nfn put_u16le(b,v){push(b,v&255)\npush(b,(v>>8)&255)}\nfn put_u32be(b,v){push(b,(v>>24)&255)\npush(b,(v>>16)&255)\npush(b,(v>>8)&255)\npush(b,v&255)}\nfn u8(b,o){return b[o]}\nfn u16le(b,o){return b[o]+b[o+1]*256}\nfn u32be(b,o){return b[o]*16777216+b[o+1]*65536+b[o+2]*256+b[o+3]}\nfn tsize(t){if t==\"u8\"{return 1}\nif t==\"u16le\"{return 2}\nif t==\"u32be\"{return 4}\nreturn 0}\nfn rd(b,o,t){if t==\"u8\"{return u8(b,o)}\nif t==\"u16le\"{return u16le(b,o)}\nif t==\"u32be\"{return u32be(b,o)}\nreturn 0}\nfn wr(b,v,t){if t==\"u8\"{put_u8(b,v)}\nelif t==\"u16le\"{put_u16le(b,v)}\nelif t==\"u32be\"{put_u32be(b,v)}}\nfn emit(fmt,vals){mut b=[]\nfor f in fmt{wr(b,vals[f[\"name\"]],f[\"type\"])}\nreturn b}\nfn parse(fmt,b,start){mut out={}\nmut off=start\nfor f in fmt{out[f[\"name\"]]=rd(b,off,f[\"type\"])\noff=off+tsize(f[\"type\"])}\nreturn out}\nlet HDR=[{name:\"magic\",type:\"u32be\"},{name:\"ver\",type:\"u16le\"},{name:\"flag\",type:\"u8\"}]\nlet bytes=emit(HDR,{\"magic\":3405691582,\"ver\":7,\"flag\":1})\nshow bytes\nlet g=parse(HDR,bytes,0)\nshow g[\"magic\"]\nshow g[\"ver\"]\nshow g[\"flag\"]")
 
+
+    -- ── stage 20: disassembly on-ramp (capstone.clarity) ──
+    -- Bind libcapstone at runtime via ffi_open + buffers and decode x86-64
+    -- machine code into instructions. Linux-gated: CI installs libcapstone-dev on
+    -- the Linux runners (Capstone is a cross-disassembler, so x86-64 decodes on
+    -- both linux-x64 and linux-arm64); macOS has no capstone, so it skips. Native-
+    -- only (the interpreter has no ffi_* surface). Decodes a tiny prologue:
+    -- push rbp; mov rbp,rsp; mov eax,0x2a; ret.
+    if IS_LINUX {
+        nat_eq("capstone_disasm", "fn ru64(p){let b=ffi_read(p,8)\nreturn b[0]+b[1]*256+b[2]*65536+b[3]*16777216+(b[4]+b[5]*256+b[6]*65536+b[7]*16777216)*4294967296}\nfn cstr(p,m){let b=ffi_read(p,m)\nmut s=\"\"\nfor c in b{if c==0{break}\ns=s+from_char_code(c)}\nreturn s}\nfn lay(){let v=ffi_call(\"cs_version\",\"lll\",[0,0])\nif int(v/256)>=5{return [248,42,74]}\nreturn [240,34,66]}\nfn dis(code,addr){if ffi_open(\"libcapstone.so.4\")==0 and ffi_open(\"libcapstone.so.5\")==0 and ffi_open(\"libcapstone.so\")==0{return []}\nlet l=lay()\nlet hbuf=ffi_buffer(8)\nif ffi_call(\"cs_open\",\"lllp\",[3,8,hbuf])!=0{return []}\nlet handle=ru64(hbuf)\nlet cbuf=ffi_buffer(len(code))\nffi_write(cbuf,code)\nlet ibuf=ffi_buffer(8)\nlet count=ffi_call(\"cs_disasm\",\"llplllp\",[handle,cbuf,len(code),addr,0,ibuf])\nlet base=ru64(ibuf)\nmut out=[]\nmut i=0\nwhile i<count{let ins=base+i*l[0]\npush(out,cstr(ins+l[1],32)+\" \"+cstr(ins+l[2],160))\ni=i+1}\nreturn out}\nfor m in dis([85,72,137,229,184,42,0,0,0,195],4096){show trim(m)}", "push rbp\nmov rbp, rsp\nmov eax, 0x2a\nret")
+    } else {
+        show "-- stage 20 capstone: not Linux, native check skipped --"
+    }
     exec("rm -f /tmp/_clc_*")
 }
 
