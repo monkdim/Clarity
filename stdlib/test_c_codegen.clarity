@@ -242,6 +242,16 @@ if CC == null {
         show "-- stage 14 write_mem mutation: non-Linux, native check skipped --"
     }
 
+    -- ── stage 15: 64-bit-capable bit manipulation (bits.clarity) ──
+    -- Pure computation, so these diff native vs interpreter directly. The point
+    -- is values ABOVE 2^31, where the plain `<<`/`&` operators (32-bit-signed)
+    -- would mangle results but these arithmetic/decomposition helpers stay exact
+    -- to 2^53.
+    same("bits_shifts", "fn pow2(n){mut v=1\nmut i=0\nwhile i<n{v=v*2\ni=i+1}\nreturn v}\nfn shl(x,n){return x*pow2(n)}\nfn shr(x,n){return int(x/pow2(n))}\nfn mask(x,b){return x%pow2(b)}\nshow shl(255,32)\nshow shr(shl(255,32),32)\nshow mask(3735928559,16)\nshow pow2(48)")
+    same("bits_getbits", "fn pow2(n){mut v=1\nmut i=0\nwhile i<n{v=v*2\ni=i+1}\nreturn v}\nfn get_bits(x,s,c){return int(x/pow2(s))%pow2(c)}\nshow get_bits(3735928559,16,16)\nshow get_bits(3735928559,0,16)\nshow get_bits(171*pow2(40),40,8)")
+    same("bits_ops", "fn u32(r){if r<0{return r+4294967296}\nreturn r}\nfn band(a,b){let lo=u32((a%4294967296)&(b%4294967296))\nlet hi=u32(int(a/4294967296)&int(b/4294967296))\nreturn hi*4294967296+lo}\nfn bor(a,b){let lo=u32((a%4294967296)|(b%4294967296))\nlet hi=u32(int(a/4294967296)|int(b/4294967296))\nreturn hi*4294967296+lo}\nfn bxor(a,b){let lo=u32((a%4294967296)^(b%4294967296))\nlet hi=u32(int(a/4294967296)^int(b/4294967296))\nreturn hi*4294967296+lo}\nshow band(0x1000000FF,0x1FF)\nshow bor(0x100000000,0xFF)\nshow bxor(0x1000000FF,0x100000000)\nshow band(0xABCDEF012345,0xFFFFFF000000)")
+    same("bits_tohex", "fn to_hex(x,d){mut v=x\nmut out=\"\"\nmut c=0\nwhile c<d{out=char_at(\"0123456789abcdef\",v%16)+out\nv=int(v/16)\nc=c+1}\nreturn out}\nshow to_hex(0xABCDEF012345,12)\nshow to_hex(255,2)\nshow to_hex(0,4)")
+
     exec("rm -f /tmp/_clc_*")
 }
 
