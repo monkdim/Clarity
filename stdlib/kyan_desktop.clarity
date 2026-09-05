@@ -301,7 +301,7 @@ class KyanDesktop {
             return false
         }
         if app_id == "calc" and has(this._app_ui, "calc") {
-            let key = calc_key_at(ax, ay, aw, ah, px, py)
+            let key = calc_key_at(ax, ay, aw, ah, px, py, this._app_ui["calc"])
             if key != null {
                 calc_press(this._app_ui["calc"], key)
                 this._dirty = true
