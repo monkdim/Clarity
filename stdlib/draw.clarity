@@ -550,6 +550,52 @@ fn blit_rounded(dst, src, dx, dy, w, h, radius) {
     _blit_corner(dst, src, dx, dy, dx + w - r, dy + h - r, dx + w - r, dy + h - r, r)
 }
 
+-- Composite `src` onto `dst` at (dx,dy) as a translucent rounded pane:
+-- every pixel is `src` over `dst` at `alpha` (0-255), the four corners
+-- anti-aliased so the pane floats with soft edges. This is the frosted-
+-- window blit — a window's chrome rides at `alpha` over a frosted-glass
+-- base (frosted_panel), so the blurred wallpaper glows through the surface.
+-- Opaque alpha (>=255) falls through to the fast opaque blit_rounded.
+fn blit_rounded_alpha(dst, src, dx, dy, w, h, radius, alpha) {
+    if alpha >= 255 { blit_rounded(dst, src, dx, dy, w, h, radius); return null }
+    if alpha <= 0 { return null }
+    let r0 = if radius * 2 > w { int(w / 2) } else { radius }
+    let r = if r0 * 2 > h { int(h / 2) } else { r0 }
+    let fa = float(alpha)
+    let fr = float(r)
+    mut ly = 0
+    while ly < h {
+        -- vertical distance from the near corner-arc centre, when in a band
+        mut in_vband = false
+        mut ey = 0.0
+        if ly < r { in_vband = true; ey = float(ly) + 0.5 - fr }
+        if ly >= h - r { in_vband = true; ey = float(ly) + 0.5 - float(h - r) }
+        mut lx = 0
+        while lx < w {
+            mut cov = 1.0
+            if in_vband {
+                mut in_hband = false
+                mut ex = 0.0
+                if lx < r { in_hband = true; ex = float(lx) + 0.5 - fr }
+                if lx >= w - r { in_hband = true; ex = float(lx) + 0.5 - float(w - r) }
+                if in_hband {
+                    -- inside a corner box: coverage from the arc, like _blit_corner
+                    let d = sqrt(ex * ex + ey * ey)
+                    cov = fr + 0.5 - d
+                    if cov > 1.0 { cov = 1.0 }
+                }
+            }
+            if cov > 0.0 {
+                let sp = src.get_pixel(lx, ly) & 0xFFFFFF
+                let a = int(fa * cov)
+                if a > 0 { blend_pixel(dst, dx + lx, dy + ly, a * 16777216 + sp) }
+            }
+            lx += 1
+        }
+        ly += 1
+    }
+}
+
 -- ── Scaled + faded compositing (window animations) ──────
 -- Composite `src` into `dst` scaled to `dw`×`dh` at (dx,dy), source-over
 -- at `alpha` (0-255). Bilinear, native. This is how a window scales up

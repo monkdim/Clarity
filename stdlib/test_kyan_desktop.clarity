@@ -78,10 +78,16 @@ let void = theme["background"]
 let glow_px = screen.get_pixel(850, 520)
 assert(glow_px != void, "wallpaper glow tints the canvas")
 
--- an app window composited: terminal is on top at (120,90); its red
--- traffic dot sits at window-local (14, title_h/2-5)=(14,11)
-let dot = screen.get_pixel(120 + 16, 90 + 13)
-assert_eq(dot, 0xFFFB7185, "focused window's traffic dot painted on screen")
+-- an app window composited: terminal is on top at (120,90); its round
+-- red traffic light is centred at window-local (19, title_h/2)=(19,16).
+-- The window rides at <100% over a frosted-glass base, so the dot is the
+-- source red composited through the glass — assert it's red-dominant (the
+-- chrome landed on screen) rather than an exact source colour.
+let dot = screen.get_pixel(120 + 19, 90 + 16)
+let dot_r = int(dot / 65536) & 0xFF
+let dot_g = int(dot / 256) & 0xFF
+let dot_b = dot & 0xFF
+assert(dot_r > 150 and dot_r > dot_g + 60 and dot_r > dot_b + 40, "focused window's traffic dot painted on screen (red through glass)")
 
 -- focused window shows the signature rail (not the plain border) on top
 let rail = screen.get_pixel(120 + 180, 90 + 1)
