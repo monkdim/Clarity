@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
+from "kyan_apps.clarity" import paint_prism, new_prism, prism_hit, paint_terminal_content, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -39,9 +39,11 @@ assert(has(reg, "files"), "files painter registered")
 
 -- ── Prism ──
 show "-- Kyan apps: prism --"
+let pstate = new_prism()
+assert_eq(pstate["view"], "library", "prism starts in the library view")
 let fp = framebuffer(680, 420)
 fp.clear(0xFF000000)
-paint_prism(fp, 0, 0, 680, 420, t, true)
+paint_prism(fp, 0, 0, 680, 420, t, pstate)
 assert(painted(fp, 0xFF000000), "prism paints content")
 -- sidebar band on the left uses the elevated surface
 assert_eq(fp.get_pixel(40, 200), t["surface_elevated"], "prism sidebar painted")
@@ -50,8 +52,29 @@ assert(fp.get_pixel(400, 60) != 0xFF000000, "prism featured card painted")
 -- a tiny content area is a no-op, not a crash
 let tiny = framebuffer(60, 60)
 tiny.clear(0xFF000000)
-paint_prism(tiny, 0, 0, 60, 60, t, true)
+paint_prism(tiny, 0, 0, 60, 60, t, new_prism())
 assert(true, "prism tolerates a tiny content rect")
+
+-- the featured Play pill launches the game
+let hplay = prism_hit(pstate, 0, 0, 680, 420, 168 + 45, 104 + 12)
+assert(hplay != null and hplay["kind"] == "play", "clicking the featured Play pill launches the game")
+-- clicking a grid tile opens that game's detail view
+let hgrid = prism_hit(pstate, 0, 0, 680, 420, 220, 200)
+assert(hgrid != null and hgrid["kind"] == "open", "clicking a library tile opens a detail view")
+assert(hgrid["idx"] >= 1, "the opened tile maps to a catalogue game")
+-- drive the state into the detail view and paint it
+pstate["view"] = "detail"
+pstate["sel"] = hgrid["idx"]
+let fp2 = framebuffer(680, 420)
+fp2.clear(0xFF000000)
+paint_prism(fp2, 0, 0, 680, 420, t, pstate)
+assert(painted(fp2, 0xFF000000), "prism paints the detail view")
+-- in detail view, the back affordance returns to the library
+let hback = prism_hit(pstate, 0, 0, 680, 420, 150, 20)
+assert(hback != null and hback["kind"] == "back", "the detail view has a working Back affordance")
+-- and its Play button launches the game
+let hdplay = prism_hit(pstate, 0, 0, 680, 420, 150 + 20, 44 + 150 + 74 + 16)
+assert(hdplay != null and hdplay["kind"] == "play", "the detail view's Play button launches the game")
 
 -- ── Terminal ──
 show "-- Kyan apps: terminal --"

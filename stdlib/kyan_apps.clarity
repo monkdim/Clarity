@@ -8,7 +8,7 @@
 -- Prism is the flagship: the game hub where you play games built in
 -- Clarity and (later) build your own.
 
-from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, linear_gradient, line
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, linear_gradient, line, fill_rect_blend
 from "font.clarity" import builtin_font, draw_text, draw_text_scaled, draw_text_smooth, measure_text
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "graphics.clarity" import rgba
@@ -16,25 +16,77 @@ from "theme_kyan.clarity" import kyan_gradient_stops
 
 -- ── Prism — the game hub ────────────────────────────────
 
-let _GAME_ARTS = [
-    [{"t": 0.0, "color": 0xFF7C3AED}, {"t": 1.0, "color": 0xFF22D3EE}],
-    [{"t": 0.0, "color": 0xFFFB7185}, {"t": 1.0, "color": 0xFF4F46E5}],
-    [{"t": 0.0, "color": 0xFF0EA5E9}, {"t": 1.0, "color": 0xFF34D399}],
-    [{"t": 0.0, "color": 0xFFFBBF24}, {"t": 1.0, "color": 0xFF7C3AED}]
+-- The Prism catalogue. Index 0 is Voidrunner (the featured, actually
+-- playable, built-in title); 1..4 are the library grid. Each carries a
+-- gradient "art", a genre, and a one-line pitch for the detail view.
+let _PRISM_GAMES = [
+    {"name": "Voidrunner", "genre": "Runner", "playable": true,
+     "art": [{"t": 0.0, "color": 0xFF7C3AED}, {"t": 1.0, "color": 0xFF22D3EE}],
+     "desc": "Outrun the collapse of a dying star system. A built-in Clarity title."},
+    {"name": "Hexfield", "genre": "Strategy", "playable": false,
+     "art": [{"t": 0.0, "color": 0xFF7C3AED}, {"t": 1.0, "color": 0xFF22D3EE}],
+     "desc": "Command hex legions across a fractured frontier."},
+    {"name": "Orbit Decay", "genre": "Arcade", "playable": false,
+     "art": [{"t": 0.0, "color": 0xFFFB7185}, {"t": 1.0, "color": 0xFF4F46E5}],
+     "desc": "Thread decaying orbits before the last satellite falls."},
+    {"name": "Verdant", "genre": "Puzzle", "playable": false,
+     "art": [{"t": 0.0, "color": 0xFF0EA5E9}, {"t": 1.0, "color": 0xFF34D399}],
+     "desc": "Grow impossible gardens, one tessellation at a time."},
+    {"name": "Ash Fable", "genre": "RPG", "playable": false,
+     "art": [{"t": 0.0, "color": 0xFFFBBF24}, {"t": 1.0, "color": 0xFF7C3AED}],
+     "desc": "A slow-burning saga through cinder kingdoms."}
 ]
-let _GAME_NAMES = ["Hexfield", "Orbit Decay", "Verdant", "Ash Fable"]
-let _GAME_META = ["Strategy", "Arcade", "Puzzle", "RPG"]
 
--- Absolute rect of the "Play" pill given Prism's content origin/size.
--- Shared by paint_prism and the desktop's content-click hit-test.
+fn new_prism() { return {"view": "library", "sel": 0} }
+
+-- Shared main-column origin/size (right of the sidebar).
+fn _prism_main(x, w) {
+    let sw = 132
+    return [x + sw + 18, w - sw - 36, sw]
+}
+
+-- Absolute rect of the library "Play" pill (featured card). Shared by
+-- paint and hit-test; kept as a named fn for back-compat.
 fn prism_play_rect(x, y, w, h) {
     return [x + 168, y + 104, 90, 24]
 }
 
-fn paint_prism(fb, x, y, w, h, theme, focused) {
+-- Library grid tile rects: [x, y, w, h] per visible tile (games 1..4).
+fn _prism_grid(x, y, w, h) {
+    let m = _prism_main(x, w)
+    let mx = m[0]
+    let mw = m[1]
+    let gy = y + 18 + 120 + 18
+    let cols = 4
+    let gap = 12
+    let cw = int((mw - (cols - 1) * gap) / cols)
+    let ch = 96
+    mut out = []
+    mut i = 0
+    while i < cols {
+        push(out, {"idx": i + 1, "x": mx + i * (cw + gap), "y": gy, "w": cw, "h": ch})
+        i = i + 1
+    }
+    return out
+}
+
+-- Detail-view rects: the back affordance and the play button.
+fn _prism_detail_layout(x, y, w, h) {
+    let m = _prism_main(x, w)
+    let mx = m[0]
+    let mw = m[1]
+    let hero_y = y + 44
+    let hero_h = 150
+    return {"mx": mx, "mw": mw, "hero_y": hero_y, "hero_h": hero_h,
+            "back": [mx, y + 14, 80, 22],
+            "play": [mx, hero_y + hero_h + 74, 130, 34]}
+}
+
+fn paint_prism(fb, x, y, w, h, theme, state) {
     let t = theme
     let atlas = shared_atlas()
-    -- sidebar
+    let view = if state != null and has(state, "view") { state["view"] } else { "library" }
+    -- sidebar (both views)
     let sw = 132
     fill_rect(fb, x, y, sw, h, t["surface_elevated"])
     fill_rect(fb, x + sw - 1, y, 1, h, t["border"])
@@ -46,41 +98,97 @@ fn paint_prism(fb, x, y, w, h, theme, focused) {
     _prism_item(fb, x + 10, y + 128, sw - 20, "Forge", t, atlas, false)
     _prism_item(fb, x + 10, y + 152, sw - 20, "Assets", t, atlas, false)
 
-    -- main column
-    let mx = x + sw + 18
-    let mw = w - sw - 36
-    if mw < 40 { return null }
-    -- featured card
+    let m = _prism_main(x, w)
+    if m[1] < 40 { return null }
+    if view == "detail" {
+        let sel = if has(state, "sel") { state["sel"] } else { 0 }
+        _paint_prism_detail(fb, x, y, w, h, t, atlas, sel)
+    } else {
+        _paint_prism_library(fb, x, y, w, h, t, atlas)
+    }
+}
+
+fn _paint_prism_library(fb, x, y, w, h, t, atlas) {
+    let m = _prism_main(x, w)
+    let mx = m[0]
+    let mw = m[1]
+    -- featured card (game 0)
+    let g0 = _PRISM_GAMES[0]
     let fh = 120
     let fy = y + 18
     linear_gradient(fb, mx, fy, mw, fh, [
         {"t": 0.0, "color": 0xFF131022},
         {"t": 1.0, "color": 0xFF0B2440}
     ], "h")
-    -- a signature bloom across the top of the card
     linear_gradient(fb, mx, fy, mw, 3, kyan_gradient_stops(), "h")
     draw_atlas_text(fb, mx + 18, fy + 14, "FEATURED - BUILT IN CLARITY", atlas, t["accent"], {"size": 12, "tracking": 1})
-    draw_atlas_text(fb, mx + 18, fy + 32, "Voidrunner", atlas, 0xFFFFFFFF, {"size": 30})
-    draw_atlas_text(fb, mx + 18, fy + 70, "Outrun the collapse of a dying star system.", atlas, t["foreground_muted"], {"size": 14})
-    -- play pill (geometry shared with the desktop's click hit-test)
+    draw_atlas_text(fb, mx + 18, fy + 32, g0["name"], atlas, 0xFFFFFFFF, {"size": 30})
+    draw_atlas_text(fb, mx + 18, fy + 70, g0["desc"], atlas, t["foreground_muted"], {"size": 14})
     let pr = prism_play_rect(x, y, w, h)
     rounded_rect(fb, pr[0], pr[1], pr[2], pr[3], 8, t["accent"])
     draw_atlas_text(fb, pr[0] + 14, pr[1] + 4, "> Play", atlas, 0xFF05060A, {"size": 15})
 
-    -- game grid
-    let gy = fy + fh + 18
-    let cols = 4
-    let gap = 12
-    let cw = int((mw - (cols - 1) * gap) / cols)
-    let ch = 96
-    mut i = 0
-    while i < cols {
-        let gx = mx + i * (cw + gap)
-        if gy + ch < y + h {
-            _prism_game(fb, gx, gy, cw, ch, i, t, atlas)
+    -- game grid (games 1..4), from the shared geometry
+    for cell in _prism_grid(x, y, w, h) {
+        if cell["y"] + cell["h"] < y + h {
+            _prism_game(fb, cell["x"], cell["y"], cell["w"], cell["h"], _PRISM_GAMES[cell["idx"]], t, atlas)
         }
-        i = i + 1
     }
+}
+
+fn _paint_prism_detail(fb, x, y, w, h, t, atlas, sel) {
+    let g = _PRISM_GAMES[sel]
+    let L = _prism_detail_layout(x, y, w, h)
+    let mx = L["mx"]
+    let mw = L["mw"]
+    -- back affordance
+    let bk = L["back"]
+    draw_atlas_text(fb, bk[0], bk[1] + 4, "< Library", atlas, t["accent"], {"size": 14})
+    -- hero art with the title over a darkened base
+    let hy = L["hero_y"]
+    let hh = L["hero_h"]
+    linear_gradient(fb, mx, hy, mw, hh, g["art"], "h")
+    fill_rect_blend(fb, mx, hy + hh - 52, mw, 52, rgba(5, 6, 10, 150))
+    draw_atlas_text(fb, mx + 16, hy + hh - 44, g["name"], atlas, 0xFFFFFFFF, {"size": 26})
+    draw_atlas_text(fb, mx + 16, hy + hh - 16, g["genre"], atlas, t["ink_soft"], {"size": 13})
+    -- description
+    draw_atlas_text(fb, mx, hy + hh + 20, g["desc"], atlas, t["foreground_muted"], {"size": 14})
+    -- play button (label reflects whether it's the real built-in title)
+    let pl = L["play"]
+    rounded_rect(fb, pl[0], pl[1], pl[2], pl[3], 8, t["accent"])
+    let label = if g["playable"] { "> Play" } else { "> Play demo" }
+    draw_atlas_text(fb, pl[0] + 16, pl[1] + 9, label, atlas, 0xFF05060A, {"size": 15})
+}
+
+-- Hit-test a Prism click. Returns {"kind":"play"} (launch the game),
+-- {"kind":"open","idx"} (open a game's detail), {"kind":"back"} (return to
+-- the library), or null.
+fn prism_hit(state, x, y, w, h, px, py) {
+    let view = if state != null and has(state, "view") { state["view"] } else { "library" }
+    if view == "detail" {
+        let L = _prism_detail_layout(x, y, w, h)
+        if _rect_has(L["back"], px, py) { return {"kind": "back"} }
+        if _rect_has(L["play"], px, py) { return {"kind": "play"} }
+        return null
+    }
+    -- library: featured play pill, then the featured card, then the grid
+    let pr = prism_play_rect(x, y, w, h)
+    if _rect_has(pr, px, py) { return {"kind": "play"} }
+    if px >= _prism_main(x, w)[0] and py >= y + 18 and py < y + 18 + 120 { return {"kind": "open", "idx": 0} }
+    for cell in _prism_grid(x, y, w, h) {
+        if px >= cell["x"] and px < cell["x"] + cell["w"] and py >= cell["y"] and py < cell["y"] + cell["h"] {
+            return {"kind": "open", "idx": cell["idx"]}
+        }
+    }
+    return null
+}
+fn _rect_has(r, px, py) {
+    return px >= r[0] and px < r[0] + r[2] and py >= r[1] and py < r[1] + r[3]
+}
+
+-- Registry/fallback wrapper: renders the library with fresh state.
+fn paint_prism_content(fb, x, y, w, h, theme, focused) {
+    paint_prism(fb, x, y, w, h, theme, new_prism())
 }
 
 fn _prism_head(fb, x, y, text, t, atlas) {
@@ -96,11 +204,11 @@ fn _prism_item(fb, x, y, w, text, t, atlas, active) {
     }
 }
 
-fn _prism_game(fb, x, y, w, h, idx, t, atlas) {
+fn _prism_game(fb, x, y, w, h, game, t, atlas) {
     let art_h = h - 26
-    linear_gradient(fb, x, y, w, art_h, _GAME_ARTS[idx], "h")
-    draw_atlas_text(fb, x + 4, y + art_h + 2, _GAME_NAMES[idx], atlas, t["foreground"], {"size": 14})
-    draw_atlas_text(fb, x + 4, y + art_h + 16, _GAME_META[idx], atlas, t["foreground_muted"], {"size": 12})
+    linear_gradient(fb, x, y, w, art_h, game["art"], "h")
+    draw_atlas_text(fb, x + 4, y + art_h + 2, game["name"], atlas, t["foreground"], {"size": 14})
+    draw_atlas_text(fb, x + 4, y + art_h + 16, game["genre"], atlas, t["foreground_muted"], {"size": 12})
 }
 
 -- ── Terminal ────────────────────────────────────────────
@@ -1131,7 +1239,7 @@ fn paint_calc_content(fb, x, y, w, h, theme, focused) {
 
 fn app_painters() {
     return {
-        "prism": paint_prism,
+        "prism": paint_prism_content,
         "terminal": paint_terminal_content,
         "files": paint_files_content,
         "monitor": paint_monitor_content,
