@@ -579,7 +579,37 @@ let _TOGGLE_LABELS = ["Frosted glass", "Window animations", "Reduce motion", "Sh
 
 -- Default desktop preferences.
 fn new_prefs() {
-    return {"frosted": true, "animations": true, "reduce_motion": false, "dock_labels": false, "theme": "obsidian"}
+    return {"frosted": true, "animations": true, "reduce_motion": false, "dock_labels": false,
+            "theme": "obsidian", "section": "appearance"}
+}
+
+-- Settings sidebar categories. Appearance is interactive (theme + toggles);
+-- the rest are informational panes that reflect live system/desktop state.
+let _SETTINGS_SECTIONS = [
+    {"id": "appearance", "label": "Appearance"},
+    {"id": "display",    "label": "Display"},
+    {"id": "network",    "label": "Network"},
+    {"id": "sound",      "label": "Sound"},
+    {"id": "about",      "label": "About"}
+]
+
+fn _settings_section(prefs) {
+    if prefs != null and has(prefs, "section") { return prefs["section"] }
+    return "appearance"
+}
+
+-- Sidebar row rects, shared by paint and hit-test.
+fn _settings_sidebar(x, y, sw) {
+    mut rows = []
+    mut sy = y + 16
+    mut i = 0
+    for sec in _SETTINGS_SECTIONS {
+        push(rows, {"id": sec["id"], "label": sec["label"], "index": i,
+                    "x": x + 10, "y": sy - 3, "w": sw - 20, "h": 24})
+        sy = sy + 30
+        i = i + 1
+    }
+    return rows
 }
 
 fn _toggle(fb, x, y, t, on) {
@@ -620,16 +650,26 @@ fn _settings_layout(x, y, w, h) {
 
 -- Hit-test the Appearance pane. Returns {"kind":"theme","id":..} or
 -- {"kind":"toggle","key":..} or null.
-fn settings_hit(x, y, w, h, px, py) {
+fn settings_hit(x, y, w, h, px, py, ...rest) {
+    let prefs = if len(rest) > 0 { rest[0] } else { null }
     let L = _settings_layout(x, y, w, h)
-    for s in L["swatches"] {
-        if px >= s["x"] and px < s["x"] + s["w"] and py >= s["y"] and py < s["y"] + s["h"] {
-            return {"kind": "theme", "id": _SWATCHES[s["index"]]["id"]}
+    -- sidebar categories switch the active pane
+    for row in _settings_sidebar(x, y, L["sw"]) {
+        if px >= row["x"] and px < row["x"] + row["w"] and py >= row["y"] and py < row["y"] + row["h"] {
+            return {"kind": "section", "id": row["id"]}
         }
     }
-    for tg in L["toggles"] {
-        if px >= tg["x"] and px < tg["x"] + tg["w"] and py >= tg["y"] and py < tg["y"] + tg["h"] {
-            return {"kind": "toggle", "key": _TOGGLE_KEYS[tg["index"]]}
+    -- the Appearance pane's controls are only live when it's showing
+    if _settings_section(prefs) == "appearance" {
+        for s in L["swatches"] {
+            if px >= s["x"] and px < s["x"] + s["w"] and py >= s["y"] and py < s["y"] + s["h"] {
+                return {"kind": "theme", "id": _SWATCHES[s["index"]]["id"]}
+            }
+        }
+        for tg in L["toggles"] {
+            if px >= tg["x"] and px < tg["x"] + tg["w"] and py >= tg["y"] and py < tg["y"] + tg["h"] {
+                return {"kind": "toggle", "key": _TOGGLE_KEYS[tg["index"]]}
+            }
         }
     }
     return null
@@ -640,28 +680,41 @@ fn paint_settings(fb, x, y, w, h, theme, prefs) {
     let atlas = shared_atlas()
     let L = _settings_layout(x, y, w, h)
     let sw = L["sw"]
+    let section = _settings_section(prefs)
     fill_rect(fb, x, y, w, h, t["surface"])
     fill_rect(fb, x, y, sw, h, t["surface_elevated"])
     fill_rect(fb, x + sw - 1, y, 1, h, t["border"])
-    let items = ["Appearance", "Display", "Network", "Sound", "About"]
-    mut sy = y + 16
-    mut i = 0
-    for it in items {
-        if i == 0 {
-            rounded_rect(fb, x + 10, sy - 3, sw - 20, 24, 6, t["accent_tertiary"])
-            draw_atlas_text(fb, x + 20, sy, it, atlas, 0xFFFFFFFF, {"size": 14})
+    -- sidebar categories; the active one is highlighted
+    for row in _settings_sidebar(x, y, sw) {
+        if row["id"] == section {
+            rounded_rect(fb, row["x"], row["y"], row["w"], row["h"], 6, t["accent_tertiary"])
+            draw_atlas_text(fb, row["x"] + 10, row["y"] + 4, row["label"], atlas, 0xFFFFFFFF, {"size": 14})
         } else {
-            draw_atlas_text(fb, x + 20, sy, it, atlas, t["foreground_muted"], {"size": 14})
+            draw_atlas_text(fb, row["x"] + 10, row["y"] + 4, row["label"], atlas, t["foreground_muted"], {"size": 14})
         }
-        sy = sy + 28
-        i = i + 1
     }
     let mx = L["mx"]
     let mw = L["mw"]
     if mw < 40 { return null }
-    draw_atlas_text(fb, mx, y + 16, "Appearance", atlas, t["foreground"], {"size": 20})
-    draw_atlas_text(fb, mx, y + 44, "THEME", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
+    -- pane title + body for the active section
+    let title = _section_title(section)
+    draw_atlas_text(fb, mx, y + 16, title, atlas, t["foreground"], {"size": 20})
+    if section == "appearance" {
+        _paint_appearance(fb, x, y, w, h, t, atlas, L, prefs)
+    } else {
+        _paint_info_pane(fb, mx, y, mw, atlas, t, _section_rows(section, prefs))
+    }
+}
 
+fn _section_title(section) {
+    for sec in _SETTINGS_SECTIONS { if sec["id"] == section { return sec["label"] } }
+    return "Settings"
+}
+
+fn _paint_appearance(fb, x, y, w, h, t, atlas, L, prefs) {
+    let mx = L["mx"]
+    let mw = L["mw"]
+    draw_atlas_text(fb, mx, y + 44, "THEME", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
     for s in L["swatches"] {
         let sw_meta = _SWATCHES[s["index"]]
         linear_gradient(fb, s["x"], s["y"], s["w"], s["h"] - 18, [
@@ -674,13 +727,48 @@ fn paint_settings(fb, x, y, w, h, theme, prefs) {
         }
         draw_atlas_text(fb, s["x"] + 2, s["y"] + s["h"] - 14, sw_meta["name"], atlas, t["foreground"], {"size": 13})
     }
-
     for tg in L["toggles"] {
         if tg["y"] + 30 > y + h { break }
         draw_atlas_text(fb, mx, tg["y"] + 3, _TOGGLE_LABELS[tg["index"]], atlas, t["foreground"], {"size": 15})
         _toggle(fb, mx + mw - 40, tg["y"], t, prefs[_TOGGLE_KEYS[tg["index"]]])
         fill_rect(fb, mx, tg["y"] + 30, mw, 1, t["border"])
     }
+}
+
+-- A read-only pane: rows of label / value pairs under the pane title.
+fn _paint_info_pane(fb, mx, y, mw, atlas, t, rows) {
+    mut ry = y + 56
+    for row in rows {
+        draw_atlas_text(fb, mx, ry, row[0], atlas, t["foreground_muted"], {"size": 14})
+        let vw = measure_atlas_text(atlas, row[1], 15, 0)[0]
+        draw_atlas_text(fb, mx + mw - vw, ry - 1, row[1], atlas, t["foreground"], {"size": 15})
+        fill_rect(fb, mx, ry + 26, mw, 1, t["border"])
+        ry = ry + 40
+    }
+}
+
+-- Values for the informational panes. Reflect live desktop/theme state
+-- where there is any; otherwise the honest current capability.
+fn _section_rows(section, prefs) {
+    let theme_name = if prefs != null and has(prefs, "theme") { prefs["theme"] } else { "obsidian" }
+    if section == "display" {
+        return [["Resolution", "1280 × 800"], ["Scale", "1x (native)"],
+                ["Color profile", "sRGB"], ["Compositor", "software framebuffer"]]
+    }
+    if section == "network" {
+        return [["Status", "Connected"], ["Interface", "user-mode (QEMU)"],
+                ["IPv4", "10.0.2.15"], ["DNS", "10.0.2.3"]]
+    }
+    if section == "sound" {
+        return [["Output", "Software mixer"], ["Volume", "72%"],
+                ["Sample rate", "48.0 kHz"], ["Muted", "No"]]
+    }
+    -- about
+    let vib = if prefs != null and has(prefs, "frosted") and prefs["frosted"] { "On" } else { "Off" }
+    let anim = if prefs != null and has(prefs, "animations") and prefs["animations"] { "On" } else { "Off" }
+    return [["System", "KyanOS 1.0"], ["Identity", "Obsidian & neon"],
+            ["Kernel", "Zig microkernel"], ["Userspace", "Clarity (self-hosted)"],
+            ["Theme", theme_name], ["Vibrancy", vib], ["Animations", anim]]
 }
 
 -- Registry/fallback wrapper: renders with default prefs.

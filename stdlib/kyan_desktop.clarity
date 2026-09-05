@@ -309,10 +309,13 @@ class KyanDesktop {
             }
         }
         if app_id == "settings" {
-            let hit = settings_hit(ax, ay, aw, ah, px, py)
+            let hit = settings_hit(ax, ay, aw, ah, px, py, this.prefs)
             if hit != null {
                 if hit["kind"] == "theme" {
                     this.set_theme_by_id(hit["id"])
+                } elif hit["kind"] == "section" {
+                    this.prefs["section"] = hit["id"]
+                    this._dirty = true
                 } else {
                     this.prefs[hit["key"]] = not this.prefs[hit["key"]]
                     this._dirty = true
