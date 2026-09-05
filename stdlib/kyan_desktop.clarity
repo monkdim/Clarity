@@ -23,7 +23,7 @@ from "compositor.clarity" import compositor
 from "window.clarity" import window
 from "window_manager.clarity" import window_manager
 from "graphics.clarity" import framebuffer, rgba
-from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded, frosted_panel, blit_scaled_alpha, radial_glow, circle
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded, blit_rounded_alpha, frosted_panel, blit_scaled_alpha, radial_glow, circle
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
@@ -35,6 +35,9 @@ from "theme_kyan.clarity" import kyan_obsidian, kyan_quartz, kyan_gradient_stops
 
 let TITLE_H = 32
 let WIN_RADIUS = 12       -- rounded window corners (MacOS-style float)
+let WIN_GLASS_ALPHA = 184  -- window opacity over the frosted base (~72%); the rest is blurred aurora
+let WIN_GLASS_TINT = 0x30281E46  -- faint violet-ink tint so the glass reads even over darker aurora
+let WIN_GLASS_BLUR = 9    -- box-blur radius for the glass behind a window
 let DOCK_ICON = 44
 let DOCK_GAP = 12
 let DOCK_PAD = 12
@@ -580,7 +583,15 @@ class KyanDesktop {
                 blit_scaled_alpha(s, win.framebuffer, dx, dy, dw, dh, anim["alpha"])
             } else {
                 drop_shadow(s, win.x, win.y, win.width, win.height, WIN_RADIUS, rgba(0, 0, 0, 150), 7)
-                blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS)
+                if this.prefs["frosted"] {
+                    -- frosted glass: blur the aurora (and any window below)
+                    -- behind this window, tint it, then ride the window's
+                    -- chrome over it at <100% so the blur glows through.
+                    frosted_panel(s, win.x, win.y, win.width, win.height, WIN_RADIUS, WIN_GLASS_TINT, WIN_GLASS_BLUR)
+                    blit_rounded_alpha(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS, WIN_GLASS_ALPHA)
+                } else {
+                    blit_rounded(s, win.framebuffer, win.x, win.y, win.width, win.height, WIN_RADIUS)
+                }
             }
         }
         this._paint_dock(s)
@@ -621,9 +632,10 @@ class KyanDesktop {
             {"t": 1.0,  "color": rgba(6, 26, 32, 255)}      -- #061A20 teal-black
         ], "v")
         radial_glow(small, int(sw * 0.14), int(sh * 0.08), int(sw * 0.52), rgba(163, 116, 249, 150))  -- violet, top-left
-        radial_glow(small, int(sw * 0.90), int(sh * 0.16), int(sw * 0.40), rgba(53, 231, 225, 90))    -- cyan, top-right
+        radial_glow(small, int(sw * 0.90), int(sh * 0.16), int(sw * 0.42), rgba(53, 231, 225, 105))   -- cyan, top-right
         radial_glow(small, int(sw * 0.66), int(sh * 1.04), int(sw * 0.60), rgba(79, 157, 255, 120))   -- blue, rising from bottom
-        radial_glow(small, int(sw * 0.44), int(sh * 0.44), int(sw * 0.50), rgba(120, 60, 200, 40))    -- soft violet centre
+        radial_glow(small, int(sw * 0.42), int(sh * 0.40), int(sw * 0.56), rgba(140, 82, 222, 78))    -- violet centre wash (backdrop for window glass)
+        radial_glow(small, int(sw * 0.62), int(sh * 0.64), int(sw * 0.44), rgba(72, 122, 232, 66))    -- blue mid (glows through window bodies)
         fb.clear(t["background"])
         blit_scaled_alpha(fb, small, 0, 0, this.width, this.height, 255)
     }
