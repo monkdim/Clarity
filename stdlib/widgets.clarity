@@ -11,7 +11,7 @@
 from "ui.clarity" import Widget
 from "theme.clarity" import theme_color, theme_font, theme_spacing
 from "graphics.clarity" import rgb, rgba
-from "draw.clarity" import line, hline, vline, fill_rect, rect, circle
+from "draw.clarity" import line, hline, vline, fill_rect, rect, circle, circle_outline
 from "font.clarity" import draw_text, measure_text
 
 -- ── Label — non-interactive text ───────────────────────
@@ -557,6 +557,254 @@ class ListView < Widget {
 }
 
 fn list_view(items) { return ListView(items) }
+
+-- ── Toggle — a pill switch (on/off) ────────────────────
+-- The rounded-pill counterpart to Checkbox: same on/off semantics, the
+-- control Settings panels reach for. Track fills with the accent when on;
+-- the knob slides between the two ends.
+
+class Toggle < Widget {
+    fn init(on) {
+        this._setup_widget()
+        this.role = "switch"
+        this.focusable = true
+        this.on = on ?? false
+        this.track_w = 40
+        this.track_h = 22
+    }
+
+    fn preferred_size() { return [this.track_w, this.track_h] }
+
+    fn set_on(v) {
+        this.on = v
+        if this._click_handler != null { this._click_handler(this) }
+    }
+    fn toggle() { this.set_on(not this.on) }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let th = this.track_h
+        let ty = r[1] + (r[3] - th) / 2
+        let rad = th / 2
+        let track = if this.on { theme_color(t, "accent") } else { theme_color(t, "border") }
+        -- rounded track: two end caps + the bar between them
+        circle(fb, r[0] + rad, ty + rad, rad, track)
+        circle(fb, r[0] + this.track_w - rad, ty + rad, rad, track)
+        fill_rect(fb, r[0] + rad, ty, this.track_w - th, th, track)
+        -- knob slides to the lit end when on
+        let kx = if this.on { r[0] + this.track_w - rad } else { r[0] + rad }
+        circle(fb, kx, ty + rad, rad - 3, theme_color(t, "foreground"))
+        if this.focused {
+            rect(fb, r[0] - 1, ty - 1, this.track_w + 2, th + 2, theme_color(t, "focus_ring"))
+        }
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_press {
+            this.focus()
+            this.toggle()
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press and (event.name == " " or event.name == "Enter") {
+            this.toggle()
+            return true
+        }
+        return false
+    }
+}
+
+fn toggle(on) { return Toggle(on) }
+
+-- ── RadioButton + RadioGroup — single-choice ───────────
+-- A RadioButton is a labelled ring with a filled centre when selected.
+-- RadioGroup wires a set together so selecting one clears the rest.
+
+class RadioButton < Widget {
+    fn init(label_text) {
+        this._setup_widget()
+        this.role = "radio"
+        this.focusable = true
+        this.label = label_text ?? ""
+        this.selected = false
+        this._group = null
+        this.dot_size = 16
+        this.gap = 8
+    }
+
+    fn preferred_size() {
+        let f = theme_font(this.theme())
+        let m = measure_text(f, this.label)
+        let h = if m[1] > this.dot_size { m[1] } else { this.dot_size }
+        return [this.dot_size + this.gap + m[0], h]
+    }
+
+    fn select() {
+        if this._group != null { this._group.select(this) } else { this.selected = true }
+        if this._click_handler != null { this._click_handler(this) }
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let s = this.dot_size
+        let cx = r[0] + s / 2
+        let cy = r[1] + (r[3] - s) / 2 + s / 2
+        let ring = if this.focused { theme_color(t, "focus_ring") } else { theme_color(t, "border") }
+        circle_outline(fb, cx, cy, s / 2, ring)
+        if this.selected {
+            circle(fb, cx, cy, s / 2 - 4, theme_color(t, "accent"))
+        }
+        let f = theme_font(t)
+        let m = measure_text(f, this.label)
+        draw_text(fb, r[0] + s + this.gap, r[1] + (r[3] - m[1]) / 2, this.label, f, theme_color(t, "foreground"))
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_press {
+            this.focus()
+            this.select()
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press and (event.name == " " or event.name == "Enter") {
+            this.select()
+            return true
+        }
+        return false
+    }
+}
+
+fn radio_button(label_text) { return RadioButton(label_text) }
+
+-- Groups a set of RadioButtons so at most one is selected. Not a Widget —
+-- a plain coordinator the app holds onto; lay the buttons out normally.
+class RadioGroup {
+    fn init() {
+        this.buttons = []
+        this._change_handler = null
+    }
+    fn add(b) {
+        b._group = this
+        push(this.buttons, b)
+        return b
+    }
+    fn select(b) {
+        for x in this.buttons { x.selected = (x == b) }
+        if this._change_handler != null { this._change_handler(b) }
+    }
+    fn selected() {
+        for x in this.buttons { if x.selected { return x } }
+        return null
+    }
+    fn on_change(h) { this._change_handler = h }
+}
+
+fn radio_group() { return RadioGroup() }
+
+-- ── Tabs — a horizontal tab strip ──────────────────────
+-- Selects one of several titled sections. Self-contained: the strip draws
+-- and hit-tests entirely within its own rect; the app swaps content on
+-- the selection change. The accent underline marks the active tab.
+
+class Tabs < Widget {
+    fn init(titles) {
+        this._setup_widget()
+        this.role = "tablist"
+        this.focusable = true
+        this.titles = titles ?? []
+        this.selected = 0
+        this.tab_h = 32
+        this.pad_x = 14
+    }
+
+    fn set_titles(titles) {
+        this.titles = titles
+        if this.selected >= len(titles) { this.selected = if len(titles) > 0 { 0 } else { -1 } }
+    }
+
+    fn preferred_size() {
+        let f = theme_font(this.theme())
+        mut w = 0
+        for title in this.titles {
+            let m = measure_text(f, title)
+            w = w + m[0] + this.pad_x * 2
+        }
+        return [w, this.tab_h]
+    }
+
+    fn set_selected(i) {
+        if i >= 0 and i < len(this.titles) {
+            this.selected = i
+            if this._click_handler != null { this._click_handler(this) }
+        }
+    }
+
+    -- [x, w] screen rect of each tab, laid left to right.
+    fn _tab_bounds() {
+        let r = this.screen_rect()
+        let f = theme_font(this.theme())
+        mut out = []
+        mut x = r[0]
+        for title in this.titles {
+            let m = measure_text(f, title)
+            let w = m[0] + this.pad_x * 2
+            push(out, [x, w])
+            x = x + w
+        }
+        return out
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        -- baseline hairline under the whole strip
+        fill_rect(fb, r[0], r[1] + this.tab_h - 1, r[2], 1, theme_color(t, "border"))
+        let bounds = this._tab_bounds()
+        mut i = 0
+        while i < len(this.titles) {
+            let b = bounds[i]
+            let active = (i == this.selected)
+            let col = if active { theme_color(t, "foreground") } else { theme_color(t, "foreground_muted") }
+            let m = measure_text(f, this.titles[i])
+            draw_text(fb, b[0] + this.pad_x, r[1] + (this.tab_h - m[1]) / 2, this.titles[i], f, col)
+            if active {
+                fill_rect(fb, b[0], r[1] + this.tab_h - 2, b[1], 2, theme_color(t, "accent"))
+            }
+            i += 1
+        }
+        if this.focused {
+            rect(fb, r[0], r[1], r[2], this.tab_h, theme_color(t, "focus_ring"))
+        }
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_press {
+            this.focus()
+            let bounds = this._tab_bounds()
+            mut i = 0
+            while i < len(bounds) {
+                let b = bounds[i]
+                if event.x >= b[0] and event.x < b[0] + b[1] {
+                    this.set_selected(i)
+                    return true
+                }
+                i += 1
+            }
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press {
+            if event.name == "Left"  { this.set_selected(this.selected - 1); return true }
+            if event.name == "Right" { this.set_selected(this.selected + 1); return true }
+        }
+        return false
+    }
+}
+
+fn tabs(titles) { return Tabs(titles) }
 
 -- Local helper duplicated from ui.clarity (modules can't re-import each
 -- other's private helpers cleanly without circular deps).
