@@ -9,7 +9,7 @@ from "graphics.clarity" import framebuffer, BLACK, WHITE
 from "ui.clarity" import Widget, WidgetRoot
 from "layout.clarity" import FlexLayout, GridLayout, StackLayout, flex_row, flex_column, grid, stack
 from "theme.clarity" import dark, light, default, theme_color, theme_font, theme_spacing
-from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view, Toggle, RadioButton, RadioGroup, Tabs, toggle, radio_button, radio_group, tabs
+from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view, Toggle, RadioButton, RadioGroup, Tabs, toggle, radio_button, radio_group, tabs, TreeView, Dropdown, tree_view, dropdown
 from "event_bus.clarity" import InputBus
 from "input.clarity" import EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y, REL_WHEEL, BTN_LEFT, KEY_PRESS, KEY_RELEASE
 from "keymap.clarity" import KEY_TAB, KEY_LEFTSHIFT, KEY_A, Modifiers
@@ -473,11 +473,76 @@ assert(tb_changes >= 1, "tabs fired change on selection")
 tb.set_titles(["A", "B"])
 assert_eq(tb.selected, 1, "shrinking titles keeps a valid selection")
 
+-- ── TreeView ──────────────────────────────────────────
+
+show "-- Widgets: TreeView --"
+let tvroots = [
+  {"label": "src", "children": [
+    {"label": "main.clarity"},
+    {"label": "lib", "children": [{"label": "util.clarity"}]}
+  ]},
+  {"label": "README.md"}
+]
+let tv = tree_view(tvroots)
+tv.set_theme(dark())
+tv.set_bounds(0, 0, 200, 240)
+-- only top-level rows are visible until expanded
+mut tv_labels = []
+for row in tv.visible_rows() { push(tv_labels, row["label"]) }
+assert(contains(tv_labels, "src") and contains(tv_labels, "README.md"), "tree shows the roots")
+assert(not contains(tv_labels, "main.clarity"), "collapsed root hides its children")
+-- click the 'src' disclosure chevron (near the left) to expand it
+tv.handle_event(me_press(6, 12, 1))
+mut tv_labels2 = []
+for row in tv.visible_rows() { push(tv_labels2, row["label"]) }
+assert(contains(tv_labels2, "main.clarity"), "expanding src reveals its children")
+-- clicking a row body (not the chevron) selects it
+tv.handle_event(me_press(80, 12, 1))
+assert_eq(tv.selected, 0, "clicking a row selects it")
+assert_eq(tv.selected_label(), "src", "selected_label reports the row")
+-- keyboard: Down moves selection, Left collapses an expanded folder
+tv.focus()
+tv.handle_event(ke_press(108, "Down", null))
+assert_eq(tv.selected, 1, "Down moves the selection")
+tv.selected = 0
+tv.handle_event(ke_press(105, "Left", null))
+mut tv_labels3 = []
+for row in tv.visible_rows() { push(tv_labels3, row["label"]) }
+assert(not contains(tv_labels3, "main.clarity"), "Left collapses the selected folder")
+
+-- ── Dropdown ──────────────────────────────────────────
+
+show "-- Widgets: Dropdown --"
+let dd = dropdown(["Low", "Medium", "High"])
+dd.set_theme(dark())
+dd.set_bounds(0, 0, 150, 28)
+assert_eq(dd.value(), "Low", "dropdown starts on the first item")
+assert(not dd.open, "dropdown starts closed")
+-- clicking the header opens the popup
+dd.handle_event(me_press(20, 14, 1))
+assert(dd.open, "clicking the header opens the popup")
+-- clicking an item in the popup (below the header) selects it and closes
+mut dd_changes = 0
+dd.on_click(fn(w) { dd_changes += 1 })
+-- item index 2 ("High") sits at header-bottom + 2*row_height + a bit
+dd.handle_event(me_press(20, 28 + 2 * 24 + 6, 1))
+assert_eq(dd.value(), "High", "clicking a popup row selects that item")
+assert(not dd.open, "selecting closes the popup")
+assert_eq(dd_changes, 1, "dropdown fired its change hook")
+-- keyboard: Up moves selection; Enter toggles open
+dd.focus()
+dd.handle_event(ke_press(103, "Up", null))
+assert_eq(dd.value(), "Medium", "Up moves the selection")
+dd.handle_event(ke_press(28, "Enter", null))
+assert(dd.open, "Enter toggles the popup open")
+
 -- paint smoke: every new widget paints without error onto a real buffer
-let wfb = framebuffer(320, 120)
+let wfb = framebuffer(320, 260)
 tg.set_bounds(10, 10, 40, 22);  tg._paint(wfb)
 r1.set_bounds(10, 40, 120, 20); r1._paint(wfb)
 tb.set_bounds(10, 70, 300, 32); tb._paint(wfb)
+tv.set_bounds(10, 110, 180, 120); tv._paint(wfb)
+dd.set_bounds(200, 110, 110, 28); dd._paint(wfb)
 assert(true, "new widgets paint onto a framebuffer")
 
 -- ── Summary ─────────────────────────────────────────
