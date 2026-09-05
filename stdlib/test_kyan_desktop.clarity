@@ -108,13 +108,13 @@ d2.boot(null)
 let w = d2.open("editor", 200, 150, 300, 200)
 assert_eq(w.x, 200, "window starts at x=200")
 
--- press on the title bar, then drag +60,+40
-d2.handle_mouse(mk_mouse(240, 160, "press", 1))     -- title bar (ly=10 < 32)
+-- press on the title bar (clear of the traffic-light buttons), then drag +60,+40
+d2.handle_mouse(mk_mouse(320, 160, "press", 1))     -- title bar (ly=10 < 32), local x=120
 assert(d2.wm.is_dragging(), "press on title starts a drag")
-d2.handle_mouse(mk_mouse(300, 200, "motion", 0))     -- dx=60, dy=40
+d2.handle_mouse(mk_mouse(380, 200, "motion", 0))     -- dx=60, dy=40
 assert_eq(w.x, 260, "drag moved window x by 60")
 assert_eq(w.y, 190, "drag moved window y by 40")
-d2.handle_mouse(mk_mouse(300, 200, "release", 0))
+d2.handle_mouse(mk_mouse(380, 200, "release", 0))
 assert(not d2.wm.is_dragging(), "release ends the drag")
 
 -- a press in empty space doesn't start a drag
@@ -347,6 +347,34 @@ assert(not has(df._app_ui, "files"), "closing files frees its navigation state")
 assert(d.close("terminal"), "close terminal")
 assert_eq(len(d.running()), 1, "one app left after close")
 assert(not d.close("terminal"), "closing again is a no-op")
+
+-- ── Window controls: traffic-light buttons + dock ──
+
+show "-- KyanDesktop: window controls --"
+let dw = kyan_desktop(1000, 640, theme)
+dw.boot(null)
+-- minimize (yellow light at local x=37, centred on the title bar)
+let mwin = dw.open("calc", 200, 120, 300, 420)
+dw.handle_mouse(mk_mouse(mwin.x + 37, mwin.y + 16, "press", 1))
+assert(mwin.minimized, "the yellow light minimizes the window")
+-- clicking the app's dock icon restores it
+mut cicon = null
+for ic in dw._dock_layout()["icons"] { if ic["app"] == "calc" { cicon = ic } }
+assert(cicon != null, "calc has a dock icon")
+dw.handle_mouse(mk_mouse(cicon["x"] + 10, cicon["y"] + 10, "press", 1))
+assert(not mwin.minimized, "clicking the dock icon restores a minimized window")
+-- zoom (green light at local x=55) maximizes, then restores
+dw.handle_mouse(mk_mouse(mwin.x + 55, mwin.y + 16, "press", 1))
+assert(mwin.maximized, "the green light maximizes the window")
+dw.handle_mouse(mk_mouse(mwin.x + 55, mwin.y + 16, "press", 1))
+assert(not mwin.maximized, "the green light again restores it")
+-- close (red light at local x=19) removes the window
+let cwin2 = dw.open("files", 120, 100, 420, 320)
+dw.handle_mouse(mk_mouse(cwin2.x + 19, cwin2.y + 16, "press", 1))
+assert(not has(dw.windows, "files"), "the red light closes the window")
+-- a plain title-bar click (between the lights and the title) is not a button
+let twin = dw.open("terminal", 140, 140, 460, 280)
+assert(not dw._titlebar_click(twin.x + 100, twin.y + 16), "a non-button title-bar click is left to the window manager")
 
 -- ── Summary ──────────────────────────────────────
 

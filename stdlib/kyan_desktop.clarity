@@ -282,6 +282,7 @@ class KyanDesktop {
         if me.is_press {
             let hit = this._dock_hit(me.x, me.y)
             if hit != null { this._activate(hit); return true }
+            if this._titlebar_click(me.x, me.y) { return true }
             if this._content_click(me.x, me.y) { return true }
         }
         return this.wm.handle_mouse(me)
@@ -504,8 +505,10 @@ class KyanDesktop {
     -- Open (or focus) an app by id at a cascaded default position.
     fn _activate(app_id) {
         if has(this.windows, app_id) {
-            this.comp.focus(this.windows[app_id])
-            return this.windows[app_id]
+            let win = this.windows[app_id]
+            win.restore_from_min()      -- a dock click on a minimized app brings it back
+            this.comp.focus(win)
+            return win
         }
         let b = this._default_bounds(app_id)
         return this.open(app_id, b[0], b[1], b[2], b[3])
@@ -551,6 +554,48 @@ class KyanDesktop {
             if this._in(px, py, ic["x"], ic["y"], ic["size"], ic["size"]) { return ic["app"] }
         }
         return null
+    }
+
+    fn _circle_hit(px, py, cx, cy, r) {
+        let dx = px - cx
+        let dy = py - cy
+        return dx * dx + dy * dy <= r * r
+    }
+
+    -- Traffic-light buttons in a window's title bar. Returns true if a
+    -- button (close / minimize / zoom) was clicked; a plain title-bar click
+    -- returns false so the WindowManager still gets it for focus/drag.
+    -- Geometry mirrors _paint_chrome: round lights at local x 19/37/55,
+    -- centred on the title bar.
+    fn _titlebar_click(px, py) {
+        mut i = len(this.comp.windows) - 1
+        while i >= 0 {
+            let win = this.comp.windows[i]
+            if win.visible and not win.minimized
+               and px >= win.x and px <= win.x + win.width
+               and py >= win.y and py <= win.y + win.title_h {
+                let cyc = win.y + int(win.title_h / 2)
+                let app_id = this._app_of(win)
+                if this._circle_hit(px, py, win.x + 19, cyc, 9) {
+                    if app_id != null { this.close(app_id) }
+                    return true
+                }
+                if this._circle_hit(px, py, win.x + 37, cyc, 9) {
+                    win.minimize()
+                    this._dirty = true
+                    return true
+                }
+                if this._circle_hit(px, py, win.x + 55, cyc, 9) {
+                    if win.maximized { win.unmaximize() } else { win.maximize(this.width, this.height) }
+                    this._dirty = true
+                    return true
+                }
+                -- a click elsewhere on this title bar: leave it to the WM
+                return false
+            }
+            i -= 1
+        }
+        return false
     }
 
     -- ── Composition ─────────────────────────────────
@@ -822,7 +867,9 @@ class KyanDesktop {
             let bg = fb.get_pixel(ic["x"], ic["y"])   -- the glass under this icon
             fb.blit(this._icon(ic["app"], ic["size"], bg), 0, 0, ic["x"], ic["y"], ic["size"], ic["size"])
             if has(this.windows, ic["app"]) {
-                fill_rect(fb, ic["x"] + int(ic["size"] / 2) - 2, dy + dh - 5, 4, 4, this.theme["accent"])
+                -- running indicator: accent for a live window, dimmed when minimized
+                let dotcol = if this.windows[ic["app"]].minimized { this.theme["foreground_muted"] } else { this.theme["accent"] }
+                fill_rect(fb, ic["x"] + int(ic["size"] / 2) - 2, dy + dh - 5, 4, 4, dotcol)
             }
             if this.prefs["dock_labels"] {
                 let label = if has(APP_TITLES, ic["app"]) { APP_TITLES[ic["app"]] } else { ic["app"] }
