@@ -235,6 +235,122 @@ fn paint_terminal_content(fb, x, y, w, h, theme, focused) {
     fill_rect(fb, x + 12, ly + 2, 8, 13, t["accent"])
 }
 
+-- ── Terminal echo shell ─────────────────────────────────
+-- A small interactive shell for hosts without a real PTY (e.g. the browser
+-- build). It keeps a scrollback of output lines plus the line being typed;
+-- the host feeds raw input via shell_input (Enter = "\n", Backspace = "\b").
+
+fn new_shell() {
+    return {"input": "", "lines": ["KyanOS shell - type 'help' for commands", ""]}
+}
+
+fn _starts_with(s, pre) {
+    let m = len(pre)
+    if m > len(s) { return false }
+    return substring(s, 0, m) == pre
+}
+
+-- Feed raw typed text to the shell, char by char.
+fn shell_input(state, text) {
+    mut i = 0
+    while i < len(text) {
+        let ch = char_at(text, i)
+        let code = char_code(ch)
+        if ch == "\n" or ch == "\r" {
+            _shell_run(state, state["input"])
+            state["input"] = ""
+            i = i + 1
+        } elif code == 8 or code == 127 {
+            -- Backspace (BS) or Delete (DEL) — the host feeds DEL(127).
+            let n = len(state["input"])
+            if n > 0 { state["input"] = substring(state["input"], 0, n - 1) }
+            i = i + 1
+        } elif code == 27 {
+            -- ESC: swallow a CSI sequence (ESC [ … final-letter) whole so
+            -- arrow keys don't paste "[A" into the prompt.
+            i = i + 1
+            if i < len(text) and char_at(text, i) == "[" {
+                i = i + 1
+                while i < len(text) {
+                    let fc = char_code(char_at(text, i))
+                    i = i + 1
+                    if (fc >= 65 and fc <= 90) or (fc >= 97 and fc <= 122) { break }
+                }
+            }
+        } elif code < 32 {
+            -- swallow stray control bytes (Tab, etc.)
+            i = i + 1
+        } else {
+            state["input"] = state["input"] + ch
+            i = i + 1
+        }
+    }
+    -- keep the scrollback bounded
+    let ln = len(state["lines"])
+    if ln > 200 {
+        mut kept = []
+        mut k = ln - 200
+        while k < ln { push(kept, state["lines"][k]); k = k + 1 }
+        state["lines"] = kept
+    }
+    return state
+}
+
+fn _shell_run(state, cmd) {
+    push(state["lines"], "kyan > " + cmd)
+    if cmd == "" { return null }
+    if cmd == "clear" { state["lines"] = []; return null }
+    if cmd == "help" {
+        push(state["lines"], "commands: help  ls  clarity  echo <text>  neofetch  clear")
+        return null
+    }
+    if cmd == "ls" {
+        push(state["lines"], "voidrunner.clarity  kyan_desktop.clarity  draw.clarity  aurora.wall")
+        return null
+    }
+    if cmd == "clarity" {
+        push(state["lines"], "Clarity 1.1 - self-hosted. try: clarity run hello.clarity")
+        return null
+    }
+    if cmd == "neofetch" {
+        push(state["lines"], "KyanOS - Obsidian & neon - self-hosted in Clarity")
+        return null
+    }
+    if _starts_with(cmd, "echo ") {
+        push(state["lines"], substring(cmd, 5, len(cmd)))
+        return null
+    }
+    push(state["lines"], "command not found: " + cmd)
+    return null
+}
+
+fn paint_shell(fb, x, y, w, h, theme, state) {
+    let t = theme
+    let atlas = shared_atlas()
+    fill_rect(fb, x, y, w, h, 0xFF05060A)
+    let lh = 20
+    let maxrows = int((h - 20) / lh)
+    let lines = state["lines"]
+    -- show the last maxrows lines (leaving room for the live prompt)
+    let total = len(lines) + 1
+    mut start = 0
+    if total > maxrows { start = total - maxrows }
+    mut ly = y + 10
+    mut idx = start
+    while idx < len(lines) {
+        let line = lines[idx]
+        let col = if _starts_with(line, "kyan >") { t["accent"] } else { t["foreground_muted"] }
+        draw_atlas_text(fb, x + 12, ly, line, atlas, col, {"size": 15})
+        ly = ly + lh
+        idx = idx + 1
+    }
+    -- the live prompt + a block cursor
+    let prompt = "kyan > " + state["input"]
+    draw_atlas_text(fb, x + 12, ly, prompt, atlas, t["foreground"], {"size": 15})
+    let pw = measure_atlas_text(atlas, prompt, 15, 0)[0]
+    fill_rect(fb, x + 12 + pw + 2, ly, 8, 14, t["accent"])
+}
+
 -- ── Files ───────────────────────────────────────────────
 --
 -- A navigable virtual filesystem. The tree below is the whole "disk";

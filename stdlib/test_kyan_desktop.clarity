@@ -10,6 +10,8 @@ from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 from "mouse.clarity" import MouseEvent
 from "kyan_apps.clarity" import _calc_layout, _settings_layout, _files_layout
+from "pty.clarity" import pty_supported
+from "kyan_apps.clarity" import new_shell
 
 mut PASSED = 0
 mut FAILED = 0
@@ -341,6 +343,37 @@ assert_eq(len(df._app_ui["files"]["path"]), 0, "clicking the Home crumb returns 
 -- closing files frees its navigation state
 df.close("files")
 assert(not has(df._app_ui, "files"), "closing files frees its navigation state")
+
+-- ── Terminal echo shell (hosts without a PTY) ──
+-- On a host with no PTY (e.g. the browser build) the Terminal falls back to
+-- an interactive echo shell seeded in _app_ui and driven by terminal_input.
+if not pty_supported() {
+    show "-- KyanDesktop: terminal echo shell --"
+    let dsh = kyan_desktop(1000, 640, theme)
+    dsh.boot(null)
+    dsh.open("terminal", 120, 90, 460, 300)
+    assert(has(dsh._app_ui, "terminal"), "opening the terminal seeds the echo shell")
+    assert(not has(dsh._terminals, "terminal"), "no PTY session is spawned on this host")
+    let before = len(dsh._app_ui["terminal"]["lines"])
+    assert(dsh.terminal_input("ls\n"), "terminal_input drives the shell and reports handled")
+    assert(len(dsh._app_ui["terminal"]["lines"]) > before, "running a command extends the scrollback")
+    assert_eq(dsh._app_ui["terminal"]["input"], "", "Enter clears the shell input line")
+    -- closing the terminal frees the shell state
+    dsh.close("terminal")
+    assert(not has(dsh._app_ui, "terminal"), "closing the terminal frees the shell state")
+}
+
+-- terminal_input routes to the echo shell whenever there's no PTY session,
+-- regardless of host — seed the fallback state directly and drive it. (On a
+-- PTY host the branch above is skipped, so this keeps the wiring covered.)
+show "-- KyanDesktop: terminal input routes to the echo shell --"
+let dsr = kyan_desktop(1000, 640, theme)
+dsr.boot(null)
+dsr._app_ui["terminal"] = new_shell()
+let sbefore = len(dsr._app_ui["terminal"]["lines"])
+assert(dsr.terminal_input("help\n"), "terminal_input routes to the shell when no PTY is present")
+assert(len(dsr._app_ui["terminal"]["lines"]) > sbefore, "the routed command extends the scrollback")
+assert_eq(dsr._app_ui["terminal"]["input"], "", "Enter clears the routed input line")
 
 -- ── close ────────────────────────────────────────
 
