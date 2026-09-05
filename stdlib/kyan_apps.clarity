@@ -553,17 +553,48 @@ let _CALC_KEYS = [
     ["0", ".", "="]
 ]
 
+-- Scientific keypad (6 wide): trig, logs, powers, roots, constants, and
+-- memory on the left; the numeric pad on the right. Shown when the calc is
+-- in scientific mode (toggled by the "mode" pill in the display).
+let _CALC_KEYS_SCI = [
+    ["sin", "cos", "tan", "C",   "+/-", "%"],
+    ["ln",  "log", "^",   "7",   "8",   "9"],
+    ["sqrt",   "x^2",  "1/x", "4",   "5",   "6"],
+    ["pi",   "e",   "mr",  "1",   "2",   "3"],
+    ["mc",  "m+",  "m-",  "0",   ".",   "="]
+]
+
 fn _is_op(k) {
-    return k == "/" or k == "*" or k == "-" or k == "+" or k == "="
+    return k == "/" or k == "*" or k == "-" or k == "+" or k == "=" or k == "^"
 }
 fn _is_fn(k) {
-    return k == "C" or k == "+/-" or k == "%"
+    return k == "C" or k == "+/-" or k == "%" or k == "mode"
+        or k == "sin" or k == "cos" or k == "tan" or k == "ln" or k == "log"
+        or k == "sqrt" or k == "x^2" or k == "1/x" or k == "pi" or k == "e"
+        or k == "mr" or k == "mc" or k == "m+" or k == "m-"
+}
+
+-- Unary scientific functions apply to the current display value at once.
+fn _is_unary(k) {
+    return k == "sin" or k == "cos" or k == "tan" or k == "ln" or k == "log"
+        or k == "sqrt" or k == "x^2" or k == "1/x"
+}
+fn _calc_unary(k, v) {
+    if k == "sin" { return sin(v) }
+    if k == "cos" { return cos(v) }
+    if k == "tan" { return tan(v) }
+    if k == "ln"  { return log(v) }
+    if k == "log" { return log(v) / log(10.0) }
+    if k == "sqrt"   { return sqrt(v) }
+    if k == "x^2"  { return v * v }
+    if k == "1/x" { if v == 0.0 { return 0.0 } return 1.0 / v }
+    return v
 }
 
 -- ── Calculator state machine ────────────────────────────
 
 fn new_calc() {
-    return {"display": "0", "expr": "", "acc": 0.0, "op": "", "fresh": true}
+    return {"display": "0", "expr": "", "acc": 0.0, "op": "", "fresh": true, "mem": 0.0, "sci": false}
 }
 
 fn _calc_num(s) {
@@ -581,6 +612,7 @@ fn _calc_compute(a, op, b) {
     if op == "-" { return a - b }
     if op == "*" { return a * b }
     if op == "/" { if b == 0.0 { return 0.0 } return a / b }
+    if op == "^" { return pow(a, b) }
     return b
 }
 
@@ -588,6 +620,22 @@ fn _calc_compute(a, op, b) {
 fn calc_press(s, key) {
     if key == "C" {
         s["display"] = "0"; s["expr"] = ""; s["acc"] = 0.0; s["op"] = ""; s["fresh"] = true
+        return s
+    }
+    -- mode toggle: basic ⇄ scientific keypad
+    if key == "mode" { s["sci"] = not s["sci"]; return s }
+    -- memory
+    if key == "mc" { s["mem"] = 0.0; return s }
+    if key == "mr" { s["display"] = _calc_fmt(s["mem"]); s["fresh"] = true; return s }
+    if key == "m+" { s["mem"] = s["mem"] + _calc_num(s["display"]); s["fresh"] = true; return s }
+    if key == "m-" { s["mem"] = s["mem"] - _calc_num(s["display"]); s["fresh"] = true; return s }
+    -- constants
+    if key == "pi" { s["display"] = _calc_fmt(3.141592653589793); s["fresh"] = true; return s }
+    if key == "e" { s["display"] = _calc_fmt(2.718281828459045); s["fresh"] = true; return s }
+    -- unary scientific functions apply to the current value immediately
+    if _is_unary(key) {
+        s["display"] = _calc_fmt(_calc_unary(key, _calc_num(s["display"])))
+        s["fresh"] = true
         return s
     }
     if key == "+/-" { s["display"] = _calc_fmt(0.0 - _calc_num(s["display"])); return s }
@@ -625,22 +673,28 @@ fn calc_press(s, key) {
 
 -- Keypad geometry: the single source of truth shared by paint and the
 -- desktop's hit-test. Returns a list of {"key","x","y","w","h"}.
-fn _calc_layout(x, y, w, h) {
+fn _calc_layout(x, y, w, h, ...rest) {
+    let sci = len(rest) > 0 and rest[0]
+    let keys = if sci { _CALC_KEYS_SCI } else { _CALC_KEYS }
     let pad = 14
     let disp_h = 74
     let gy = y + disp_h + 6
     let gh = h - disp_h - pad - 6
-    let cols = 4
-    let rows = 5
+    -- column count = the widest row, so basic (4) and scientific (6) both fit
+    mut cols = 0
+    for row in keys { if len(row) > cols { cols = len(row) } }
+    let rows = len(keys)
     let gap = 8
     let kw = int((w - pad * 2 - (cols - 1) * gap) / cols)
     let kh = int((gh - (rows - 1) * gap) / rows)
     mut cells = []
+    -- mode toggle pill, tucked in the display area's top-left
+    push(cells, {"key": "mode", "x": x + pad, "y": y + 12, "w": 46, "h": 22})
     mut r = 0
-    for row in _CALC_KEYS {
+    for row in keys {
         mut c = 0
         for k in row {
-            let span = if k == "0" { 2 } else { 1 }
+            let span = if k == "0" and not sci { 2 } else { 1 }
             let kx = x + pad + c * (kw + gap)
             let ky = gy + r * (kh + gap)
             let kwid = kw * span + (span - 1) * gap
@@ -652,9 +706,13 @@ fn _calc_layout(x, y, w, h) {
     return cells
 }
 
--- Which key (if any) is under (px,py) for a calc at (x,y,w,h).
-fn calc_key_at(x, y, w, h, px, py) {
-    for cell in _calc_layout(x, y, w, h) {
+-- Which key (if any) is under (px,py) for a calc at (x,y,w,h). The optional
+-- trailing arg is the calc state (for scientific-mode layout); omitting it
+-- hit-tests the basic keypad.
+fn calc_key_at(x, y, w, h, px, py, ...rest) {
+    let s = if len(rest) > 0 { rest[0] } else { null }
+    let sci = s != null and has(s, "sci") and s["sci"]
+    for cell in _calc_layout(x, y, w, h, sci) {
         if px >= cell["x"] and px < cell["x"] + cell["w"] and py >= cell["y"] and py < cell["y"] + cell["h"] {
             return cell["key"]
         }
@@ -675,16 +733,30 @@ fn paint_calc(fb, x, y, w, h, theme, state) {
     let big = state["display"]
     let bw = measure_atlas_text(atlas, big, 40, 0)[0]
     draw_atlas_text(fb, x + w - pad - bw, y + 30, big, atlas, 0xFFFFFFFF, {"size": 40})
-    -- keypad
-    for cell in _calc_layout(x, y, w, h) {
+    -- memory indicator: a small "M" when a value is stored
+    let sci = has(state, "sci") and state["sci"]
+    if has(state, "mem") and state["mem"] != 0.0 {
+        draw_atlas_text(fb, x + pad + 54, y + 16, "M", atlas, t["accent"], {"size": 13})
+    }
+    -- keypad + the mode-toggle pill (sci-aware layout)
+    let ksize = if sci { 16 } else { 20 }
+    for cell in _calc_layout(x, y, w, h, sci) {
         let k = cell["key"]
+        if k == "mode" {
+            -- a small pill; label shows the mode you switch to
+            rounded_rect(fb, cell["x"], cell["y"], cell["w"], cell["h"], 11, t["surface"])
+            let ml = if sci { "123" } else { "sci" }
+            let mlw = measure_atlas_text(atlas, ml, 12, 0)[0]
+            draw_atlas_text(fb, cell["x"] + int(cell["w"] / 2) - int(mlw / 2), cell["y"] + 5, ml, atlas, t["accent"], {"size": 12})
+            continue
+        }
         mut bgc = t["surface_elevated"]
         if _is_op(k) { bgc = t["accent"] }
         elif _is_fn(k) { bgc = t["surface"] }
         rounded_rect(fb, cell["x"], cell["y"], cell["w"], cell["h"], 10, bgc)
         let kcol = if _is_op(k) { 0xFF05060A } else { if _is_fn(k) { t["foreground_muted"] } else { 0xFFFFFFFF } }
-        let lw = measure_atlas_text(atlas, k, 20, 0)[0]
-        draw_atlas_text(fb, cell["x"] + int(cell["w"] / 2) - int(lw / 2), cell["y"] + int(cell["h"] / 2) - 12, k, atlas, kcol, {"size": 20})
+        let lw = measure_atlas_text(atlas, k, ksize, 0)[0]
+        draw_atlas_text(fb, cell["x"] + int(cell["w"] / 2) - int(lw / 2), cell["y"] + int(cell["h"] / 2) - int(ksize / 2), k, atlas, kcol, {"size": ksize})
     }
 }
 

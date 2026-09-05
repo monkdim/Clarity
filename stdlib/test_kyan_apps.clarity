@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -125,6 +125,47 @@ assert_eq(calc_seq(["5", "/", "0", "="]), "0", "divide by zero returns 0, no cra
 let hk = calc_key_at(0, 0, 300, 400, 40, 120)
 assert(hk != null, "calc_key_at finds a key inside the pad")
 assert_eq(calc_key_at(0, 0, 300, 400, -5, -5), null, "calc_key_at misses outside the pad")
+
+-- ── Calculator: scientific mode ──
+show "-- Kyan apps: scientific calculator --"
+fn approx(a, b) { mut d = a - b; if d < 0.0 { d = 0.0 - d } return d < 0.0001 }
+-- the mode pill toggles basic ⇄ scientific
+let cm = new_calc()
+assert(not cm["sci"], "calc starts in basic mode")
+calc_press(cm, "mode")
+assert(cm["sci"], "mode pill switches to scientific")
+calc_press(cm, "mode")
+assert(not cm["sci"], "mode pill switches back to basic")
+-- unary functions apply immediately to the current value
+assert_eq(calc_seq(["9", "sqrt"]), "3", "√9 = 3")
+assert_eq(calc_seq(["5", "x^2"]), "25", "5² = 25")
+assert_eq(calc_seq(["4", "1/x"]), "0.25", "1/4 = 0.25")
+assert_eq(calc_seq(["0", "sin"]), "0", "sin(0) = 0")
+assert_eq(calc_seq(["0", "cos"]), "1", "cos(0) = 1")
+assert(approx(float(calc_seq(["1", "0", "0", "log"])), 2.0), "log10(100) ≈ 2")
+-- power is a binary op like the others
+assert_eq(calc_seq(["2", "^", "1", "0", "="]), "1024", "2 ^ 10 = 1024")
+-- constants
+assert(approx(float(calc_seq(["pi"])), 3.14159), "π key sets pi")
+-- memory: M+ accumulates, MR recalls, M- subtracts, MC clears
+let cmem = new_calc()
+calc_press(cmem, "5"); calc_press(cmem, "m+")
+calc_press(cmem, "3"); calc_press(cmem, "m+")
+calc_press(cmem, "mr")
+assert_eq(cmem["display"], "8", "M+ accumulates and MR recalls (5+3=8)")
+calc_press(cmem, "2"); calc_press(cmem, "m-")
+calc_press(cmem, "mr")
+assert_eq(cmem["display"], "6", "M- subtracts from memory (8-2=6)")
+calc_press(cmem, "mc")
+assert_eq(cmem["mem"], 0.0, "MC clears memory")
+-- scientific hit-testing (state selects the 6-wide layout) + the mode pill
+let csci = new_calc(); csci["sci"] = true
+assert(calc_key_at(0, 0, 320, 420, 30, 130, csci) != null, "calc_key_at finds a key in the scientific layout")
+assert_eq(calc_key_at(0, 0, 320, 420, 24, 20, csci), "mode", "top-left of the display hits the mode pill")
+-- scientific keypad paints without error onto a real buffer
+let fsci_fb = framebuffer(320, 420)
+paint_calc(fsci_fb, 0, 0, 320, 420, t, csci)
+assert(painted(fsci_fb, 0xFF000000), "scientific calc paints display + expanded keypad")
 
 -- ── Files navigation ──
 show "-- Kyan apps: files navigation --"
