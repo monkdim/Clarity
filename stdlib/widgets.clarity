@@ -806,6 +806,240 @@ class Tabs < Widget {
 
 fn tabs(titles) { return Tabs(titles) }
 
+-- ── TreeView — a collapsible hierarchy ─────────────────
+-- A generic retained-mode tree: nodes are {"label", "children"} dicts
+-- (a leaf omits children or gives []). Rows indent by depth, folders get
+-- a disclosure chevron, and one row is selectable. The reusable sibling of
+-- the Files app's own sidebar tree.
+
+-- Flatten the currently-visible rows, depth-first, honouring expansion.
+-- Each node's key is its positional path ("0", "0.1", …) so expansion is
+-- stable regardless of labels.
+fn _tv_rows(tree, nodes, keypfx, depth) {
+    mut out = []
+    mut i = 0
+    for n in nodes {
+        let key = if keypfx == "" { str(i) } else { keypfx + "." + str(i) }
+        let kids = if has(n, "children") { n["children"] } else { [] }
+        let has_kids = len(kids) > 0
+        let exp = has(tree.expanded, key) and tree.expanded[key]
+        push(out, {"label": n["label"], "depth": depth, "has_kids": has_kids, "expanded": exp, "key": key})
+        if exp and has_kids {
+            for r in _tv_rows(tree, kids, key, depth + 1) { push(out, r) }
+        }
+        i += 1
+    }
+    return out
+}
+
+class TreeView < Widget {
+    fn init(roots) {
+        this._setup_widget()
+        this.role = "tree"
+        this.focusable = true
+        this.roots = roots ?? []
+        this.expanded = {}
+        this.selected = -1
+        this.row_height = 24
+        this.indent = 14
+    }
+
+    fn set_roots(roots) { this.roots = roots; this.selected = -1 }
+    fn visible_rows() { return _tv_rows(this, this.roots, "", 0) }
+    fn toggle(key) {
+        let cur = has(this.expanded, key) and this.expanded[key]
+        this.expanded[key] = not cur
+    }
+    fn selected_label() {
+        let rows = this.visible_rows()
+        if this.selected >= 0 and this.selected < len(rows) { return rows[this.selected]["label"] }
+        return ""
+    }
+
+    fn preferred_size() { return [180, len(this.visible_rows()) * this.row_height] }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "surface"))
+        let border_c = if this.focused { theme_color(t, "focus_ring") } else { theme_color(t, "border") }
+        rect(fb, r[0], r[1], r[2], r[3], border_c)
+        let rows = this.visible_rows()
+        mut i = 0
+        while i < len(rows) {
+            let row = rows[i]
+            let ry = r[1] + i * this.row_height
+            if ry >= r[1] + r[3] { break }
+            if i == this.selected {
+                fill_rect(fb, r[0] + 1, ry, r[2] - 2, this.row_height, theme_color(t, "selection"))
+            }
+            let tx = r[0] + 8 + row["depth"] * this.indent
+            let midy = ry + this.row_height / 2
+            if row["has_kids"] {
+                let cc = theme_color(t, "foreground_muted")
+                if row["expanded"] {
+                    line(fb, tx, midy - 1, tx + 4, midy + 3, cc)
+                    line(fb, tx + 4, midy + 3, tx + 8, midy - 1, cc)
+                } else {
+                    line(fb, tx + 1, midy - 4, tx + 5, midy, cc)
+                    line(fb, tx + 5, midy, tx + 1, midy + 4, cc)
+                }
+            }
+            let m = measure_text(f, row["label"])
+            draw_text(fb, tx + 14, ry + (this.row_height - m[1]) / 2, row["label"], f, theme_color(t, "foreground"))
+            i += 1
+        }
+    }
+
+    fn _handle(event) {
+        let kind = _event_kind_local(event)
+        let r = this.screen_rect()
+        if kind == "mouse" and event.is_press {
+            this.focus()
+            let idx = int((event.y - r[1]) / this.row_height)
+            let rows = this.visible_rows()
+            if idx >= 0 and idx < len(rows) {
+                let row = rows[idx]
+                let tx = r[0] + 8 + row["depth"] * this.indent
+                if row["has_kids"] and event.x >= tx - 3 and event.x <= tx + 12 {
+                    this.toggle(row["key"])
+                } else {
+                    this.selected = idx
+                    if this._click_handler != null { this._click_handler(this) }
+                }
+            }
+            return true
+        }
+        if kind == "key" and this.focused and event.is_press {
+            let rows = this.visible_rows()
+            if event.name == "Down" { if this.selected < len(rows) - 1 { this.selected += 1; if this._click_handler != null { this._click_handler(this) } } return true }
+            if event.name == "Up"   { if this.selected > 0 { this.selected -= 1; if this._click_handler != null { this._click_handler(this) } } return true }
+            if event.name == "Right" {
+                if this.selected >= 0 and this.selected < len(rows) {
+                    let row = rows[this.selected]
+                    if row["has_kids"] and not row["expanded"] { this.toggle(row["key"]) }
+                }
+                return true
+            }
+            if event.name == "Left" {
+                if this.selected >= 0 and this.selected < len(rows) {
+                    let row = rows[this.selected]
+                    if row["has_kids"] and row["expanded"] { this.toggle(row["key"]) }
+                }
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn tree_view(roots) { return TreeView(roots) }
+
+-- ── Dropdown — a value selector with a popup list ──────
+-- The popup extends below the header, past the widget's own bounds, so
+-- Dropdown overrides handle_event (which normally rejects clicks outside a
+-- widget's rect) to route clicks in the open list. A click elsewhere
+-- closes it.
+
+class Dropdown < Widget {
+    fn init(items) {
+        this._setup_widget()
+        this.role = "combobox"
+        this.focusable = true
+        this.items = items ?? []
+        this.selected = if len(this.items) > 0 { 0 } else { -1 }
+        this.open = false
+        this.row_height = 24
+        this.padding_x = 10
+    }
+
+    fn set_items(items) {
+        this.items = items
+        if this.selected >= len(items) { this.selected = if len(items) > 0 { 0 } else { -1 } }
+    }
+    fn value() {
+        if this.selected >= 0 and this.selected < len(this.items) { return this.items[this.selected] }
+        return ""
+    }
+    fn preferred_size() { return [150, 28] }
+
+    -- Screen rect of the open list, directly below the header.
+    fn _popup_rect() {
+        let r = this.screen_rect()
+        return [r[0], r[1] + r[3], r[2], len(this.items) * this.row_height]
+    }
+
+    fn _paint(fb) {
+        let r = this.screen_rect()
+        let t = this.theme()
+        let f = theme_font(t)
+        fill_rect(fb, r[0], r[1], r[2], r[3], theme_color(t, "surface"))
+        let border_c = if this.focused { theme_color(t, "focus_ring") } else { theme_color(t, "border") }
+        rect(fb, r[0], r[1], r[2], r[3], border_c)
+        draw_text(fb, r[0] + this.padding_x, r[1] + (r[3] - f.height) / 2, this.value(), f, theme_color(t, "foreground"))
+        -- caret chevron (down when closed, up when open) on the right
+        let cx = r[0] + r[2] - 16
+        let cy = r[1] + r[3] / 2
+        let cc = theme_color(t, "foreground_muted")
+        if this.open {
+            line(fb, cx, cy + 2, cx + 4, cy - 2, cc); line(fb, cx + 4, cy - 2, cx + 8, cy + 2, cc)
+        } else {
+            line(fb, cx, cy - 2, cx + 4, cy + 2, cc); line(fb, cx + 4, cy + 2, cx + 8, cy - 2, cc)
+        }
+        -- open popup list
+        if this.open {
+            let p = this._popup_rect()
+            fill_rect(fb, p[0], p[1], p[2], p[3], theme_color(t, "surface_elevated"))
+            rect(fb, p[0], p[1], p[2], p[3], theme_color(t, "border"))
+            mut i = 0
+            while i < len(this.items) {
+                let iy = p[1] + i * this.row_height
+                if i == this.selected {
+                    fill_rect(fb, p[0] + 1, iy, p[2] - 2, this.row_height, theme_color(t, "selection"))
+                }
+                draw_text(fb, p[0] + this.padding_x, iy + (this.row_height - f.height) / 2, this.items[i], f, theme_color(t, "foreground"))
+                i += 1
+            }
+        }
+    }
+
+    -- Override the base dispatch so popup clicks (outside our rect) reach us.
+    fn handle_event(event) {
+        if not this.visible or not this.enabled { return false }
+        let kind = _event_kind_local(event)
+        if kind == "mouse" and event.is_press {
+            let r = this.screen_rect()
+            let in_header = event.x >= r[0] and event.x < r[0] + r[2] and event.y >= r[1] and event.y < r[1] + r[3]
+            if this.open {
+                let p = this._popup_rect()
+                if event.x >= p[0] and event.x < p[0] + p[2] and event.y >= p[1] and event.y < p[1] + p[3] {
+                    let idx = int((event.y - p[1]) / this.row_height)
+                    if idx >= 0 and idx < len(this.items) {
+                        this.selected = idx
+                        if this._click_handler != null { this._click_handler(this) }
+                    }
+                    this.open = false
+                    return true
+                }
+                this.open = false      -- click-away closes
+                return in_header
+            }
+            if in_header { this.focus(); this.open = true; return true }
+            return false
+        }
+        if kind == "key" and this.focused and event.is_press {
+            if event.name == "Down" { if this.selected < len(this.items) - 1 { this.selected += 1; if this._click_handler != null { this._click_handler(this) } } return true }
+            if event.name == "Up"   { if this.selected > 0 { this.selected -= 1; if this._click_handler != null { this._click_handler(this) } } return true }
+            if event.name == "Enter" or event.name == " " { this.open = not this.open; return true }
+            if event.name == "Escape" { this.open = false; return true }
+        }
+        return false
+    }
+}
+
+fn dropdown(items) { return Dropdown(items) }
+
 -- Local helper duplicated from ui.clarity (modules can't re-import each
 -- other's private helpers cleanly without circular deps).
 fn _event_kind_local(event) {
