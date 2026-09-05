@@ -27,7 +27,7 @@ from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_sha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters, prism_play_rect, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click
+from "kyan_apps.clarity" import app_painters, prism_play_rect, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_spawn_shell, pty_supported
@@ -197,6 +197,10 @@ class KyanDesktop {
             let cr = win.content_rect()
             this.app_state["voidrunner"] = new_voidrunner(cr[2], cr[3])
         }
+        -- the System Monitor is a live app: its readings drift each frame
+        if app_id == "monitor" {
+            this.app_state["monitor"] = new_monitor()
+        }
         -- a real Terminal spawns a shell on a PTY where the host supports it;
         -- otherwise (e.g. the browser build) it falls back to the mockup painter
         if app_id == "terminal" and pty_supported() and not has(this._terminals, "terminal") {
@@ -360,6 +364,9 @@ class KyanDesktop {
             let dt = now_ms - this._last_tick
             if has(this.windows, "voidrunner") and has(this.app_state, "voidrunner") {
                 voidrunner_update(this.app_state["voidrunner"], dt, this.keys)
+            }
+            if has(this.windows, "monitor") and has(this.app_state, "monitor") {
+                monitor_tick(this.app_state["monitor"], dt)
             }
         }
         -- pump live PTY terminals: reflow on a window resize (SIGWINCH),
@@ -705,6 +712,10 @@ class KyanDesktop {
         -- live (stateful) apps paint from their own state
         if app_id == "voidrunner" and has(this.app_state, "voidrunner") {
             voidrunner_paint(fb, cx, cy, cw, ch, t, this.app_state["voidrunner"])
+            return null
+        }
+        if app_id == "monitor" and has(this.app_state, "monitor") {
+            paint_monitor(fb, cx, cy, cw, ch, t, this.app_state["monitor"])
             return null
         }
         -- a live PTY terminal renders its real character grid; without a

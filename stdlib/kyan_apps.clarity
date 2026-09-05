@@ -497,14 +497,46 @@ fn paint_files_content(fb, x, y, w, h, theme, focused) {
 
 -- ── System Monitor ─────────────────────────────────────
 
-let _CPU_BARS = [0.32, 0.58, 0.24, 0.71, 0.44, 0.63, 0.38, 0.52]
-let _PROCS = [
-    {"name": "clarity-init", "cpu": "2.4%", "mem": "38 MB"},
-    {"name": "compositor",   "cpu": "6.1%", "mem": "72 MB"},
-    {"name": "prism",        "cpu": "11.7%", "mem": "144 MB"},
-    {"name": "voidrunner",   "cpu": "18.3%", "mem": "96 MB"},
-    {"name": "terminal",     "cpu": "0.9%", "mem": "24 MB"}
-]
+-- Live System Monitor state. Values drift over time via monitor_tick so
+-- the app reads as a real, updating monitor rather than a static mock.
+-- A tiny LCG keeps the drift deterministic (seed lives in the state), so
+-- tests can advance it and assert exact behaviour.
+fn new_monitor() {
+    return {
+        "_seed": 1234567,
+        "cpu":   0.42,                                        -- 0..1 overall load
+        "cores": [0.32, 0.58, 0.24, 0.71, 0.44, 0.63, 0.38, 0.52],
+        "mem_used":  6.2, "mem_total": 16.0,                  -- GB
+        "procs": [
+            {"name": "clarity-init", "cpu": 2.4,  "mem": "38 MB"},
+            {"name": "compositor",   "cpu": 6.1,  "mem": "72 MB"},
+            {"name": "prism",        "cpu": 11.7, "mem": "144 MB"},
+            {"name": "voidrunner",   "cpu": 18.3, "mem": "96 MB"},
+            {"name": "terminal",     "cpu": 0.9,  "mem": "24 MB"}
+        ]
+    }
+}
+
+fn _mon_rand(state) {
+    -- LCG → a float in [0, 1)
+    state["_seed"] = (state["_seed"] * 1103515245 + 12345) % 2147483648
+    return (state["_seed"] % 1000) / 1000.0
+}
+fn _clampf(v, lo, hi) { if v < lo { return lo }; if v > hi { return hi }; return v }
+fn _mon_fmt1(x) { return str(round(x, 1)) }
+
+-- Advance the monitor: nudge the overall load, each core, memory, and each
+-- process's CPU by a small random walk. `dt` is accepted for parity with
+-- other live apps; the walk is per-tick.
+fn monitor_tick(state, dt) {
+    state["cpu"] = _clampf(state["cpu"] + (_mon_rand(state) - 0.5) * 0.10, 0.03, 0.99)
+    mut cores = []
+    for c in state["cores"] { push(cores, _clampf(c + (_mon_rand(state) - 0.5) * 0.22, 0.04, 0.99)) }
+    state["cores"] = cores
+    state["mem_used"] = _clampf(state["mem_used"] + (_mon_rand(state) - 0.5) * 0.3, 2.0, state["mem_total"])
+    for p in state["procs"] { p["cpu"] = _clampf(p["cpu"] + (_mon_rand(state) - 0.5) * 2.4, 0.1, 60.0) }
+    return state
+}
 
 fn _stat_card(fb, x, y, w, h, t, atlas, label, value) {
     rounded_rect(fb, x, y, w, h, 10, t["surface_elevated"])
@@ -513,23 +545,25 @@ fn _stat_card(fb, x, y, w, h, t, atlas, label, value) {
     draw_atlas_text(fb, x + 12, y + 24, value, atlas, 0xFFFFFFFF, {"size": 24})
 }
 
-fn paint_monitor_content(fb, x, y, w, h, theme, focused) {
+fn paint_monitor(fb, x, y, w, h, theme, state) {
     let t = theme
     let atlas = shared_atlas()
     fill_rect(fb, x, y, w, h, t["surface"])
     let pad = 16
 
-    -- two stat cards up top
+    -- two stat cards up top, reading the live state
     let cw = int((w - pad * 3) / 2)
-    _stat_card(fb, x + pad, y + pad, cw, 58, t, atlas, "CPU LOAD", "47%")
-    _stat_card(fb, x + pad * 2 + cw, y + pad, cw, 58, t, atlas, "MEMORY", "6.2 / 16 GB")
+    _stat_card(fb, x + pad, y + pad, cw, 58, t, atlas, "CPU LOAD", str(int(state["cpu"] * 100)) + "%")
+    _stat_card(fb, x + pad * 2 + cw, y + pad, cw, 58, t, atlas, "MEMORY",
+               _mon_fmt1(state["mem_used"]) + " / " + str(int(state["mem_total"])) + " GB")
 
     -- CPU core bar graph
+    let cores = state["cores"]
     let gy = y + pad + 58 + 16
     let gh = 74
     rounded_rect(fb, x + pad, gy, w - pad * 2, gh, 10, t["surface_elevated"])
     draw_atlas_text(fb, x + pad + 12, gy + 8, "CORES", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
-    let bars = len(_CPU_BARS)
+    let bars = len(cores)
     let inner = w - pad * 2 - 24
     let bw = int(inner / bars) - 6
     let base_y = gy + gh - 12
@@ -537,7 +571,7 @@ fn paint_monitor_content(fb, x, y, w, h, theme, focused) {
     mut i = 0
     while i < bars {
         let bx = x + pad + 12 + i * (bw + 6)
-        let bh = int(_CPU_BARS[i] * max_h)
+        let bh = int(cores[i] * max_h)
         fill_rect(fb, bx, gy + 24, bw, max_h, t["surface"])
         linear_gradient(fb, bx, base_y - bh, bw, bh, [
             {"t": 0.0, "color": 0xFF22D3EE},
@@ -546,23 +580,29 @@ fn paint_monitor_content(fb, x, y, w, h, theme, focused) {
         i = i + 1
     }
 
-    -- process list
+    -- process list (CPU% is live, formatted from the drifting float)
     let py0 = gy + gh + 16
     draw_atlas_text(fb, x + pad, py0, "PROCESSES", atlas, t["foreground_muted"], {"size": 11, "tracking": 1})
     mut py = py0 + 18
     mut r = 0
-    for p in _PROCS {
+    for p in state["procs"] {
         if py + 22 > y + h { break }
         if r % 2 == 1 { fill_rect(fb, x + pad, py - 3, w - pad * 2, 22, t["surface_elevated"]) }
         fill_rect(fb, x + pad + 4, py + 4, 6, 6, t["accent"])
         draw_atlas_text(fb, x + pad + 18, py, p["name"], atlas, t["foreground"], {"size": 14})
-        let cpuw = measure_atlas_text(atlas, p["cpu"], 14, 0)[0]
-        draw_atlas_text(fb, x + w - pad - 90 - cpuw, py, p["cpu"], atlas, t["accent"], {"size": 14})
+        let cpu_str = _mon_fmt1(p["cpu"]) + "%"
+        let cpuw = measure_atlas_text(atlas, cpu_str, 14, 0)[0]
+        draw_atlas_text(fb, x + w - pad - 90 - cpuw, py, cpu_str, atlas, t["accent"], {"size": 14})
         let memw = measure_atlas_text(atlas, p["mem"], 14, 0)[0]
         draw_atlas_text(fb, x + w - pad - memw, py, p["mem"], atlas, t["foreground_muted"], {"size": 14})
         py = py + 24
         r = r + 1
     }
+}
+
+-- Registry/fallback wrapper: a fresh (static-snapshot) monitor.
+fn paint_monitor_content(fb, x, y, w, h, theme, focused) {
+    paint_monitor(fb, x, y, w, h, theme, new_monitor())
 }
 
 -- ── Settings ────────────────────────────────────────────

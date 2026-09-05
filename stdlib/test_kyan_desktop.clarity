@@ -236,6 +236,21 @@ assert(dg.app_state["voidrunner"]["ship_x"] > sx0, "tick + key state moves the s
 dg.close("voidrunner")
 assert(not has(dg.app_state, "voidrunner"), "close clears game state")
 
+-- ── System Monitor: live app seeds + drifts ──
+
+let dm = kyan_desktop(1000, 640, theme)
+dm.boot(null)
+dm.open("monitor", 120, 90, 520, 420)
+assert(has(dm.app_state, "monitor"), "monitor state seeded on open")
+let mcpu0 = dm.app_state["monitor"]["cpu"]
+dm.tick(0)
+dm.tick(16)
+dm.tick(32)
+assert(dm.app_state["monitor"]["cpu"] != mcpu0, "tick drives the monitor's live readings")
+assert(dm.needs_redraw(), "an open monitor keeps the desktop live")
+dm.close("monitor")
+assert(not has(dm.app_state, "monitor"), "close clears monitor state")
+
 -- Prism's Play button launches Voidrunner
 let dp = kyan_desktop(1000, 640, theme)
 dp.boot(null)
