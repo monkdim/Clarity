@@ -23,7 +23,7 @@ from "compositor.clarity" import compositor
 from "window.clarity" import window
 from "window_manager.clarity" import window_manager
 from "graphics.clarity" import framebuffer, rgba
-from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded, frosted_panel, blit_scaled_alpha
+from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_shadow, linear_gradient, fill_rect_blend, line, blit_rounded, frosted_panel, blit_scaled_alpha, radial_glow, circle
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
@@ -600,19 +600,32 @@ class KyanDesktop {
 
     fn _paint_wallpaper(fb) {
         let t = this.theme
+        -- Aurora Glass wallpaper. Two layers of depth:
+        --  1. a diagonal base wash — deep violet at the top-left fading
+        --     to a teal-black at the bottom — so the canvas is never a
+        --     dead flat black.
+        --  2. three soft radial "aurora" blooms (violet, cyan, blue)
+        --     placed off the corners so the light feels like it spills
+        --     in from beyond the frame.
+        -- The whole thing is drawn at quarter resolution and then
+        -- bilinear-upscaled: the blooms are smooth gradients, so the
+        -- upscale is invisible, and the per-pixel glow cost drops ~16x
+        -- (keeps the one-time paint cheap even off the compiled path).
+        let sc = 4
+        let sw = int(this.width / sc)
+        let sh = int(this.height / sc)
+        let small = framebuffer(sw, sh)
+        linear_gradient(small, 0, 0, sw, sh, [
+            {"t": 0.0,  "color": rgba(26, 12, 51, 255)},    -- #1A0C33 deep violet
+            {"t": 0.42, "color": rgba(10, 10, 28, 255)},    -- #0A0A1C ink
+            {"t": 1.0,  "color": rgba(6, 26, 32, 255)}      -- #061A20 teal-black
+        ], "v")
+        radial_glow(small, int(sw * 0.14), int(sh * 0.08), int(sw * 0.52), rgba(163, 116, 249, 150))  -- violet, top-left
+        radial_glow(small, int(sw * 0.90), int(sh * 0.16), int(sw * 0.40), rgba(53, 231, 225, 90))    -- cyan, top-right
+        radial_glow(small, int(sw * 0.66), int(sh * 1.04), int(sw * 0.60), rgba(79, 157, 255, 120))   -- blue, rising from bottom
+        radial_glow(small, int(sw * 0.44), int(sh * 0.44), int(sw * 0.50), rgba(120, 60, 200, 40))    -- soft violet centre
         fb.clear(t["background"])
-        -- aurora wash: a violet bloom fading down from the top, and a
-        -- cyan bloom rising from the bottom — fast per-row blends.
-        let top_h = int(this.height * 0.62)
-        linear_gradient(fb, 0, 0, this.width, top_h, [
-            {"t": 0.0, "color": rgba(124, 58, 237, 64)},
-            {"t": 1.0, "color": rgba(124, 58, 237, 0)}
-        ], "v")
-        let bot_y = int(this.height * 0.45)
-        linear_gradient(fb, 0, bot_y, this.width, this.height - bot_y, [
-            {"t": 0.0, "color": rgba(34, 211, 238, 0)},
-            {"t": 1.0, "color": rgba(34, 211, 238, 48)}
-        ], "v")
+        blit_scaled_alpha(fb, small, 0, 0, this.width, this.height, 255)
     }
 
     -- Paint Kyan glass chrome + a content placeholder into a window's
@@ -625,19 +638,27 @@ class KyanDesktop {
         let th = win.title_h
         -- opaque surface (square window — the compositor blit is opaque)
         fb.clear(t["surface"])
-        -- title bar
-        fill_rect(fb, 0, 0, w, th, t["surface_elevated"])
+        -- title bar: a subtle vertical gradient (raised → surface) so it
+        -- reads as a distinct glass strip rather than a flat band
+        linear_gradient(fb, 0, 0, w, th, [
+            {"t": 0.0, "color": t["surface_elevated"]},
+            {"t": 1.0, "color": t["surface"]}
+        ], "v")
+        -- rim-light: a 1px highlight along the very top edge catches the
+        -- light like a bevelled glass pane. Brighter when focused.
+        let rim_a = if win.focused { 40 } else { 22 }
+        fill_rect_blend(fb, 0, 0, w, 1, rgba(255, 255, 255, rim_a))
         -- top rail: signature gradient when focused, hairline otherwise
         if win.focused {
-            linear_gradient(fb, 0, 0, w, 3, kyan_gradient_stops(), "h")
+            linear_gradient(fb, 0, 1, w, 2, kyan_gradient_stops(), "h")
         } else {
-            fill_rect(fb, 0, 0, w, 3, t["border"])
+            fill_rect(fb, 0, 1, w, 2, t["border"])
         }
-        -- traffic dots
-        let dy = int(th / 2) - 5
-        fill_rect(fb, 14, dy, 10, 10, 0xFFFB7185)
-        fill_rect(fb, 30, dy, 10, 10, 0xFFFBBF24)
-        fill_rect(fb, 46, dy, 10, 10, 0xFF34D399)
+        -- traffic lights (round)
+        let cy = int(th / 2)
+        circle(fb, 19, cy, 6, 0xFFFB7185)
+        circle(fb, 37, cy, 6, 0xFFFBBF24)
+        circle(fb, 55, cy, 6, 0xFF34D399)
         -- title, centred (anti-aliased proportional type)
         let tw = measure_atlas_text(this._atlas, win.title, 15, 0)[0]
         let tx = int(w / 2) - int(tw / 2)

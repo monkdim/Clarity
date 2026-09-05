@@ -397,19 +397,35 @@ fn radial_glow(fb, cx, cy, radius, color) {
     let peak = int(color / 16777216) & 0xFF
     let rgb = color & 0xFFFFFF
     let r2 = radius * radius
-    mut yy = cy - radius
-    while yy <= cy + radius {
-        mut xx = cx - radius
-        while xx <= cx + radius {
-            let dx = xx - cx
-            let dy = yy - cy
-            let d2 = dx * dx + dy * dy
-            if d2 <= r2 {
-                let falloff = 1.0 - (d2 / r2)
+    let fr2 = float(r2)
+    -- clip the bloom's bounding box to the framebuffer up front so a
+    -- glow anchored off-canvas (the wallpaper places them past the
+    -- corners) only touches visible rows.
+    let y0 = if cy - radius > 0 { cy - radius } else { 0 }
+    let y1 = if cy + radius < fb.height - 1 { cy + radius } else { fb.height - 1 }
+    mut yy = y0
+    while yy <= y1 {
+        let dy = yy - cy
+        let dy2 = dy * dy
+        -- horizontal half-span of the circle at this row: sqrt(r2 - dy2).
+        -- Iterating only this span skips the ~21% of the bounding box
+        -- that lies in the transparent corners, and drops the per-pixel
+        -- inside-circle test entirely.
+        let rem = r2 - dy2
+        if rem > 0 {
+            let half = int(sqrt(float(rem)))
+            let xa0 = cx - half
+            let xb0 = cx + half
+            let xa = if xa0 > 0 { xa0 } else { 0 }
+            let xb = if xb0 < fb.width - 1 { xb0 } else { fb.width - 1 }
+            mut xx = xa
+            while xx <= xb {
+                let dx = xx - cx
+                let falloff = 1.0 - (float(dx * dx + dy2) / fr2)
                 let a = int(peak * falloff)
                 if a > 0 { blend_pixel(fb, xx, yy, a * 16777216 + rgb) }
+                xx += 1
             }
-            xx += 1
         }
         yy += 1
     }
