@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -82,6 +82,32 @@ fm.clear(0xFF000000)
 paint_monitor_content(fm, 0, 0, 500, 420, t, true)
 assert_eq(fm.get_pixel(2, 2), t["surface"], "monitor fills the surface")
 assert(painted(fm, 0xFF000000), "monitor draws cards / bars / processes")
+
+-- live monitor: seeded state + a deterministic drift
+let mon = new_monitor()
+assert(mon["cpu"] > 0.0 and mon["cpu"] < 1.0, "monitor seeds a CPU load in range")
+assert_eq(len(mon["cores"]), 8, "monitor has eight cores")
+assert_eq(len(mon["procs"]), 5, "monitor lists processes")
+-- a tick moves the readings but keeps them in range
+let cpu0 = mon["cpu"]
+monitor_tick(mon, 16.0)
+assert(mon["cpu"] != cpu0, "a tick nudges the CPU load")
+assert(mon["cpu"] >= 0.03 and mon["cpu"] <= 0.99, "CPU load stays clamped")
+for c in mon["cores"] { assert(c >= 0.04 and c <= 0.99, "each core stays clamped") }
+for p in mon["procs"] { assert(p["cpu"] >= 0.1 and p["cpu"] <= 60.0, "each process CPU stays clamped") }
+-- the drift is deterministic from the seed: two fresh monitors ticked the
+-- same number of times land on the same CPU load
+let ma = new_monitor()
+let mb = new_monitor()
+mut _mi = 0
+while _mi < 20 { monitor_tick(ma, 16.0); monitor_tick(mb, 16.0); _mi += 1 }
+assert_eq(ma["cpu"], mb["cpu"], "monitor drift is deterministic from the seed")
+assert(ma["cpu"] >= 0.03 and ma["cpu"] <= 0.99, "CPU load holds range over many ticks")
+-- the live painter renders the ticked state onto a real buffer
+let fm2 = framebuffer(500, 420)
+fm2.clear(0xFF000000)
+paint_monitor(fm2, 0, 0, 500, 420, t, ma)
+assert(painted(fm2, 0xFF000000), "live monitor paints from its state")
 
 -- ── Settings ──
 show "-- Kyan apps: settings --"
