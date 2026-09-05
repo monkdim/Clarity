@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, new_prism, prism_hit, paint_terminal_content, new_shell, shell_input, paint_shell, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
+from "kyan_apps.clarity" import new_editor, editor_input, editor_click, paint_editor, _editor_layout, paint_prism, new_prism, prism_hit, paint_terminal_content, new_shell, shell_input, paint_shell, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -126,6 +126,58 @@ fsh.clear(0xFF112233)
 paint_shell(fsh, 0, 0, 360, 200, t, new_shell())
 assert_eq(fsh.get_pixel(2, 2), 0xFF05060A, "shell fills the void background")
 assert(painted(fsh, 0xFF05060A), "shell paints the banner and prompt")
+
+-- ── Text editor ──
+show "-- Kyan apps: editor --"
+let ed = new_editor()
+let ed_lines0 = len(ed["lines"])
+assert(ed_lines0 > 0, "a new editor has a starter buffer")
+assert_eq(ed["cy"], 0, "the cursor starts on the first line")
+assert_eq(ed["cx"], 0, "the cursor starts at column 0")
+-- typing inserts at the cursor
+editor_input(ed, "X")
+assert_eq(ed["cx"], 1, "typing advances the cursor")
+assert_eq(substring(ed["lines"][0], 0, 1), "X", "the typed char lands at the cursor")
+-- backspace removes it again (host feeds DEL, code 127)
+editor_input(ed, from_char_code(127))
+assert_eq(ed["cx"], 0, "backspace pulls the cursor back")
+-- Enter splits the current line in two
+let ed2 = new_editor()
+editor_input(ed2, "ab")           -- line 0 -> "ab" + rest of the welcome line
+let joinpt = ed2["cx"]            -- the split column (2), where a merge rejoins
+editor_input(ed2, "\n")
+assert_eq(ed2["cy"], 1, "Enter moves the cursor to the new line")
+assert_eq(ed2["cx"], 0, "Enter puts the cursor at the start of the new line")
+assert_eq(len(ed2["lines"]), ed_lines0 + 1, "Enter adds a line to the buffer")
+-- backspace at column 0 merges the line back into the previous one
+editor_input(ed2, from_char_code(127))
+assert_eq(len(ed2["lines"]), ed_lines0, "backspace at col 0 merges lines back")
+assert_eq(ed2["cy"], 0, "the merge moves the cursor up a line")
+assert_eq(ed2["cx"], joinpt, "the merge places the cursor at the join point")
+-- arrow keys move the cursor without editing (ESC CSI sequences)
+let ed3 = new_editor()
+let ESC = from_char_code(27)
+editor_input(ed3, ESC + "[B")     -- down
+assert_eq(ed3["cy"], 1, "the Down arrow moves the cursor down a line")
+editor_input(ed3, ESC + "[C")     -- right
+assert_eq(ed3["cx"], 1, "the Right arrow moves the cursor right")
+editor_input(ed3, ESC + "[D")     -- left
+assert_eq(ed3["cx"], 0, "the Left arrow moves the cursor left")
+editor_input(ed3, ESC + "[A")     -- up
+assert_eq(ed3["cy"], 0, "the Up arrow moves the cursor up a line")
+-- a click places the cursor on the clicked line
+let ed4 = new_editor()
+let L4 = _editor_layout(ed4, 0, 0, 480, 320)
+assert(editor_click(ed4, 0, 0, 480, 320, L4["text_x"] + 1, L4["text_y"] + 2 * L4["line_h"] + 1), "a body click reports handled")
+assert_eq(ed4["cy"], 2, "clicking the third row puts the cursor there")
+-- a click in the status bar is not a text-body click
+assert(not editor_click(ed4, 0, 0, 480, 320, 40, 320 - 4), "a status-bar click is not a body click")
+-- the editor paints its buffer over the surface
+let fed = framebuffer(480, 320)
+fed.clear(0xFF000000)
+paint_editor(fed, 0, 0, 480, 320, t, new_editor(), true)
+assert_eq(fed.get_pixel(4, 40), t["surface_elevated"], "the editor draws a line-number gutter")
+assert(painted(fed, 0xFF000000), "the editor paints its text buffer")
 
 -- ── Files ──
 show "-- Kyan apps: files --"

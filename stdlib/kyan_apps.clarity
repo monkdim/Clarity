@@ -351,6 +351,250 @@ fn paint_shell(fb, x, y, w, h, theme, state) {
     fill_rect(fb, x + 12 + pw + 2, ly, 8, 14, t["accent"])
 }
 
+-- ── Text editor ─────────────────────────────────────────
+-- A small immediate-mode text editor. State is a list of line strings, a
+-- cursor (cy row, cx column) and a vertical scroll offset. The host feeds
+-- raw input through editor_input the same way it feeds the shell: printable
+-- chars insert at the cursor, "\n" splits a line, DEL/BS delete, and ESC-CSI
+-- arrow sequences move the cursor — so host.clarity routes to it identically.
+
+let _ED_LINE_H = 19
+let _ED_PAD = 8
+let _ED_GUTTER = 46
+let _ED_STATUS_H = 22
+let _ED_SIZE = 15
+
+fn new_editor() {
+    return {
+        "name": "untitled.clarity",
+        "lines": [
+            "-- Welcome to the KyanOS editor.",
+            "-- Type to edit; arrow keys move; Enter splits a line.",
+            "",
+            "fn main() {",
+            "    show \"hello from Clarity\"",
+            "}",
+            ""
+        ],
+        "cy": 0, "cx": 0, "scroll": 0, "_rows": 20
+    }
+}
+
+fn _ed_insert(state, s) {
+    let line = state["lines"][state["cy"]]
+    let cx = state["cx"]
+    state["lines"][state["cy"]] = substring(line, 0, cx) + s + substring(line, cx, len(line))
+    state["cx"] = cx + len(s)
+}
+
+fn _ed_newline(state) {
+    let line = state["lines"][state["cy"]]
+    let cx = state["cx"]
+    let left = substring(line, 0, cx)
+    let right = substring(line, cx, len(line))
+    state["lines"][state["cy"]] = left
+    mut out = []
+    mut i = 0
+    while i < len(state["lines"]) {
+        push(out, state["lines"][i])
+        if i == state["cy"] { push(out, right) }
+        i = i + 1
+    }
+    state["lines"] = out
+    state["cy"] = state["cy"] + 1
+    state["cx"] = 0
+}
+
+fn _ed_backspace(state) {
+    let cx = state["cx"]
+    if cx > 0 {
+        let line = state["lines"][state["cy"]]
+        state["lines"][state["cy"]] = substring(line, 0, cx - 1) + substring(line, cx, len(line))
+        state["cx"] = cx - 1
+        return null
+    }
+    if state["cy"] == 0 { return null }
+    let prev = state["lines"][state["cy"] - 1]
+    let cur = state["lines"][state["cy"]]
+    let newcx = len(prev)
+    mut out = []
+    mut i = 0
+    while i < len(state["lines"]) {
+        if i == state["cy"] - 1 { push(out, prev + cur) }
+        elif i != state["cy"] { push(out, state["lines"][i]) }
+        i = i + 1
+    }
+    state["lines"] = out
+    state["cy"] = state["cy"] - 1
+    state["cx"] = newcx
+}
+
+fn _ed_left(state) {
+    if state["cx"] > 0 { state["cx"] = state["cx"] - 1; return null }
+    if state["cy"] > 0 {
+        state["cy"] = state["cy"] - 1
+        state["cx"] = len(state["lines"][state["cy"]])
+    }
+}
+
+fn _ed_right(state) {
+    let line = state["lines"][state["cy"]]
+    if state["cx"] < len(line) { state["cx"] = state["cx"] + 1; return null }
+    if state["cy"] < len(state["lines"]) - 1 { state["cy"] = state["cy"] + 1; state["cx"] = 0 }
+}
+
+fn _ed_up(state) {
+    if state["cy"] > 0 {
+        state["cy"] = state["cy"] - 1
+        let m = len(state["lines"][state["cy"]])
+        if state["cx"] > m { state["cx"] = m }
+    }
+}
+
+fn _ed_down(state) {
+    if state["cy"] < len(state["lines"]) - 1 {
+        state["cy"] = state["cy"] + 1
+        let m = len(state["lines"][state["cy"]])
+        if state["cx"] > m { state["cx"] = m }
+    }
+}
+
+fn _ed_ensure_visible(state, rows) {
+    if state["cy"] < state["scroll"] { state["scroll"] = state["cy"] }
+    elif state["cy"] >= state["scroll"] + rows { state["scroll"] = state["cy"] - rows + 1 }
+    if state["scroll"] < 0 { state["scroll"] = 0 }
+}
+
+-- Feed raw typed input to the editor, char by char.
+fn editor_input(state, text) {
+    mut i = 0
+    while i < len(text) {
+        let ch = char_at(text, i)
+        let code = char_code(ch)
+        if ch == "\n" or ch == "\r" {
+            _ed_newline(state); i = i + 1
+        } elif code == 8 or code == 127 {
+            _ed_backspace(state); i = i + 1
+        } elif code == 9 {
+            _ed_insert(state, "  "); i = i + 1
+        } elif code == 27 {
+            -- ESC CSI arrow: ESC [ <A|B|C|D>
+            i = i + 1
+            if i < len(text) and char_at(text, i) == "[" {
+                i = i + 1
+                if i < len(text) {
+                    let d = char_at(text, i)
+                    if d == "A" { _ed_up(state) }
+                    elif d == "B" { _ed_down(state) }
+                    elif d == "C" { _ed_right(state) }
+                    elif d == "D" { _ed_left(state) }
+                    i = i + 1
+                }
+            }
+        } elif code < 32 {
+            i = i + 1
+        } else {
+            _ed_insert(state, ch); i = i + 1
+        }
+    }
+    _ed_ensure_visible(state, state["_rows"])
+    return state
+}
+
+fn _editor_layout(state, x, y, w, h) {
+    let body_h = h - _ED_STATUS_H
+    let rows = int((body_h - _ED_PAD) / _ED_LINE_H)
+    return {
+        "text_x": x + _ED_GUTTER,
+        "text_y": y + _ED_PAD,
+        "line_h": _ED_LINE_H,
+        "gutter": _ED_GUTTER,
+        "body_h": if body_h > 0 { body_h } else { 0 },
+        "rows": if rows > 0 { rows } else { 1 }
+    }
+}
+
+-- Place the cursor from a click. Returns true when the click landed in the
+-- text body (not the status bar).
+fn editor_click(state, x, y, w, h, px, py) {
+    -- only clicks inside the text body (not the chrome above/around it, and
+    -- not the status bar) reposition the cursor
+    if px < x or px >= x + w { return false }
+    if py < y or py >= y + h - _ED_STATUS_H { return false }
+    let L = _editor_layout(state, x, y, w, h)
+    let atlas = shared_atlas()
+    mut rrel = int((py - L["text_y"]) / L["line_h"])
+    if rrel < 0 { rrel = 0 }
+    mut li = state["scroll"] + rrel
+    if li >= len(state["lines"]) { li = len(state["lines"]) - 1 }
+    if li < 0 { li = 0 }
+    state["cy"] = li
+    let line = state["lines"][li]
+    mut col = 0
+    if px > L["text_x"] {
+        let target = px - L["text_x"]
+        mut best = 0
+        mut bestd = if target < 0 { -target } else { target }
+        mut c = 1
+        while c <= len(line) {
+            let ww = measure_atlas_text(atlas, substring(line, 0, c), _ED_SIZE, 0)[0]
+            mut dd = target - ww
+            if dd < 0 { dd = -dd }
+            if dd < bestd { bestd = dd; best = c }
+            c = c + 1
+        }
+        col = best
+    }
+    state["cx"] = col
+    _ed_ensure_visible(state, L["rows"])
+    return true
+}
+
+fn paint_editor(fb, x, y, w, h, theme, state, focused) {
+    let t = theme
+    let atlas = shared_atlas()
+    let L = _editor_layout(state, x, y, w, h)
+    state["_rows"] = L["rows"]
+    _ed_ensure_visible(state, L["rows"])
+    -- body + gutter
+    fill_rect(fb, x, y, w, h, t["surface"])
+    fill_rect(fb, x, y, L["gutter"], L["body_h"], t["surface_elevated"])
+    let cur_screen = state["cy"] - state["scroll"]
+    -- current-line highlight
+    if focused and cur_screen >= 0 and cur_screen < L["rows"] {
+        let hy = L["text_y"] + cur_screen * L["line_h"]
+        fill_rect(fb, x + L["gutter"], hy - 2, w - L["gutter"], L["line_h"], t["surface_elevated"])
+    }
+    -- visible lines + line numbers
+    mut r = 0
+    while r < L["rows"] {
+        let li = state["scroll"] + r
+        if li >= len(state["lines"]) { break }
+        let ly = L["text_y"] + r * L["line_h"]
+        let num = str(li + 1)
+        let nw = measure_atlas_text(atlas, num, 13, 0)[0]
+        draw_atlas_text(fb, x + L["gutter"] - 10 - nw, ly, num, atlas, t["foreground_muted"], {"size": 13})
+        draw_atlas_text(fb, L["text_x"], ly, state["lines"][li], atlas, t["foreground"], {"size": _ED_SIZE})
+        r = r + 1
+    }
+    -- cursor caret
+    if focused and cur_screen >= 0 and cur_screen < L["rows"] {
+        let line = state["lines"][state["cy"]]
+        let pre = substring(line, 0, state["cx"])
+        let cxp = measure_atlas_text(atlas, pre, _ED_SIZE, 0)[0]
+        fill_rect(fb, L["text_x"] + cxp, L["text_y"] + cur_screen * L["line_h"], 2, L["line_h"] - 2, t["accent"])
+    }
+    -- status bar
+    let sy = y + h - _ED_STATUS_H
+    fill_rect(fb, x, sy, w, _ED_STATUS_H, t["surface_elevated"])
+    let info = state["name"] + "   Ln " + str(state["cy"] + 1) + ", Col " + str(state["cx"] + 1) + "   " + str(len(state["lines"])) + " lines"
+    draw_atlas_text(fb, x + 12, sy + 5, info, atlas, t["foreground_muted"], {"size": 13})
+}
+
+fn paint_editor_content(fb, x, y, w, h, theme, focused) {
+    paint_editor(fb, x, y, w, h, theme, new_editor(), focused)
+}
+
 -- ── Files ───────────────────────────────────────────────
 --
 -- A navigable virtual filesystem. The tree below is the whole "disk";
@@ -1360,6 +1604,7 @@ fn app_painters() {
         "files": paint_files_content,
         "monitor": paint_monitor_content,
         "settings": paint_settings_content,
-        "calc": paint_calc_content
+        "calc": paint_calc_content,
+        "editor": paint_editor_content
     }
 }

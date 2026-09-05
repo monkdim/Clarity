@@ -27,7 +27,7 @@ from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_sha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters, prism_play_rect, new_prism, prism_hit, paint_prism, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor, new_shell, shell_input, paint_shell
+from "kyan_apps.clarity" import app_painters, prism_play_rect, new_prism, prism_hit, paint_prism, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor, new_shell, shell_input, paint_shell, new_editor, editor_input, editor_click, paint_editor
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_spawn_shell, pty_supported
@@ -228,6 +228,10 @@ class KyanDesktop {
         if app_id == "files" and not has(this._app_ui, "files") {
             this._app_ui["files"] = new_files()
         }
+        -- the Editor keeps a live text buffer + cursor
+        if app_id == "editor" and not has(this._app_ui, "editor") {
+            this._app_ui["editor"] = new_editor()
+        }
         return win
     }
 
@@ -347,6 +351,12 @@ class KyanDesktop {
                 return true
             }
         }
+        if app_id == "editor" and has(this._app_ui, "editor") {
+            if editor_click(this._app_ui["editor"], ax, ay, aw, ah, px, py) {
+                this._dirty = true
+                return true
+            }
+        }
         return false
     }
 
@@ -371,6 +381,15 @@ class KyanDesktop {
             return true
         }
         return false
+    }
+
+    -- Send raw input to the Editor's buffer (typed text or a control
+    -- sequence). Returns false when no editor is open.
+    fn editor_input(text) {
+        if not has(this._app_ui, "editor") { return false }
+        editor_input(this._app_ui["editor"], text)
+        this._dirty = true
+        return true
     }
 
     -- The live terminal session for an app id, or null (for tests/hosts).
@@ -813,6 +832,11 @@ class KyanDesktop {
         -- Files paints its current directory from live navigation state
         if app_id == "files" and has(this._app_ui, "files") {
             paint_files(fb, cx, cy, cw, ch, t, this._app_ui["files"])
+            return null
+        }
+        -- the Editor paints its live buffer + cursor
+        if app_id == "editor" and has(this._app_ui, "editor") {
+            paint_editor(fb, cx, cy, cw, ch, t, this._app_ui["editor"], win.focused)
             return null
         }
         if app_id != null and has(this.painters, app_id) {
