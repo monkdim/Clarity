@@ -27,7 +27,7 @@ from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_sha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters, prism_play_rect, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor
+from "kyan_apps.clarity" import app_painters, prism_play_rect, new_prism, prism_hit, paint_prism, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_spawn_shell, pty_supported
@@ -201,6 +201,10 @@ class KyanDesktop {
         if app_id == "monitor" {
             this.app_state["monitor"] = new_monitor()
         }
+        -- Prism keeps view state (library ⇄ game detail)
+        if app_id == "prism" and not has(this._app_ui, "prism") {
+            this._app_ui["prism"] = new_prism()
+        }
         -- a real Terminal spawns a shell on a PTY where the host supports it;
         -- otherwise (e.g. the browser build) it falls back to the mockup painter
         if app_id == "terminal" and pty_supported() and not has(this._terminals, "terminal") {
@@ -299,9 +303,14 @@ class KyanDesktop {
         let aw = cr[2]
         let ah = cr[3]
 
-        if app_id == "prism" {
-            let r = prism_play_rect(ax, ay, aw, ah)
-            if this._in(px, py, r[0], r[1], r[2], r[3]) { this._activate("voidrunner"); return true }
+        if app_id == "prism" and has(this._app_ui, "prism") {
+            let st = this._app_ui["prism"]
+            let hit = prism_hit(st, ax, ay, aw, ah, px, py)
+            if hit != null {
+                if hit["kind"] == "play" { this._activate("voidrunner"); return true }
+                if hit["kind"] == "open" { st["view"] = "detail"; st["sel"] = hit["idx"]; this._dirty = true; return true }
+                if hit["kind"] == "back" { st["view"] = "library"; this._dirty = true; return true }
+            }
             return false
         }
         if app_id == "calc" and has(this._app_ui, "calc") {
@@ -716,6 +725,11 @@ class KyanDesktop {
         }
         if app_id == "monitor" and has(this.app_state, "monitor") {
             paint_monitor(fb, cx, cy, cw, ch, t, this.app_state["monitor"])
+            return null
+        }
+        -- Prism paints its current view (library or a game's detail)
+        if app_id == "prism" and has(this._app_ui, "prism") {
+            paint_prism(fb, cx, cy, cw, ch, t, this._app_ui["prism"])
             return null
         }
         -- a live PTY terminal renders its real character grid; without a
