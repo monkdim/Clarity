@@ -173,7 +173,39 @@ fn _kyan_fs() {
     ]}
 }
 
-fn new_files() { return {"path": [], "expanded": {"/": true}} }
+fn new_files() { return {"path": [], "expanded": {"/": true}, "selected": null} }
+
+-- Human-readable kind for a file, from its extension.
+fn _file_kind(name, dir) {
+    if dir { return "Folder" }
+    if _ends_with(name, ".clarity") { return "Clarity source" }
+    if _ends_with(name, ".md")      { return "Markdown" }
+    if _ends_with(name, ".txt")     { return "Text" }
+    if _ends_with(name, ".png")     { return "PNG image" }
+    if _ends_with(name, ".flac")    { return "Audio (FLAC)" }
+    if _ends_with(name, ".wall")    { return "Wallpaper" }
+    return "File"
+}
+fn _ends_with(s, suffix) {
+    let n = len(s)
+    let m = len(suffix)
+    if m > n { return false }
+    return substring(s, n - m, n) == suffix
+}
+-- The entry in the current directory matching state["selected"] (or null).
+fn _selected_entry(state) {
+    if not has(state, "selected") or state["selected"] == null { return null }
+    for e in _files_sorted(_files_dir(state)) {
+        if e["name"] == state["selected"] { return e }
+    }
+    return null
+}
+-- The current folder's name (for the details "Where" row).
+fn _where_label(state) {
+    let p = state["path"]
+    if len(p) == 0 { return "Home" }
+    return p[len(p) - 1]
+}
 
 -- ── File-tree sidebar helpers ───────────────────────────
 -- Path utilities: paths are lists of folder names from the Home root.
@@ -328,6 +360,7 @@ let _FILES_ROW_H = 26
 let _FILES_HEAD_H = 34
 let _FILES_SIDEBAR_W = 160
 let _FILES_INDENT = 13
+let _FILES_DETAILS_W = 190
 fn _files_layout(state, x, y, w, h) {
     let atlas = shared_atlas()
     let sb = _FILES_SIDEBAR_W
@@ -342,9 +375,12 @@ fn _files_layout(state, x, y, w, h) {
                     "x": x, "y": ty, "w": sb, "h": _FILES_ROW_H - 2, "tri_x": tri_x})
         ty = ty + _FILES_ROW_H
     }
-    -- main pane sits to the right of the sidebar
+    -- a details pane is carved off the right when the window is wide enough
+    let dw = if w - sb > 340 { _FILES_DETAILS_W } else { 0 }
+    let dx = x + w - dw
+    -- main pane sits between the sidebar and the details pane
     let mx = x + sb
-    let mw = w - sb
+    let mw = w - sb - dw
     mut crumbs = []
     mut cx = mx + 14
     let cy = y + 10
@@ -363,7 +399,8 @@ fn _files_layout(state, x, y, w, h) {
                     "x": mx + 6, "y": ry, "w": mw - 12, "h": _FILES_ROW_H - 2})
         ry = ry + _FILES_ROW_H
     }
-    return {"crumbs": crumbs, "rows": rows, "tree": tree, "main_x": mx, "main_w": mw, "sidebar_w": sb}
+    return {"crumbs": crumbs, "rows": rows, "tree": tree, "main_x": mx, "main_w": mw,
+            "sidebar_w": sb, "details_x": dx, "details_w": dw}
 }
 
 -- Hit-test a click. Returns {"kind":"crumb","index"} to jump up the path,
@@ -402,17 +439,25 @@ fn files_click(state, x, y, w, h, px, py) {
         return true
     }
     if hit["kind"] == "tree_open" {
+        state["selected"] = null
         files_open_path(state, hit["path"])
         return true
     }
     if hit["kind"] == "crumb" {
+        state["selected"] = null
         let before = len(state["path"])
         files_goto(state, hit["index"])
         return len(state["path"]) != before
     }
     if hit["kind"] == "row" and hit["dir"] {
         -- descend into the folder and reveal it in the sidebar tree
+        state["selected"] = null
         files_open_path(state, _path_plus(state["path"], hit["name"]))
+        return true
+    }
+    if hit["kind"] == "row" {
+        -- a file row: select it so the details pane can describe it
+        state["selected"] = hit["name"]
         return true
     }
     return false
@@ -478,6 +523,9 @@ fn paint_files(fb, x, y, w, h, theme, state) {
 
     -- directory rows (main pane)
     for r in lay["rows"] {
+        if has(state, "selected") and r["name"] == state["selected"] {
+            rounded_rect(fb, r["x"], r["y"] - 2, r["w"], r["h"] + 4, 6, t["selection"])
+        }
         let ic = if r["dir"] { t["accent_secondary"] } else { t["accent"] }
         fill_rect(fb, r["x"] + 6, r["y"] + 6, 12, 10, ic)
         draw_atlas_text(fb, r["x"] + 26, r["y"] + 3, r["name"], atlas, t["foreground"], {"size": 15})
@@ -488,6 +536,44 @@ fn paint_files(fb, x, y, w, h, theme, state) {
     -- empty-folder hint
     if len(lay["rows"]) == 0 {
         draw_atlas_text(fb, mx + 20, y + _FILES_HEAD_H + 14, "This folder is empty", atlas, t["foreground_muted"], {"size": 14})
+    }
+
+    -- details / preview pane on the right
+    let dw = lay["details_w"]
+    if dw > 0 {
+        let dx = lay["details_x"]
+        fill_rect(fb, dx, y, dw, h, t["surface_elevated"])
+        fill_rect(fb, dx, y, 1, h, t["border"])       -- divider
+        draw_atlas_text(fb, dx + 16, y + 10, "Details", atlas, t["foreground_muted"], {"size": 12})
+        fill_rect(fb, dx, y + _FILES_HEAD_H - 1, dw, 1, t["border"])
+        let sel = _selected_entry(state)
+        let px2 = dx + 16
+        if sel == null {
+            draw_atlas_text(fb, px2, y + _FILES_HEAD_H + 20, "Select a file to see", atlas, t["foreground_muted"], {"size": 13})
+            draw_atlas_text(fb, px2, y + _FILES_HEAD_H + 38, "its details here.", atlas, t["foreground_muted"], {"size": 13})
+        } else {
+            let pw2 = dw - 32
+            let pvy = y + _FILES_HEAD_H + 16
+            let pvh = 88
+            let kind = _file_kind(sel["name"], sel["dir"])
+            -- preview: gradient for images, a document glyph otherwise
+            if _ends_with(sel["name"], ".png") or _ends_with(sel["name"], ".wall") {
+                linear_gradient(fb, px2, pvy, pw2, pvh, [
+                    {"t": 0.0, "color": 0xFF22D3EE}, {"t": 1.0, "color": 0xFF7C3AED}], "h")
+            } else {
+                rounded_rect(fb, px2, pvy, pw2, pvh, 10, t["surface"])
+                rounded_rect(fb, px2 + int(pw2 / 2) - 15, pvy + 20, 30, 44, 4, t["accent"])
+            }
+            -- name + info rows
+            draw_atlas_text(fb, px2, pvy + pvh + 14, sel["name"], atlas, t["foreground"], {"size": 15})
+            mut dyy = pvy + pvh + 42
+            let info = [["Kind", kind], ["Size", _entry_meta(sel)], ["Where", _where_label(state)]]
+            for row in info {
+                draw_atlas_text(fb, px2, dyy, row[0], atlas, t["foreground_muted"], {"size": 12})
+                draw_atlas_text(fb, px2, dyy + 15, row[1], atlas, t["foreground"], {"size": 13})
+                dyy = dyy + 40
+            }
+        }
     }
 }
 

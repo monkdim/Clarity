@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -311,6 +311,41 @@ assert(len(ftree2["path"]) == 1, "clicking a folder in the main pane descends in
 let ftfb = framebuffer(480, 320)
 paint_files(ftfb, 0, 0, 480, 320, t, ftree)
 assert(painted(ftfb, 0xFF000000), "files app paints the sidebar tree + main pane")
+
+-- ── Files: details / preview pane ──
+show "-- Kyan apps: files details pane --"
+fn first_file_row(lay) { for r in lay["rows"] { if not r["dir"] { return r } } return null }
+fn first_folder_row(lay) { for r in lay["rows"] { if r["dir"] { return r } } return null }
+let fd = new_files()
+assert(fd["selected"] == null, "no file selected initially")
+-- the details pane only appears when the window is wide enough
+let wide = _files_layout(fd, 0, 0, 600, 360)
+assert(wide["details_w"] > 0, "a wide Files window shows the details pane")
+assert_eq(_files_layout(fd, 0, 0, 400, 300)["details_w"], 0, "a narrow window hides the details pane")
+-- clicking a file row selects it
+let frow = first_file_row(wide)
+assert(frow != null, "root has a file row")
+files_click(fd, 0, 0, 600, 360, frow["x"] + 20, frow["y"] + 8)
+assert_eq(fd["selected"], frow["name"], "clicking a file selects it for the details pane")
+-- navigating into a folder clears the selection
+let dfrow = first_folder_row(_files_layout(fd, 0, 0, 600, 360))
+files_click(fd, 0, 0, 600, 360, dfrow["x"] + 20, dfrow["y"] + 8)
+assert(fd["selected"] == null, "descending into a folder clears the selection")
+assert_eq(len(fd["path"]), 1, "and navigates into it")
+-- file-kind classification from extensions
+assert_eq(_file_kind("game.clarity", false), "Clarity source", "kind of a .clarity file")
+assert_eq(_file_kind("notes.txt", false), "Text", "kind of a .txt file")
+assert_eq(_file_kind("shot.png", false), "PNG image", "kind of a .png file")
+assert_eq(_file_kind("Projects", true), "Folder", "kind of a folder")
+-- paint the wide Files with a file selected (exercises the details pane)
+let fd2 = new_files()
+let w2 = _files_layout(fd2, 0, 0, 600, 360)
+let fr2 = first_file_row(w2)
+files_click(fd2, 0, 0, 600, 360, fr2["x"] + 20, fr2["y"] + 8)
+let dfb = framebuffer(600, 360)
+dfb.clear(0xFF000000)
+paint_files(dfb, 0, 0, 600, 360, t, fd2)
+assert(painted(dfb, 0xFF000000), "files paints the details pane with a selection")
 
 -- ── Summary ──
 show ""
