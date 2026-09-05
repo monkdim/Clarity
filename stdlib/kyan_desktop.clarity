@@ -27,7 +27,7 @@ from "draw.clarity" import fill_rect, rounded_rect, rounded_rect_blend, drop_sha
 from "font.clarity" import builtin_font, draw_text, measure_text, draw_text_scaled, measure_text_scaled
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "branding_kyan.clarity" import paint_kyan_icon
-from "kyan_apps.clarity" import app_painters, prism_play_rect, new_prism, prism_hit, paint_prism, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor
+from "kyan_apps.clarity" import app_painters, prism_play_rect, new_prism, prism_hit, paint_prism, new_calc, calc_press, calc_key_at, paint_calc, new_prefs, paint_settings, settings_hit, new_files, paint_files, files_click, new_monitor, monitor_tick, paint_monitor, new_shell, shell_input, paint_shell
 from "kyan_game.clarity" import new_voidrunner, voidrunner_update, voidrunner_paint
 from "terminal_emulator.clarity" import Terminal
 from "pty.clarity" import pty_spawn_shell, pty_supported
@@ -217,6 +217,10 @@ class KyanDesktop {
                 "dead": false
             }
         }
+        -- no PTY (e.g. the browser build): a small interactive echo shell
+        if app_id == "terminal" and not pty_supported() and not has(this._app_ui, "terminal") {
+            this._app_ui["terminal"] = new_shell()
+        }
         -- interactive apps get a fresh UI state
         if app_id == "calc" and not has(this._app_ui, "calc") {
             this._app_ui["calc"] = new_calc()
@@ -355,10 +359,18 @@ class KyanDesktop {
     -- Send raw input to the live terminal's shell (a typed line, a
     -- keystroke). Returns false when there's no PTY-backed terminal.
     fn terminal_input(text) {
-        if not has(this._terminals, "terminal") { return false }
-        this._terminals["terminal"]["pty"].write(text)
-        this._dirty = true
-        return true
+        if has(this._terminals, "terminal") {
+            this._terminals["terminal"]["pty"].write(text)
+            this._dirty = true
+            return true
+        }
+        -- no PTY: feed the echo shell
+        if has(this._app_ui, "terminal") {
+            shell_input(this._app_ui["terminal"], text)
+            this._dirty = true
+            return true
+        }
+        return false
     }
 
     -- The live terminal session for an app id, or null (for tests/hosts).
@@ -781,6 +793,11 @@ class KyanDesktop {
         -- session (unsupported host) it falls through to the mockup painter
         if app_id == "terminal" and has(this._terminals, "terminal") {
             this._render_terminal(fb, cx, cy, cw, ch, this._terminals["terminal"])
+            return null
+        }
+        -- no PTY: the interactive echo shell paints from its own state
+        if app_id == "terminal" and has(this._app_ui, "terminal") {
+            paint_shell(fb, cx, cy, cw, ch, t, this._app_ui["terminal"])
             return null
         }
         -- interactive Calculator paints from its live state

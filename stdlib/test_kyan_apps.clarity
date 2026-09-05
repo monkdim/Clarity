@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, new_prism, prism_hit, paint_terminal_content, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
+from "kyan_apps.clarity" import paint_prism, new_prism, prism_hit, paint_terminal_content, new_shell, shell_input, paint_shell, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -84,6 +84,48 @@ paint_terminal_content(ft, 0, 0, 360, 200, t, true)
 -- terminal fills its own void-black background
 assert_eq(ft.get_pixel(2, 2), 0xFF05060A, "terminal fills void background")
 assert(painted(ft, 0xFF05060A), "terminal draws prompt text over the void")
+
+-- ── Terminal echo shell ──
+show "-- Kyan apps: shell --"
+fn has_line(lines, s) {
+    mut i = 0
+    while i < len(lines) {
+        if lines[i] == s { return true }
+        i = i + 1
+    }
+    return false
+}
+let sh = new_shell()
+assert(has_line(sh["lines"], "KyanOS shell - type 'help' for commands"), "shell shows a banner")
+-- typing appends to the input line without running
+shell_input(sh, "he")
+assert_eq(sh["input"], "he", "typed chars accumulate in the input")
+-- backspace deletes the last char (host feeds DEL, code 127)
+shell_input(sh, from_char_code(127))
+assert_eq(sh["input"], "h", "backspace removes the last typed char")
+-- an escape/arrow sequence is swallowed, not pasted into the prompt
+shell_input(sh, from_char_code(27) + "[A")
+assert_eq(sh["input"], "h", "arrow-key CSI sequences are swallowed")
+-- finishing the word and pressing Enter runs `help`
+shell_input(sh, "elp\n")
+assert_eq(sh["input"], "", "Enter clears the input line")
+assert(has_line(sh["lines"], "kyan > help"), "the command is echoed with a prompt")
+assert(has_line(sh["lines"], "commands: help  ls  clarity  echo <text>  neofetch  clear"), "help lists the commands")
+-- echo prints its argument verbatim
+shell_input(sh, "echo hi there\n")
+assert(has_line(sh["lines"], "hi there"), "echo prints its argument")
+-- an unknown command reports not found
+shell_input(sh, "bogus\n")
+assert(has_line(sh["lines"], "command not found: bogus"), "unknown commands report not found")
+-- clear empties the scrollback
+shell_input(sh, "clear\n")
+assert_eq(len(sh["lines"]), 0, "clear empties the scrollback")
+-- and the shell paints over its own void background
+let fsh = framebuffer(360, 200)
+fsh.clear(0xFF112233)
+paint_shell(fsh, 0, 0, 360, 200, t, new_shell())
+assert_eq(fsh.get_pixel(2, 2), 0xFF05060A, "shell fills the void background")
+assert(painted(fsh, 0xFF05060A), "shell paints the banner and prompt")
 
 -- ── Files ──
 show "-- Kyan apps: files --"
