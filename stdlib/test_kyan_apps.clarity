@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files
+from "kyan_apps.clarity" import paint_prism, paint_terminal_content, paint_files_content, paint_monitor_content, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -91,6 +91,29 @@ fs.clear(0xFF000000)
 paint_settings_content(fs, 0, 0, 560, 380, t, true)
 assert_eq(fs.get_pixel(2, 2), t["surface_elevated"], "settings fills the sidebar")
 assert(painted(fs, 0xFF000000), "settings draws swatches / toggles")
+
+-- multi-pane settings: the sidebar switches panes
+let sp = new_prefs()
+assert_eq(sp["section"], "appearance", "settings starts on the Appearance pane")
+let h_about = settings_hit(0, 0, 560, 380, 60, 140, sp)
+assert(h_about != null and h_about["kind"] == "section" and h_about["id"] == "about", "clicking the About sidebar row selects that section")
+let h_disp = settings_hit(0, 0, 560, 380, 60, 43, sp)
+assert_eq(h_disp["id"], "display", "clicking the Display sidebar row selects it")
+-- the Appearance controls are live only while Appearance is showing
+let h_theme = settings_hit(0, 0, 560, 380, 200, 80, sp)
+assert(h_theme != null and h_theme["kind"] == "theme", "a swatch click picks a theme on the Appearance pane")
+sp["section"] = "about"
+let h_inert = settings_hit(0, 0, 560, 380, 200, 80, sp)
+assert(h_inert == null, "Appearance controls are inert on other panes")
+-- every pane paints without error
+for sec in ["appearance", "display", "network", "sound", "about"] {
+    let pf = new_prefs()
+    pf["section"] = sec
+    let pfb = framebuffer(560, 380)
+    pfb.clear(0xFF000000)
+    paint_settings(pfb, 0, 0, 560, 380, t, pf)
+    assert(painted(pfb, 0xFF000000), "settings paints the " + sec + " pane")
+}
 
 -- ── Calculator ──
 show "-- Kyan apps: calc --"
