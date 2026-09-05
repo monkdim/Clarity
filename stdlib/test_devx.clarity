@@ -177,6 +177,9 @@ for entry in pal { push(kinds_in_palette, entry["kind"]) }
 assert(contains(kinds_in_palette, "Label"), "Label in palette")
 assert(contains(kinds_in_palette, "Button"), "Button in palette")
 assert(contains(kinds_in_palette, "WidgetRoot"), "WidgetRoot in palette")
+assert(contains(kinds_in_palette, "Toggle"), "Toggle in palette")
+assert(contains(kinds_in_palette, "RadioButton"), "RadioButton in palette")
+assert(contains(kinds_in_palette, "Tabs"), "Tabs in palette")
 
 let b = ui_builder()
 let root = b.add(null, "WidgetRoot", {"width": 480, "height": 320})

@@ -9,7 +9,7 @@ from "graphics.clarity" import framebuffer, BLACK, WHITE
 from "ui.clarity" import Widget, WidgetRoot
 from "layout.clarity" import FlexLayout, GridLayout, StackLayout, flex_row, flex_column, grid, stack
 from "theme.clarity" import dark, light, default, theme_color, theme_font, theme_spacing
-from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view
+from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view, Toggle, RadioButton, RadioGroup, Tabs, toggle, radio_button, radio_group, tabs
 from "event_bus.clarity" import InputBus
 from "input.clarity" import EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y, REL_WHEEL, BTN_LEFT, KEY_PRESS, KEY_RELEASE
 from "keymap.clarity" import KEY_TAB, KEY_LEFTSHIFT, KEY_A, Modifiers
@@ -405,6 +405,80 @@ assert(root._focus_index != started_focus, "Tab via WidgetRoot.dispatch_key adva
 -- Mouse click on a focusable widget transfers focus
 root.dispatch_mouse(me_press(40, 70, 1))
 assert(f3.focused, "click transferred focus to clicked widget")
+
+-- ── Toggle ────────────────────────────────────────────
+
+show "-- Widgets: Toggle --"
+let tg = toggle(false)
+tg.set_theme(dark())
+tg.set_bounds(0, 0, 40, 22)
+assert(not tg.on, "toggle starts off")
+mut tg_changes = 0
+tg.on_click(fn(w) { tg_changes += 1 })
+tg.handle_event(me_press(20, 11, 1))
+assert(tg.on, "click turns toggle on")
+tg.handle_event(me_press(20, 11, 1))
+assert(not tg.on, "second click turns toggle off")
+assert_eq(tg_changes, 2, "toggle fired change twice")
+tg.focus()
+tg.handle_event(ke_press(57, " ", " "))
+assert(tg.on, "Space toggles when focused")
+let tgp = tg.preferred_size()
+assert(tgp[0] == 40 and tgp[1] == 22, "toggle preferred size is its track")
+
+-- ── RadioButton + RadioGroup ──────────────────────────
+
+show "-- Widgets: RadioButton --"
+let rg = radio_group()
+let r1 = rg.add(radio_button("One"))
+let r2 = rg.add(radio_button("Two"))
+let r3 = rg.add(radio_button("Three"))
+for rb in [r1, r2, r3] { rb.set_theme(dark()); rb.set_bounds(0, 0, 120, 20) }
+assert(rg.selected() == null, "no radio selected initially")
+r2.handle_event(me_press(8, 10, 1))
+assert(r2.selected, "clicked radio is selected")
+assert(rg.selected() == r2, "group reports the selected radio")
+r3.handle_event(me_press(8, 10, 1))
+assert(r3.selected, "second click selects the other")
+assert(not r2.selected, "group cleared the previous selection")
+mut rg_changes = 0
+rg.on_change(fn(b) { rg_changes += 1 })
+r1.focus()
+r1.handle_event(ke_press(57, " ", " "))
+assert(r1.selected and not r3.selected, "Space selects the focused radio and clears siblings")
+assert_eq(rg_changes, 1, "group change handler fired")
+
+-- ── Tabs ──────────────────────────────────────────────
+
+show "-- Widgets: Tabs --"
+let tb = tabs(["Files", "Search", "Settings"])
+tb.set_theme(dark())
+tb.set_bounds(0, 0, 300, 32)
+assert_eq(tb.selected, 0, "tabs start on the first tab")
+mut tb_changes = 0
+tb.on_click(fn(w) { tb_changes += 1 })
+let tbounds = tb._tab_bounds()
+-- click within the second tab's x-range
+let mid2 = tbounds[1][0] + tbounds[1][1] / 2
+tb.handle_event(me_press(mid2, 16, 1))
+assert_eq(tb.selected, 1, "click selects the tab under the pointer")
+tb.focus()
+tb.handle_event(ke_press(106, "Right", null))
+assert_eq(tb.selected, 2, "Right arrow advances the tab")
+tb.handle_event(ke_press(106, "Right", null))
+assert_eq(tb.selected, 2, "Right arrow clamps at the last tab")
+tb.handle_event(ke_press(105, "Left", null))
+assert_eq(tb.selected, 1, "Left arrow goes back")
+assert(tb_changes >= 1, "tabs fired change on selection")
+tb.set_titles(["A", "B"])
+assert_eq(tb.selected, 1, "shrinking titles keeps a valid selection")
+
+-- paint smoke: every new widget paints without error onto a real buffer
+let wfb = framebuffer(320, 120)
+tg.set_bounds(10, 10, 40, 22);  tg._paint(wfb)
+r1.set_bounds(10, 40, 120, 20); r1._paint(wfb)
+tb.set_bounds(10, 70, 300, 32); tb._paint(wfb)
+assert(true, "new widgets paint onto a framebuffer")
 
 -- ── Summary ─────────────────────────────────────────
 

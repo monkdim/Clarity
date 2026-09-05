@@ -24,7 +24,10 @@ let WIDGET_PALETTE = [
     {"kind": "Slider",     "import": "widgets.clarity", "props": ["min_v", "max_v"]},
     {"kind": "ProgressBar","import": "widgets.clarity", "props": []},
     {"kind": "ScrollView", "import": "widgets.clarity", "props": []},
-    {"kind": "ListView",   "import": "widgets.clarity", "props": ["items"]}
+    {"kind": "ListView",   "import": "widgets.clarity", "props": ["items"]},
+    {"kind": "Toggle",     "import": "widgets.clarity", "props": ["on"]},
+    {"kind": "RadioButton","import": "widgets.clarity", "props": ["label_text"]},
+    {"kind": "Tabs",       "import": "widgets.clarity", "props": ["titles"]}
 ]
 
 class UiNode {
