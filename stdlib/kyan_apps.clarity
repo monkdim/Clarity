@@ -173,7 +173,82 @@ fn _kyan_fs() {
     ]}
 }
 
-fn new_files() { return {"path": []} }
+fn new_files() { return {"path": [], "expanded": {"/": true}} }
+
+-- ── File-tree sidebar helpers ───────────────────────────
+-- Path utilities: paths are lists of folder names from the Home root.
+fn _path_plus(path, name) {
+    mut p = []
+    for x in path { push(p, x) }
+    push(p, name)
+    return p
+}
+fn _path_key(path) {
+    mut s = "/"
+    mut i = 0
+    while i < len(path) { if i > 0 { s = s + "/" }; s = s + path[i]; i += 1 }
+    return s
+}
+fn _path_eq(a, b) {
+    if len(a) != len(b) { return false }
+    mut i = 0
+    while i < len(a) { if a[i] != b[i] { return false }; i += 1 }
+    return true
+}
+fn _has_subdir(dir) {
+    for c in dir["children"] { if c["dir"] { return true } }
+    return false
+}
+fn _is_expanded(state, path) {
+    let k = _path_key(path)
+    return has(state["expanded"], k) and state["expanded"][k]
+}
+
+-- The visible sidebar tree, flattened top-to-bottom: the Home root, then
+-- each expanded folder's subfolders (folders only — files show in the main
+-- pane). Each row carries its full path, depth, and disclosure state.
+fn _files_tree_rows(state) {
+    let root = _kyan_fs()
+    mut out = [{"name": "Home", "path": [], "depth": 0,
+                "has_kids": _has_subdir(root), "expanded": _is_expanded(state, [])}]
+    if _is_expanded(state, []) {
+        for r in _files_subtree(state, root, [], 1) { push(out, r) }
+    }
+    return out
+}
+fn _files_subtree(state, dir, path, depth) {
+    mut out = []
+    for c in dir["children"] {
+        if not c["dir"] { continue }
+        let cpath = _path_plus(path, c["name"])
+        let expanded = _is_expanded(state, cpath)
+        push(out, {"name": c["name"], "path": cpath, "depth": depth,
+                   "has_kids": _has_subdir(c), "expanded": expanded})
+        if expanded {
+            for r in _files_subtree(state, c, cpath, depth + 1) { push(out, r) }
+        }
+    }
+    return out
+}
+
+-- Collapse/expand a folder in the sidebar; returns the new state (bool).
+fn files_toggle(state, key) {
+    let cur = has(state["expanded"], key) and state["expanded"][key]
+    state["expanded"][key] = not cur
+    return not cur
+}
+
+-- Navigate to (select) a folder by full path, revealing it in the tree by
+-- expanding every ancestor and the node itself.
+fn files_open_path(state, path) {
+    mut np = []
+    for x in path { push(np, x) }
+    state["path"] = np
+    mut pre = []
+    state["expanded"][_path_key(pre)] = true
+    for name in path { push(pre, name); state["expanded"][_path_key(pre)] = true }
+    return state
+}
 
 -- Find a child node by name inside a directory node (null if absent).
 fn _fs_child(dir, name) {
@@ -251,10 +326,27 @@ fn _files_crumbs(state) {
 -- crumb rects and the row rects for the current directory.
 let _FILES_ROW_H = 26
 let _FILES_HEAD_H = 34
+let _FILES_SIDEBAR_W = 160
+let _FILES_INDENT = 13
 fn _files_layout(state, x, y, w, h) {
     let atlas = shared_atlas()
+    let sb = _FILES_SIDEBAR_W
+    -- sidebar: the folder tree, flattened
+    mut tree = []
+    mut ty = y + _FILES_HEAD_H + 4
+    for node in _files_tree_rows(state) {
+        let tri_x = x + 10 + node["depth"] * _FILES_INDENT
+        push(tree, {"name": node["name"], "path": node["path"], "depth": node["depth"],
+                    "has_kids": node["has_kids"], "expanded": node["expanded"],
+                    "selected": _path_eq(node["path"], state["path"]),
+                    "x": x, "y": ty, "w": sb, "h": _FILES_ROW_H - 2, "tri_x": tri_x})
+        ty = ty + _FILES_ROW_H
+    }
+    -- main pane sits to the right of the sidebar
+    let mx = x + sb
+    let mw = w - sb
     mut crumbs = []
-    mut cx = x + 14
+    mut cx = mx + 14
     let cy = y + 10
     let labels = _files_crumbs(state)
     mut i = 0
@@ -268,16 +360,25 @@ fn _files_layout(state, x, y, w, h) {
     mut ry = y + _FILES_HEAD_H + 6
     for e in _files_sorted(_files_dir(state)) {
         push(rows, {"name": e["name"], "dir": e["dir"], "meta": _entry_meta(e),
-                    "x": x + 6, "y": ry, "w": w - 12, "h": _FILES_ROW_H - 2})
+                    "x": mx + 6, "y": ry, "w": mw - 12, "h": _FILES_ROW_H - 2})
         ry = ry + _FILES_ROW_H
     }
-    return {"crumbs": crumbs, "rows": rows}
+    return {"crumbs": crumbs, "rows": rows, "tree": tree, "main_x": mx, "main_w": mw, "sidebar_w": sb}
 }
 
 -- Hit-test a click. Returns {"kind":"crumb","index"} to jump up the path,
 -- {"kind":"row","name","dir"} for a file/folder row, or null.
 fn files_hit(state, x, y, w, h, px, py) {
     let lay = _files_layout(state, x, y, w, h)
+    -- sidebar tree: the disclosure triangle toggles; the rest selects
+    for tr in lay["tree"] {
+        if px >= tr["x"] and px < tr["x"] + tr["w"] and py >= tr["y"] and py <= tr["y"] + tr["h"] {
+            if tr["has_kids"] and px >= tr["tri_x"] - 3 and px <= tr["tri_x"] + 14 {
+                return {"kind": "tree_toggle", "path": tr["path"]}
+            }
+            return {"kind": "tree_open", "path": tr["path"]}
+        }
+    }
     for c in lay["crumbs"] {
         if px >= c["x"] - 4 and px <= c["x"] + c["w"] + 4 and py >= c["y"] - 4 and py <= c["y"] + c["h"] + 4 {
             return {"kind": "crumb", "index": c["index"]}
@@ -296,13 +397,22 @@ fn files_hit(state, x, y, w, h, px, py) {
 fn files_click(state, x, y, w, h, px, py) {
     let hit = files_hit(state, x, y, w, h, px, py)
     if hit == null { return false }
+    if hit["kind"] == "tree_toggle" {
+        files_toggle(state, _path_key(hit["path"]))
+        return true
+    }
+    if hit["kind"] == "tree_open" {
+        files_open_path(state, hit["path"])
+        return true
+    }
     if hit["kind"] == "crumb" {
         let before = len(state["path"])
         files_goto(state, hit["index"])
         return len(state["path"]) != before
     }
     if hit["kind"] == "row" and hit["dir"] {
-        files_nav(state, hit["name"])
+        -- descend into the folder and reveal it in the sidebar tree
+        files_open_path(state, _path_plus(state["path"], hit["name"]))
         return true
     }
     return false
@@ -311,12 +421,50 @@ fn files_click(state, x, y, w, h, px, py) {
 fn paint_files(fb, x, y, w, h, theme, state) {
     let t = theme
     let atlas = shared_atlas()
-    fill_rect(fb, x, y, w, h, t["surface"])
     let lay = _files_layout(state, x, y, w, h)
+    let sb = lay["sidebar_w"]
+    let mx = lay["main_x"]
+    let mw = lay["main_w"]
 
-    -- breadcrumb header on the elevated surface
-    fill_rect(fb, x, y, w, _FILES_HEAD_H, t["surface_elevated"])
-    fill_rect(fb, x, y + _FILES_HEAD_H - 1, w, 1, t["border"])
+    -- backgrounds: a slightly darker sidebar, the content surface on the right
+    fill_rect(fb, x, y, w, h, t["surface"])
+    fill_rect(fb, x, y, sb, h, t["surface_elevated"])
+    fill_rect(fb, x + sb - 1, y, 1, h, t["border"])   -- divider
+
+    -- sidebar header
+    draw_atlas_text(fb, x + 12, y + 10, "Files", atlas, t["foreground_muted"], {"size": 12})
+    fill_rect(fb, x, y + _FILES_HEAD_H - 1, sb, 1, t["border"])
+
+    -- sidebar tree rows
+    for tr in lay["tree"] {
+        if tr["selected"] {
+            rounded_rect(fb, tr["x"] + 4, tr["y"], sb - 8, tr["h"], 6, t["selection"])
+        }
+        -- disclosure chevron (drawn only when the folder has subfolders)
+        if tr["has_kids"] {
+            let tx = tr["tri_x"]
+            let cyc = tr["y"] + int(tr["h"] / 2)
+            let cc = t["foreground_muted"]
+            if tr["expanded"] {
+                line(fb, tx, cyc - 1, tx + 4, cyc + 3, cc)
+                line(fb, tx + 4, cyc + 3, tx + 8, cyc - 1, cc)
+            } else {
+                line(fb, tx + 1, cyc - 4, tx + 5, cyc, cc)
+                line(fb, tx + 5, cyc, tx + 1, cyc + 4, cc)
+            }
+        }
+        -- folder swatch + name (indented)
+        let nx = tr["tri_x"] + 14
+        let sel = tr["selected"]
+        let icol = if sel { t["accent"] } else { t["accent_secondary"] }
+        fill_rect(fb, nx, tr["y"] + 6, 11, 9, icol)
+        let ncol = if sel { t["foreground"] } else { t["ink_soft"] }
+        draw_atlas_text(fb, nx + 17, tr["y"] + 3, tr["name"], atlas, ncol, {"size": 13})
+    }
+
+    -- main-pane breadcrumb header
+    fill_rect(fb, mx, y, mw, _FILES_HEAD_H, t["surface_elevated"])
+    fill_rect(fb, mx, y + _FILES_HEAD_H - 1, mw, 1, t["border"])
     let last = len(lay["crumbs"]) - 1
     mut ci = 0
     for c in lay["crumbs"] {
@@ -328,18 +476,18 @@ fn paint_files(fb, x, y, w, h, theme, state) {
         ci = ci + 1
     }
 
-    -- directory rows
+    -- directory rows (main pane)
     for r in lay["rows"] {
         let ic = if r["dir"] { t["accent_secondary"] } else { t["accent"] }
         fill_rect(fb, r["x"] + 6, r["y"] + 6, 12, 10, ic)
         draw_atlas_text(fb, r["x"] + 26, r["y"] + 3, r["name"], atlas, t["foreground"], {"size": 15})
-        let mw = measure_atlas_text(atlas, r["meta"], 14, 0)[0]
-        draw_atlas_text(fb, x + w - mw - 14, r["y"] + 4, r["meta"], atlas, t["foreground_muted"], {"size": 14})
+        let mtw = measure_atlas_text(atlas, r["meta"], 14, 0)[0]
+        draw_atlas_text(fb, mx + mw - mtw - 14, r["y"] + 4, r["meta"], atlas, t["foreground_muted"], {"size": 14})
     }
 
     -- empty-folder hint
     if len(lay["rows"]) == 0 {
-        draw_atlas_text(fb, x + 20, y + _FILES_HEAD_H + 14, "This folder is empty", atlas, t["foreground_muted"], {"size": 14})
+        draw_atlas_text(fb, mx + 20, y + _FILES_HEAD_H + 14, "This folder is empty", atlas, t["foreground_muted"], {"size": 14})
     }
 }
 
