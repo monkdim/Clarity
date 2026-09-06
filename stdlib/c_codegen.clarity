@@ -642,6 +642,137 @@ static Value cl_hof_each(Value lst, Value fn){
   for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_call(fn, a); }
   return cl_null();
 }
+static Value cl_hof_find(Value lst, Value fn){
+  Value it=cl_iter(lst); long n=cl_length(it);
+  for(long i=0;i<n;i++){ Value e=cl_index(it, cl_int(i)); Value a[1]={ e }; if(cl_truthy(cl_call(fn, a))) return e; }
+  return cl_null();   /* JS find returns undefined; the interpreter maps that to null */
+}
+static Value cl_hof_every(Value lst, Value fn){
+  Value it=cl_iter(lst); long n=cl_length(it);
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(!cl_truthy(cl_call(fn, a))) return cl_bool(0); }
+  return cl_bool(1);
+}
+static Value cl_hof_some(Value lst, Value fn){
+  Value it=cl_iter(lst); long n=cl_length(it);
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(cl_truthy(cl_call(fn, a))) return cl_bool(1); }
+  return cl_bool(0);
+}
+
+/* ── app stdlib: list ops ── */
+static Value cl_pop(Value lv){
+  if(lv.t!=T_LIST) return cl_null();
+  List* l=(List*)lv.o; if(l->len==0) return cl_null();
+  l->len--; return l->items[l->len];
+}
+/* JS sorts with (a,b) => a < b ? -1 : a > b ? 1 : 0, over a copy. */
+static int cl_sort_cmp(Value a, Value b){
+  if(cl_truthy(cl_lt(a,b))) return -1;
+  if(cl_truthy(cl_lt(b,a))) return 1;
+  return 0;
+}
+/* Bottom-up merge sort: Array.prototype.sort is required to be stable, and an
+   unstable sort would disagree with the interpreter on equal-comparing
+   elements — exactly the kind of difference that shows up much later. */
+static Value cl_sort(Value lv){
+  Value out=cl_list_new();
+  if(lv.t!=T_LIST) return out;
+  List* src=(List*)lv.o; long n=src->len;
+  for(long i=0;i<n;i++) cl_list_add(out, src->items[i]);
+  if(n<2) return out;
+  List* a=(List*)out.o;
+  Value* buf=(Value*)cl_alloc((size_t)n*sizeof(Value));
+  for(long width=1; width<n; width*=2){
+    for(long lo=0; lo<n; lo+=2*width){
+      long mid=lo+width; if(mid>n) mid=n;
+      long hi=lo+2*width; if(hi>n) hi=n;
+      long i=lo, j=mid, k=lo;
+      while(i<mid && j<hi) buf[k++] = (cl_sort_cmp(a->items[j], a->items[i])<0) ? a->items[j++] : a->items[i++];
+      while(i<mid) buf[k++]=a->items[i++];
+      while(j<hi)  buf[k++]=a->items[j++];
+      for(long t=lo;t<hi;t++) a->items[t]=buf[t];
+    }
+  }
+  return out;
+}
+static Value cl_reverse(Value v){
+  if(v.t==T_STR){ size_t n=strlen(v.s); char* o=(char*)cl_alloc(n+1); for(size_t i=0;i<n;i++) o[i]=v.s[n-1-i]; o[n]=0; return cl_str(o); }
+  Value out=cl_list_new();
+  if(v.t!=T_LIST) return out;
+  List* l=(List*)v.o; for(long i=l->len-1;i>=0;i--) cl_list_add(out, l->items[i]);
+  return out;
+}
+/* new Set(...) keeps first occurrences, in order. */
+static Value cl_unique(Value lv){
+  Value out=cl_list_new();
+  if(lv.t!=T_LIST) return out;
+  List* l=(List*)lv.o;
+  for(long i=0;i<l->len;i++){
+    List* o=(List*)out.o; int seen=0;
+    for(long j=0;j<o->len;j++) if(cl_equal(o->items[j], l->items[i])){ seen=1; break; }
+    if(!seen) cl_list_add(out, l->items[i]);
+  }
+  return out;
+}
+/* Array.prototype.flat() with no argument: one level only. */
+static Value cl_flat(Value lv){
+  Value out=cl_list_new();
+  if(lv.t!=T_LIST) return out;
+  List* l=(List*)lv.o;
+  for(long i=0;i<l->len;i++){
+    Value e=l->items[i];
+    if(e.t==T_LIST){ List* inner=(List*)e.o; for(long j=0;j<inner->len;j++) cl_list_add(out, inner->items[j]); }
+    else cl_list_add(out, e);
+  }
+  return out;
+}
+static Value cl_zip(Value* ls, long count){
+  Value out=cl_list_new();
+  if(count<=0) return out;
+  long min=cl_length(ls[0]);
+  for(long i=1;i<count;i++){ long n=cl_length(ls[i]); if(n<min) min=n; }
+  for(long i=0;i<min;i++){
+    Value row=cl_list_new();
+    for(long j=0;j<count;j++) cl_list_add(row, cl_index(ls[j], cl_int(i)));
+    cl_list_add(out, row);
+  }
+  return out;
+}
+static Value cl_values(Value v){
+  Value out=cl_list_new();
+  if(v.t==T_MAP){ Map* m=(Map*)v.o; for(long j=0;j<m->len;j++) cl_list_add(out, m->vals[j]); }
+  return out;
+}
+static Value cl_entries(Value v){
+  Value out=cl_list_new();
+  if(v.t==T_MAP){
+    Map* m=(Map*)v.o;
+    for(long j=0;j<m->len;j++){
+      Value pair=cl_list_new();
+      cl_list_add(pair, cl_str(m->keys[j]));
+      cl_list_add(pair, m->vals[j]);
+      cl_list_add(out, pair);
+    }
+  }
+  return out;
+}
+/* Object.assign({}, ...): later sources win. */
+static Value cl_merge(Value* ms, long count){
+  Value out=cl_map_new();
+  for(long i=0;i<count;i++){
+    if(ms[i].t!=T_MAP) continue;
+    Map* m=(Map*)ms[i].o;
+    for(long j=0;j<m->len;j++) cl_map_put(out, m->keys[j], m->vals[j]);
+  }
+  return out;
+}
+/* print(...) is show(...) with the arguments joined by a space, which is what
+   the interpreter does for both. */
+static Value cl_print(Value* vs, long n){
+  char* out=(char*)cl_alloc(1); out[0]=0;
+  for(long i=0;i<n;i++){ if(i) out=cl_cat(out, " "); out=cl_cat(out, cl_display(vs[i])); }
+  printf("%s\n", out);
+  return cl_null();
+}
 
 /* ── app stdlib: string ops ── (arena-allocated results) */
 static Value cl_upper(Value v){ const char* s=v.s; size_t n=strlen(s); char* o=(char*)cl_alloc(n+1); for(size_t i=0;i<n;i++) o[i]=(char)toupper((unsigned char)s[i]); o[n]=0; return cl_str(o); }
@@ -1245,6 +1376,16 @@ class CCodegen {
             }
             return
         }
+        if nt == "RangeExpression" {
+            this._free_expr(node.start, bound, acc)
+            if node.end != null { this._free_expr(node.end, bound, acc) }
+            return
+        }
+        if nt == "PipeExpression" {
+            this._free_expr(node.value, bound, acc)
+            this._free_expr(node.function, bound, acc)
+            return
+        }
         if nt == "SpreadExpression" { this._free_expr(node.value, bound, acc); return }
         if nt == "FnExpression" {
             mut inner = bound
@@ -1283,6 +1424,15 @@ class CCodegen {
                 }
             }
             if node.else_body != null { this._free_stmts(_block_stmts(node.else_body), bound, acc) }
+            return
+        }
+        if nt == "MatchStatement" {
+            this._free_expr(node.subject, bound, acc)
+            for arm in node.arms {
+                this._free_expr(arm[0], bound, acc)
+                this._free_stmts(_block_stmts(arm[1]), bound, acc)
+            }
+            if node.default != null { this._free_stmts(_block_stmts(node.default), bound, acc) }
             return
         }
         if nt == "WhileStatement" {
@@ -1356,6 +1506,34 @@ class CCodegen {
         return "(Value[]){" + join(arg_exprs, ", ") + "}"
     }
 
+    -- Emit a call, given the callee node and its arguments already generated
+    -- as C expressions. Shared by CallExpression and PipeExpression so that
+    -- `v |> f(a)` resolves builtins, constructors and named top-level
+    -- functions exactly as `f(v, a)` does, instead of through a second call
+    -- site that would drift from this one.
+    fn _emit_call(callee, args, line) {
+        -- obj.method(args) → dynamic dispatch on the instance's class
+        if callee.node_type == "MemberExpression" {
+            return "cl_dispatch(" + this.expr(callee.object) + ", \"" + callee.property + "\", " + this._argv(args) + ")"
+        }
+        if callee.node_type == "Identifier" {
+            -- ClassName(args) → construct an instance
+            if contains(this.classes, callee.name) {
+                return "cl_ctor_" + callee.name + "(" + this._argv(args) + ")"
+            }
+            let builtin = this._builtin_call(callee.name, args)
+            if builtin != "" { return builtin }
+            -- A known top-level function calls directly; anything else is a
+            -- local holding a closure value, called through cl_call.
+            if contains(this.fn_names, callee.name) {
+                return "f_" + callee.name + "(" + join(args, ", ") + ")"
+            }
+            return "cl_call(v_" + callee.name + ", " + this._argv(args) + ")"
+        }
+        this.unsupported("indirect call", line)
+        return "cl_null()"
+    }
+
     fn unsupported(what, line) {
         push(this.errors, "native compile: unsupported " + what + " (line " + str(line ?? 0) + ")")
     }
@@ -1383,6 +1561,25 @@ class CCodegen {
         if name == "filter" and n == 2 { return "cl_hof_filter(" + args[0] + ", " + args[1] + ")" }
         if name == "reduce" and n == 3 { return "cl_hof_reduce(" + args[0] + ", " + args[1] + ", " + args[2] + ")" }
         if name == "each" and n == 2 { return "cl_hof_each(" + args[0] + ", " + args[1] + ")" }
+        if name == "find" and n == 2 { return "cl_hof_find(" + args[0] + ", " + args[1] + ")" }
+        if name == "every" and n == 2 { return "cl_hof_every(" + args[0] + ", " + args[1] + ")" }
+        if name == "some" and n == 2 { return "cl_hof_some(" + args[0] + ", " + args[1] + ")" }
+        if name == "pop" and n == 1 { return "cl_pop(" + args[0] + ")" }
+        if name == "sort" and n == 1 { return "cl_sort(" + args[0] + ")" }
+        if name == "reverse" and n == 1 { return "cl_reverse(" + args[0] + ")" }
+        if name == "unique" and n == 1 { return "cl_unique(" + args[0] + ")" }
+        if name == "flat" and n == 1 { return "cl_flat(" + args[0] + ")" }
+        if name == "values" and n == 1 { return "cl_values(" + args[0] + ")" }
+        if name == "entries" and n == 1 { return "cl_entries(" + args[0] + ")" }
+        if name == "bool" and n == 1 { return "cl_bool(cl_truthy(" + args[0] + "))" }
+        if name == "pow" and n == 2 { return "cl_pow(" + args[0] + ", " + args[1] + ")" }
+        -- Variadic in the interpreter; C takes a count, so the argument list
+        -- becomes an array literal. Any arity works, including zero.
+        if name == "zip" and n > 0 { return "cl_zip((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
+        if name == "merge" and n > 0 { return "cl_merge((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
+        if name == "merge" and n == 0 { return "cl_map_new()" }
+        if name == "print" and n > 0 { return "cl_print((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
+        if name == "print" and n == 0 { return "cl_print(0, 0)" }
         -- strings
         if name == "upper" and n == 1 { return "cl_upper(" + args[0] + ")" }
         if name == "lower" and n == 1 { return "cl_lower(" + args[0] + ")" }
@@ -1548,31 +1745,9 @@ class CCodegen {
             return "cl_get_field(" + this.expr(node.object) + ", \"" + node.property + "\")"
         }
         if nt == "CallExpression" {
-            let callee = node.callee
-            -- obj.method(args) → dynamic dispatch on the instance's class
-            if callee.node_type == "MemberExpression" {
-                mut margs = []
-                for a in node.arguments { push(margs, this.expr(a)) }
-                return "cl_dispatch(" + this.expr(callee.object) + ", \"" + callee.property + "\", " + this._argv(margs) + ")"
-            }
-            if callee.node_type == "Identifier" {
-                mut args = []
-                for a in node.arguments { push(args, this.expr(a)) }
-                -- ClassName(args) → construct an instance
-                if contains(this.classes, callee.name) {
-                    return "cl_ctor_" + callee.name + "(" + this._argv(args) + ")"
-                }
-                let builtin = this._builtin_call(callee.name, args)
-                if builtin != "" { return builtin }
-                -- A known top-level function calls directly; anything else is a
-                -- local holding a closure value, called through cl_call.
-                if contains(this.fn_names, callee.name) {
-                    return "f_" + callee.name + "(" + join(args, ", ") + ")"
-                }
-                return "cl_call(v_" + callee.name + ", " + this._argv(args) + ")"
-            }
-            this.unsupported("indirect call", node.line)
-            return "cl_null()"
+            mut cargs = []
+            for a in node.arguments { push(cargs, this.expr(a)) }
+            return this._emit_call(node.callee, cargs, node.line)
         }
         if nt == "NullCoalesce" {
             -- `a ?? b`: evaluate a once, and b only if a is null. A plain
@@ -1593,6 +1768,27 @@ class CCodegen {
             -- other branch is taken.
             return "(cl_truthy(" + this.expr(node.condition) + ") ? " +
                 this.expr(node.true_expr) + " : " + this.expr(node.false_expr) + ")"
+        }
+        if nt == "RangeExpression" {
+            -- `a..b` is exactly range(a, b); an open-ended range is only legal
+            -- in a slice, which the interpreter also rejects here.
+            if node.end == null {
+                this.unsupported("open-ended range outside a slice", node.line)
+                return "cl_null()"
+            }
+            return "cl_range2(" + this.expr(node.start) + ", " + this.expr(node.end) + ")"
+        }
+        if nt == "PipeExpression" {
+            -- `v |> f` is f(v); `v |> f(a, b)` is f(v, a, b). The piped value
+            -- becomes the first argument, and the rest of the call is emitted
+            -- through the ordinary call path.
+            mut pargs = [this.expr(node.value)]
+            mut target = node.function
+            if target.node_type == "CallExpression" {
+                for a in target.arguments { push(pargs, this.expr(a)) }
+                target = target.callee
+            }
+            return this._emit_call(target, pargs, node.line)
         }
         this.unsupported("expression " + nt, node.line)
         return "cl_null()"
@@ -1691,6 +1887,42 @@ class CCodegen {
         }
         if nt == "BreakStatement" { return [pad + "break;"] }
         if nt == "ContinueStatement" { return [pad + "continue;"] }
+        if nt == "MatchStatement" {
+            -- The interpreter matches by `==` against each arm's evaluated
+            -- pattern — there is no destructuring — so this is an if/else
+            -- chain over cl_equal. The subject is bound to a temporary first
+            -- because it must be evaluated exactly once, however many arms
+            -- are tested.
+            let id = this.tmp_id
+            this.tmp_id += 1
+            let t = "__match" + str(id)
+            mut lines = [pad + "{ Value " + t + " = " + this.expr(node.subject) + ";"]
+            mut first = true
+            for arm in node.arms {
+                let head = if first { pad + "  if(cl_truthy(cl_eq(" } else { pad + "  } else if(cl_truthy(cl_eq(" }
+                push(lines, head + t + ", " + this.expr(arm[0]) + "))) {")
+                for st in _block_stmts(arm[1]) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+                first = false
+            }
+            if node.default != null {
+                if first { push(lines, pad + "  {") } else { push(lines, pad + "  } else {") }
+                for st in _block_stmts(node.default) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+                push(lines, pad + "  }")
+            } elif not first {
+                push(lines, pad + "  }")
+            }
+            push(lines, pad + "}")
+            return lines
+        }
+        if nt == "InterfaceStatement" {
+            -- An interface is a compile-time contract: the interpreter uses it
+            -- to check that a class declaring it defines the right methods,
+            -- and it has no effect on what a valid program does at runtime.
+            -- So it emits nothing. A program that *violates* an interface is
+            -- rejected by the interpreter and accepted here — stated in
+            -- ROADMAP, not silently different.
+            return []
+        }
         if nt == "FnStatement" { return [] }   -- hoisted separately
         this.unsupported("statement " + nt, node.line)
         return []

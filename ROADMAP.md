@@ -102,7 +102,28 @@ lands with codegen tests that diff native output against the interpreter.
   a better API, and it sidesteps the backend's inability to pass a named function as a value. One
   connection at a time; there are no threads yet. **Remaining:** keep-alive, chunked
   transfer-encoding, redirects, TLS.
-- **Networking (next on the trunk).** TLS, then keep-alive and chunked encoding, so the HTTP
+- **Missing builtins (done).** Fifteen builtins that work under `clarity run` had no case in the
+  C backend at all, so a program using one failed with an undeclared identifier in the generated C
+  — a `v_print` that was never emitted. `print` among them, which put most real programs outside
+  `clarity cc` entirely. Now: `print`, `pop`, `sort`, `reverse`, `unique`, `flat`, `zip`, `find`,
+  `every`, `some`, `values`, `entries`, `merge`, `bool`, `pow`. Semantics match the host runtime
+  deliberately — `sort` is a stable merge sort because `Array.prototype.sort` is required to be
+  stable, `unique` keeps first occurrences, `flat` goes one level, `merge` lets later sources win.
+  Measured, not guessed: each candidate was run through both paths, and five apparent gaps
+  (`slice`, `insert`, `remove`, `now`, `json_str`) turned out not to be globals in either.
+- **Language constructs the backend rejected (done).** `a..b`, `x |> f`, `match`/`when`, and
+  `interface`. Six of the seventeen files in `examples/` would not compile because of them. The
+  pipe form reuses the ordinary call emitter rather than adding a second call site, so it resolves
+  builtins and named functions identically; `match` binds its subject to a temporary because it
+  must be evaluated once however many arms are tested. `interface` emits nothing — it is a
+  compile-time contract with no runtime effect on a *valid* program. The divergence that leaves,
+  stated rather than hidden: a program that violates an interface is rejected by the interpreter
+  and accepted by `clarity cc`.
+- **The rest of the language (next on the trunk).** With the above landed, the three examples that
+  still do not compile stop on `TryCatch`/`ThrowStatement`, `EnumStatement`, and `YieldExpression`.
+  Exceptions and enums are the tractable pair; generators need real coroutines in C and are their
+  own piece of work. Also still missing: `cwd`, `encode64`, `decode64`, `hash` (sha256), `random`.
+- **Networking.** TLS, then keep-alive and chunked encoding, so the HTTP
   client can talk to real services rather than only to plaintext ones.
 - **Stage 12+ — services stdlib.** Real crypto (not the toy cipher), a real embedded key/value or
   SQLite binding, CSV/YAML/TOML parsers. The "boring but load-bearing" tier for backends and data

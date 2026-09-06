@@ -115,6 +115,40 @@ if CC == null {
     same("str_builtin", "show str(42) + \"!\"\nshow \"n=\" + str(3 + 4)")
     same("nested_loops", "mut total = 0\nfor i in range(3) { for j in range(3) { total = total + i * j } }\nshow total")
 
+    -- Builtins that worked in the interpreter and had no case in the C
+    -- backend at all, so any program using one simply failed to compile. Each
+    -- is asserted against the interpreter rather than a literal, because
+    -- matching the interpreter *is* the specification.
+    same("bi_print", "print(\"x\")\nprint(\"a\", 1, true)\nprint()")
+    same("bi_pop", "mut a = [1, 2, 3]\nshow pop(a)\nshow a\nshow pop([])")
+    same("bi_sort", "show sort([3, 1, 2])\nshow sort([\"b\", \"a\"])\nshow sort([])\nshow sort([2.5, 1.5])")
+    -- Stability: equal-comparing elements must keep their original order, or
+    -- native and interpreter disagree on a list this small only by luck.
+    same("bi_sort_stable", "let xs = [[2, \"a\"], [1, \"b\"], [2, \"c\"], [1, \"d\"]]\nshow map(sort(map(xs, fn(p) { return p[0] })), fn(v) { return v })")
+    same("bi_reverse", "show reverse([1, 2, 3])\nshow reverse(\"abc\")\nshow reverse([])")
+    same("bi_unique", "show unique([1, 1, 2, 3, 2])\nshow unique([\"a\", \"a\"])\nshow unique([])")
+    same("bi_flat", "show flat([[1], [2, 3], []])\nshow flat([1, [2]])")
+    same("bi_zip", "show zip([1, 2], [3, 4])\nshow zip([1, 2, 3], [4, 5])\nshow zip([1], [2], [3])")
+    same("bi_find", "show find([1, 2, 3], fn(x) { return x > 1 })\nshow find([1, 2], fn(x) { return x > 9 })")
+    same("bi_every_some", "show every([1, 2], fn(x) { return x > 0 })\nshow every([1, 2], fn(x) { return x > 1 })\nshow some([1, 2], fn(x) { return x > 1 })\nshow some([1, 2], fn(x) { return x > 9 })")
+    same("bi_values_entries", "let m = {\"a\": 1, \"b\": 2}\nshow values(m)\nshow entries(m)")
+    same("bi_merge", "show merge({\"a\": 1}, {\"b\": 2})\nshow merge({\"a\": 1}, {\"a\": 2})\nshow merge({\"a\": 1}, {\"b\": 2}, {\"c\": 3})")
+    same("bi_bool", "show bool(1)\nshow bool(0)\nshow bool(\"\")\nshow bool([])\nshow bool(null)")
+    same("bi_pow", "show pow(2, 10)\nshow pow(2, 0)\nshow pow(2.0, 0.5)")
+
+    -- Language constructs the backend had no case for, so a program using
+    -- one refused to compile: six of the seventeen files in examples/ did.
+    same("lang_range", "for i in 1..4 { show i }\nshow 0..3\nmut s = 0\nfor i in 2..6 { s = s + i }\nshow s")
+    same("lang_pipe", "fn double(x) { return x * 2 }\nfn addn(x, n) { return x + n }\nshow 5 |> double\nshow 5 |> addn(3)\nshow [1, 2, 3] |> len\nshow \"  hi  \" |> trim |> upper")
+    same("lang_match", "fn classify(n) { match n { when 1 { return \"one\" }\nwhen 2 { return \"two\" }\nelse { return \"many\" } } }\nshow classify(1)\nshow classify(2)\nshow classify(9)")
+    -- No arm matches and there is no else: the match must fall through rather
+    -- than run the last arm or skip the rest of the program.
+    same("lang_match_no_default", "match \"x\" { when \"y\" { show \"nope\" } }\nshow \"after\"")
+    same("lang_match_in_loop", "mut hits = 0\nfor v in [1, 2, 3, 1] { match v { when 1 { hits = hits + 10 }\nwhen 2 { hits = hits + 100 }\nelse { hits = hits + 1 } } }\nshow hits")
+    -- The subject is evaluated once, however many arms are tested.
+    same("lang_match_subject_once", "mut calls = 0\nfn subj() { calls = calls + 1\nreturn 3 }\nmatch subj() { when 1 { show \"a\" }\nwhen 2 { show \"b\" }\nelse { show \"c\" } }\nshow calls")
+    same("lang_interface", "interface Shape { fn area() }\nclass Sq impl Shape { fn init(s) { this.s = s }\nfn area() { return this.s * this.s } }\nshow Sq(4).area()")
+
     -- ── stage 3: classes ──
     same("class_counter", "class Counter { fn init(start) { this.n = start }\nfn inc() { this.n = this.n + 1 }\nfn get() { return this.n } }\nlet c = Counter(5)\nc.inc()\nc.inc()\nshow c.get()")
     same("class_to_string", "class Point { fn init(x, y) { this.x = x\nthis.y = y }\nfn to_string() { return \"(\" + str(this.x) + \", \" + str(this.y) + \")\" } }\nshow Point(3, 4)")
