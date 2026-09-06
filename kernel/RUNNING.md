@@ -218,6 +218,38 @@ The lines above are read by the kernel. This one is read by a *program*:
   init: read "hello"
 ```
 
+### A shell
+
+The last thing the boot runs is `/bin/clarity-sh`, and it waits for you:
+
+```
+clarity-sh: type help
+$ cat /bin/hello.txt
+clarity
+$ echo hello from kyan
+hello from kyan
+$ count abcde
+5
+$ frobnicate
+clarity-sh: unknown command: frobnicate
+$ exit 0
+```
+
+Four commands, because six system calls is what there is. `cat` needs `open`
+and `read`; there is no `ls` because listing a directory needs a call that
+does not exist yet, and no way to start a program because nothing can `exec`.
+`help` says both rather than leaving them to be discovered.
+
+It ends when its input does — three seconds of nothing — so a boot with
+nobody at the keyboard still finishes.
+
+**Typing while it is busy loses characters.** The keyboard is polled and only
+a read polls it, so nothing drains the device's 64-event queue while a
+command runs. Forty characters typed at a waiting prompt all arrive; the same
+forty sent while `help` is printing arrive as ten. Nobody types faster than
+the shell echoes, so this bites tests rather than people — but it is why
+`tools/key_check.py` waits for each prompt before typing the next line.
+
 `/bin/clarity-init` — the compiled, linked ELF running at EL0 — calls
 `read(0, ...)` twice. The first time it deliberately points at its own
 read-only text. The kernel translates a read buffer through the process's own

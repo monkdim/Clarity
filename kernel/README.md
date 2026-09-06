@@ -61,6 +61,16 @@ claim with no marker behind it is in "What does not run yet".
 - **a keyboard**: virtio-input over the virtio-mmio bus, found by walking the
   thirty-two slots the device tree names rather than by knowing where QEMU
   puts them
+- **a filesystem, shared with x86_64 and unchanged**: `fs/vfs.zig` and
+  `fs/tmpfs.zig` import `std`, the heap and each other and nothing else, so
+  they run here as written. The marker comes from `fstest.zig` — the *same
+  file* the x86_64 kernel runs, not a copy — which is worth stating because a
+  port that quietly forked its code produces an identical boot log
+- **`open`, `close`, and `read` from a file**: six system calls now. A path
+  arrives as a pointer the process chose, so it is copied into the kernel
+  before use — page by page, translated for reading, bounded at 256 bytes,
+  and rejected rather than truncated if it has no terminator, because a
+  silently shortened path names a different file
 - **`read(2)`**: a program at EL0 asks for a line and gets one. The buffer is
   translated through the process's own page tables **for writing** — a
   pointer into the program's own read-only text is refused with `EFAULT`,
@@ -165,10 +175,11 @@ Not written:
   nothing keeps run queues, priorities or a process table — the boot selftest
   drives the switching primitive directly. Programs are loaded from an ELF
   embedded in the kernel image, because there is nowhere to read one from.
-- On aarch64, four system calls exist — `read`, `write`, `brk`, `exit` — and
-  every other number returns `ENOSYS`. Three are what a freestanding C
-  library needs and the fourth is what a shell will; the rest wait on a VFS
-  and a process table.
+- On aarch64, six system calls exist — `read`, `write`, `open`, `close`,
+  `brk`, `exit` — and every other number returns `ENOSYS`. There is no
+  `getdents`, so the shell has `cat` and no `ls`; no `exec`, so nothing can
+  start a program; no `stat`, `lseek` or `unlink`. The rest wait on a process
+  table.
 - Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired on x86_64:
   read, write, open, close, mmap, brk, exit, fork, exec, wait, kill,
   getpid, getppid, nanosleep, clock_gettime, ioctl. The rest return
@@ -216,6 +227,7 @@ kernel/
 │   └── heap.zig            slab allocator over the pmm
 ├── drivers/line.zig        characters into lines — echo, backspace, Enter
 ├── drivers/stdin.zig       one editor, shared by the selftest and read(2)
+├── arch/console.zig        the console, whichever machine this is
 ├── sched/
 │   ├── process.zig         one Process per address space, many Threads
 │   └── scheduler.zig       preemptive priority round-robin

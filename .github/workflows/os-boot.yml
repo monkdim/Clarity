@@ -365,6 +365,7 @@ jobs:
              && grep -q "\[ok\] console on screen:" serial-arm.log \
              && grep -q "\[ok\] console: 95 glyphs drawn, screen scrolled" serial-arm.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm.log \
+             && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm.log \
              && grep -q "\[ok\] console input:" serial-arm.log \
              && grep -q "init: nothing typed, end of input" serial-arm.log \
              && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm.log \
@@ -410,6 +411,7 @@ jobs:
           echo "-------------------------"
           if grep -q "hello from EL0 on aarch64" serial-arm-pan.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-pan.log \
+             && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm-pan.log \
              && grep -q "\[ok\] console input:" serial-arm-pan.log \
              && grep -q "init: nothing typed, end of input" serial-arm-pan.log \
              && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm-pan.log \
@@ -452,6 +454,7 @@ jobs:
           echo "-------------------------"
           if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-4g.log \
+             && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm-4g.log \
              && grep -q "\[ok\] console input:" serial-arm-4g.log \
              && grep -q "init: nothing typed, end of input" serial-arm-4g.log \
              && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm-4g.log \
@@ -476,6 +479,11 @@ jobs:
       - name: Screenshot the display and check the pixels
         run: python3 kernel/tools/fb_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img
 
+      # The vfs marker is fstest.zig — the same file the x86_64 job runs, not
+      # a second copy of it. fs/vfs.zig and fs/tmpfs.zig needed no change to
+      # run here, so what this asserts is that the shared code really is
+      # shared: a port that quietly forked it would produce this same line.
+      #
       # A note on the marker these three boots require from read(2).
       #
       # Nobody types during them, so what they assert is the *end of input*

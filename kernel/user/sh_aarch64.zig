@@ -34,6 +34,8 @@ const std = @import("std");
 
 const NR_READ: u64 = 0;
 const NR_WRITE: u64 = 1;
+const NR_OPEN: u64 = 2;
+const NR_CLOSE: u64 = 3;
 const NR_EXIT: u64 = 12;
 
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
@@ -65,6 +67,21 @@ fn write(s: []const u8) void {
 
 fn read_line(buf: []u8) i64 {
     return syscall3(NR_READ, 0, @intFromPtr(buf.ptr), buf.len);
+}
+
+/// open(2). The path has to be NUL-terminated for the kernel, which is why
+/// this takes a buffer rather than a slice: a shell argument is a slice of
+/// the line it was typed on, and there is nowhere in it to put the zero.
+fn open(path: [*:0]const u8) i64 {
+    return syscall3(NR_OPEN, @intFromPtr(path), 0, 0);
+}
+
+fn close(fd: u64) void {
+    _ = syscall3(NR_CLOSE, fd, 0, 0);
+}
+
+fn read_fd(fd: u64, buf: []u8) i64 {
+    return syscall3(NR_READ, fd, @intFromPtr(buf.ptr), buf.len);
 }
 
 fn exit(code: u64) noreturn {
@@ -116,13 +133,61 @@ fn help() void {
         \\  help          this
         \\  echo TEXT     write TEXT back
         \\  count TEXT    how many characters TEXT is
+        \\  cat PATH      write out a file
         \\  exit [N]      leave, with status N
         \\
-        \\There is no ls: this architecture has no filesystem yet. There is no
-        \\way to run a program: nothing can exec. Both are why this list is
-        \\short rather than an oversight.
+        \\There is no ls yet: listing a directory needs a system call that
+        \\does not exist, and cat only needed open and read. There is no way
+        \\to run a program either: nothing can exec. Both are why this list
+        \\is short rather than an oversight.
         \\
     );
+}
+
+/// cat, in the only shape four system calls allow.
+fn cat(path_text: []const u8) void {
+    if (path_text.len == 0) {
+        write("clarity-sh: cat: no path\n");
+        return;
+    }
+    // A NUL-terminated copy, because open(2) takes a C string and the
+    // argument is a slice of the line it was typed on.
+    var path: [96:0]u8 = undefined;
+    if (path_text.len >= path.len) {
+        write("clarity-sh: cat: path too long\n");
+        return;
+    }
+    for (path_text, 0..) |c, i| path[i] = c;
+    path[path_text.len] = 0;
+
+    const fd = open(&path);
+    if (fd < 0) {
+        write("clarity-sh: cat: cannot open ");
+        write(path_text);
+        write("\n");
+        return;
+    }
+
+    // Read until it stops giving anything, rather than once: a read may
+    // return less than was asked for without being at the end.
+    var buf: [128]u8 = undefined;
+    var total: usize = 0;
+    var last: u8 = 0;
+    while (true) {
+        const n = read_fd(@intCast(fd), &buf);
+        if (n <= 0) break;
+        const got: usize = @intCast(n);
+        write(buf[0..got]);
+        total += got;
+        last = buf[got - 1];
+    }
+    close(@intCast(fd));
+
+    // End the line if the file did not. Remembered as it goes rather than
+    // looked up afterwards: `buf` holds only the last chunk read, so an index
+    // computed from the running total points into the wrong place — which is
+    // exactly the mistake the first version of this made.
+    if (total > 0 and last != '\n') write("\n");
 }
 
 export fn _start() callconv(.C) noreturn {
@@ -163,6 +228,8 @@ export fn _start() callconv(.C) noreturn {
         } else if (eql(parts.word, "echo")) {
             write(parts.rest);
             write("\n");
+        } else if (eql(parts.word, "cat")) {
+            cat(split(parts.rest).word);
         } else if (eql(parts.word, "count")) {
             write_dec(parts.rest.len);
             write("\n");

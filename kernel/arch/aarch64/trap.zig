@@ -30,6 +30,7 @@ const paging = @import("paging.zig");
 const pmm = @import("../../mm/pmm.zig");
 const line = @import("../../drivers/line.zig");
 const stdin = @import("../../drivers/stdin.zig");
+const vfs = @import("../../fs/vfs.zig");
 
 /// The interrupted process's state, as the vector entry laid it out.
 /// `extern` because the offsets are shared with assembly and must not be
@@ -58,12 +59,15 @@ pub const EXIT_FAULT: u64 = 1;
 /// call on the other.
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
+const SYS_OPEN: u64 = 2;
+const SYS_CLOSE: u64 = 3;
 const SYS_BRK: u64 = 9;
 const SYS_EXIT: u64 = 12;
 
 /// Negative errno, the way the x86_64 dispatcher returns them.
 const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
+const ENOENT: i64 = -2;
 const ENOSYS: i64 = -38;
 
 /// A ceiling on one process's heap.
@@ -191,6 +195,12 @@ fn dispatch(frame: *Frame) void {
         SYS_READ => {
             frame.x[0] = @bitCast(sys_read(frame.x[0], frame.x[1], frame.x[2]));
         },
+        SYS_OPEN => {
+            frame.x[0] = @bitCast(sys_open(frame.x[0], frame.x[1], frame.x[2]));
+        },
+        SYS_CLOSE => {
+            frame.x[0] = @bitCast(sys_close(frame.x[0]));
+        },
         SYS_WRITE => {
             if (calls == 1) ticks_entering = timer.ticks();
             // The result goes back the way the arguments came: into the saved
@@ -221,6 +231,60 @@ fn dispatch(frame: *Frame) void {
 /// write(fd, buf, len) — the console, and nothing else yet.
 ///
 /// `buf` is a user virtual address. It is not dereferenced: `mmu.translate_
+/// The longest path a process may hand the kernel.
+///
+/// Bounded because the string is copied into kernel memory before it is
+/// used: an unbounded copy from a pointer a process chose is how a kernel
+/// gets a stack overflow from userspace.
+const PATH_MAX: usize = 256;
+
+/// Copy a NUL-terminated path out of the process's memory.
+///
+/// Page by page and translated for reading, the same way sys_write reads a
+/// buffer, because a path may straddle a page boundary and the two halves are
+/// unrelated frames. A path with no terminator inside PATH_MAX bytes is
+/// rejected rather than truncated: a silently shortened path names a
+/// different file, which is worse than an error.
+fn copy_user_path(ptr: u64, out: []u8) ?[]const u8 {
+    var len: usize = 0;
+    while (len < out.len) {
+        const va = ptr + len;
+        const phys = mmu.translate_user_read(va) orelse return null;
+        const page_left = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        const src: [*]const u8 = @ptrFromInt(vm.phys_to_virt(phys));
+        var i: usize = 0;
+        while (i < page_left and len < out.len) : (i += 1) {
+            const c = src[i];
+            if (c == 0) return out[0..len];
+            out[len] = c;
+            len += 1;
+        }
+    }
+    return null;
+}
+
+/// open(2), for real files.
+///
+/// The flags are Linux's, because that is what the VFS was written against
+/// and what stdlib/kernel_abi.clarity records: 0x40 is O_CREAT, the low two
+/// bits are the access mode.
+fn sys_open(path_ptr: u64, flags: u64, mode: u64) i64 {
+    var buf: [PATH_MAX]u8 = undefined;
+    const path = copy_user_path(path_ptr, &buf) orelse return EFAULT;
+    const fd = vfs.open(path, @truncate(flags), @truncate(mode)) catch return ENOENT;
+    files_opened += 1;
+    return fd;
+}
+
+fn sys_close(fd: u64) i64 {
+    if (fd <= 2) return EBADF; // the console's three are not the VFS's to close
+    vfs.close(@intCast(fd)) catch return EBADF;
+    return 0;
+}
+
+/// Counted so the boot log can say the path was used rather than present.
+pub var files_opened: u64 = 0;
+
 /// Read a line from the console into the process's memory.
 ///
 /// The mirror image of sys_write, and the difference is the whole point: this
@@ -233,12 +297,20 @@ fn dispatch(frame: *Frame) void {
 /// Returns 0 for end of input, which on a machine with no scheduler means
 /// nobody typed anything for a few seconds. See drivers/stdin.zig.
 fn sys_read(fd: u64, buf: u64, len: u64) i64 {
-    if (fd != 0) return EBADF;
     if (len == 0) return 0;
 
     var staging: [line.MAX_LINE + 1]u8 = undefined;
     const want = @min(len, staging.len);
-    const n = stdin.read(staging[0..want], READ_IDLE_TICKS);
+
+    // Descriptor zero is the console; anything above the three standard ones
+    // is a file the process opened. The two differ in where the bytes come
+    // from and in nothing else — both end up copied out below, through the
+    // process's own page tables, translated for writing.
+    const n = switch (fd) {
+        0 => stdin.read(staging[0..want], READ_IDLE_TICKS),
+        1, 2 => return EBADF, // stdout and stderr are not for reading
+        else => vfs.read(@intCast(fd), staging[0..want]) catch return EBADF,
+    };
     if (n == 0) return 0;
 
     // Page by page, for the reason sys_write is: two consecutive pages of the
