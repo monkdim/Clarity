@@ -27,6 +27,8 @@ const threadtest = @import("threadtest.zig");
 const fstest = @import("fstest.zig");
 const preempttest = @import("preempttest.zig");
 const timer = @import("arch/x86_64/timer.zig");
+const fpu = @import("arch/x86_64/fpu.zig");
+const fputest = @import("fputest.zig");
 
 extern const __kernel_phys_end: u8;
 
@@ -49,7 +51,13 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     // 1. CPU structures
     gdt.init();
     idt.init();
-    console.println("  [ok] GDT + IDT");
+    // x87 and SSE, before anything can execute a floating-point instruction.
+    // The kernel does not use one — it is built with SSE subtracted and
+    // soft_float on — but ring 3 will: a compiled Clarity program is C, and C
+    // on x86-64 keeps every double in an xmm register. Without CR4.OSFXSR
+    // that program's first division raises #UD.
+    fpu.enable();
+    console.println("  [ok] GDT + IDT + FPU");
 
     // Parse the multiboot2 info blob into a BootInfo. Allocator-free, so
     // the memory map aliases the firmware-supplied table — it must be
@@ -139,7 +147,18 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         hang();
     };
 
-    // 9. Filesystem. `vfs.resolve` was a stub returning null, so nothing
+    // 9. The FPU across a context switch. Nothing had ever needed it: the
+    //    kernel has no floating point and the first user program did integer
+    //    arithmetic, so FXSAVE was absent from the switch and would have
+    //    stayed absent until two processes doing arithmetic corrupted each
+    //    other in a way nobody could reproduce.
+    fputest.run() catch |err| {
+        console.print("PANIC: fpu self-test: ");
+        console.println(@errorName(err));
+        hang();
+    };
+
+    // 10. Filesystem. `vfs.resolve` was a stub returning null, so nothing
     //    could open a path and spawn_user could never load an executable.
     fstest.run() catch |err| {
         console.print("PANIC: filesystem self-test: ");
@@ -147,7 +166,7 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         hang();
     };
 
-    // 10. The first real process. This supersedes the hand-mapped ring 3
+    // 11. The first real process. This supersedes the hand-mapped ring 3
     //    self-test: it enters ring 3 the same way, but from an actual ELF
     //    read out of the filesystem, so it also covers elf.parse, segment
     //    mapping into a fresh address space, and the CR3 switch — none of

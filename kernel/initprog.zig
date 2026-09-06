@@ -70,5 +70,5 @@ pub fn run() !noreturn {
     // identity-mapped address the process's address space does not map. See
     // enter_userland — anything at all between the two would fault on a
     // stack that no longer exists.
-    context.enter_userland(t.cr3, t.iret_rsp);
+    context.enter_userland(t.cr3, t.iret_rsp, @intFromPtr(&t.context.fpu));
 }

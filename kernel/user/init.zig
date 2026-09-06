@@ -113,8 +113,34 @@ export fn _start() callconv(.C) noreturn {
         _ = write(1, "  [FAIL] user heap: wrote to brk memory, read back wrong\n");
     }
 
+    // Floating point in ring 3. A compiled Clarity program is C, and C on
+    // x86-64 keeps every double in an xmm register — so until the kernel sets
+    // CR0.EM=0 and CR4.OSFXSR, the first arithmetic in such a program raises
+    // #UD and it dies before printing anything. This is the smallest thing
+    // that would have failed.
+    //
+    // Read through volatile pointers so the compiler cannot fold the whole
+    // computation at compile time and emit a constant — which would make the
+    // check pass on a CPU where SSE was never enabled, i.e. test nothing.
+    const a: *volatile f64 = &fp_a;
+    const b: *volatile f64 = &fp_b;
+    const q = a.* / b.*;
+    const bits: u64 = @bitCast(q);
+    // 355/113 is 3.14159292035398... The quotient is not exact, but rounding
+    // it is: one specific double, every time, on every conforming CPU. So the
+    // check is a bit pattern rather than a tolerance.
+    if (bits == 0x400921FB78121FB8) {
+        _ = write(1, "  [ok] user sse: 355/113 in xmm\n");
+    } else {
+        _ = write(1, "  [FAIL] user sse: wrong quotient ");
+        write_hex(bits);
+    }
+
     exit(0);
 }
+
+var fp_a: f64 = 355.0;
+var fp_b: f64 = 113.0;
 
 pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     _ = write(2, "  [FAIL] user panic\n");
