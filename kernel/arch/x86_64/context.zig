@@ -102,11 +102,19 @@ pub const IretFrame = extern struct {
 /// instructions there is no memory access at all, and both operands are
 /// already in registers before the block begins.
 ///
+/// `cli` for the same reason: an interrupt is taken *between* instructions,
+/// so one arriving in that one-instruction window would push its frame onto
+/// the stack CR3 had just taken away — a double fault, and then a triple.
+/// The window is tiny, which makes it a rare boot failure rather than an
+/// obvious one. `iretq` restores IF from the frame's RFLAGS, so ring 3 still
+/// starts with interrupts on.
+///
 /// The kernel stack `frame_rsp` points into is an HHDM address in the upper
 /// half, which every address space shares (see vmm.share_kernel_half), so it
 /// survives the switch.
 pub fn enter_userland(cr3: u64, frame_rsp: u64) noreturn {
     asm volatile (
+        \\ cli
         \\ movq %[cr3], %%cr3
         \\ movq %[frame], %%rsp
         \\ swapgs
