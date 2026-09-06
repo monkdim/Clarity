@@ -6,12 +6,11 @@
 //! display device that exists precisely so a kernel with no PCI driver can
 //! still have a screen.
 //!
-//! The base address is 0x0902_0000 on QEMU's `virt` machine. That is not a
-//! guess: it was read out of the device tree QEMU itself emits
-//! (`-M virt,dumpdtb=…`), where the node is `/fw-cfg@9020000` with a region
-//! 0x18 bytes long. Reading it from the device tree at boot instead would be
-//! better and is a later change; it needs a flattened-device-tree parser,
-//! which is its own piece of work.
+//! The base address comes from the device tree at boot — the node is
+//! `/fw-cfg@9020000` on QEMU's `virt` machine, with a region 0x18 bytes long.
+//! The constant below is only the fallback for a machine that hands over no
+//! device tree at all; on anything that is not this exact QEMU model, the
+//! tree is the only answer that can be right.
 //!
 //! Register layout, from QEMU's docs/specs/fw_cfg.txt:
 //!
@@ -25,10 +24,30 @@
 //! 0x0019 selects nothing and reads back zeroes, which looks exactly like a
 //! device that is not there.
 
-const BASE: u64 = 0x0902_0000;
-const REG_DATA: u64 = BASE + 0x00;
-const REG_SELECTOR: u64 = BASE + 0x08;
-const REG_DMA: u64 = BASE + 0x10;
+/// Where the interface is. The fallback is QEMU `virt`'s address; the device
+/// tree is asked first, and on any machine that is not this one the tree is
+/// the only answer that can be right.
+const DEFAULT_BASE: u64 = 0x0902_0000;
+var base: u64 = DEFAULT_BASE;
+
+/// Point the driver at the address the device tree gave.
+pub fn set_base(addr: u64) void {
+    base = addr;
+}
+
+pub fn current_base() u64 {
+    return base;
+}
+
+fn reg_data() u64 {
+    return base + 0x00;
+}
+fn reg_selector() u64 {
+    return base + 0x08;
+}
+fn reg_dma() u64 {
+    return base + 0x10;
+}
 
 /// The file directory, which lists every other file by name.
 const KEY_FILE_DIR: u16 = 0x0019;
@@ -72,12 +91,12 @@ fn mmio_read8(addr: u64) u8 {
 }
 
 fn select(key: u16) void {
-    mmio_write16(REG_SELECTOR, @byteSwap(key));
+    mmio_write16(reg_selector(), @byteSwap(key));
 }
 
 /// Read `buf.len` bytes from the currently selected file, sequentially.
 fn read_bytes(buf: []u8) void {
-    for (buf) |*b| b.* = mmio_read8(REG_DATA);
+    for (buf) |*b| b.* = mmio_read8(reg_data());
 }
 
 /// Run one DMA command and wait for the device to finish with it.
@@ -91,7 +110,7 @@ fn run_dma(control: u32, length: u32, address: u64) bool {
     dma_cmd.length = @byteSwap(length);
     dma_cmd.address = @byteSwap(address);
 
-    mmio_write64(REG_DMA, @byteSwap(@intFromPtr(&dma_cmd)));
+    mmio_write64(reg_dma(), @byteSwap(@intFromPtr(&dma_cmd)));
 
     const ctl: *volatile u32 = &dma_cmd.control;
     var spins: u32 = 0;

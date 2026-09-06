@@ -9,15 +9,21 @@ Needs Zig 0.13. From `kernel/`:
 
 ```sh
 zig build            # x86-64  -> zig-out/bin/clarity-kernel
-zig build aarch64    # aarch64 -> zig-out/bin/clarity-kernel-aarch64
+zig build aarch64    # aarch64 -> zig-out/bin/clarity-kernel-aarch64.img
 ```
+
+The aarch64 build produces two files. The `.img` is the bootable one: a flat
+binary carrying an ARM64 Linux Image header, which is what makes a bootloader
+treat it as a kernel — and hand it a device tree. The ELF beside it has the
+symbols, for a debugger or a disassembler; booting it works, but the kernel
+comes up knowing nothing about the machine.
 
 ## aarch64 — the one with a screen
 
 ```sh
 qemu-system-aarch64 \
   -M virt -cpu cortex-a72 -m 512 \
-  -kernel zig-out/bin/clarity-kernel-aarch64 \
+  -kernel zig-out/bin/clarity-kernel-aarch64.img \
   -device ramfb \
   -serial stdio
 ```
@@ -30,6 +36,18 @@ have the log in a file than mixed into the QEMU window's terminal.
 You should get a 1024×768 window: slate background, blue border, and four
 colour patches — red, green, blue, white. That picture is the test the boot
 gate checks pixel by pixel.
+
+The serial log should report the machine describing itself:
+
+```
+  [ok] device tree at 0x48000000, 1048576 bytes, #address-cells=2 #size-cells=2
+  [ok] fw_cfg from the device tree at 0x9020000
+  ram 0x40000000 + 512 MiB
+  [ok] pmm: 512 MiB managed, 129349 pages free, allocated 0x402bb000 and it holds
+```
+
+Change `-m 512` and the RAM line follows it — that is the kernel reading the
+device tree rather than assuming a machine.
 
 ### On an Apple Silicon Mac
 
@@ -44,7 +62,7 @@ qemu-system-aarch64 \
   -M virt,gic-version=2 \
   -accel hvf -cpu host \
   -m 512 \
-  -kernel zig-out/bin/clarity-kernel-aarch64 \
+  -kernel zig-out/bin/clarity-kernel-aarch64.img \
   -device ramfb \
   -serial stdio
 ```
@@ -67,9 +85,9 @@ work, the boot log up to the point it stops is the useful thing to report.
 
 ### What it does not do yet
 
-Prints to the serial line and draws a fixed pattern. No text on screen, no
-keyboard, no programs — those are on the x86 side, and are being brought
-across.
+Prints to the serial line, draws a fixed pattern, and can allocate a physical
+page. No page tables for processes, no text on screen, no keyboard, no
+programs — those are on the x86 side, and are being brought across.
 
 ## x86-64 — the one that runs programs
 
@@ -104,7 +122,7 @@ display.
 ## The checks
 
 ```sh
-python3 tools/fb_check.py zig-out/bin/clarity-kernel-aarch64
+python3 tools/fb_check.py zig-out/bin/clarity-kernel-aarch64.img
 ```
 
 Boots the ARM kernel, takes a screendump through QEMU's monitor, and verifies

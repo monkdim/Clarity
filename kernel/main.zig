@@ -90,7 +90,21 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     // 2. Memory: physical page allocator over the boot memory map,
     //    then a clean page-table tree owned by the kernel, then a
     //    slab allocator for kernel objects.
-    pmm.init(boot_info.memory_map);
+    // The map is built explicitly rather than handed over as a multiboot
+    // structure, so the allocator itself knows nothing about how this machine
+    // describes its memory — the aarch64 side builds the same map from a
+    // device tree.
+    pmm.begin();
+    for (boot_info.memory_map) |entry| {
+        if (entry.region_type != @intFromEnum(multiboot.MemoryRegionType.available)) continue;
+        pmm.add_available(entry.base_addr, entry.length);
+    }
+    // The first mebibyte is BIOS and legacy hardware, and the kernel image —
+    // code, rodata, data, bss, the boot page tables and the boot stack — runs
+    // from where it was loaded. Neither is ours to hand out.
+    pmm.reserve(0, 1 << 20);
+    pmm.reserve(0, @intFromPtr(&__kernel_phys_end));
+    pmm.finish();
     console.println("  .. pmm ok");
     vmm.init();
     console.println("  .. vmm ok");

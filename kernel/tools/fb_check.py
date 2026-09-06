@@ -92,7 +92,7 @@ def screendump(sock_path, out_path, deadline):
 
 def main():
     if len(sys.argv) != 2:
-        raise SystemExit("usage: fb_check.py <kernel-elf>")
+        raise SystemExit("usage: fb_check.py <kernel-image>")
     kernel = sys.argv[1]
     tmp = tempfile.mkdtemp(prefix="clarityfb-")
     log = os.path.join(tmp, "serial.log")

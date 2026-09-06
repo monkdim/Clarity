@@ -16,14 +16,15 @@ const console = @import("arch/aarch64/console.zig");
 const timer = @import("arch/aarch64/timer.zig");
 const mmu = @import("arch/aarch64/mmu.zig");
 const ramfb = @import("arch/aarch64/ramfb.zig");
+const fwcfg = @import("arch/aarch64/fwcfg.zig");
+const fdt = @import("boot/fdt.zig");
+const pmm = @import("mm/pmm.zig");
 const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
 /// is at EL1 with a stack and a zeroed .bss. `dtb_phys` is the device tree
 /// pointer QEMU leaves in x0; recorded now, consumed by the memory phase.
 export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
-    _ = dtb_phys;
-
     console.init();
     console.println("ClarityOS aarch64 micro-kernel starting...");
     console.println("  [ok] EL1 + PL011 UART");
@@ -43,12 +44,22 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // architecture generated an interrupt, so the entire delivery path — GIC,
     // DAIF, the vector entry itself — was untested. On x86 the equivalent gap
     // was hiding a scheduler that picked a thread and never switched to it.
+    // What kind of machine is this? On x86 the firmware answers with a
+    // multiboot2 block; here the answer is a device tree, and until now the
+    // pointer to it was taken in x0 and thrown away. Everything below needs
+    // it: how much RAM there is, and where the machine put its devices.
+    const tree = describe_machine(dtb_phys);
+
     timer.init(100);
     console.print("  [ok] generic timer armed at 100 Hz, cntfrq=");
     console.print_dec(timer.frequency());
     console.println("");
 
     timer_selftest();
+
+    // Physical memory. Nothing on this architecture could allocate a page
+    // before this: the kernel had no idea where RAM was.
+    memory_selftest(tree, dtb_phys);
 
     // A screen. Everything this kernel has said so far went out a serial
     // line; this is the first thing it can show.
@@ -73,6 +84,11 @@ const PATCH_Y: u32 = 240;
 const PATCH_X = [_]u32{ 112, 288, 464, 640 };
 const PATCH_COLOUR = [_]u32{ fb.RED, fb.GREEN, fb.BLUE, fb.WHITE };
 
+/// One past the last byte of usable RAM, once the device tree has been read.
+/// Zero means it is not known yet, in which case nothing may assume a fixed
+/// address is real memory.
+var ram_end: u64 = 0;
+
 /// Bring up the display and prove something is really on it.
 ///
 /// Reading the pixels back is the part that matters. Writing to memory proves
@@ -81,6 +97,23 @@ const PATCH_COLOUR = [_]u32{ fb.RED, fb.GREEN, fb.BLUE, fb.WHITE };
 /// answers the first half; the screenshot CI takes answers the second, and
 /// neither is redundant.
 fn screen_selftest() void {
+    // The framebuffer sits at a fixed address chosen before this kernel could
+    // ask how much RAM the machine has. Now it can — and on a machine small
+    // enough that the address is past the end of memory, configuring ramfb
+    // would point the display at nothing and the writes below would go
+    // nowhere. Refusing is a message; carrying on is a picture of noise.
+    const fb_bytes: u64 = @as(u64, SCREEN_W) * SCREEN_H * 4;
+    if (ram_end != 0 and ramfb.FB_PHYS + fb_bytes > ram_end) {
+        console.print("  [--] framebuffer wants ");
+        console.print_hex(ramfb.FB_PHYS);
+        console.print("..");
+        console.print_hex(ramfb.FB_PHYS + fb_bytes);
+        console.print(" but RAM ends at ");
+        console.print_hex(ram_end);
+        console.println("; running headless");
+        return;
+    }
+
     const surf_info = ramfb.init(SCREEN_W, SCREEN_H) orelse {
         // Not a failure of this code: it means QEMU was started without
         // `-device ramfb`, and the kernel carries on headless as before.
@@ -204,3 +237,137 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     console.println(msg);
     hang();
 }
+
+/// End of everything the kernel image occupies, from the linker script — past
+/// .bss and past the boot stack.
+extern const __stack_top: u8;
+
+/// Read the machine's own description, and point the drivers that need an
+/// address at the one it gives.
+///
+/// Null means no device tree, which is survivable: the drivers keep their
+/// QEMU `virt` defaults and the memory phase below reports that it cannot
+/// run. It is worth distinguishing from a tree that parsed and said something
+/// unexpected, because the two have completely different causes.
+fn describe_machine(dtb_phys: u64) ?fdt.Fdt {
+    const tree = fdt.parse(dtb_phys) orelse {
+        console.print("  [--] no device tree at ");
+        console.print_hex(dtb_phys);
+        console.println("; using built-in machine defaults");
+        return null;
+    };
+
+    console.print("  [ok] device tree at ");
+    console.print_hex(dtb_phys);
+    console.print(", ");
+    console.print_dec(tree.total_size);
+    console.print(" bytes, #address-cells=");
+    console.print_dec(tree.addr_cells);
+    console.print(" #size-cells=");
+    console.print_dec(tree.size_cells);
+    console.println("");
+
+    // The one hardcoded address this retires. The UART's cannot follow: the
+    // console has to work before anything can be printed about the tree, so
+    // it is found the only way something can be before there is any output.
+    if (fdt.node_reg(&tree, "fw-cfg@")) |reg| {
+        fwcfg.set_base(reg.base);
+        console.print("  [ok] fw_cfg from the device tree at ");
+        console.print_hex(reg.base);
+        console.println("");
+    }
+    return tree;
+}
+
+/// Stand up the page allocator, and prove it hands out memory that works.
+fn memory_selftest(tree: ?fdt.Fdt, dtb_phys: u64) void {
+    const t = tree orelse {
+        console.println("  [--] no device tree; physical memory unknown, allocator not started");
+        return;
+    };
+
+    var regions: [8]fdt.Region = undefined;
+    const n = fdt.memory_regions(&t, &regions);
+    if (n == 0) {
+        console.println("  [FAIL] device tree describes no memory");
+        return;
+    }
+
+    pmm.begin();
+    var total: u64 = 0;
+    for (regions[0..n]) |r| {
+        pmm.add_available(r.base, r.len);
+        total += r.len;
+        ram_end = @max(ram_end, r.base + r.len);
+        console.print("  ram ");
+        console.print_hex(r.base);
+        console.print(" + ");
+        console.print_dec(r.len >> 20);
+        console.println(" MiB");
+    }
+
+    // Three things already live in that memory and must never be handed out.
+    //
+    // The kernel image runs from where it was loaded — and the reservation
+    // starts at the base of RAM rather than at the image, because the ARM64
+    // boot protocol puts the kernel 512 KiB up and leaves what is underneath
+    // to the bootloader. QEMU happens to put nothing there; a different
+    // bootloader is entitled to, and half a mebibyte is not worth the risk.
+    //
+    // The device tree is still being read from, wherever the bootloader chose
+    // to put it. And the framebuffer is being scanned out by the display
+    // right now, so a page handed out of it would appear on screen.
+    const kernel_end: u64 = @intFromPtr(&__stack_top);
+    pmm.reserve(regions[0].base, kernel_end - regions[0].base);
+    pmm.reserve(dtb_phys, t.total_size);
+    pmm.reserve(ramfb.FB_PHYS, @as(u64, SCREEN_W) * SCREEN_H * 4);
+    pmm.finish();
+
+    const before = pmm.stats();
+
+    // Allocate, write through it, read it back, free it, and check the page
+    // comes back. Allocating alone proves only that a bit was flipped; the
+    // question is whether the address returned is memory that works.
+    const p1 = pmm.alloc_page() orelse {
+        console.println("  [FAIL] pmm: no page available on a machine with RAM");
+        return;
+    };
+    const cell: *volatile u64 = @ptrFromInt(p1);
+    cell.* = 0xC0FFEE_5EED;
+    const held = cell.* == 0xC0FFEE_5EED;
+
+    const p2 = pmm.alloc_page() orelse 0;
+    const distinct = p2 != 0 and p2 != p1;
+
+    pmm.free_page(p1);
+    pmm.free_page(p2);
+    const after = pmm.stats();
+    const restored = after.free_pages == before.free_pages;
+
+    // A page below the end of the kernel image would mean the reservations
+    // did not take — the failure that corrupts the kernel out from under
+    // itself later rather than here.
+    const outside_kernel = p1 >= kernel_end;
+
+    if (held and distinct and restored and outside_kernel) {
+        console.print("  [ok] pmm: ");
+        console.print_dec(before.total_bytes >> 20);
+        console.print(" MiB managed, ");
+        console.print_dec(before.free_pages);
+        console.print(" pages free, allocated ");
+        console.print_hex(p1);
+        console.println(" and it holds");
+    } else {
+        console.print("  [FAIL] pmm: held=");
+        console.print_dec(@intFromBool(held));
+        console.print(" distinct=");
+        console.print_dec(@intFromBool(distinct));
+        console.print(" restored=");
+        console.print_dec(@intFromBool(restored));
+        console.print(" outside_kernel=");
+        console.print_dec(@intFromBool(outside_kernel));
+        console.println("");
+    }
+}
+
+

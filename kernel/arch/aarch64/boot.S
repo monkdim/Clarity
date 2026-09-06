@@ -13,6 +13,34 @@
 .global _start
 .type _start, %function
 _start:
+    // ── ARM64 Linux Image header ────────────────────────────────────────
+    //
+    // 64 bytes, laid out by Documentation/arch/arm64/booting.rst. Its
+    // presence is what makes a bootloader treat this as a kernel rather than
+    // as an opaque blob to jump into — and following that protocol is the
+    // only way to be handed a device tree, because the bootloader puts its
+    // address in x0 as part of it.
+    //
+    // QEMU loading an ELF does neither: it jumps straight to the ELF entry
+    // point and loads no device tree at all, even when given `-dtb`. That was
+    // measured, not assumed — a scan of the whole of RAM found no tree.
+    //
+    // This is not a QEMU workaround. m1n1, the bootloader onto Apple Silicon,
+    // boots exactly this format and hands over a device tree the same way, as
+    // do U-Boot and EDK2. The ELF is still built, for symbols and debugging;
+    // the image booted is the flat binary with this header on the front.
+    b       .Lheader_end            // code0: a real instruction, as required
+    .long   0                       // code1
+    .quad   0x80000                 // text_offset: load 512 KiB above RAM base
+    .quad   __image_size            // image_size: memory to reserve, .bss included
+    .quad   0                       // flags: 4 KiB pages, no constraints
+    .quad   0                       // res2
+    .quad   0                       // res3
+    .quad   0                       // res4
+    .ascii  "ARM\x64"               // magic
+    .long   0                       // res5
+.Lheader_end:
+
     // Only the boot CPU (Aff0 == 0) continues; others wait forever.
     mrs     x1, mpidr_el1
     and     x1, x1, #0xFF
