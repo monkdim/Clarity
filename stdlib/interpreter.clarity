@@ -263,12 +263,12 @@ class Interpreter {
 
         -- I/O
         this.global_env.set("print", fn(...args) {
-            let out = join(map(args, fn(a) { interp._to_display(a) }), " ")
+            let out = join(map(args, fn(a) { return interp._to_display(a) }), " ")
             show out
             push(interp.output, out)
         }, true)
         this.global_env.set("show", fn(...args) {
-            let out = join(map(args, fn(a) { interp._to_display(a) }), " ")
+            let out = join(map(args, fn(a) { return interp._to_display(a) }), " ")
             show out
             push(interp.output, out)
         }, true)

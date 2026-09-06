@@ -642,6 +642,137 @@ static Value cl_hof_each(Value lst, Value fn){
   for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_call(fn, a); }
   return cl_null();
 }
+static Value cl_hof_find(Value lst, Value fn){
+  Value it=cl_iter(lst); long n=cl_length(it);
+  for(long i=0;i<n;i++){ Value e=cl_index(it, cl_int(i)); Value a[1]={ e }; if(cl_truthy(cl_call(fn, a))) return e; }
+  return cl_null();   /* JS find returns undefined; the interpreter maps that to null */
+}
+static Value cl_hof_every(Value lst, Value fn){
+  Value it=cl_iter(lst); long n=cl_length(it);
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(!cl_truthy(cl_call(fn, a))) return cl_bool(0); }
+  return cl_bool(1);
+}
+static Value cl_hof_some(Value lst, Value fn){
+  Value it=cl_iter(lst); long n=cl_length(it);
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(cl_truthy(cl_call(fn, a))) return cl_bool(1); }
+  return cl_bool(0);
+}
+
+/* ── app stdlib: list ops ── */
+static Value cl_pop(Value lv){
+  if(lv.t!=T_LIST) return cl_null();
+  List* l=(List*)lv.o; if(l->len==0) return cl_null();
+  l->len--; return l->items[l->len];
+}
+/* JS sorts with (a,b) => a < b ? -1 : a > b ? 1 : 0, over a copy. */
+static int cl_sort_cmp(Value a, Value b){
+  if(cl_truthy(cl_lt(a,b))) return -1;
+  if(cl_truthy(cl_lt(b,a))) return 1;
+  return 0;
+}
+/* Bottom-up merge sort: Array.prototype.sort is required to be stable, and an
+   unstable sort would disagree with the interpreter on equal-comparing
+   elements — exactly the kind of difference that shows up much later. */
+static Value cl_sort(Value lv){
+  Value out=cl_list_new();
+  if(lv.t!=T_LIST) return out;
+  List* src=(List*)lv.o; long n=src->len;
+  for(long i=0;i<n;i++) cl_list_add(out, src->items[i]);
+  if(n<2) return out;
+  List* a=(List*)out.o;
+  Value* buf=(Value*)cl_alloc((size_t)n*sizeof(Value));
+  for(long width=1; width<n; width*=2){
+    for(long lo=0; lo<n; lo+=2*width){
+      long mid=lo+width; if(mid>n) mid=n;
+      long hi=lo+2*width; if(hi>n) hi=n;
+      long i=lo, j=mid, k=lo;
+      while(i<mid && j<hi) buf[k++] = (cl_sort_cmp(a->items[j], a->items[i])<0) ? a->items[j++] : a->items[i++];
+      while(i<mid) buf[k++]=a->items[i++];
+      while(j<hi)  buf[k++]=a->items[j++];
+      for(long t=lo;t<hi;t++) a->items[t]=buf[t];
+    }
+  }
+  return out;
+}
+static Value cl_reverse(Value v){
+  if(v.t==T_STR){ size_t n=strlen(v.s); char* o=(char*)cl_alloc(n+1); for(size_t i=0;i<n;i++) o[i]=v.s[n-1-i]; o[n]=0; return cl_str(o); }
+  Value out=cl_list_new();
+  if(v.t!=T_LIST) return out;
+  List* l=(List*)v.o; for(long i=l->len-1;i>=0;i--) cl_list_add(out, l->items[i]);
+  return out;
+}
+/* new Set(...) keeps first occurrences, in order. */
+static Value cl_unique(Value lv){
+  Value out=cl_list_new();
+  if(lv.t!=T_LIST) return out;
+  List* l=(List*)lv.o;
+  for(long i=0;i<l->len;i++){
+    List* o=(List*)out.o; int seen=0;
+    for(long j=0;j<o->len;j++) if(cl_equal(o->items[j], l->items[i])){ seen=1; break; }
+    if(!seen) cl_list_add(out, l->items[i]);
+  }
+  return out;
+}
+/* Array.prototype.flat() with no argument: one level only. */
+static Value cl_flat(Value lv){
+  Value out=cl_list_new();
+  if(lv.t!=T_LIST) return out;
+  List* l=(List*)lv.o;
+  for(long i=0;i<l->len;i++){
+    Value e=l->items[i];
+    if(e.t==T_LIST){ List* inner=(List*)e.o; for(long j=0;j<inner->len;j++) cl_list_add(out, inner->items[j]); }
+    else cl_list_add(out, e);
+  }
+  return out;
+}
+static Value cl_zip(Value* ls, long count){
+  Value out=cl_list_new();
+  if(count<=0) return out;
+  long min=cl_length(ls[0]);
+  for(long i=1;i<count;i++){ long n=cl_length(ls[i]); if(n<min) min=n; }
+  for(long i=0;i<min;i++){
+    Value row=cl_list_new();
+    for(long j=0;j<count;j++) cl_list_add(row, cl_index(ls[j], cl_int(i)));
+    cl_list_add(out, row);
+  }
+  return out;
+}
+static Value cl_values(Value v){
+  Value out=cl_list_new();
+  if(v.t==T_MAP){ Map* m=(Map*)v.o; for(long j=0;j<m->len;j++) cl_list_add(out, m->vals[j]); }
+  return out;
+}
+static Value cl_entries(Value v){
+  Value out=cl_list_new();
+  if(v.t==T_MAP){
+    Map* m=(Map*)v.o;
+    for(long j=0;j<m->len;j++){
+      Value pair=cl_list_new();
+      cl_list_add(pair, cl_str(m->keys[j]));
+      cl_list_add(pair, m->vals[j]);
+      cl_list_add(out, pair);
+    }
+  }
+  return out;
+}
+/* Object.assign({}, ...): later sources win. */
+static Value cl_merge(Value* ms, long count){
+  Value out=cl_map_new();
+  for(long i=0;i<count;i++){
+    if(ms[i].t!=T_MAP) continue;
+    Map* m=(Map*)ms[i].o;
+    for(long j=0;j<m->len;j++) cl_map_put(out, m->keys[j], m->vals[j]);
+  }
+  return out;
+}
+/* print(...) is show(...) with the arguments joined by a space, which is what
+   the interpreter does for both. */
+static Value cl_print(Value* vs, long n){
+  char* out=(char*)cl_alloc(1); out[0]=0;
+  for(long i=0;i<n;i++){ if(i) out=cl_cat(out, " "); out=cl_cat(out, cl_display(vs[i])); }
+  printf("%s\n", out);
+  return cl_null();
+}
 
 /* ── app stdlib: string ops ── (arena-allocated results) */
 static Value cl_upper(Value v){ const char* s=v.s; size_t n=strlen(s); char* o=(char*)cl_alloc(n+1); for(size_t i=0;i<n;i++) o[i]=(char)toupper((unsigned char)s[i]); o[n]=0; return cl_str(o); }
@@ -1383,6 +1514,25 @@ class CCodegen {
         if name == "filter" and n == 2 { return "cl_hof_filter(" + args[0] + ", " + args[1] + ")" }
         if name == "reduce" and n == 3 { return "cl_hof_reduce(" + args[0] + ", " + args[1] + ", " + args[2] + ")" }
         if name == "each" and n == 2 { return "cl_hof_each(" + args[0] + ", " + args[1] + ")" }
+        if name == "find" and n == 2 { return "cl_hof_find(" + args[0] + ", " + args[1] + ")" }
+        if name == "every" and n == 2 { return "cl_hof_every(" + args[0] + ", " + args[1] + ")" }
+        if name == "some" and n == 2 { return "cl_hof_some(" + args[0] + ", " + args[1] + ")" }
+        if name == "pop" and n == 1 { return "cl_pop(" + args[0] + ")" }
+        if name == "sort" and n == 1 { return "cl_sort(" + args[0] + ")" }
+        if name == "reverse" and n == 1 { return "cl_reverse(" + args[0] + ")" }
+        if name == "unique" and n == 1 { return "cl_unique(" + args[0] + ")" }
+        if name == "flat" and n == 1 { return "cl_flat(" + args[0] + ")" }
+        if name == "values" and n == 1 { return "cl_values(" + args[0] + ")" }
+        if name == "entries" and n == 1 { return "cl_entries(" + args[0] + ")" }
+        if name == "bool" and n == 1 { return "cl_bool(cl_truthy(" + args[0] + "))" }
+        if name == "pow" and n == 2 { return "cl_pow(" + args[0] + ", " + args[1] + ")" }
+        -- Variadic in the interpreter; C takes a count, so the argument list
+        -- becomes an array literal. Any arity works, including zero.
+        if name == "zip" and n > 0 { return "cl_zip((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
+        if name == "merge" and n > 0 { return "cl_merge((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
+        if name == "merge" and n == 0 { return "cl_map_new()" }
+        if name == "print" and n > 0 { return "cl_print((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
+        if name == "print" and n == 0 { return "cl_print(0, 0)" }
         -- strings
         if name == "upper" and n == 1 { return "cl_upper(" + args[0] + ")" }
         if name == "lower" and n == 1 { return "cl_lower(" + args[0] + ")" }
