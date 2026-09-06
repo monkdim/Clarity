@@ -120,6 +120,30 @@ _start:
     msr     cpacr_el1, x1
     isb
 
+    // Privileged Access Never, where the CPU has it.
+    //
+    // Clearing SCTLR_EL1.SPAN makes PSTATE.PAN set on every exception entry
+    // to EL1, so any access the kernel makes to memory a process can also
+    // reach faults. That is a rule this kernel already follows — a user
+    // pointer is translated through the process's page tables and read
+    // through the kernel's own direct map, never dereferenced — and this is
+    // what makes it enforced rather than merely intended. A missed conversion
+    // becomes a fault at the point of the mistake instead of code that works
+    // here and not on hardware.
+    //
+    // ARMv8.1 and later. Asked for rather than assumed: ID_AA64MMFR1_EL1.PAN
+    // is zero on a core without it (QEMU's cortex-a72, among others), and
+    // clearing a bit that does not exist would be a silent no-op that reads
+    // like it worked.
+    mrs     x1, id_aa64mmfr1_el1
+    ubfx    x1, x1, #20, #4         // ID_AA64MMFR1_EL1.PAN
+    cbz     x1, .Lno_pan
+    mrs     x2, sctlr_el1
+    bic     x2, x2, #(1 << 23)      // SPAN = 0
+    msr     sctlr_el1, x2
+    isb
+.Lno_pan:
+
     // ── Where are we, and where do we think we are? ─────────────────────
     //
     // `adrp` is PC-relative, so with the MMU off it yields the address the

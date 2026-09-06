@@ -63,7 +63,9 @@ The serial log should report the machine describing itself:
   [ok] direct map covers all of RAM (0 GiB added beyond the boot stub's block)
   [ok] pmm: 512 MiB managed, 129347 pages free, allocated 0x402bd000 and it holds
   [ok] process address space: 0x10000000 -> 0x402c0000 for EL0 read and write, 0x400000 read-only (a write there faults), kernel unaffected, unmapped and torn down with every page returned
-  [ok] EL0: a program ran, read 41 from its own memory, called the kernel twice, got 42 back, and wrote it where the kernel could see it
+  -- below this line, EL0 is speaking through write(2) --
+hello from EL0 on aarch64
+  [ok] EL0: a program wrote 26 bytes through write(2), read 41 from its own memory, and exited with 42 — which the kernel found in the page it had left it
   [ok] EL0: the timer interrupted it 18 times while it ran, and it carried on afterwards
   [ok] EL0: and when it wrote to its read-only text at 0x400000, the kernel took the CPU back
   [ok] context switch: ABABABa — two threads alternated and handed the CPU back
@@ -124,11 +126,21 @@ work, the boot log up to the point it stops is the useful thing to report.
 ### What it does not do yet
 
 It can now do the thing an operating system is for: run a program that is not
-the kernel. Unprivileged code executes at EL0 in its own address space, calls
-into the kernel and gets answers back, is preempted by the timer and carries
+the kernel. Unprivileged code executes at EL0 in its own address space, prints
+through `write(2)`, exits with a status, is preempted by the timer and carries
 on, and is stopped by the kernel when it does something it is not allowed to.
 Kernel threads switch, cooperatively and preemptively, carrying their address
 space with them.
+
+The one unprintable line above is the point: `hello from EL0 on aarch64` came
+from a user program, not from the kernel.
+
+Try it on a CPU that implements Privileged Access Never — `-cpu max` instead
+of `-cpu cortex-a72` — and it still works, because the kernel never touches a
+user address directly. It translates the pointer through the process's own
+page tables and reads through its own map. On cortex-a72, which has no PAN,
+doing it the wrong way also works, which is exactly why the boot gate runs
+both.
 
 What is missing is everything above that. There is no *scheduler* — the
 switching primitive exists and the boot selftest drives it directly, but

@@ -257,13 +257,20 @@ jobs:
           # survived the switch, and that every table page came back when the
           # space was torn down.
           #
-          # The three EL0 markers are the port's actual milestone. A program
-          # ran at EL0 in that address space, read its own memory, called into
-          # the kernel twice and got an answer back, was interrupted by the
-          # timer while it ran and carried on — and then, entered a second
-          # time, stored to its read-only text page and had the CPU taken away
-          # from it. That last one is the one a kernel that never really left
-          # EL1 could not produce.
+          # The EL0 markers are the port's actual milestone. "hello from EL0
+          # on aarch64" was not printed by the kernel: it was printed *by a
+          # user program*, through write(2), naming a string by an address
+          # that means nothing outside that process's page tables. The kernel
+          # translated it rather than dereferencing it, which is both how the
+          # pointer gets validated and the only way that is allowed to work
+          # (see the PAN boot below).
+          #
+          # The program then read its own memory, was interrupted by the timer
+          # while it ran and carried on, wrote its answer back where the kernel
+          # could see it, and exited with a status the kernel checked — and
+          # then, entered a second time, stored to its read-only text page and
+          # had the CPU taken away from it. That last one is the one a kernel
+          # that never really left EL1 could not produce.
           #
           # The last two markers are about threads rather than processes. The
           # trace has to be exactly ABABABa: a switch that went nowhere leaves
@@ -276,7 +283,8 @@ jobs:
              && grep -q "\[ok\] identity map dropped:" serial-arm.log \
              && grep -q "\[ok\] direct map covers all of RAM" serial-arm.log \
              && grep -q "\[ok\] process address space:" serial-arm.log \
-             && grep -q "\[ok\] EL0: a program ran" serial-arm.log \
+             && grep -q "hello from EL0 on aarch64" serial-arm.log \
+             && grep -q "\[ok\] EL0: a program wrote" serial-arm.log \
              && grep -q "\[ok\] EL0: the timer interrupted it" serial-arm.log \
              && grep -q "\[ok\] EL0: and when it wrote to its read-only text" serial-arm.log \
              && grep -q "\[ok\] context switch: ABABABa" serial-arm.log \
@@ -288,6 +296,46 @@ jobs:
             echo "PASS: aarch64 reached EL1 in the high half, read its device tree, allocated a page, and drew a screen"
           else
             echo "FAIL: aarch64 boot, address space, device tree, page allocator or screen did not come up"
+            exit 1
+          fi
+
+      # A CPU that implements Privileged Access Never.
+      #
+      # The kernel never dereferences an address userspace gave it: a user
+      # pointer is translated through the process's own page tables and read
+      # through the kernel's direct map. PAN is what turns that from a rule
+      # this code follows into one the hardware enforces — with SCTLR_EL1.SPAN
+      # cleared, any EL1 access to memory EL0 can reach faults.
+      #
+      # cortex-a72 is ARMv8.0 and has no PAN, so the boot above cannot tell an
+      # enforced rule from a followed one. That was measured, not assumed:
+      # making sys_write dereference the user pointer directly boots fine on
+      # cortex-a72 and takes a permission fault on this one, at the exact
+      # address the program passed in. Which is the whole failure mode —
+      # correct on the machine it was tested on, and not on the next.
+      - name: Boot on a PAN-capable CPU
+        run: |
+          timeout 120 qemu-system-aarch64 \
+            -M virt \
+            -cpu max \
+            -m 512 \
+            -kernel kernel/zig-out/bin/clarity-kernel-aarch64.img \
+            -device ramfb \
+            -serial stdio \
+            -display none \
+            -no-reboot \
+            > serial-arm-pan.log 2>&1 || true
+          echo "----- serial output -----"
+          cat serial-arm-pan.log
+          echo "-------------------------"
+          if grep -q "hello from EL0 on aarch64" serial-arm-pan.log \
+             && grep -q "\[ok\] EL0: a program wrote" serial-arm-pan.log \
+             && grep -q "\[ok\] preemption: B ran" serial-arm-pan.log \
+             && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-pan.log \
+             && ! grep -q "AARCH64 EXCEPTION" serial-arm-pan.log; then
+            echo "PASS: the kernel never touched a user address directly"
+          else
+            echo "FAIL: PAN caught the kernel dereferencing user memory, or the boot broke"
             exit 1
           fi
 
@@ -319,7 +367,7 @@ jobs:
           if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
              && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
              && grep -q "\[ok\] process address space:" serial-arm-4g.log \
-             && grep -q "\[ok\] EL0: a program ran" serial-arm-4g.log \
+             && grep -q "\[ok\] EL0: a program wrote" serial-arm-4g.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm-4g.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-4g.log; then
             echo "PASS: the direct map was extended over all 4 GiB and the allocator manages it"

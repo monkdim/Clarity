@@ -105,32 +105,59 @@ aarch64_leave_user:
 
 .global __user_probe_start
 __user_probe_start:
-    // Read what the kernel left in the data page. Proves EL0 can reach its
-    // own memory, not merely execute.
-    movz    x9, #0x1000, lsl #16    // 0x1000_0000 — the data page
-    ldr     x0, [x9]
-
-    mov     x8, #1                  // syscall 1: hand back x0 + 1
+    // 1. Say something. The string is in this page, named by a PC-relative
+    //    address — so what reaches the kernel is a *user* virtual address,
+    //    meaningful only inside this process's page tables. The kernel
+    //    translating it rather than dereferencing it is the whole point.
+    mov     x0, #1                  // fd 1
+    adr     x1, .Lmsg
+    mov     x2, #(.Lmsgend - .Lmsg)
+    mov     x8, #1                  // SYS_WRITE
     svc     #0
 
-    // Spend long enough at EL0 that the 100 Hz timer is certain to fire
-    // here rather than in the kernel. That is the point of the loop: it makes
-    // the process get interrupted, so vector entry 9 has to save and restore
-    // it correctly and the kernel has to hand the CPU back to exactly this
-    // instruction. Eight million iterations is tens of milliseconds under
-    // TCG — several ticks — and a slower machine only makes it more certain.
+    // The kernel put the byte count in x0. If it disagrees with what we
+    // asked for, say so with an exit status nothing else produces.
+    cmp     x0, x2
+    b.ne    .Lbad_write
+
+    // 2. Read the kernel's number out of our data page, add one to it.
+    movz    x9, #0x1000, lsl #16    // 0x1000_0000 — the data page
+    ldr     x19, [x9]
+    add     x19, x19, #1
+
+    // 3. Spend long enough at EL0 that the 100 Hz timer is certain to fire
+    //    here rather than in the kernel. That is the point of the loop: it
+    //    makes the process get interrupted, so vector entry 9 has to save and
+    //    restore it correctly and the kernel has to hand the CPU back to
+    //    exactly this instruction. Sixty-seven million iterations is a
+    //    fraction of a second under TCG — several ticks — and a slower
+    //    machine only makes it more certain.
     movz    x11, #0x400, lsl #16
 2:  subs    x11, x11, #1
     b.ne    2b
 
-    // The kernel put a value in x0 and sent us back here. Store it where the
-    // kernel can read it through its own direct map, which is how the write
-    // is checked: it has to land in the physical page, not merely appear to.
-    str     x0, [x9]
+    // 4. Store it where the kernel can read it through its own direct map,
+    //    which is how the write is checked: it has to land in the physical
+    //    page, not merely appear to from here.
+    str     x19, [x9]
 
-    mov     x8, #2                  // syscall 2: done, x0 is the answer
+    // 5. Exit with it.
+    mov     x0, x19
+    mov     x8, #12                 // SYS_EXIT
     svc     #0
 1:  b       1b                      // the kernel does not come back here
+
+.Lbad_write:
+    movz    x0, #0xBAD
+    mov     x8, #12
+    svc     #0
+3:  b       3b
+
+    .balign 4
+.Lmsg:
+    .ascii  "hello from EL0 on aarch64\n"
+.Lmsgend:
+    .balign 4
 .global __user_probe_end
 __user_probe_end:
 
@@ -144,11 +171,12 @@ __user_fault_start:
     str     x0, [x12]               // must fault: read-only at EL0
 
     // Reaching this instruction means the store was allowed, which is the
-    // failure this half of the probe exists to catch. Saying so with an
-    // unknown system call rather than spinning is the difference between a
-    // test that reports and a test that hangs — and a hung boot is a much
+    // failure this half of the probe exists to catch. Exiting with a status
+    // nothing else produces, rather than spinning, is the difference between
+    // a test that reports and a test that hangs — and a hung boot is a much
     // worse way to find out.
-    mov     x8, #3
+    movz    x0, #0xDEAD
+    mov     x8, #12                 // SYS_EXIT
     svc     #0
 1:  b       1b
 .global __user_fault_end
