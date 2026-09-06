@@ -2189,24 +2189,49 @@ class CCodegen {
             let id = this.tmp_id
             this.tmp_id += 1
             let h = "__h" + str(id)
+            let h2 = "__hc" + str(id)
             mut lines = [pad + "{ ClHandler " + h + "; " + h + ".prev = cl_handlers; cl_handlers = &" + h + ";"]
             push(lines, pad + "  if(setjmp(" + h + ".buf) == 0) {")
-            -- The handler is popped on both paths before the body runs, so a
-            -- throw from inside a catch block goes to the *enclosing* handler
-            -- rather than back to this one, which would loop forever.
+            -- The finally stays on the stack across *both* arms, so a `return`
+            -- from either runs it on the way out. Handlers are popped before
+            -- their body runs, so a throw from inside a catch reaches the
+            -- enclosing handler rather than re-entering the one it is in.
             if node.finally_body != null { push(this.finally_stack, node.finally_body) }
             for st in _block_stmts(node.try_body) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
-            if node.finally_body != null { pop(this.finally_stack) }
             push(lines, pad + "    cl_handlers = " + h + ".prev;")
             push(lines, pad + "  } else {")
             push(lines, pad + "    cl_handlers = " + h + ".prev;")
             if node.catch_var != null {
                 push(lines, pad + "    Value v_" + node.catch_var + " = cl_thrown;")
             }
-            if node.catch_body != null {
-                for st in _block_stmts(node.catch_body) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+            if node.finally_body == null {
+                if node.catch_body != null {
+                    for st in _block_stmts(node.catch_body) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+                }
+            } else {
+                -- With a finally, the catch body runs under a handler of its
+                -- own. A throw from inside it would otherwise longjmp straight
+                -- past the finally to the enclosing handler, and the finally
+                -- would never run — which is the whole point of writing one.
+                -- Caught here, the finally runs and the value is rethrown.
+                push(lines, pad + "    ClHandler " + h2 + "; " + h2 + ".prev = cl_handlers; cl_handlers = &" + h2 + ";")
+                push(lines, pad + "    if(setjmp(" + h2 + ".buf) == 0) {")
+                if node.catch_body != null {
+                    for st in _block_stmts(node.catch_body) { for l in this.stmt(st, indent + 3) { push(lines, l) } }
+                }
+                push(lines, pad + "      cl_handlers = " + h2 + ".prev;")
+                push(lines, pad + "    } else {")
+                push(lines, pad + "      cl_handlers = " + h2 + ".prev;")
+                push(lines, pad + "      Value " + h2 + "_v = cl_thrown;")
+                let saved = this.finally_stack
+                this.finally_stack = []
+                for st in _block_stmts(node.finally_body) { for l in this.stmt(st, indent + 3) { push(lines, l) } }
+                this.finally_stack = saved
+                push(lines, pad + "      cl_throw(" + h2 + "_v);")
+                push(lines, pad + "    }")
             }
             push(lines, pad + "  }")
+            if node.finally_body != null { pop(this.finally_stack) }
             if node.finally_body != null {
                 for st in _block_stmts(node.finally_body) { for l in this.stmt(st, indent + 1) { push(lines, l) } }
             }
