@@ -1,0 +1,92 @@
+-- Files the test suite never opens still have to parse.
+--
+-- This exists because one did not, and nothing noticed for a long time.
+-- stdlib/benchmark.clarity used ordinary double quotes for ten multi-line
+-- string literals, which the lexer rejects; nothing imports it — `clarity
+-- bench` reads it by path at run time — so no test ever touched it, and the
+-- benchmark command had simply been broken.
+--
+-- The set checked here is exactly the gap, not everything: a file some test
+-- imports is parsed by that test, and re-parsing all 237 sources costs nearly
+-- three minutes in the interpreter, which is as long as the entire suite.
+-- What is left over is
+--
+--   * everything under examples/ and tools/, which are read by a person or by
+--     a command and imported by nothing, and
+--   * stdlib modules that no other file in the repository imports, minus the
+--     test files themselves, which the suite runs directly.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+
+mut PASSED = 0
+mut FAILED = 0
+
+-- Every "…​.clarity" that appears after `from` or `import` anywhere in the
+-- repository, as a set of basenames. Done with grep rather than by walking
+-- ASTs because it only has to over-approximate: a name that appears in an
+-- import line somewhere is assumed covered, and being too generous here can
+-- only shrink this test, never make it wrong about a file it does check.
+fn _imported_names() {
+    let raw = exec("grep -rhoE '(from|import) \"[^\"]+\\.clarity\"' stdlib examples tools 2>/dev/null")
+    mut names = {}
+    for line in split(raw, "\n") {
+        let parts = split(trim(line), "\"")
+        if len(parts) < 2 { continue }
+        let segs = split(parts[1], "/")
+        names[segs[len(segs) - 1]] = true
+    }
+    return names
+}
+
+fn _basename(path) {
+    let segs = split(path, "/")
+    return segs[len(segs) - 1]
+}
+
+fn _candidates() {
+    let listing = exec("find stdlib examples tools -name '*.clarity' -type f 2>/dev/null | sort")
+    let imported = _imported_names()
+    mut out = []
+    for line in split(trim(listing), "\n") {
+        let f = trim(line)
+        if len(f) == 0 { continue }
+        let base = _basename(f)
+        if starts(f, "examples/") or starts(f, "tools/") { push(out, f); continue }
+        if starts(base, "test_") { continue }
+        if has(imported, base) { continue }
+        push(out, f)
+    }
+    return out
+}
+
+let files = _candidates()
+if len(files) == 0 {
+    show "-- parses: nothing to check (not at the repository root?) — skipped --"
+} else {
+    show "-- parses: " + str(len(files)) + " files nothing imports --"
+    for f in files {
+        let src = read(f)
+        mut err = null
+        mut n = -1
+        try {
+            let tree = parse(tokenize(src, f), src)
+            n = len(tree.body)
+        } catch e { err = str(e) }
+        if err != null {
+            FAILED += 1
+            show "  FAIL: " + f + "\n    " + err
+        } elif n == 0 and len(trim(src)) > 0 {
+            -- An empty body from a non-empty file is a failure wearing a
+            -- success: the parser accepted the file and kept none of it.
+            FAILED += 1
+            show "  FAIL: " + f + " parsed to an empty program"
+        } else {
+            PASSED += 1
+        }
+    }
+}
+
+show ""
+show "parses: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " file(s) do not parse" }

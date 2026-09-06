@@ -59,13 +59,13 @@ fn _pad(s, width) {
 
 -- ── Benchmark programs ───────────────────────────────────
 
-let BENCH_FIB = "fn fib(n) {
+let BENCH_FIB = """fn fib(n) {
   if n <= 1 { return n }
   return fib(n - 1) + fib(n - 2)
 }
-fib(15)"
+fib(15)"""
 
-let BENCH_FIB_ITER = "fn fib(n) {
+let BENCH_FIB_ITER = """fn fib(n) {
   mut a = 0
   mut b = 1
   mut i = 0
@@ -77,9 +77,9 @@ let BENCH_FIB_ITER = "fn fib(n) {
   }
   return a
 }
-fib(100)"
+fib(100)"""
 
-let BENCH_BUBBLE_SORT = "fn bsort(lst) {
+let BENCH_BUBBLE_SORT = """fn bsort(lst) {
   mut arr = lst
   mut n = len(arr)
   mut i = 0
@@ -97,19 +97,19 @@ let BENCH_BUBBLE_SORT = "fn bsort(lst) {
   }
   return arr
 }
-bsort([9, 4, 7, 2, 1, 8, 3, 6, 5, 0])"
+bsort([9, 4, 7, 2, 1, 8, 3, 6, 5, 0])"""
 
-let BENCH_STRING_OPS = "mut result = \"\"
+let BENCH_STRING_OPS = """mut result = ""
 mut i = 0
 while i < 50 {
-  result = result + str(i) + \"-\"
+  result = result + str(i) + "-"
   i += 1
 }
-let parts = split(result, \"-\")
+let parts = split(result, "-")
 let filtered = filter(parts, fn(x) { return len(x) > 0 })
-len(filtered)"
+len(filtered)"""
 
-let BENCH_LIST_OPS = "mut lst = []
+let BENCH_LIST_OPS = """mut lst = []
 mut i = 0
 while i < 100 {
   push(lst, i * 2)
@@ -117,9 +117,9 @@ while i < 100 {
 }
 let mapped = map(lst, fn(x) { return x + 1 })
 let filtered = filter(mapped, fn(x) { return x % 3 == 0 })
-sum(filtered)"
+sum(filtered)"""
 
-let BENCH_CLASS_DISPATCH = "class Vec2 {
+let BENCH_CLASS_DISPATCH = """class Vec2 {
   fn init(x, y) { this.x = x; this.y = y }
   fn add(other) { return Vec2(this.x + other.x, this.y + other.y) }
   fn mag() { return this.x * this.x + this.y * this.y }
@@ -130,9 +130,9 @@ while i < 50 {
   v = v.add(Vec2(i, i))
   i += 1
 }
-v.mag()"
+v.mag()"""
 
-let BENCH_NESTED_LOOPS = "mut count = 0
+let BENCH_NESTED_LOOPS = """mut count = 0
 mut i = 0
 while i < 30 {
   mut j = 0
@@ -142,9 +142,9 @@ while i < 30 {
   }
   i += 1
 }
-count"
+count"""
 
-let BENCH_MAP_ACCESS = "let data = {}
+let BENCH_MAP_ACCESS = """let data = {}
 mut i = 0
 while i < 100 {
   data[str(i)] = i * i
@@ -156,9 +156,9 @@ while i < 100 {
   total += data[str(i)]
   i += 1
 }
-total"
+total"""
 
-let BENCH_CLOSURES = "fn make_counter() {
+let BENCH_CLOSURES = """fn make_counter() {
   mut count = 0
   return fn() {
     count += 1
@@ -171,9 +171,9 @@ while i < 50 {
   c()
   i += 1
 }
-c()"
+c()"""
 
-let BENCH_HIGHER_ORDER = "fn compose(f, g) {
+let BENCH_HIGHER_ORDER = """fn compose(f, g) {
   return fn(x) { return f(g(x)) }
 }
 let double = fn(x) { return x * 2 }
@@ -185,7 +185,7 @@ while i < 100 {
   total += double_then_inc(i)
   i += 1
 }
-total"
+total"""
 
 -- ── Run benchmarks ───────────────────────────────────────
 
