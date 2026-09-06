@@ -150,14 +150,12 @@ pub fn run() !noreturn {
     // happen before the CPU is ever in ring 3.
     sched.adopt_current(t);
 
-    // Install the process's address space. Safe only because its upper half
-    // is the kernel's — see vmm.share_kernel_half.
-    asm volatile ("mov %[cr3], %%cr3"
-        :
-        : [cr3] "r" (t.cr3),
-        : "memory"
-    );
-
     console.println("  init: entering userspace");
-    context.enter_userland(t.iret_rsp);
+
+    // Installing the address space and leaving for ring 3 are one step, not
+    // two: this function runs on the boot stack, which is a low
+    // identity-mapped address the process's address space does not map. See
+    // enter_userland — anything at all between the two would fault on a
+    // stack that no longer exists.
+    context.enter_userland(t.cr3, t.iret_rsp);
 }

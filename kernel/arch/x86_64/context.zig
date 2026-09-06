@@ -83,19 +83,37 @@ pub const IretFrame = extern struct {
     ss: u64,
 };
 
-/// Enter ring 3 with a frame already built at `frame_rsp`.
+/// Install the address space `cr3` and enter ring 3 with a frame already
+/// built at `frame_rsp`.
 ///
 /// Not `callconv(.Naked)`: a naked function has no ABI, so Zig refuses to
 /// call one, and this was previously uncallable — it only compiled because
 /// nothing reached it. A normal function works because the prologue is
 /// irrelevant once %rsp is replaced and `iretq` leaves for good.
-pub fn enter_userland(frame_rsp: u64) noreturn {
+///
+/// The CR3 load belongs here, in the same asm block, rather than at the call
+/// site. The boot path runs on the stack the boot stub set up, which is a
+/// low identity-mapped address; the process's address space maps its own
+/// program and stack in the lower half and nothing else, so the moment CR3
+/// changes that stack is gone. Any stack access before %rsp moves to the
+/// thread's kernel stack — a push, a call, a spilled register — would fault,
+/// and the fault handler would push its frame onto the same missing stack:
+/// double fault, then triple, then a silent reset. Between these two
+/// instructions there is no memory access at all, and both operands are
+/// already in registers before the block begins.
+///
+/// The kernel stack `frame_rsp` points into is an HHDM address in the upper
+/// half, which every address space shares (see vmm.share_kernel_half), so it
+/// survives the switch.
+pub fn enter_userland(cr3: u64, frame_rsp: u64) noreturn {
     asm volatile (
+        \\ movq %[cr3], %%cr3
         \\ movq %[frame], %%rsp
         \\ swapgs
         \\ iretq
         :
-        : [frame] "r" (frame_rsp),
+        : [cr3] "r" (cr3),
+          [frame] "r" (frame_rsp),
         : "memory"
     );
     unreachable;

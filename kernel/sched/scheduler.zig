@@ -65,12 +65,9 @@ pub const Thread = struct {
     exit_code: i32 = 0,
 };
 
-/// Per-CPU process table; populated lazily.
+/// Per-CPU process table. Given its allocator by init(); see the note there
+/// for why that is not a separate call any more.
 pub var process_table: process.Table = undefined;
-
-pub fn init_process_table(gpa: std.mem.Allocator) void {
-    process_table = process.Table.init(gpa);
-}
 
 const Queue = struct {
     head: ?*Thread = null,
@@ -133,6 +130,16 @@ pub fn init() void {
     for (&queues) |*q| q.* = .{};
     current = null;
     frozen = false;
+    // The process table needs its allocator before anything can register a
+    // process. This was an `init_process_table(gpa)` that nothing called, so
+    // `process_table` stayed `undefined` — which for a .bss global means
+    // zeroes, i.e. a std.mem.Allocator whose vtable pointer is null. The
+    // first spawn_user called through it, loaded a function pointer from
+    // physical page 0 (identity-mapped, and still holding the real-mode
+    // interrupt vector table), and jumped to 0xf000ff53f000ff53. Setting it
+    // here means it cannot be missed again: there is one kernel heap, and
+    // anything with a run queue needs a process table to go with it.
+    process_table = process.Table.init(heap.allocator());
 }
 
 pub fn freeze() void {
@@ -455,8 +462,9 @@ pub fn exec(path: []const u8) !void {
     cur.iret_rsp = context.build_iret_frame(cur.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, 0x202, gdt.USER_CODE, gdt.USER_DATA);
     proc.name = path;
 
-    // Re-enter user mode with the new image.
-    context.enter_userland(cur.iret_rsp);
+    // Re-enter user mode with the new image. CR3 goes in with it — see
+    // enter_userland for why they cannot be separate statements.
+    context.enter_userland(cur.cr3, cur.iret_rsp);
 }
 
 pub const WaitResult = struct { pid: Pid, exit_code: i32 };
