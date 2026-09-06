@@ -52,6 +52,11 @@ pub const Loaded = struct {
     space: paging.AddressSpace,
     entry: u64,
     user_sp: u64,
+    /// Where this program's heap starts: the first page-aligned address past
+    /// everything the image occupies. A process's break begins here and only
+    /// ever moves up from it, so a `brk` that asked for less would be asking
+    /// the kernel to unmap the program's own .bss.
+    brk_start: u64,
     /// Every page-aligned range mapped into the space, so `release` can
     /// return the frames. Eight is comfortably more than a static
     /// freestanding binary's segments plus its stack; a program with more is
@@ -77,14 +82,19 @@ pub fn load(image: []const u8, asid: u16, gpa: std.mem.Allocator) !Loaded {
         // headroom is also an empty argc/argv/envp frame for whenever
         // something starts reading one.
         .user_sp = USER_STACK_TOP - 64,
+        .brk_start = 0,
         .ranges = undefined,
         .range_count = 0,
     };
-    errdefer release(&out);
+    // No heap yet at this point: brk has not run, so there is nothing past
+    // brk_start to give back.
+    errdefer release(&out, 0);
 
     for (exe.segments) |seg| {
         try segments.map_segment(Ops, &out.space, seg, image);
-        try remember(&out, segments.page_round_down(seg.vaddr), segments.page_round_up(seg.vaddr + seg.memsz));
+        const seg_end = segments.page_round_up(seg.vaddr + seg.memsz);
+        try remember(&out, segments.page_round_down(seg.vaddr), seg_end);
+        if (seg_end > out.brk_start) out.brk_start = seg_end;
 
         // The instructions were just written through the data cache, and EL0
         // is about to fetch them through the instruction cache. QEMU models
@@ -120,7 +130,22 @@ pub fn load(image: []const u8, asid: u16, gpa: std.mem.Allocator) !Loaded {
 /// Give back everything the load took: the frames behind every mapping, then
 /// the tables that described them. In that order, because finding a frame
 /// means asking the tables where it is.
-pub fn release(loaded: *Loaded) void {
+///
+/// `heap_end` is where the process's break finished, which the loader could
+/// not know: those pages were mapped by brk while the program was running,
+/// and are as much the process's as its segments are.
+pub fn release(loaded: *Loaded, heap_end: u64) void {
+    if (heap_end > loaded.brk_start) {
+        var addr = loaded.brk_start;
+        const end = segments.page_round_up(heap_end);
+        while (addr < end) : (addr += pmm.PAGE_SIZE) {
+            if (paging.lookup(&loaded.space, addr)) |phys| {
+                paging.unmap_page(&loaded.space, addr);
+                pmm.free_page(phys & ~@as(u64, pmm.PAGE_SIZE - 1));
+            }
+        }
+    }
+
     var i: usize = 0;
     while (i < loaded.range_count) : (i += 1) {
         const r = loaded.ranges[i];

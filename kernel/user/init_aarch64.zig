@@ -16,6 +16,7 @@
 const std = @import("std");
 
 const NR_WRITE: u64 = 1;
+const NR_BRK: u64 = 9;
 const NR_EXIT: u64 = 12;
 
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
@@ -144,6 +145,42 @@ export fn _start() callconv(.C) noreturn {
         failures += 1;
         _ = write(1, "  [FAIL] user fp: wrong quotient ");
         write_hex(bits);
+    }
+
+    // A heap. brk(0) reports the current break; asking for more maps pages
+    // that were not there before. This is what a C library's malloc sits on,
+    // and the reason it is tested here rather than left until something
+    // depends on it.
+    const before = syscall3(NR_BRK, 0, 0, 0);
+    if (before <= 0) {
+        failures += 1;
+        _ = write(1, "  [FAIL] user heap: brk(0) reported no break\n");
+    } else {
+        const want = @as(u64, @intCast(before)) + 8192;
+        const after = syscall3(NR_BRK, want, 0, 0);
+        if (after < 0 or @as(u64, @intCast(after)) != want) {
+            failures += 1;
+            _ = write(1, "  [FAIL] user heap: brk did not grow\n");
+            _ = write(1, "    before ");
+            write_hex(@bitCast(before));
+            _ = write(1, "    wanted ");
+            write_hex(want);
+            _ = write(1, "    got    ");
+            write_hex(@bitCast(after));
+        } else {
+            // Checking the return value alone would prove nothing — the
+            // kernel could return the number without mapping anything. Write
+            // through the new break and read it back, volatile so neither end
+            // can be folded away. An unmapped page faults instead, which the
+            // boot log shows.
+            const cell: *volatile u64 = @ptrFromInt(@as(usize, @intCast(before)) + 16);
+            cell.* = 0xC0FFEE;
+            check(
+                cell.* == 0xC0FFEE,
+                "  [ok] user heap: brk grew and the memory holds\n",
+                "  [FAIL] user heap: wrote to brk memory, read back wrong\n",
+            );
+        }
     }
 
     // 42 means every check above passed. Anything else is the count of the

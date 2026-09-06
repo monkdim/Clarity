@@ -26,6 +26,8 @@ const console = @import("console.zig");
 const timer = @import("timer.zig");
 const mmu = @import("mmu.zig");
 const vm = @import("vm.zig");
+const paging = @import("paging.zig");
+const pmm = @import("../../mm/pmm.zig");
 
 /// The interrupted process's state, as the vector entry laid it out.
 /// `extern` because the offsets are shared with assembly and must not be
@@ -53,12 +55,49 @@ pub const EXIT_FAULT: u64 = 1;
 /// convenient local set: a program that runs on one should make the same
 /// call on the other.
 const SYS_WRITE: u64 = 1;
+const SYS_BRK: u64 = 9;
 const SYS_EXIT: u64 = 12;
 
 /// Negative errno, the way the x86_64 dispatcher returns them.
 const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
 const ENOSYS: i64 = -38;
+
+/// A ceiling on one process's heap.
+///
+/// Without one, a single wild request — a garbage pointer, or a size computed
+/// from an unchecked length — walks up through every physical page the machine
+/// has before it can fail, and takes the machine with it. The caller sees the
+/// same "you got less than you asked for" it already has to handle.
+const HEAP_MAX: u64 = 64 * 1024 * 1024;
+
+/// The running process's heap.
+///
+/// Module state rather than a field of a process, because this architecture
+/// has no process table: one program is loaded, entered, and torn down before
+/// the next. `set_heap` is what the loader calls to say whose it is, and it is
+/// the thing that has to become a per-process field the moment there are two.
+var brk_space: ?*paging.AddressSpace = null;
+var brk_start: u64 = 0;
+var brk_current: u64 = 0;
+
+/// Told to the kernel by whoever loaded the program, before it is entered.
+pub fn set_heap(space: *paging.AddressSpace, start: u64) void {
+    brk_space = space;
+    brk_start = start;
+    brk_current = start;
+}
+
+pub fn clear_heap() void {
+    brk_space = null;
+    brk_start = 0;
+    brk_current = 0;
+}
+
+/// Where the break ended up, so a teardown knows which pages to give back.
+pub fn heap_end() u64 {
+    return brk_current;
+}
 
 /// How much of a single `write` the kernel will copy in one go. A user
 /// program can name any length it likes; this is the bound on what that can
@@ -152,6 +191,9 @@ fn dispatch(frame: *Frame) void {
             // registers, which the vector entry restores on its way out.
             frame.x[0] = @bitCast(sys_write(frame.x[0], frame.x[1], frame.x[2]));
         },
+        SYS_BRK => {
+            frame.x[0] = @bitCast(sys_brk(frame.x[0]));
+        },
         SYS_EXIT => {
             ticks_leaving = timer.ticks();
             exit_status = frame.x[0];
@@ -202,6 +244,59 @@ fn sys_write(fd: u64, buf: u64, len: u64) i64 {
     }
     bytes_written += done;
     return @intCast(done);
+}
+
+/// brk(0) reports the current break; brk(addr) asks for it to move there and
+/// reports where it ended up — which may be short of what was asked for, and
+/// which every caller already has to check.
+///
+/// Same shape as the x86_64 dispatcher's, including the silence on success:
+/// a compiled Clarity program's allocator calls this every 64 KiB, and a
+/// kernel that narrates each one buries the output of the program it is
+/// running. A refusal still reports, because a refused brk is a failure the
+/// log has to explain.
+fn sys_brk(requested: u64) i64 {
+    const space = brk_space orelse return @bitCast(@as(u64, 0));
+    if (requested == 0) return @intCast(brk_current);
+    if (requested < brk_start) return @intCast(brk_current);
+    if (requested > brk_start +| HEAP_MAX) return @intCast(brk_current);
+
+    if (requested <= brk_current) {
+        // Shrinking moves the break without unmapping. The pages stay until
+        // the process is torn down, which is what the x86_64 side does too:
+        // a program that shrinks its heap almost always grows it again, and
+        // handing the frames back only to take them straight out again costs
+        // more than holding them.
+        brk_current = requested;
+        return @intCast(brk_current);
+    }
+
+    var addr = (brk_current + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    const end = (requested + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    while (addr < end) : (addr += PAGE_SIZE) {
+        const phys = pmm.alloc_page() orelse {
+            // Say why. The caller only sees "you got less than you asked
+            // for", which is the same answer for out of memory as for a
+            // broken mapping.
+            console.print("  brk: no physical page for ");
+            console.print_hex(addr);
+            console.println("");
+            return @intCast(brk_current);
+        };
+        const zeroed: [*]u8 = @ptrFromInt(vm.phys_to_virt(phys));
+        @memset(zeroed[0..PAGE_SIZE], 0);
+        paging.map_page(space, addr, phys, paging.MAP_USER | paging.MAP_WRITE) catch |err| {
+            console.print("  brk: cannot map ");
+            console.print_hex(addr);
+            console.print(": ");
+            console.println(@errorName(err));
+            pmm.free_page(phys);
+            return @intCast(brk_current);
+        };
+        brk_current = addr + PAGE_SIZE;
+    }
+    brk_current = requested;
+    return @intCast(brk_current);
 }
 
 const PAGE_SIZE: u64 = 4096;

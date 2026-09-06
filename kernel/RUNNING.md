@@ -71,14 +71,15 @@ hello from EL0 on aarch64
   [ok] context switch: ABABABa — two threads alternated and handed the CPU back
   [ok] preemption: B ran (7583766) while A (9416843) never yielded — 6 switches in 7 ticks, each thread resuming in its own code
   init: 74208 bytes of ELF, embedded in the kernel image
-  init: entry 0x40100000, stack 0x7fffffc0, 4 mapped ranges
+  init: entry 0x40100000, stack 0x7fffffc0, 4 mapped ranges, heap from 0x40104000
   [ok] user .data came from the file
 hello from /bin/clarity-init on aarch64
   [ok] user .bss zeroed
   [ok] user .data writable
   [ok] user fp: 355/113 in a v register
-  ... the same four lines again, from the second run ...
-  [ok] init: a compiled, linked ELF ran at EL0 twice, printed 168 bytes, exited 42 each time, and every page came back
+  [ok] user heap: brk grew and the memory holds
+  ... the same five lines again, from the second run ...
+  [ok] init: a compiled, linked ELF ran at EL0 twice, printed 216 bytes, exited 42 each time, and every page came back
 ```
 
 The spin counts and the tick count vary — it is however many times the 100 Hz
