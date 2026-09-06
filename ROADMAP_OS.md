@@ -70,43 +70,56 @@ every pull request; anything not gated is called out as unverified.
 
 ## Userspace runtime — the critical path
 
-This is the single blocker between a booting kernel and a usable OS, and it is
-larger than it looks.
+This is still the blocker between a booting kernel and a usable OS, but it is
+now much smaller than the section it replaces, and the route has changed.
 
-`runtime/freestanding` builds `clarity-runtime` (QuickJS evaluating the
-transpiled Clarity bundle) as the binary the kernel spawns as
-`/bin/clarity-init`. It does not compile. Two distinct problems:
+**The QuickJS route is not needed.** `runtime/freestanding` was built to embed
+QuickJS and have it evaluate the transpiled Clarity bundle, which meant
+supplying a freestanding libc broad enough for a JavaScript engine — the
+printf family, `strtod`, `qsort`, `setjmp`, math, file I/O, and the C headers
+none of it had. That was correctly described as "the bulk of the work". It is
+also unnecessary: `clarity cc` compiles Clarity to C to a native binary, with
+no JavaScript engine anywhere.
 
-1. **No freestanding libc.** QuickJS's C sources `#include <stdlib.h>`,
-   `<stdio.h>`, `<assert.h>`, `<string.h>`. The build targets
-   `x86_64-freestanding` with `-ffreestanding`, so those headers do not
-   exist. `libc_shim.zig` supplies ~18 functions (malloc/free, mem*, str*,
-   write/read, abort, clock) but **no C headers at all**, and QuickJS needs
-   far more than 18 functions — the printf family, `strtod`, `qsort`,
-   `setjmp`/`longjmp`, math, and file I/O among them. Writing that header +
-   implementation layer is the bulk of the work.
-2. **No single-file bundle.** `@embedFile` needs one self-contained script.
-   `transpile.py --bundle` emits the stdlib as many `.js` modules plus a
-   139-byte `clarity-entry.js` stub that ES-`import`s its siblings — which a
-   freestanding QuickJS cannot resolve. A real single-file bundle step is
-   required.
+**Measured, not estimated.** Compiling a small Clarity program — strings, a
+list, a loop, a function, `show` — and linking the generated C freestanding
+leaves exactly fifteen undefined symbols:
 
-**Two candidate routes, neither started:**
+```
+_setjmp free getenv malloc memcpy printf qsort realloc
+snprintf sprintf strcat strcmp strcpy strlen strtod
+```
 
-- **Finish the freestanding libc** (above). The Clarity semantics come for
-  free because they already exist as JavaScript; the work is bounded and
-  well-understood, just broad.
-- **Finish `runtime/native_vm`** — a pure-Zig Clarity bytecode VM, so no libc
-  is needed at all. Attractive in principle, but it is a **484-line
-  skeleton**: taking it to "runs the stdlib" means reimplementing the whole
-  Clarity runtime (strings, maps, lists, classes, closures, GC) in Zig, which
-  is *larger* than the libc route, not smaller.
+and the whole printf surface it uses is four specifiers: `%ld`, `%s`, `%08lx`,
+`%.*g`. `qsort` appears only in the collector's index sort, `strtod` only in
+float round-tripping, `getenv` only to read `CLARITY_GC`.
 
-A third option worth evaluating before committing: build the runtime against
-**static musl** rather than bare freestanding, and implement the Linux syscall
-subset musl needs in the kernel (which already has a syscall dispatch table).
-That trades "write a libc" for "implement syscalls", which may be the smaller
-and more reusable job.
+That is a few hundred lines, not a libc port, and `malloc` now has something
+to sit on: the kernel grows a process heap through `brk`.
+
+**The remaining pieces, in order:**
+
+1. **The libc subset itself.** String and memory primitives; `malloc`/`free`/
+   `realloc` over `brk`; `setjmp`/`longjmp` (thirty lines of x86-64); `qsort`;
+   `printf`/`snprintf`/`sprintf` for those four specifiers. `%.*g` and
+   `strtod` are the only awkward pair, and they are needed together: the
+   runtime finds the shortest round-tripping float by printing at increasing
+   precision and parsing back.
+2. **A build path that reaches the ISO.** The OS-boot job installs zig and
+   qemu, not bun, so the C for a test program is generated ahead of time and
+   checked in as a build artifact, with the command that regenerates it
+   recorded next to it.
+3. **The gate.** A compiled Clarity program written to the filesystem, loaded
+   by `spawn_user`, and printing from ring 3 — the same shape as the existing
+   `/bin/clarity-init` marker, but for a program the Clarity compiler
+   produced.
+
+**Not pursued, and why.** `runtime/native_vm` (a pure-Zig bytecode VM) is a
+484-line skeleton; taking it to "runs the stdlib" means reimplementing
+strings, maps, lists, classes, closures and GC in Zig, which is larger than
+the fifteen symbols above, not smaller. Building against static musl trades
+"write a libc" for "implement the Linux syscall subset musl needs", which is
+a bigger surface than the one measured here and pins the ABI to Linux's.
 
 ---
 
