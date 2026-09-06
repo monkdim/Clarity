@@ -88,3 +88,60 @@ jobs:
             echo "FAIL: 'ClarityOS ready.' never appeared on serial"
             exit 1
           fi
+
+  os-boot-aarch64:
+    runs-on: ubuntu-latest
+    name: OS boot (aarch64, TCG)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.13.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install QEMU (aarch64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm
+          qemu-system-aarch64 --version | head -1
+          zig version
+
+      - name: Cache aarch64 Zig build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel/zig-out
+            kernel/.zig-cache
+          key: os-kernel-arm-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld') }}
+          restore-keys: |
+            os-kernel-arm-${{ runner.os }}-
+
+      - name: Build the aarch64 kernel
+        run: |
+          cd kernel
+          zig build aarch64
+          test -f zig-out/bin/clarity-kernel-aarch64
+
+      - name: Boot the aarch64 kernel under QEMU and assert the marker
+        run: |
+          echo "Booting ClarityOS aarch64 (QEMU virt, TCG)..."
+          timeout 120 qemu-system-aarch64 \
+            -M virt \
+            -cpu cortex-a72 \
+            -m 512 \
+            -kernel kernel/zig-out/bin/clarity-kernel-aarch64 \
+            -serial stdio \
+            -display none \
+            -no-reboot \
+            > serial-arm.log 2>&1 || true
+          echo "----- serial output -----"
+          cat serial-arm.log
+          echo "-------------------------"
+          if grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log; then
+            echo "PASS: aarch64 kernel reached EL1 and brought up the UART"
+          else
+            echo "FAIL: aarch64 boot marker never appeared on serial"
+            exit 1
+          fi
