@@ -15,6 +15,20 @@
 //! three seconds and then a clean exit, which is what lets a boot with no one
 //! watching still finish — and it is also just what a shell does when its
 //! input closes.
+//!
+//! **Typing while this shell is busy loses characters, and that is measured
+//! rather than suspected.** The keyboard is polled, and the only code that
+//! polls it is a read — so while a command is running or its output is being
+//! written, nothing drains the device's queue, which is sixty-four events
+//! deep, or sixteen key presses. Forty characters typed at a prompt the shell
+//! is reading all arrive; the same forty sent while it prints `help` arrive
+//! as ten, with the newline lost too, so the next command joins the line.
+//!
+//! Nobody types faster than a shell can echo, so this does not bite a person.
+//! It bites a test that types faster than a person, and it is the reason
+//! tools/key_check.py waits for the prompt before each line. The real fix is
+//! interrupt-driven input, which needs the GIC routing that is in the device
+//! tree and that nothing reads yet.
 
 const std = @import("std");
 

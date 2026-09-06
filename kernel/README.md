@@ -142,11 +142,20 @@ Compiled, but only on x86_64, and never executed past detection:
 
 Not written:
 
-- No shell. `read(2)` reaches a program now, but nothing keeps a terminal, a
-  session or a process table, so the only reader is a boot selftest and the
-  init program. Reading also does not really block: there is no scheduler to
-  block a thread on, so a read spins and reports end of input after three
-  seconds — which is a stand-in for blocking, not blocking. The keycode table covers the main block only — no function keys,
+- The shell is one program with four commands, not a session. Nothing keeps a
+  terminal, a process table or a working directory, and `exit` ends the boot's
+  last program rather than returning to anything. Reading does not really
+  block either: there is no scheduler to block a thread on, so a read spins
+  and reports end of input after three seconds — a stand-in for blocking, not
+  blocking.
+- **Characters typed while a program is busy are lost.** The keyboard is
+  polled and only a read polls it, so nothing drains the device's queue while
+  a command runs or its output is written; the queue is 64 events, or 16 key
+  presses. Measured: 40 characters typed at a prompt the shell is reading all
+  arrive, the same 40 sent while it prints `help` arrive as 10. No person
+  types faster than the shell echoes, so this bites tests rather than people —
+  but the honest fix is interrupt-driven input, and the GIC routing for the
+  virtio slots is in the device tree and still unread. The keycode table covers the main block only — no function keys,
   keypad, arrows or modifiers past shift, because nothing reads them yet and
   a table of untested entries is a table of guesses. The line editor has
   backspace and nothing else: no kill-line, no history, no cursor keys. The

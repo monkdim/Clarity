@@ -64,6 +64,24 @@ EXPECTED_LINES = ["".join(ALPHABET), "hello"]
 INIT_WORDS = ["alpha", "beta"]
 INIT_PROMPT = b"init: type a line: "
 
+# And then the shell, which is the only thing here that answers back. Each
+# command is sent only after its prompt has appeared, and that is not
+# politeness: the keyboard is polled, and the only code that polls it is a
+# read, so anything typed while the shell is writing goes into a 64-event
+# queue and is dropped once it fills. Forty characters typed at a waiting
+# prompt all arrive; the same forty sent while `help` is printing arrive as
+# ten. Waiting for the prompt is what keeps this test measuring the shell
+# rather than measuring that.
+SHELL_BANNER = b"clarity-sh: type help"
+SHELL_PROMPT = b"$ "
+SHELL_SESSION = [
+    # what to type,          what the shell must say back
+    ("echo hello from kyan", "hello from kyan"),
+    ("count abcde",          "5"),
+    ("frobnicate",           "clarity-sh: unknown command: frobnicate"),
+]
+SHELL_EXIT_STATUS = 7
+
 
 def wait_for(log_path, marker, deadline, proc=None):
     """Wait for `marker` to appear in the log, or for the deadline to pass.
@@ -103,6 +121,33 @@ def wait_for_count(log_path, marker, count, deadline, proc):
             return False
         time.sleep(0.1)
     return False
+
+
+def prompts_seen(log_path):
+    """How many shell prompts have been printed so far."""
+    try:
+        with open(log_path, "rb") as f:
+            return f.read().count(SHELL_PROMPT)
+    except FileNotFoundError:
+        return 0
+
+
+def send_line(m, text):
+    """Type `text` and press return.
+
+    `sendkey` names a key, not a character, so the few punctuation marks these
+    commands use have to be spelled out. Anything not in the table would be
+    typed as its own name and silently produce nothing, so it raises instead.
+    """
+    names = {" ": "spc", "-": "minus", ".": "dot", "/": "slash"}
+    for c in text:
+        key = names.get(c, c)
+        if len(key) == 1 and not (c.isalnum()):
+            raise SystemExit("key_check: no sendkey name for %r" % c)
+        m.sendall(("sendkey %s\n" % key).encode())
+        time.sleep(0.05)
+    m.sendall(b"sendkey ret\n")
+    time.sleep(0.05)
 
 
 def monitor(sock_path, deadline):
@@ -282,6 +327,22 @@ def main():
         # the log describe the same moment. The typed lines are still on
         # screen when it does, and the check below fails loudly if they ever
         # stop being.
+        # The shell. Every command waits for its own prompt first.
+        if not wait_for(log, SHELL_BANNER, time.time() + 200, qemu):
+            print("FAIL: the shell never started")
+            return 1
+        for command, _ in SHELL_SESSION:
+            if not wait_for_count(log, SHELL_PROMPT, prompts_seen(log) + 1,
+                                  time.time() + 60, qemu):
+                print("FAIL: the shell stopped prompting before %r" % command)
+                return 1
+            send_line(m, command)
+        if not wait_for_count(log, SHELL_PROMPT, prompts_seen(log) + 1,
+                              time.time() + 60, qemu):
+            print("FAIL: the shell stopped prompting before exit")
+            return 1
+        send_line(m, "exit %d" % SHELL_EXIT_STATUS)
+
         if not wait_for(log, fb_check.BOOT_MARKER, time.time() + 300, qemu):
             print("FAIL: the kernel read the input but never finished booting")
             return 1
@@ -358,11 +419,36 @@ def main():
               "picture was taken" % wanted)
         return 1
 
+    # What the shell said back. This is a third path again: the kernel read the
+    # keys, read(2) delivered them to a program, and that program decided what
+    # they meant and answered.
+    for command, want in SHELL_SESSION:
+        if want not in text:
+            print("FAIL: typed %r at the shell, but %r is not in its output"
+                  % (command, want))
+            for candidate in text.splitlines():
+                if candidate.startswith("$ ") or "clarity-sh" in candidate:
+                    print("  " + candidate)
+            return 1
+    want_exit = "shell: ran at EL0, read its own input"
+    if want_exit not in text:
+        print("FAIL: the shell did not run to completion")
+        return 1
+    if ("exited %d" % SHELL_EXIT_STATUS) not in text:
+        print("FAIL: `exit %d` did not reach the kernel as the exit status"
+              % SHELL_EXIT_STATUS)
+        for candidate in text.splitlines():
+            if "shell:" in candidate:
+                print("  " + candidate)
+        return 1
+
     print("PASS: the kernel read %r, read(2) gave the program %r "
           "(after refusing a read-only buffer both times), and the screen "
           "shows %r on a row of its own" % (got, from_program, wanted))
     print("      (%d bytes of screenshot, every character cell checked)"
           % len(shot_bytes))
+    print("      the shell answered %d commands and exited %d as asked"
+          % (len(SHELL_SESSION), SHELL_EXIT_STATUS))
     return 0
 
 
