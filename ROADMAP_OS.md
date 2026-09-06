@@ -28,11 +28,36 @@ every pull request; anything not gated is called out as unverified.
   The `OS boot (linux-x64, TCG)` job builds the kernel, wraps it in a GRUB
   rescue ISO, and boots it under QEMU **three times, requiring all three** to
   reach the marker — reliability is part of the gate, not a re-run away.
-- **An AArch64 (Apple-Silicon-class) kernel boots too.** A second gate,
-  `OS boot (aarch64, TCG)`, builds the ARM64 kernel and boots it on QEMU's
-  `virt` machine: EL2→EL1 drop, FP/SIMD enabled, PL011 UART up. This is the
-  start of the Apple Silicon track, not parity — the ARM kernel does not yet
-  have memory management, scheduling, or drivers.
+- **The AArch64 (Apple-Silicon-class) kernel runs programs, draws a screen,
+  and reads a keyboard.** The `OS boot (aarch64, TCG)` gate boots it three
+  ways — 512 MiB with 28 required markers, then 4 GiB and a PAN-capable CPU
+  with the ten and nine that those configurations exist to prove — and then
+  screenshots the display and types at it. What is behind those markers:
+
+  - higher-half kernel on TTBR1 at `0xFFFF_FF80_0000_0000` with the identity
+    map **dropped**, checked by asking the MMU (`at s1e1w`) rather than by
+    reading a bit back
+  - a page allocator over the memory the device tree described, with the
+    direct map extended to cover all of it — the 4 GiB boot exists because a
+    machine that fits in the boot stub's one mapped gigabyte would pass with
+    that code deleted
+  - per-process address spaces in TTBR0, ASID-tagged, permissions verified by
+    asking the MMU to translate as EL0 would
+  - programs at EL0: `/bin/clarity-init` and `/bin/clarity-demo` are a
+    compiler's and a linker's output, loaded from ELF, run twice in two
+    address spaces. The second is a **Clarity program** whose output is byte
+    for byte identical to the x86_64 side, floating point included
+  - four system calls — `read`, `write`, `brk`, `exit`. User pointers are
+    translated through the process's own page tables, never dereferenced, and
+    Privileged Access Never is enabled where the CPU has it so the hardware
+    enforces that rather than this kernel intending it
+  - kernel threads switching, cooperatively and preemptively
+  - a 1024×768 framebuffer with the boot log drawn on it, 64×48 characters,
+    and a keyboard over virtio-input with a line discipline above it
+
+  This is no longer "the start of the Apple Silicon track". It is not parity
+  either: there is no scheduler, no filesystem and no shell on this side. See
+  **Outstanding on aarch64** below.
 - **The kernel reaches userspace.** It writes a small ELF to
   `/bin/clarity-init`, and `spawn_user` reads it back off the VFS, parses it,
   maps its segments into a fresh address space, switches CR3 and enters ring
@@ -46,10 +71,12 @@ every pull request; anything not gated is called out as unverified.
     [exit] status=0
   ```
 
-  What that program is, is the gap. It is 47 bytes of hand-assembled machine
-  code, not the Clarity runtime, because the freestanding runtime still does
-  not build — see **Userspace runtime** below. The *mechanism* is real and
-  tested; the thing to run through it is not there yet.
+  What runs through it is no longer hand-assembled bytes. `/bin/clarity-init`
+  is compiled and linked, and `/bin/clarity-demo` is a **Clarity** program
+  through `clarity cc --freestanding`, linked against the freestanding libc
+  in `kernel/user/libc`. Both are on the gate, on both architectures, and the
+  demo's floating-point output is checked digit for digit because a subtly
+  wrong `strtod` or `dtoa` still prints a plausible number.
 - **Threads are preempted.** A 100 Hz PIT tick takes the CPU from a thread
   that never yields and gives it back. Gated on a test cooperative scheduling
   cannot pass: two threads, neither of which calls `yield`.
@@ -199,18 +226,54 @@ a bigger surface than the one measured here and pins the ABI to Linux's.
   allocates from a thread today (every spawn happens on the boot path, where
   preemption is a no-op), so it is not reachable — but it is the next lock
   that has to exist, before anything that allocates runs as a thread.
-- **User pointers are not validated.** `sys_write` takes an address from
-  userspace and reads it in kernel mode without checking that it is mapped,
-  user-owned, or canonical. A bad pointer faults inside the kernel. This is
-  fine for a program the kernel wrote itself and unacceptable for anything
-  else.
+- **User pointers are not validated — on x86_64.** `sys_write` in
+  `syscall/dispatch.zig` takes an address from userspace and reads it in
+  kernel mode without checking that it is mapped, user-owned, or canonical.
+  A bad pointer faults inside the kernel. This is fine for a program the
+  kernel wrote itself and unacceptable for anything else.
+
+  **aarch64 already does this correctly, and is the model to copy.** A user
+  pointer there is translated through the process's own page tables (`at
+  s1e0r` / `at s1e0w`) and read or written through the kernel's direct map,
+  page by page; a page the process cannot reach is an `EFAULT` the hardware
+  reported, not a fault the kernel took. `read(2)` translates *for writing*,
+  so a buffer in the program's own read-only text is refused — checked by the
+  init program passing one deliberately. And Privileged Access Never is
+  enabled where the CPU has it, so the rule is enforced by hardware rather
+  than followed by convention; the boot gate runs a PAN-capable CPU as well
+  as one without, because on the one without, doing it the wrong way also
+  works.
 - **AHCI and virtio-net are skeletons.** Both scan PCI correctly, but
   `attach`/`send_frame`/`recv_frame` are `NotImplemented`. PCI enumeration
   itself is real.
 
-**Outstanding on aarch64** (in rough order): exception vectors, MMU/TTBR page
-tables, the generic timer, then sharing the memory manager, scheduler and VFS
-with x86_64 behind an arch abstraction. The shared subsystems are mostly
+**Outstanding on aarch64.** Exception vectors, page tables, the generic timer,
+per-process address spaces, EL0, system calls, the ELF loader, a framebuffer
+console and a keyboard are all done and gated — see **Where we are** above.
+What is left, in rough order:
+
+- **A scheduler.** The switching primitive works, cooperatively and
+  preemptively, and the boot selftest drives it directly. Nothing keeps run
+  queues, priorities or a process table, so programs run one after another
+  rather than at the same time.
+- **A filesystem.** Programs are loaded from ELFs embedded in the kernel
+  image because there is nowhere to read one from. The VFS and tmpfs on the
+  x86_64 side are architecture-neutral Zig and should cross over largely
+  intact.
+- **A shell.** `read(2)` delivers a line to a program, and the line
+  discipline echoes and edits, but nothing holds a terminal or a session.
+  This is the increment that makes the ARM side feel like an operating
+  system rather than a boot log.
+- **Interrupt-driven input.** The keyboard is polled. The GIC routing for
+  the virtio slots is in the device tree and nothing reads it.
+- **Real blocking.** `read(2)` cannot block: there is no scheduler to block a
+  thread on, so it spins and reports end of input after three seconds. That
+  is a stand-in, and it is documented as one in `drivers/stdin.zig`.
+- **Bare metal.** Everything above is QEMU `virt`. Apple hardware needs
+  m1n1, and the `-accel hvf` path in `kernel/RUNNING.md` is written but
+  **untested** — nobody with a Mac has run it yet.
+
+The shared subsystems (pmm, heap, VFS, scheduler) are mostly
 architecture-neutral Zig already, but they reach into port I/O, GDT/IDT and
 x86 4-level paging, so they cross over one phase at a time.
 
@@ -223,13 +286,32 @@ Both OS gates are live in `.github/workflows/os-boot.yml`:
 - **`OS boot (linux-x64, TCG)`** — `zig build` the kernel, `grub-mkrescue` a
   kernel-only rescue ISO, boot it under `qemu-system-x86_64` three times,
   require `ClarityOS ready.` on all three.
-- **`OS boot (aarch64, TCG)`** — `zig build aarch64`, boot under
-  `qemu-system-aarch64 -M virt`, require the EL1 marker.
+- **`OS boot (aarch64, TCG)`** — `zig build aarch64`, then boot under
+  `qemu-system-aarch64 -M virt` **three times**: 512 MiB, 4 GiB, and on a
+  PAN-capable `-cpu max`. The first requires all 28 markers; the other two
+  require the subset each is for — that the direct map was extended over all
+  4 GiB and the allocator manages it, and that a PAN-capable CPU reaches
+  userspace with no exception logged. Then two tools that look at the machine
+  from outside:
+  - `kernel/tools/fb_check.py` screenshots the display through QEMU's
+    monitor and compares **every character cell** against a replay of the
+    serial log, rendering the glyphs itself from `tools/font8x8.txt`
+  - `kernel/tools/key_check.py` types through the monitor and checks both
+    what the kernel read and what ended up on screen — including a line
+    typed wrong and corrected with backspace, which those two disagree about
+    if the console echoes without erasing
+- **`zig build check`** runs beside the x86 kernel build, compiling the
+  modules no kernel imports (`drivers/tty.zig`, `fs/devfs.zig`,
+  `fs/procfs.zig`, `boot/uefi.zig`). Zig never parses a file nothing
+  imports, so without it those four were checked by nothing at all.
 
-Both are deliberately **kernel-only**: they do not depend on the userspace
-runtime, so they gate the kernel today rather than waiting on it. Once the
-runtime builds, a third gate should boot the full ISO and assert a marker
-printed from *Clarity* code — that is the real "the OS runs" test.
+Both are deliberately **kernel-only**: they do not depend on the desktop
+runtime, so they gate the kernel today rather than waiting on it. The "marker
+printed from *Clarity* code" that this section used to call the real test now
+exists on both architectures — `/bin/clarity-demo` is a Clarity program
+through `clarity cc --freestanding`, and its `clarity-demo: all checks
+passed` line is required on every boot. What is still missing is the *ISO*
+gate: booting the full image with the desktop on top of it.
 
 GitHub runners have no `/dev/kvm`, so both boot under TCG.
 
