@@ -255,52 +255,6 @@ fn decode_reg(fdt: *const Fdt, reg: []const u8, out: []Region) usize {
     return written;
 }
 
-/// Every node whose name starts with `prefix`, by its first `reg` region.
-///
-/// Written for the virtio-mmio bus, where QEMU's `virt` puts thirty-two
-/// identical slots and the device in each is only discoverable by reading its
-/// registers. The addresses are 0x200 apart from 0x0a000000, which is exactly
-/// the kind of thing a driver should not know: a machine that laid them out
-/// differently would still describe them here.
-///
-/// Returns how many were written, which may be fewer than there are if `out`
-/// is short — the caller gets the first `out.len` rather than an error,
-/// because a bus with more slots than the caller can hold is not a failure.
-pub fn node_regs(fdt: *const Fdt, prefix: []const u8, out: []Region) usize {
-    var w = Walker.init(fdt);
-    var depth: u32 = 0;
-    var matched_depth: ?u32 = null;
-    var written: usize = 0;
-
-    while (w.next()) |ev| {
-        switch (ev) {
-            .node_start => {
-                depth += 1;
-                if (matched_depth == null and starts_with(ev.node_start, prefix)) matched_depth = depth;
-            },
-            .node_end => {
-                if (matched_depth) |d| if (depth == d) {
-                    matched_depth = null;
-                };
-                if (depth > 0) depth -= 1;
-            },
-            .prop => |pr| {
-                if (matched_depth) |d| {
-                    if (depth == d and str_eq(pr.name, "reg")) {
-                        if (written >= out.len) return written;
-                        var one: [1]Region = undefined;
-                        if (decode_reg(fdt, pr.value, &one) == 1) {
-                            out[written] = one[0];
-                            written += 1;
-                        }
-                    }
-                }
-            },
-        }
-    }
-    return written;
-}
-
 /// A device on a bus: where its registers are, and which interrupt it raises.
 pub const Slot = struct {
     base: u64,
@@ -316,11 +270,20 @@ pub const Slot = struct {
 /// Every node whose name starts with `prefix`, with both its registers and
 /// its interrupt.
 ///
-/// Same walk as `node_regs`, and it exists rather than being folded into it
-/// because the two properties arrive in whatever order the tree lists them —
-/// QEMU writes `interrupts` before `reg` — so neither can be read as "the
-/// one after the other". They are accumulated per node and written out when
-/// the node ends.
+/// Written for the virtio-mmio bus, where QEMU's `virt` puts thirty-two
+/// identical slots and the device in each is only discoverable by reading its
+/// registers. The addresses are 0x200 apart from 0x0a000000, which is exactly
+/// the kind of thing a driver should not know: a machine that laid them out
+/// differently would still describe them here.
+///
+/// The two properties are accumulated per node and written out when the node
+/// ends, rather than read one after the other, because they arrive in
+/// whatever order the tree lists them — QEMU writes `interrupts` before
+/// `reg`.
+///
+/// Returns how many were written, which may be fewer than there are if `out`
+/// is short — the caller gets the first `out.len` rather than an error,
+/// because a bus with more slots than the caller can hold is not a failure.
 ///
 /// The interrupt encoding is the GIC's three-cell form (Linux's
 /// `arm,gic-400` binding, and what QEMU's `virt` emits): type, number,
