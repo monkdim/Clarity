@@ -216,7 +216,7 @@ class Linter {
         this.scope.declare(node.name, node.line, false)
         this.push_scope("function")
         for p in node.params {
-            let pname = p
+            mut pname = p
             if type(p) == "list" { pname = p[0] }
             if type(pname) == "string" {
                 this.scope.declare(pname, node.line, false)
@@ -314,7 +314,7 @@ class Linter {
                 this.scope.declare("this", 0, false)
                 this.scope.mark_used("this")
                 for p in method.params {
-                    let pname = p
+                    mut pname = p
                     if type(p) == "list" { pname = p[0] }
                     if type(pname) == "string" {
                         this.scope.declare(pname, method.line, false)
@@ -464,7 +464,7 @@ class Linter {
         } elif nt == "FnExpression" {
             this.push_scope("function")
             for p in node.params {
-                let pname = p
+                mut pname = p
                 if type(p) == "list" { pname = p[0] }
                 if type(pname) == "string" {
                     this.scope.declare(pname, node.line, false)

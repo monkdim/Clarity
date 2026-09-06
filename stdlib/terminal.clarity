@@ -93,9 +93,15 @@ fn scroll_down(n)      { return CSI + str(n ?? 1) + "T" }
 
 -- ── Terminal dimensions ──────────────────────────────────
 
+-- Terminal size, with a sane fallback. `tput` prints nothing when stdout is
+-- not a TTY (a CI runner, a pipe), and int("") is 0 rather than an error — so
+-- checking the value matters, not just catching a throw. A zero width would
+-- otherwise propagate into every box, bar and hr as a negative repeat count.
 fn columns() {
     try {
-        return int(trim(exec("tput cols 2>/dev/null")))
+        let c = int(trim(exec("tput cols 2>/dev/null")))
+        if c > 0 { return c }
+        return 80
     } catch e {
         return 80
     }
@@ -103,7 +109,9 @@ fn columns() {
 
 fn rows() {
     try {
-        return int(trim(exec("tput lines 2>/dev/null")))
+        let r = int(trim(exec("tput lines 2>/dev/null")))
+        if r > 0 { return r }
+        return 24
     } catch e {
         return 24
     }
@@ -137,7 +145,7 @@ fn hr(ch, width) {
 fn banner(text) {
     -- Print a centered banner.
     let w = columns()
-    let pad = (w - len(text) - 4) / 2
+    mut pad = (w - len(text) - 4) / 2
     if pad < 0 { pad = 0 }
     let line = repeat("=", pad) + "  " + text + "  " + repeat("=", pad)
     show bold(line)
@@ -166,7 +174,7 @@ fn box_top(width) {
 }
 
 fn box_mid(text, width) {
-    let pad = width - len(text) - 4
+    mut pad = width - len(text) - 4
     if pad < 0 { pad = 0 }
     return "| " + text + repeat(" ", pad) + " |"
 }

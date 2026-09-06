@@ -109,6 +109,21 @@ fn _abspath(path) {
     return trim(result.stdout)
 }
 
+-- Locate the stdlib sources for `transpile --bundle`.
+--
+-- This used to be `_dirname(_abspath("lexer.clarity"))`, which only resolves
+-- correctly when the process was started from inside stdlib/. Run from the
+-- repo root it resolved to the root, matched no source files, and wrote an
+-- *empty* bundle while still reporting success — so a rebuild appeared to
+-- work and silently produced nothing.
+fn _resolve_stdlib_dir() {
+    let here = _dirname(_abspath("lexer.clarity"))
+    for cand in [here, _abspath("stdlib"), _abspath("../stdlib")] {
+        if exists(cand + "/lexer.clarity") { return cand }
+    }
+    throw "transpile --bundle: cannot find the stdlib sources (no lexer.clarity in " + here + ", ./stdlib or ../stdlib)"
+}
+
 fn _quote(s) {
     let escaped = replace(str(s), "'", "'\\''")
     return "'" + escaped + "'"
@@ -1404,7 +1419,7 @@ fn do_transpile(cli_args) {
 
     if is_bundle {
         -- Bundle mode: transpile entire stdlib
-        let stdlib_dir = _dirname(_abspath("lexer.clarity"))
+        let stdlib_dir = _resolve_stdlib_dir()
         let dist_dir = output_path ?? (replace(stdlib_dir, "stdlib", "native") + "/dist")
         transpile_bundle(stdlib_dir, dist_dir)
         return null

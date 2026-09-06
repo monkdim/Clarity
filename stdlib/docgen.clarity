@@ -56,7 +56,7 @@ fn extract_entries(source, tree, filename) {
             -- Build signature
             mut sig_parts = []
             for p in params {
-                let pname = p
+                mut pname = p
                 if type(p) == "list" { pname = p[0] }
                 if type(pname) == "string" and has(param_types, pname) {
                     push(sig_parts, str(pname) + ": " + param_types[pname])
@@ -103,7 +103,7 @@ fn extract_entries(source, tree, filename) {
 
                     mut mp_parts = []
                     for p in mparams {
-                        let pname = p
+                        mut pname = p
                         if type(p) == "list" { pname = p[0] }
                         if type(pname) == "string" and has(mpt, pname) {
                             push(mp_parts, str(pname) + ": " + mpt[pname])
@@ -284,7 +284,7 @@ fn format_markdown(entries_list, title, filename) {
                 if has(entry, "params") and len(entry["params"]) > 0 {
                     push(lines_list, "**Parameters:**")
                     for p in entry["params"] {
-                        let pname = p
+                        mut pname = p
                         if type(p) == "list" { pname = p[0] }
                         mut type_str = ""
                         if has(entry, "param_types") and has(entry["param_types"], str(pname)) {
@@ -349,7 +349,7 @@ fn generate_docs(source, filename, output_format) {
     let entries_list = extract_entries(source, tree, filename)
 
     if output_format == "markdown" {
-        let title = filename
+        mut title = filename
         if len(title) == 0 { title = "API Documentation" }
         return format_markdown(entries_list, title, filename)
     }

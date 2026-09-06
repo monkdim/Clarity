@@ -62,3 +62,60 @@ jobs:
 
       - name: Run smoke tests
         run: ./native/dist/clarity smoke ./native/dist/clarity
+
+  selfhost:
+    runs-on: ubuntu-latest
+    name: Self-hosting bootstrap
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The compiler must be able to rebuild itself from its own sources.
+      # Without this gate the Python transpiler silently carries the build:
+      # the self-hosted one drifted far enough that its output would not even
+      # parse, and nothing failed.
+      - name: Stage 1 — seed the compiler with the Python reference transpiler
+        run: |
+          python native/transpile.py --bundle
+          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
+
+      - name: Stage 2 — the compiler regenerates its own bundle
+        run: |
+          ./native/dist/clarity transpile --bundle
+          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
+          cp -r native/dist /tmp/stage2
+          ./native/dist/clarity --version
+
+      - name: Stage 3 — and again, then require a fixpoint
+        run: |
+          ./native/dist/clarity transpile --bundle
+          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
+          cp -r native/dist /tmp/stage3
+          if diff -rq --exclude=clarity /tmp/stage2 /tmp/stage3; then
+            echo "PASS: the compiler reproduces itself byte for byte"
+          else
+            echo "FAIL: stage 2 and stage 3 output differ"
+            exit 1
+          fi
+
+      # The disassembler test binds libcapstone at runtime; without it that
+      # native check produces no output and the suite fails for a reason that
+      # has nothing to do with self-hosting.
+      - name: Install libcapstone
+        run: sudo apt-get update && sudo apt-get install -y libcapstone-dev
+
+      # A fixpoint on broken output is still broken, so the self-hosted build
+      # has to pass everything the reference build does.
+      - name: Self-hosted build passes the full suite
+        run: ./native/dist/clarity test stdlib/
+
+      - name: Self-hosted build passes the smoke tests
+        run: ./native/dist/clarity smoke ./native/dist/clarity

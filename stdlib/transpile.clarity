@@ -7,6 +7,30 @@ from "parser.clarity" import parse
 
 -- ── JS Reserved Word Mapping ────────────────────────────
 
+-- Control characters other than the ones with short escapes. Kept as two
+-- passes so the common case (no control characters at all) costs one scan.
+fn _has_control_char(s) {
+    for ch in s {
+        if char_code(ch) < 32 { return true }
+    }
+    return false
+}
+
+let _HEX = "0123456789abcdef"
+
+fn _escape_control_chars(s) {
+    mut out = ""
+    for ch in s {
+        let c = char_code(ch)
+        if c < 32 {
+            out = out + "\\x" + char_at(_HEX, int(c / 16)) + char_at(_HEX, c % 16)
+        } else {
+            out = out + ch
+        }
+    }
+    return out
+}
+
 let JS_RESERVED = {
     "int": "$int", "float": "$float", "bool": "$bool",
     "set": "$set", "min": "$min", "max": "$max",
@@ -16,7 +40,13 @@ let JS_RESERVED = {
     "typeof": "$typeof", "void": "$void", "with": "$with",
     "yield": "$yield", "debugger": "$debugger",
     "instanceof": "$instanceof", "in": "$in",
-    "var": "$var", "const": "$const"
+    "var": "$var", "const": "$const",
+    "range": "$range", "function": "$function", "enum": "$enum",
+    "implements": "$implements", "interface": "$interface",
+    "package": "$package", "private": "$private",
+    "protected": "$protected", "public": "$public",
+    "static": "$static", "arguments": "$arguments",
+    "eval": "$eval", "import": "$import", "export": "$export"
 }
 
 -- ── Runtime Import Header ───────────────────────────────
@@ -112,16 +142,20 @@ let STDLIB_FILES = [
 -- ── JSEmitter ───────────────────────────────────────────
 
 class JSEmitter {
-    fn init(module_name) {
+    fn init(module_name, base_dir) {
         this.indent_level = 0
         this.module_name = module_name ?? "<main>"
         this.classes = []
         this.hoisted_imports = []
+        -- Directory the source came from, used to resolve `from "x.clarity"
+        -- import Foo` well enough to know whether Foo is a class.
+        this.base_dir = base_dir
     }
 
     -- ── Main entry ──────────────────────────────────────
 
     fn emit(program) {
+        this._seed_classes(program)
         mut lines = []
         for stmt in program.body {
             push(lines, this.emit_stmt(stmt))
@@ -133,8 +167,37 @@ class JSEmitter {
         return join(lines, "\n")
     }
 
+    -- `Foo(1)` must become `new Foo(1)` when Foo is a class, and stay a plain
+    -- call when it is a function — the emitter cannot tell them apart from the
+    -- call site alone. Collect the names up front: classes declared in this
+    -- module (so a call *above* the declaration still works) plus classes the
+    -- module imports by name from a sibling file, resolved and parsed.
+    fn _seed_classes(program) {
+        for stmt in program.body {
+            if stmt.node_type == "ClassStatement" { push(this.classes, stmt.name) }
+        }
+        if this.base_dir == null { return null }
+        for stmt in program.body {
+            if stmt.node_type != "ImportStatement" { continue }
+            if stmt.path == null or stmt.names == null or len(stmt.names) == 0 { continue }
+            let exported = _module_class_names(this.base_dir + "/" + stmt.path)
+            for n in stmt.names {
+                if contains(exported, n) and not contains(this.classes, n) { push(this.classes, n) }
+            }
+        }
+        return null
+    }
+
     fn _indent() {
         return repeat("  ", this.indent_level)
+    }
+
+    -- Top-level declarations must be exported: the bundle is ESM, and a
+    -- module that declares `fn run(...)` without `export` cannot satisfy
+    -- another module's `from "process.clarity" import run`. Nested
+    -- declarations are locals and must not carry it.
+    fn _export_prefix() {
+        return if this.indent_level == 0 { "export " } else { "" }
     }
 
     -- ── Statement dispatch ──────────────────────────────
@@ -185,7 +248,7 @@ class JSEmitter {
         let keyword = if node.mutable { "let" } else { "const" }
         let val = this.emit_expr(node.value)
         let name = this._safe_name(node.name)
-        return this._indent() + keyword + " " + name + " = " + val + ";"
+        return this._indent() + this._export_prefix() + keyword + " " + name + " = " + val + ";"
     }
 
     fn stmt_DestructureLetStatement(node) {
@@ -201,9 +264,9 @@ class JSEmitter {
         }
         let targets_str = join(target_parts, ", ")
         if node.kind == "list" {
-            return this._indent() + keyword + " [" + targets_str + "] = " + val + ";"
+            return this._indent() + this._export_prefix() + keyword + " [" + targets_str + "] = " + val + ";"
         } else {
-            return this._indent() + keyword + " {" + targets_str + "} = " + val + ";"
+            return this._indent() + this._export_prefix() + keyword + " {" + targets_str + "} = " + val + ";"
         }
     }
 
@@ -228,7 +291,7 @@ class JSEmitter {
         let params = this._emit_params(node.params)
         let prefix = if node.is_async { "async " } else { "" }
         let body = this._emit_block_body(node.body)
-        return this._indent() + prefix + "function " + name + "(" + params + ") {\n" + body + "\n" + this._indent() + "}"
+        return this._indent() + this._export_prefix() + prefix + "function " + name + "(" + params + ") {\n" + body + "\n" + this._indent() + "}"
     }
 
     fn stmt_ReturnStatement(node) {
@@ -333,7 +396,7 @@ class JSEmitter {
         let name = this._safe_name(node.name)
         push(this.classes, node.name)
         let parent = if node.parent != null { " extends " + this._safe_name(node.parent) } else { "" }
-        mut lines = [this._indent() + "class " + name + parent + " {"]
+        mut lines = [this._indent() + this._export_prefix() + "class " + name + parent + " {"]
         this.indent_level += 1
         for method in node.methods {
             if method.node_type == "FnStatement" {
@@ -404,7 +467,7 @@ class JSEmitter {
             i += 1
         }
         let inner = join(members, ", ")
-        return this._indent() + "const " + name + " = new $ClarityEnum(\"" + node.name + "\", {" + inner + "});"
+        return this._indent() + this._export_prefix() + "const " + name + " = new $ClarityEnum(\"" + node.name + "\", {" + inner + "});"
     }
 
     fn stmt_DecoratedStatement(node) {
@@ -469,8 +532,22 @@ class JSEmitter {
             let result = this._convert_interpolation(s)
             return "`" + result + "`"
         }
-        -- Escape and use regular string
-        let escaped = replace(replace(s, "\\", "\\\\"), "\"", "\\\"")
+        -- Escape for a JS double-quoted literal: backslash first (so the
+        -- escapes introduced below are not re-escaped), then the quote, then
+        -- the control characters JS forbids inside one. A raw newline or
+        -- carriage return *terminates* a JS string literal, so emitting one
+        -- verbatim turns a source string containing "\\n" into unparseable
+        -- output — which is how the self-hosted transpiler lost the ability
+        -- to rebuild the compiler from its own sources.
+        mut escaped = replace(s, "\\", "\\\\")
+        escaped = replace(escaped, "\"", "\\\"")
+        escaped = replace(escaped, "\n", "\\n")
+        escaped = replace(escaped, "\r", "\\r")
+        escaped = replace(escaped, "\t", "\\t")
+        -- Any remaining control character (NUL especially: Clarity's "\0" is
+        -- a legal escape, and writing the byte itself produces a file that is
+        -- no longer text) becomes a \xNN escape.
+        if _has_control_char(escaped) { escaped = _escape_control_chars(escaped) }
         return "\"" + escaped + "\""
     }
 
@@ -571,16 +648,15 @@ class JSEmitter {
         return callee + "(" + args_str + ")"
     }
 
+    -- Property names are never renamed: JS reserved words are legal after a
+    -- dot, and mangling them breaks the member. `env.set(...)` must stay
+    -- `env.set(...)` even though a *variable* named `set` becomes `$set`.
     fn expr_MemberExpression(node) {
-        let obj = this.emit_expr(node.object)
-        let prop = this._safe_name(node.property)
-        return obj + "." + prop
+        return this.emit_expr(node.object) + "." + str(node.property)
     }
 
     fn expr_OptionalMemberExpression(node) {
-        let obj = this.emit_expr(node.object)
-        let prop = this._safe_name(node.property)
-        return obj + "?." + prop
+        return this.emit_expr(node.object) + "?." + str(node.property)
     }
 
     fn expr_IndexExpression(node) {
@@ -620,8 +696,10 @@ class JSEmitter {
             let val = this.emit_expr(stmts[0].value)
             return "((" + params + ") => " + val + ")"
         }
+        -- Arrow, not `function`: a Clarity closure written inside a method
+        -- refers to the enclosing `this`, and only an arrow keeps that binding.
         let body = this._emit_block_body(node.body)
-        return "(function(" + params + ") {\n" + body + "\n" + this._indent() + "})"
+        return "((" + params + ") => {\n" + body + "\n" + this._indent() + "})"
     }
 
     fn expr_PipeExpression(node) {
@@ -807,11 +885,37 @@ class JSEmitter {
 
 -- ── Public API ──────────────────────────────────────────
 
-fn transpile_source(source, filename) {
+-- Class names declared at the top level of another Clarity module. Parsing a
+-- sibling file is cheap next to transpiling it, and the results are reused
+-- across every module that imports it, so the bundle parses each file once
+-- more than before rather than once per importer.
+mut _CLASS_NAME_CACHE = {}
+
+fn _module_class_names(path) {
+    if has(_CLASS_NAME_CACHE, path) { return _CLASS_NAME_CACHE[path] }
+    mut names = []
+    -- A missing or unparseable module is not fatal here: the worst case is
+    -- that a call keeps its plain-call form, which is what happened before
+    -- imports were resolved at all.
+    try {
+        if exists(path) {
+            let src = read(path)
+            for stmt in parse(tokenize(src, path), src).body {
+                if stmt.node_type == "ClassStatement" { push(names, stmt.name) }
+            }
+        }
+    } catch e {
+        names = []
+    }
+    _CLASS_NAME_CACHE[path] = names
+    return names
+}
+
+fn transpile_source(source, filename, base_dir) {
     let fname = filename ?? "<input>"
     let tokens = tokenize(source, fname)
     let tree = parse(tokens, source)
-    let emitter = JSEmitter(fname)
+    let emitter = JSEmitter(fname, base_dir)
     let js_code = emitter.emit(tree)
     return js_code
 }
@@ -821,12 +925,52 @@ fn transpile_file(path) {
     -- Extract basename for module name
     let parts = split(path, "/")
     let basename = parts[len(parts) - 1]
-    return transpile_source(source, basename)
+    mut dir_parts = []
+    mut di = 0
+    while di < len(parts) - 1 { push(dir_parts, parts[di]); di += 1 }
+    mut dir = join(dir_parts, "/")
+    if len(dir) == 0 { dir = "." }
+    return transpile_source(source, basename, dir)
+}
+
+-- A module that defines its own `fn max(...)` emits `function $max(...)` —
+-- the same name the runtime header imports. ESM rejects that redeclaration
+-- once the file is reachable from the compile entry, so drop any runtime
+-- import the module shadows with a definition of its own. The local
+-- definition is what the module meant to use in either case.
+fn _decollide_runtime_imports(js) {
+    let open_brace = index_of(js, "{")
+    let close_brace = index_of(js, "}")
+    if open_brace < 0 or close_brace < open_brace { return js }
+
+    -- Names this module defines at top level, in either emitted form.
+    mut defined = {}
+    for line in split(js, "\n") {
+        mut rest = null
+        if starts(line, "export function ") { rest = substring(line, 16, len(line)) }
+        elif starts(line, "function ") { rest = substring(line, 9, len(line)) }
+        if rest != null {
+            let paren = index_of(rest, "(")
+            if paren > 0 { defined[trim(substring(rest, 0, paren))] = true }
+        }
+    }
+    if len(defined) == 0 { return js }
+
+    mut kept = []
+    for part in split(substring(js, open_brace + 1, close_brace), ",") {
+        let spec = trim(part)
+        if len(spec) == 0 { continue }
+        -- "show as $show" binds $show locally; a bare "push" binds push.
+        let as_at = index_of(spec, " as ")
+        let bound = if as_at >= 0 { trim(substring(spec, as_at + 4, len(spec))) } else { spec }
+        if not has(defined, bound) { push(kept, spec) }
+    }
+    return substring(js, 0, open_brace + 1) + " " + join(kept, ", ") + " " + substring(js, close_brace, len(js))
 }
 
 fn transpile_with_runtime(path) {
     let js_code = transpile_file(path)
-    return RUNTIME_HEADER + js_code
+    return _decollide_runtime_imports(RUNTIME_HEADER + js_code)
 }
 
 fn transpile_bundle(stdlib_dir, dist_dir) {
@@ -834,6 +978,7 @@ fn transpile_bundle(stdlib_dir, dist_dir) {
     exec("mkdir -p " + dist_dir)
 
     show "  Transpiling stdlib..."
+    mut emitted = 0
     for fname in STDLIB_FILES {
         let src = stdlib_dir + "/" + fname
         if exists(src) {
@@ -841,11 +986,18 @@ fn transpile_bundle(stdlib_dir, dist_dir) {
                 let js = transpile_with_runtime(src)
                 let out = dist_dir + "/" + replace(fname, ".clarity", ".js")
                 write(out, js)
+                emitted += 1
                 show "    " + fname + " -> " + replace(fname, ".clarity", ".js")
             } catch e {
                 show "    " + fname + " -- SKIP (" + str(e) + ")"
             }
         }
+    }
+    -- An empty bundle is never what the caller wanted: it means the sources
+    -- were not where we looked. Say so instead of writing an entry point that
+    -- imports modules which were never emitted.
+    if emitted == 0 {
+        throw "transpile --bundle: no stdlib sources found under " + stdlib_dir
     }
 
     -- Copy runtime.js
