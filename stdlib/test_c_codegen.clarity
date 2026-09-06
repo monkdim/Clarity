@@ -165,6 +165,14 @@ if CC == null {
     -- this is what the volatile storage is for; without it the value is
     -- whatever happened to be in a register.
     same("exc_mutated_local", "fn m() { mut acc = 0\ntry { acc = acc + 5\nthrow \"x\" } catch e { acc = acc + 100 }\nreturn acc }\nshow m()")
+    -- The same shape as exc_mutated_local, but inside a closure. A closure is
+    -- its own C function, so it decides on its own whether its locals need
+    -- volatile storage; taking the enclosing function's answer would leave a
+    -- closure with a try, written at top level, with ordinary locals.
+    same("exc_closure_local", "let f = fn(n) { mut acc = n\ntry { acc = acc + 5\nthrow \"x\" } catch e { acc = acc + 100 }\nreturn acc }\nshow f(1)\nshow map([1, 2], f)")
+    -- A throw from inside a closure has to reach the caller's handler, across
+    -- the C frames the higher-order builtin adds.
+    same("exc_through_hof", "fn run() { try { return map([1, 2, 3], fn(x) { if x == 2 { throw \"at \" + str(x) }\nreturn x }) } catch e { return \"caught \" + e } }\nshow run()")
     same("exc_gc", "fn t(v) { try { throw v } catch e { return e } }\nmut i = 0\nmut last = \"\"\nwhile i < 20000 { last = t(\"payload-\" + str(i))\ni = i + 1 }\nshow last")
     -- An uncaught throw is deliberately *not* compared against the
     -- interpreter: the interpreter prints its internal signal object and
