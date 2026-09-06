@@ -1,0 +1,95 @@
+name: OS boot smoke test
+
+# Builds the ClarityOS kernel + runtime, packs the ISO, and boots it
+# headlessly under QEMU, asserting the kernel reaches its "ClarityOS ready."
+# serial marker. GitHub-hosted runners have no /dev/kvm, so this runs under
+# TCG (software emulation) — hence the generous timeout.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  os-boot:
+    runs-on: ubuntu-latest
+    name: OS boot (linux-x64, TCG)
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Bootstrap from latest release
+        id: bootstrap
+        run: |
+          curl -fsSL https://github.com/monkdim/Clarity/releases/latest/download/clarity-linux-x64.tar.gz -o clarity-bootstrap.tar.gz
+          tar xzf clarity-bootstrap.tar.gz
+          chmod +x clarity
+          mv clarity clarity-bootstrap
+          ./clarity-bootstrap transpile --bundle
+        continue-on-error: true
+
+      - name: Bootstrap fallback (pre-first-release)
+        if: steps.bootstrap.outcome != 'success'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Transpile via Python fallback
+        if: steps.bootstrap.outcome != 'success'
+        run: python native/transpile.py --bundle
+
+      - name: Compile native binary
+        run: |
+          cd native/dist
+          bun build --compile clarity-entry.js --outfile clarity
+
+      - name: Install Zig 0.13.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install QEMU + OVMF firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+          # Ubuntu 24.04 ships only the split "_4M" OVMF layout. Stage the
+          # plain paths the launcher discovers first, and make VARS writable
+          # (QEMU opens it read-write as a pflash drive).
+          if [ ! -f /usr/share/OVMF/OVMF_CODE.fd ] && [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+            sudo cp /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd
+          fi
+          if [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ]; then
+            sudo cp /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd
+          fi
+          sudo chmod a+rw /usr/share/OVMF/OVMF_VARS.fd || true
+          qemu-system-x86_64 --version
+          zig version
+
+      - name: Cache Zig build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel/zig-out
+            kernel/.zig-cache
+            runtime/freestanding/zig-out
+            runtime/freestanding/.zig-cache
+          key: os-zig-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld', 'runtime/freestanding/**/*.zig') }}
+          restore-keys: |
+            os-zig-${{ runner.os }}-
+
+      - name: Build ClarityOS (kernel + runtime + ISO)
+        run: ./native/dist/clarity os build
+
+      - name: Boot ClarityOS under QEMU and assert the ready marker
+        run: |
+          ./native/dist/clarity os run \
+            --headless \
+            --no-rebuild \
+            --boot-test "ClarityOS ready." \
+            --timeout 180
