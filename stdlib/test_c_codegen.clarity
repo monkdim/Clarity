@@ -357,6 +357,41 @@ if CC == null {
         show "-- global_gc_rooted: mid-run GC unreliable on this platform, skipped --"
     }
 
+    -- ── stage 21: TCP sockets ──
+    -- Native-only: the interpreter's I/O is Bun's, which has no synchronous
+    -- socket call to diff against, so this asserts the compiled binary's
+    -- output directly (the same shape the FFI and capstone checks use).
+    --
+    -- The whole round trip happens in one process on loopback: bind port 0 so
+    -- the kernel picks a free one rather than racing whatever else is on the
+    -- machine, connect, accept, send, receive. Blocking calls are safe in this
+    -- order because the listen backlog completes the connect before accept()
+    -- is reached. The last exchange sends a NUL in the middle of the payload,
+    -- which is the case a string-based API would silently truncate.
+    nat_eq("tcp_roundtrip",
+        "let srv = tcp_listen(0)\nshow srv >= 0\nlet port = tcp_port(srv)\nshow port > 0\n" +
+        "let cli = tcp_connect(\"127.0.0.1\", port)\nshow cli >= 0\nlet peer = tcp_accept(srv)\nshow peer >= 0\n" +
+        "show tcp_send(cli, \"hello sockets\")\nlet got = tcp_recv(peer, 64)\nshow len(got)\n" +
+        "mut s = \"\"\nfor b in got { s = s + from_char_code(b) }\nshow s\n" +
+        "show tcp_send(peer, [65, 0, 66])\nshow tcp_recv(cli, 16)\n" +
+        "tcp_close(cli)\ntcp_close(peer)\ntcp_close(srv)",
+        "true\ntrue\ntrue\ntrue\n13\n13\nhello sockets\n3\n[65, 0, 66]")
+
+    -- A refused connection has to come back as -1, not abort the program: a
+    -- compiled tool that dies on an unreachable host is much less useful than
+    -- one that can report it. Port 1 on loopback is reliably closed.
+    nat_eq("tcp_connect_refused", "show tcp_connect(\"127.0.0.1\", 1)", "-1")
+
+    -- Writing to a peer that has closed raises SIGPIPE, whose default action
+    -- kills the process. The point of this case is simply that the program is
+    -- still alive to print afterwards.
+    nat_eq("tcp_send_after_peer_close",
+        "let srv = tcp_listen(0)\nlet port = tcp_port(srv)\n" +
+        "let cli = tcp_connect(\"127.0.0.1\", port)\nlet peer = tcp_accept(srv)\ntcp_close(peer)\n" +
+        "mut i = 0\nwhile i < 8 { tcp_send(cli, \"data after close\")\ni = i + 1 }\n" +
+        "show \"survived\"\ntcp_close(cli)\ntcp_close(srv)",
+        "survived")
+
     exec("rm -f /tmp/_clc_*")
 }
 

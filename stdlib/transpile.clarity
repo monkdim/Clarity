@@ -88,7 +88,7 @@ import { show as $show, ask as $ask, read, write, append, exists, lines, read_by
 let STDLIB_FILES = [
     "tokens.clarity", "lexer.clarity", "ast_nodes.clarity",
     "parser.clarity", "interpreter.clarity", "terminal.clarity",
-    "errors.clarity", "c_codegen.clarity",
+    "errors.clarity", "c_codegen.clarity", "c_modules.clarity",
     "process.clarity", "shell.clarity", "repl.clarity",
     "package.clarity", "lsp.clarity", "bytecode.clarity",
     "runtime.clarity",

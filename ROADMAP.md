@@ -66,13 +66,25 @@ lands with codegen tests that diff native output against the interpreter.
   a function simply failed to compile). Initialisers still run in source order at `main` entry, and
   the addresses are handed to the collector as explicit roots — the conservative GC scans the C
   stack, so a file-scope value is invisible to it without that.
-- **`clarity cc` still rejects `import` (open).** A native build must be a single file today, which
-  is why `examples/sigscan.clarity` inlines its byte helpers rather than importing
-  `bytes.clarity`, and why `sha256.clarity` does not yet compile natively. Resolving imports the
-  way the JS backend now does (parse the sibling module, merge its top-level declarations) is the
-  next step on this trunk.
-- **Networking (next on the trunk).** Sockets → an HTTP client that isn't a `curl` shell-out → an
-  HTTP server → TLS. Unlocks web/API backends as native binaries.
+- **Imports in native builds (done).** `clarity cc` emits one C translation unit, so an import
+  cannot be a link-time reference — `stdlib/c_modules.clarity` flattens the program and its import
+  graph into a single AST, resolving each module's own imports first. A module is included once
+  however many times it is imported, a cycle terminates, and because C has one namespace a name
+  defined in two modules is reported by name and file rather than silently resolved in favour of
+  whichever was spliced last. Verified end to end: a program importing `sha256.clarity` (which
+  itself imports `bits.clarity`) compiles and produces the published FIPS 180-4 digests.
+  **Remaining:** a selective import still pulls in the whole module, since taking only the named
+  symbols would break the module's internal references.
+- **Sockets (done).** `tcp_listen` / `tcp_port` / `tcp_accept` / `tcp_connect` / `tcp_send` /
+  `tcp_recv` / `tcp_close` — blocking IPv4 TCP straight onto the C runtime, with failures reported
+  as `-1` rather than aborting, because a compiled tool that dies on a refused connection is much
+  less useful than one that can say so. Received data is a list of bytes, not a string: a Value
+  string is a NUL-terminated `char*`, so any binary body would be silently truncated. Native-only
+  by nature (the interpreter's I/O is Bun's, which has no synchronous socket call to diff
+  against), so the tests assert the compiled binary's output the way the FFI ones do — a full
+  round trip on loopback in a single process, including a payload with an embedded NUL.
+- **Networking (next on the trunk).** An HTTP client that isn't a `curl` shell-out → an HTTP
+  server → TLS, on top of the sockets above. Unlocks web/API backends as native binaries.
 - **Stage 12+ — services stdlib.** Real crypto (not the toy cipher), a real embedded key/value or
   SQLite binding, CSV/YAML/TOML parsers. The "boring but load-bearing" tier for backends and data
   tools.
@@ -140,8 +152,8 @@ a small embeddable core):
 **RE / tooling direction** — *now the active sub-track (see the resolved ordering below).*
 - **Raw memory + pattern scanning.** ✅ *Stage 12:* `stdlib/bytes.clarity` gives byte buffers,
   endianness helpers (unsigned + signed, LE + BE), and AOB/signature scanning with `??`/`*`
-  wildcards, all pure-Clarity; `examples/sigscan.clarity` is a standalone compiled AOB scanner
-  (it inlines the byte helpers, because `clarity cc` still rejects `import` — see Track A). **Remaining:** pointer arithmetic against a live target's
+  wildcards, all pure-Clarity; `examples/sigscan.clarity` is a standalone compiled AOB scanner.
+  (It inlines the byte helpers, which predates native import support and no longer needs to.) **Remaining:** pointer arithmetic against a live target's
   address space (needs the process-memory piece below).
 - **Binary-format DSL.** ✅ *Stage 19:* `stdlib/binformat.clarity` — describe a layout as a list of
   field specs, then `parse` bytes into a map and `emit` a map back to bytes (`sizeof` too). Pure

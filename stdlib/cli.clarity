@@ -20,6 +20,7 @@ from "app_scaffold.clarity" import scaffold_app
 from "app_store.clarity" import app_store
 from "errors.clarity" import format_error
 from "c_codegen.clarity" import compile_to_c
+from "c_modules.clarity" import resolve_native_imports
 from "path.clarity" import stem
 
 -- ── Version ─────────────────────────────────────────────
@@ -116,12 +117,18 @@ fn _abspath(path) {
 -- repo root it resolved to the root, matched no source files, and wrote an
 -- *empty* bundle while still reporting success — so a rebuild appeared to
 -- work and silently produced nothing.
-fn _resolve_stdlib_dir() {
+fn _find_stdlib_dir() {
     let here = _dirname(_abspath("lexer.clarity"))
     for cand in [here, _abspath("stdlib"), _abspath("../stdlib")] {
         if exists(cand + "/lexer.clarity") { return cand }
     }
-    throw "transpile --bundle: cannot find the stdlib sources (no lexer.clarity in " + here + ", ./stdlib or ../stdlib)"
+    return null
+}
+
+fn _resolve_stdlib_dir() {
+    let found = _find_stdlib_dir()
+    if found != null { return found }
+    throw "transpile --bundle: cannot find the stdlib sources (no lexer.clarity next to the working directory, ./stdlib or ../stdlib)"
 }
 
 fn _quote(s) {
@@ -244,7 +251,17 @@ fn cc_file(cli_args) {
     let source = read(path)
     mut c_src = ""
     try {
-        c_src = compile_to_c(parse(tokenize(source, path), source))
+        -- A native build is a single C translation unit, so imports are
+        -- resolved by inlining the modules rather than by linking. Imports
+        -- resolve next to the file being compiled first, then in the stdlib,
+        -- the same order the interpreter uses.
+        let tree = parse(tokenize(source, path), source)
+        let abs = _abspath(path)
+        -- The stdlib is a *fallback* search path here, not a requirement:
+        -- `clarity cc` has to work on a program outside the repo, whose
+        -- imports all sit next to it.
+        let flat = resolve_native_imports(tree, _dirname(abs), _find_stdlib_dir(), abs)
+        c_src = compile_to_c(flat)
     } catch e {
         show red("\n" + format_error(e, source, path))
         exit(1)

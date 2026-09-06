@@ -1,0 +1,115 @@
+-- Resolving `import` for native compilation.
+--
+-- `clarity cc` emits one C translation unit, and C has no module system, so
+-- an import cannot become a link-time reference — the imported code has to be
+-- in the same unit. This module flattens a program and its import graph into
+-- a single AST: each imported file is parsed, its own imports resolved first,
+-- and its top-level declarations spliced in ahead of the importer's.
+--
+-- Consequences worth stating, because they are visible to anyone compiling:
+--
+--   * Names become global. Two modules that both define `fn helper` collide,
+--     and that is reported by name and file rather than silently resolved in
+--     favour of whichever was spliced last.
+--   * A module is included once however many times it is imported, and a
+--     cycle terminates instead of recursing.
+--   * `from "x.clarity" import a` still pulls in all of x. C has nothing
+--     finer, and taking only `a` would break x's own internal references.
+--   * A module's top-level statements run at startup, in dependency order —
+--     the same thing importing it does in the interpreter.
+--
+-- `import math` (a runtime-provided module, no path) is left alone; those are
+-- builtins, not files.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "ast_nodes.clarity" import Program
+
+-- Directory part of a path, without shelling out to dirname.
+fn _dir_of(path) {
+    let parts = split(path, "/")
+    if len(parts) <= 1 { return "." }
+    mut out = []
+    mut i = 0
+    while i < len(parts) - 1 { push(out, parts[i]); i += 1 }
+    let joined = join(out, "/")
+    if len(joined) == 0 { return "/" }
+    return joined
+}
+
+fn _join_path(dir, rel) {
+    if starts(rel, "/") { return rel }
+    if dir == "." { return rel }
+    return dir + "/" + rel
+}
+
+-- The name a top-level statement introduces, or null if it introduces none.
+fn _declared_name(stmt) {
+    let nt = stmt.node_type
+    if nt == "FnStatement" or nt == "ClassStatement" or nt == "LetStatement" {
+        return stmt.name
+    }
+    return null
+}
+
+fn _locate(rel, base_dir, extra_dir) {
+    let here = _join_path(base_dir, rel)
+    if exists(here) { return here }
+    if extra_dir != null {
+        let there = _join_path(extra_dir, rel)
+        if exists(there) { return there }
+    }
+    return null
+}
+
+fn _splice(tree, base_dir, extra_dir, label, seen, owner, out) {
+    -- Dependencies first, so a module's declarations are already present by
+    -- the time the importer's own code refers to them.
+    for stmt in tree.body {
+        if stmt.node_type != "ImportStatement" { continue }
+        if stmt.path == null { continue }
+        let full = _locate(stmt.path, base_dir, extra_dir)
+        if full == null {
+            throw "native compile: cannot find module '" + stmt.path + "' imported by " + label
+        }
+        if has(seen, full) { continue }
+        seen[full] = true
+        let src = read(full)
+        _splice(parse(tokenize(src, full), src), _dir_of(full), extra_dir, stmt.path, seen, owner, out)
+    }
+
+    for stmt in tree.body {
+        if stmt.node_type == "ImportStatement" { continue }
+        let name = _declared_name(stmt)
+        if name != null {
+            if has(owner, name) and owner[name] != label {
+                throw "native compile: '" + name + "' is defined in both " + owner[name] +
+                    " and " + label + " — a native build is one C translation unit, so " +
+                    "top-level names have to be unique across every module it pulls in"
+            }
+            owner[name] = label
+        }
+        push(out, stmt)
+    }
+    return null
+}
+
+-- Flatten `tree` and everything it imports into one Program.
+--
+-- `base_dir` is the directory of the file being compiled; `extra_dir` is an
+-- optional second place to look (the stdlib), matching how the interpreter
+-- resolves a bare "bits.clarity". Pass null for no fallback.
+--
+-- `root_path` is the path of the file `tree` was parsed from. It matters when
+-- an import cycle leads back to the root: without it the root is not in the
+-- visited set, so it is spliced once through the cycle and once as the root,
+-- and every name it declares looks like a duplicate definition. Pass null
+-- only when the tree did not come from a file.
+fn resolve_native_imports(tree, base_dir, extra_dir, root_path) {
+    mut seen = {}
+    mut owner = {}
+    mut body = []
+    if root_path != null { seen[root_path] = true }
+    _splice(tree, base_dir, extra_dir, "<main>", seen, owner, body)
+    return Program(body)
+}
