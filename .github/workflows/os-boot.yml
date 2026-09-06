@@ -70,6 +70,10 @@ jobs:
           #                                 entry point, which is the half of
           #                                 a context switch that is easy to
           #                                 get wrong
+          #   "[ok] preemption"          -- the timer took the CPU away from a
+          #                                 thread that never yielded, and gave
+          #                                 it back; cooperative scheduling
+          #                                 cannot produce this line
           #   "[ok] vfs"                 -- a path resolved: a file was created,
           #                                 written, and read back by name
           #   "hello from /bin/..."      -- an ELF was read out of the
@@ -99,6 +103,7 @@ jobs:
             grep -q "ClarityOS ready." "serial-$attempt.log" || missing="$missing ready"
             grep -q "\[ok\] context switch" "serial-$attempt.log" || missing="$missing ctxswitch"
             grep -q "\[A\] round 1" "serial-$attempt.log" || missing="$missing thread-resumed"
+            grep -q "\[ok\] preemption" "serial-$attempt.log" || missing="$missing preemption"
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"
             grep -q "hello from /bin/clarity-init" "serial-$attempt.log" || missing="$missing init-process"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"

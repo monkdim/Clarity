@@ -18,12 +18,20 @@ const sched = @import("sched/scheduler.zig");
 
 const ROUNDS = 2;
 
+// One console call, not five. Each call is atomic against preemption, but a
+// line built from several of them can still be split down the middle by the
+// timer — and these lines are what the boot gate greps for. Assembled here
+// so the whole line goes out under one lock.
 fn tick(who: []const u8, round: usize) void {
-    console.print("  [");
-    console.print(who);
-    console.print("] round ");
-    console.print_dec(round);
-    console.println("");
+    var buf: [32]u8 = undefined;
+    var n: usize = 0;
+    for ("  [") |c| { buf[n] = c; n += 1; }
+    for (who) |c| { buf[n] = c; n += 1; }
+    for ("] round ") |c| { buf[n] = c; n += 1; }
+    // ROUNDS is small enough that a single digit always suffices.
+    buf[n] = '0' + @as(u8, @intCast(round));
+    n += 1;
+    console.println(buf[0..n]);
 }
 
 fn thread_a() noreturn {

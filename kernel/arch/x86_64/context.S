@@ -14,18 +14,28 @@
  *   offset 0   rsp
  *   offset 56  rip
  *
- * Switching away pushes the callee-saved registers, records %rsp and the
- * address of the resume label, then loads the next thread's %rsp, pops *its*
- * saved registers and jumps to *its* recorded address. For a thread that has
- * run before, that address is the resume label, whose `ret` returns from the
- * clarity_switch_to *it* called, however long ago. For a brand-new thread it
- * is the entry point, whose stack init_kernel_thread laid out to match.
+ * Switching away pushes RFLAGS and the callee-saved registers, records %rsp
+ * and the address of the resume label, then loads the next thread's %rsp,
+ * pops *its* saved state and jumps to *its* recorded address. For a thread
+ * that has run before, that address is the resume label, whose `ret` returns
+ * from the clarity_switch_to *it* called, however long ago. For a brand-new
+ * thread it is the entry point, whose stack init_kernel_thread laid out to
+ * match.
+ *
+ * RFLAGS is saved because the timer preempts from inside an interrupt gate,
+ * where IF is 0. Without this, a thread resumed from that context would carry
+ * the interrupt state of whichever thread happened to switch to it: one that
+ * yielded cooperatively would come back with interrupts off and never be
+ * preempted again, and one preempted by the timer would come back with them
+ * on, midway through its own interrupt handler. Each thread now restores the
+ * interrupt state it was switched away with.
  */
 
         .text
         .globl clarity_switch_to
         .type clarity_switch_to, @function
 clarity_switch_to:
+        pushfq
         pushq %rbp
         pushq %rbx
         pushq %r12
@@ -36,13 +46,17 @@ clarity_switch_to:
         leaq  1f(%rip), %rax
         movq  %rax, 56(%rdi)            /* prev->rip = resume label */
         movq  0(%rsi), %rsp             /* switch to next's stack */
+        movq  56(%rsi), %rax            /* resume address, read before popfq
+                                           so no memory access depends on the
+                                           restored flags */
         popq  %r15
         popq  %r14
         popq  %r13
         popq  %r12
         popq  %rbx
         popq  %rbp
-        jmp   *56(%rsi)                 /* resume next where it left off */
+        popfq                           /* next's own interrupt state */
+        jmp   *%rax                     /* resume next where it left off */
 1:
         ret
         .size clarity_switch_to, . - clarity_switch_to

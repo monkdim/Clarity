@@ -33,10 +33,26 @@ every pull request; anything not gated is called out as unverified.
   `virt` machine: EL2→EL1 drop, FP/SIMD enabled, PL011 UART up. This is the
   start of the Apple Silicon track, not parity — the ARM kernel does not yet
   have memory management, scheduling, or drivers.
-- **There is still no userspace.** After printing `ClarityOS ready.` the
-  kernel tries to spawn `/bin/clarity-init` and fails: the freestanding
-  runtime does not build. This is *the* gap between "the kernel boots" and
-  "the OS runs" — see **Userspace runtime** below.
+- **The kernel reaches userspace.** It writes a small ELF to
+  `/bin/clarity-init`, and `spawn_user` reads it back off the VFS, parses it,
+  maps its segments into a fresh address space, switches CR3 and enters ring
+  3. The program's `write` reaches the kernel with the arguments it passed,
+  and its `exit` returns through `SYSRET`. All of it is on the boot gate:
+
+  ```
+  init: wrote 196 bytes to /bin/clarity-init
+  init: entering userspace
+  hello from /bin/clarity-init
+    [exit] status=0
+  ```
+
+  What that program is, is the gap. It is 47 bytes of hand-assembled machine
+  code, not the Clarity runtime, because the freestanding runtime still does
+  not build — see **Userspace runtime** below. The *mechanism* is real and
+  tested; the thing to run through it is not there yet.
+- **Threads are preempted.** A 100 Hz PIT tick takes the CPU from a thread
+  that never yields and gives it back. Gated on a test cooperative scheduling
+  cannot pass: two threads, neither of which calls `yield`.
 - **One language above the syscall boundary.** ~50,000 lines of Clarity: the
   runtime, init, tmpfs/devfs/procfs, input pipeline, compositor, window
   manager, dock, launcher, and the default apps. The desktop is exercised by
@@ -104,16 +120,30 @@ and more reusable job.
 - Physical page allocator over the firmware memory map, reserving the whole
   loaded kernel image so it cannot hand out its own pages.
 - Slab heap, scheduler init, syscall MSR wiring, VFS + tmpfs root mount.
+- Context switching, both cooperative and preemptive, and path resolution
+  through the VFS — each proved by a boot self-test that fails loudly rather
+  than a marker that merely says a function was called.
+- Exception handlers that report: a fault prints vector, name, error code and
+  a register dump. This is how the two faults in the userspace hand-off were
+  diagnosed, from CI logs, without a debugger.
 - Driver init: PS/2 (8042) with bounded status waits, framebuffer mapping
   through the real kernel address space.
 
 **Outstanding on x86_64:**
 
-- **ELF loader → `execve` → userspace.** Scaffolded, never exercised, and
-  blocked on the runtime above.
-- **Exception handlers that report.** A fault today is silent: no handler
-  prints a register dump, so a bad access simply stops the machine. This cost
-  real debugging time and should be fixed early.
+- **`execve`.** `spawn_user` is exercised on every boot; `exec` — replacing a
+  running process's image — shares its loader but has no caller yet, so it
+  has never been analysed by the compiler, let alone run. Everything in this
+  kernel that was in that state turned out to be broken, so assume it is.
+- **The kernel heap and page allocator are not preemption-safe.** Nothing
+  allocates from a thread today (every spawn happens on the boot path, where
+  preemption is a no-op), so it is not reachable — but it is the next lock
+  that has to exist, before anything that allocates runs as a thread.
+- **User pointers are not validated.** `sys_write` takes an address from
+  userspace and reads it in kernel mode without checking that it is mapped,
+  user-owned, or canonical. A bad pointer faults inside the kernel. This is
+  fine for a program the kernel wrote itself and unacceptable for anything
+  else.
 - **AHCI and virtio-net are skeletons.** Both scan PCI correctly, but
   `attach`/`send_frame`/`recv_frame` are `NotImplemented`. PCI enumeration
   itself is real.

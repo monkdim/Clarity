@@ -1,9 +1,9 @@
 //! Preemptive priority round-robin scheduler.
 //!
 //! Three priority levels (high / normal / idle). Each level has its
-//! own runqueue. A timer interrupt every 10 ms calls schedule() —
-//! the current thread is preempted, moved to the tail of its queue,
-//! and the head of the highest non-empty queue is dispatched.
+//! own runqueue. A timer interrupt every 10 ms calls preempt(), which
+//! moves the running thread to the tail of its queue and switches to
+//! the head of the highest non-empty one.
 //!
 //! Threads block by removing themselves from the runqueue and
 //! pointing at a wait reason; when the reason fires (I/O completes,
@@ -224,8 +224,13 @@ pub fn spawn_user(path: []const u8) !*Thread {
 /// kernel's initial stack behaves as thread zero.
 var boot_context: context.Context = std.mem.zeroes(context.Context);
 
-/// Pick the next runnable thread without switching to it. Used by the timer
-/// IRQ, which cannot switch stacks from inside an interrupt frame yet.
+/// Pick the next runnable thread without switching to it.
+///
+/// This only updates `current` and the queues; the CPU carries on executing
+/// whatever it was. That makes it useful for deciding, and wrong for
+/// dispatching — the timer used to call it, which would have left `current`
+/// naming a thread that was not running. Anything that means "stop running
+/// this thread" wants yield() or preempt().
 pub fn schedule() void {
     if (frozen) return;
     const prev = current;
@@ -249,11 +254,11 @@ pub fn schedule() void {
 
 /// Give up the CPU: pick the next runnable thread and actually switch to it.
 ///
-/// Separate from `schedule` because switching is only safe from a normal call
-/// like this one. Doing it inside the timer's interrupt handler means each
-/// thread resumes inside its *own* handler and returns through its own
-/// `iretq`, which works but has to be got exactly right; until it is, the
-/// timer only picks and this is what moves.
+/// Separate from `schedule`, which chooses a successor without moving to it.
+/// This is the one that moves. It is also what the timer's handler calls, by
+/// way of preempt(): each thread then resumes inside its *own* interrupt
+/// handler and leaves through its own `iretq`, which works because every
+/// thread has its own kernel stack for that frame to sit on.
 ///
 /// Returns when something switches back to the caller.
 pub fn yield() void {
@@ -349,6 +354,29 @@ pub fn adopt_current(t: *Thread) void {
     // An interrupt taken in ring 3 lands on the stack the TSS names, so RSP0
     // has to be this thread's before the CPU is ever in ring 3.
     if (t.kernel_stack_top != 0) gdt.set_kernel_stack(t.kernel_stack_top);
+}
+
+/// Preempt the running thread. Called from the timer IRQ.
+///
+/// This is a real switch, not `schedule`. `schedule` only *picks*: it moves
+/// `current` to another thread and returns, leaving the CPU executing the old
+/// one — so driving it from the timer would have left the scheduler's idea of
+/// what is running disagreeing with what is running, with the preempted
+/// thread simultaneously on the run queue and on the CPU. The timer never
+/// actually ran (nothing called timer.init), which is the only reason that
+/// never caused damage.
+///
+/// Switching from inside an interrupt handler is safe because every thread
+/// has its own kernel stack: the interrupt frame stays on the preempted
+/// thread's stack, and when something switches back, execution resumes in
+/// this call, returns through the handler, and leaves by that thread's own
+/// `iretq` with its own frame.
+///
+/// Only threads are preempted. The boot path has no Thread, so switching away
+/// from it would strand the boot sequence with nothing able to resume it.
+pub fn preempt() void {
+    if (current == null) return;
+    yield();
 }
 
 pub fn block(reason: WaitReason) void {

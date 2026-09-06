@@ -25,6 +25,8 @@ const multiboot = @import("boot/multiboot2.zig");
 const initprog = @import("initprog.zig");
 const threadtest = @import("threadtest.zig");
 const fstest = @import("fstest.zig");
+const preempttest = @import("preempttest.zig");
+const timer = @import("arch/x86_64/timer.zig");
 
 extern const __kernel_phys_end: u8;
 
@@ -88,7 +90,13 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
 
     // 3. Scheduler: idle thread + kernel-thread runqueue.
     sched.init();
-    console.println("  [ok] scheduler");
+    // The PIT, at last actually programmed: timer.init was called from
+    // nowhere, so the scheduler had no clock and nothing was ever preempted.
+    // It goes here, after the scheduler and before any thread exists, so the
+    // first tick can only ever land on the boot path — where preempt() is a
+    // no-op — and never on a half-built run queue.
+    timer.init(100);
+    console.println("  [ok] scheduler + 100 Hz timer");
 
     // 4. Syscall surface. Wires the SYSCALL/SYSRET MSRs and the
     //    int 0x80 fallback to the dispatch table.
@@ -123,7 +131,15 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         hang();
     };
 
-    // 8. Filesystem. `vfs.resolve` was a stub returning null, so nothing
+    // 8. Preemption. The timer had never been started, so nothing had ever
+    //    been taken off the CPU against its will.
+    preempttest.run() catch |err| {
+        console.print("PANIC: preemption self-test: ");
+        console.println(@errorName(err));
+        hang();
+    };
+
+    // 9. Filesystem. `vfs.resolve` was a stub returning null, so nothing
     //    could open a path and spawn_user could never load an executable.
     fstest.run() catch |err| {
         console.print("PANIC: filesystem self-test: ");
@@ -131,7 +147,7 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         hang();
     };
 
-    // 9. The first real process. This supersedes the hand-mapped ring 3
+    // 10. The first real process. This supersedes the hand-mapped ring 3
     //    self-test: it enters ring 3 the same way, but from an actual ELF
     //    read out of the filesystem, so it also covers elf.parse, segment
     //    mapping into a fresh address space, and the CR3 switch — none of
