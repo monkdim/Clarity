@@ -224,6 +224,13 @@ static size_t gc_work_len = 0, gc_work_cap = 0;
 static GCObj** gc_index = 0;              /* all live objects, sorted by payload address */
 static size_t gc_index_len = 0, gc_index_cap = 0;
 
+/* Module-level Clarity bindings are emitted at C file scope so functions can
+   see them, which puts them outside the conservative stack scan. The generated
+   program hands the collector the table of their addresses at main entry;
+   without it a global's object is swept while still reachable. */
+static Value** cl_globals = 0;
+static size_t cl_globals_n = 0;
+
 static int gc_cmp(const void* a, const void* b){
   char* pa = (char*)(*(GCObj* const*)a + 1);
   char* pb = (char*)(*(GCObj* const*)b + 1);
@@ -280,6 +287,8 @@ GC_NOSAN static void gc_collect(void){
   char* hi = sp < gc_stack_base ? gc_stack_base : sp;
   gc_scan(lo, hi);                               /* roots: the live C stack */
   gc_scan((char*)&regs, (char*)&regs + sizeof(regs));
+  for(size_t gi=0; gi<cl_globals_n; gi++)      /* roots: module-level bindings */
+    gc_scan((char*)cl_globals[gi], (char*)cl_globals[gi] + sizeof(Value));
   while(gc_work_len){                            /* transitive closure */
     GCObj* o = gc_work[--gc_work_len];
     gc_scan((char*)(o+1), (char*)(o+1) + o->size);
@@ -1595,11 +1604,38 @@ class CCodegen {
                 push(main_body, "  cl_register(\"" + c.name + "\", \"" + pair[0] + "\", &f_" + pair[1] + "_" + pair[0] + ");")
             }
         }
-        for s in top { for l in this.stmt(s, 1) { push(main_body, l) } }
+        -- Module-level bindings become C globals rather than locals of main().
+        -- A function body compiled above may reference one (Clarity resolves
+        -- module scope from anywhere in the file), and a local of main() is
+        -- invisible to it. The initialiser stays here, in source order, so
+        -- evaluation order matches the interpreter's module load.
+        mut globals = []
+        mut seen_global = {}
+        for s in top {
+            if s.node_type == "LetStatement" {
+                if not has(seen_global, s.name) {
+                    seen_global[s.name] = true
+                    push(globals, s.name)
+                }
+                push(main_body, "  v_" + s.name + " = " + this.expr(s.value) + ";")
+            } else {
+                for l in this.stmt(s, 1) { push(main_body, l) }
+            }
+        }
 
         -- Assemble: prelude, all forward declarations (so any call order and
         -- mutual recursion is free), closure bodies, function bodies, main.
         mut out = [C_PRELUDE, ""]
+        if len(globals) > 0 {
+            push(out, "/* module-level bindings */")
+            mut roots = []
+            for g in globals {
+                push(out, "Value v_" + g + ";")
+                push(roots, "&v_" + g)
+            }
+            push(out, "static Value* cl_global_roots[] = {" + join(roots, ", ") + "};")
+            push(out, "")
+        }
         for f in fns { push(out, this._fn_signature(f) + ";") }
         for c in classes {
             for m in c.methods {
@@ -1622,6 +1658,9 @@ class CCodegen {
         push(out, "  cl_argc = argc; cl_argv = argv;")
         push(out, "  GC_CAPTURE_STACK_BASE();")
         push(out, "  if(getenv(\"CLARITY_GC\")) gc_enabled = 1;")
+        if len(globals) > 0 {
+            push(out, "  cl_globals = cl_global_roots; cl_globals_n = " + str(len(globals)) + ";")
+        }
         for l in main_body { push(out, l) }
         push(out, "  cl_arena_free();")
         push(out, "  return 0;")

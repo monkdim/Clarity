@@ -58,6 +58,21 @@ fn same(tag, src) {
     assert_eq(native_run(src, tag), trim(interp_run(src)), tag)
 }
 
+-- Compile and run with CLARITY_GC=1 so mid-run collection actually happens.
+-- The default arena never frees, so a rooting bug is invisible without this.
+fn native_run_gc(src, tag) {
+    let c = compile_to_c(parse(tokenize(src, "<t>"), src))
+    let cfile = "/tmp/_clc_" + tag + ".c"
+    let bin = "/tmp/_clc_" + tag
+    write(cfile, c)
+    exec_full(CC + " -O2 -w " + cfile + " -o " + bin + " -lm" + LDL)
+    return trim(exec_full("CLARITY_GC=1 " + bin).stdout)
+}
+
+fn same_gc(tag, src) {
+    assert_eq(native_run_gc(src, tag), trim(interp_run(src)), tag)
+}
+
 -- Native-only check: FFI calls into libc/libm have no interpreter counterpart
 -- (the interpreter's FFI is a different, Bun-based surface), so we assert the
 -- compiled binary's output against a known-good expected string.
@@ -309,6 +324,24 @@ if CC == null {
     } else {
         show "-- stage 20 capstone: not Linux, native check skipped --"
     }
+    -- ── module-level bindings ──
+    -- A `let`/`mut` at file scope is visible to every function in the file.
+    -- These were emitted as locals of main(), so a function referencing one
+    -- failed to compile at all ("'v__K' undeclared"), which is what stopped
+    -- real stdlib modules from compiling natively.
+    same("global_let_read", "let K = [7, 11, 13]\nfn pick(i) { return K[i] }\nshow pick(0)\nshow pick(2)")
+    same("global_string", "let NAME = \"clarity\"\nfn greet() { return \"hi \" + NAME }\nshow greet()")
+    same("global_mut_write", "mut counter = 0\nfn bump() { counter = counter + 1\nreturn counter }\nshow bump()\nshow bump()\nshow counter")
+    same("global_map", "let CFG = {\"w\": 3, \"h\": 4}\nfn area() { return CFG[\"w\"] * CFG[\"h\"] }\nshow area()")
+    same("global_before_use", "let A = 2\nlet B = A * 3\nfn total() { return A + B }\nshow total()")
+    same("global_used_by_class", "let SCALE = 10\nclass Box { fn init(n) { this.n = n }\nfn big() { return this.n * SCALE } }\nshow Box(4).big()")
+
+    -- Module-level bindings live at C file scope, outside the conservative
+    -- collector's stack scan, so they are rooted explicitly. Writing CACHE from
+    -- inside a function leaves the global as the only reference once fill()
+    -- returns: without the root table this segfaults under CLARITY_GC=1.
+    same_gc("global_gc_rooted", "mut CACHE = []\nfn fill() { CACHE = [\"alpha\", \"beta\", \"gamma\"]\nreturn len(CACHE) }\nfn churn(n) { mut i = 0\nmut last = []\nwhile i < n { last = [i, \"pad-\" + str(i), [i, i]]\ni = i + 1 }\nreturn len(last) }\nshow fill()\nshow churn(200000)\nshow CACHE[0] + \"/\" + CACHE[1] + \"/\" + CACHE[2]")
+
     exec("rm -f /tmp/_clc_*")
 }
 
