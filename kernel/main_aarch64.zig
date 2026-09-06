@@ -23,8 +23,42 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     console.init();
     console.println("ClarityOS aarch64 micro-kernel starting...");
     console.println("  [ok] EL1 + PL011 UART");
+
+    install_vectors();
+    console.println("  [ok] exception vectors (VBAR_EL1)");
+
     console.println("ClarityOS aarch64: EL1 boot ok");
 
+    hang();
+}
+
+/// The vector table lives in vectors.S, 2 KiB-aligned as VBAR_EL1 requires.
+extern const aarch64_vectors: u8;
+
+fn install_vectors() void {
+    asm volatile (
+        \\msr vbar_el1, %[table]
+        \\isb
+        :
+        : [table] "r" (@intFromPtr(&aarch64_vectors)),
+        : "memory"
+    );
+}
+
+/// Called from every vector-table entry. `kind` is the entry index (0..15:
+/// four groups of sync/IRQ/FIQ/SError), and the syndrome registers say what
+/// happened and where. Nothing generates interrupts yet, so anything
+/// arriving here is a bug worth reporting rather than silently spinning.
+export fn aarch64_exception(kind: u64, esr: u64, elr: u64, far: u64) callconv(.C) noreturn {
+    console.print("\n\nAARCH64 EXCEPTION entry=");
+    console.print_dec(kind);
+    console.print(" esr=");
+    console.print_hex(esr);
+    console.print(" elr=");
+    console.print_hex(elr);
+    console.print(" far=");
+    console.print_hex(far);
+    console.println("");
     hang();
 }
 
