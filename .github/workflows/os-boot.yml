@@ -72,9 +72,12 @@ jobs:
           #                                 get wrong
           #   "[ok] vfs"                 -- a path resolved: a file was created,
           #                                 written, and read back by name
-          #   "hello from ring 3"        -- a CPL 3 instruction ran and its
-          #                                 `syscall` reached the kernel with
-          #                                 the arguments the program passed
+          #   "hello from /bin/..."      -- an ELF was read out of the
+          #                                 filesystem, parsed, mapped into a
+          #                                 fresh address space, and run at
+          #                                 CPL 3, and its `syscall` reached
+          #                                 the kernel with the arguments the
+          #                                 program passed
           #   "[exit] status=0"          -- SYSRET returned to ring 3 and a
           #                                 *second* syscall arrived, which is
           #                                 the only evidence that the return
@@ -97,7 +100,7 @@ jobs:
             grep -q "\[ok\] context switch" "serial-$attempt.log" || missing="$missing ctxswitch"
             grep -q "\[A\] round 1" "serial-$attempt.log" || missing="$missing thread-resumed"
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"
-            grep -q "hello from ring 3" "serial-$attempt.log" || missing="$missing ring3-syscall"
+            grep -q "hello from /bin/clarity-init" "serial-$attempt.log" || missing="$missing init-process"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
             if [ -z "$missing" ]; then
               echo "--> attempt $attempt: PASS"

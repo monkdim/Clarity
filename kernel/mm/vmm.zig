@@ -62,6 +62,27 @@ pub fn kernel() *AddressSpace {
     return &kernel_space;
 }
 
+/// Point a fresh address space's upper half at the kernel's.
+///
+/// PML4 entries 256..511 cover everything at or above
+/// 0xFFFF_8000_0000_0000: the kernel image, the HHDM, every kernel stack.
+/// Copying the entries themselves (rather than the tables beneath them) is
+/// what makes the kernel mapping *shared* — a later kernel mapping shows up
+/// in every address space, because they all point at the same next-level
+/// tables.
+///
+/// Without this a new PML4 is entirely zero, and the instruction after the
+/// `mov %rax, %cr3` that installs it is unmapped: the CPU triple-faults and
+/// the machine resets with nothing on the console. `alloc_address_space` had
+/// a comment saying it did this and then returned without doing it, which no
+/// one had noticed because nothing had ever loaded a user CR3.
+pub fn share_kernel_half(pml4_phys: u64) void {
+    const dest = phys_to_table(pml4_phys);
+    const src = phys_to_table(kernel_space.pml4_phys);
+    var i: usize = 256;
+    while (i < 512) : (i += 1) dest[i] = src[i];
+}
+
 pub fn map_page(space: *AddressSpace, virt: u64, phys: u64, flags: u64) !void {
     // Walk the four levels, allocating intermediate tables on demand.
     // Each table is one 4 KiB page from the pmm. Returns error.OutOfMemory

@@ -20,6 +20,7 @@ const elf = @import("../loader/elf.zig");
 const loader = @import("../loader/load.zig");
 const process = @import("process.zig");
 const vfs = @import("../fs/vfs.zig");
+const console = @import("../arch/x86_64/console.zig");
 
 pub const Priority = enum(u8) {
     high = 0,
@@ -64,12 +65,9 @@ pub const Thread = struct {
     exit_code: i32 = 0,
 };
 
-/// Per-CPU process table; populated lazily.
+/// Per-CPU process table. Given its allocator by init(); see the note there
+/// for why that is not a separate call any more.
 pub var process_table: process.Table = undefined;
-
-pub fn init_process_table(gpa: std.mem.Allocator) void {
-    process_table = process.Table.init(gpa);
-}
 
 const Queue = struct {
     head: ?*Thread = null,
@@ -132,6 +130,16 @@ pub fn init() void {
     for (&queues) |*q| q.* = .{};
     current = null;
     frozen = false;
+    // The process table needs its allocator before anything can register a
+    // process. This was an `init_process_table(gpa)` that nothing called, so
+    // `process_table` stayed `undefined` — which for a .bss global means
+    // zeroes, i.e. a std.mem.Allocator whose vtable pointer is null. The
+    // first spawn_user called through it, loaded a function pointer from
+    // physical page 0 (identity-mapped, and still holding the real-mode
+    // interrupt vector table), and jumped to 0xf000ff53f000ff53. Setting it
+    // here means it cannot be missed again: there is one kernel heap, and
+    // anything with a run queue needs a process table to go with it.
+    process_table = process.Table.init(heap.allocator());
 }
 
 pub fn freeze() void {
@@ -315,9 +323,32 @@ pub fn run_queued() void {
         while (i < Priority.count()) : (i += 1) {
             if (!queues[i].is_empty()) any = true;
         }
-        if (!any) return;
+        if (!any) break;
         yield();
     }
+    // The boot context is a resume point on *this* frame, and it stops being
+    // one the moment this call returns. Left set, a thread that exits later
+    // would find it, "switch back to boot", and resume inside a run_queued
+    // that already finished — re-running whatever the boot path did next.
+    // Clearing rip is how yield knows there is no boot coroutine left.
+    boot_context.rip = 0;
+}
+
+/// Make `t` the running thread directly, without the run queue picking it.
+///
+/// `spawn_user` queues the thread it builds, which is what you want when the
+/// scheduler is going to dispatch it. The first process is the exception: the
+/// boot path enters it by hand, so the thread has to come back *off* the
+/// queue and be installed as current. Otherwise the kernel believes nothing
+/// is running — getpid would answer 0, exit would have no thread to end, and
+/// a later yield could hand the CPU to a thread that is already on it.
+pub fn adopt_current(t: *Thread) void {
+    _ = queues[@intFromEnum(t.priority)].remove(t);
+    t.state = .running;
+    current = t;
+    // An interrupt taken in ring 3 lands on the stack the TSS names, so RSP0
+    // has to be this thread's before the CPU is ever in ring 3.
+    if (t.kernel_stack_top != 0) gdt.set_kernel_stack(t.kernel_stack_top);
 }
 
 pub fn block(reason: WaitReason) void {
@@ -345,7 +376,14 @@ pub fn exit(code: i32) noreturn {
         c.exit_code = code;
         // Reaping is the parent's responsibility via waitpid.
     }
-    while (true) schedule();
+    // Switch away for real. This used to be `while (true) schedule()`, which
+    // picks a successor but never moves to it — so a thread that called exit
+    // carried straight on through the loop, dead and still running, forever.
+    // A zombie is never re-queued, so yield returns only when there is
+    // genuinely nothing left to run.
+    yield();
+    console.println("  [halt] nothing left to run");
+    while (true) asm volatile ("cli; hlt");
 }
 
 pub fn run() noreturn {
@@ -424,8 +462,9 @@ pub fn exec(path: []const u8) !void {
     cur.iret_rsp = context.build_iret_frame(cur.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, 0x202, gdt.USER_CODE, gdt.USER_DATA);
     proc.name = path;
 
-    // Re-enter user mode with the new image.
-    context.enter_userland(cur.iret_rsp);
+    // Re-enter user mode with the new image. CR3 goes in with it — see
+    // enter_userland for why they cannot be separate statements.
+    context.enter_userland(cur.cr3, cur.iret_rsp);
 }
 
 pub const WaitResult = struct { pid: Pid, exit_code: i32 };
