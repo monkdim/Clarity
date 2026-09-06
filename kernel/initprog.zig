@@ -143,6 +143,12 @@ pub fn run() !noreturn {
     console.print_hex(t.iret_rsp);
     console.println("");
 
+    // From here to the `iretq` in enter_userland is one uninterrupted region.
+    // In the middle of it `current` names the init thread while the CPU is
+    // still on the boot stack, and at the end of it CR3 changes out from
+    // under that stack; neither is a state an interrupt should observe.
+    asm volatile ("cli" ::: "memory");
+
     // spawn_user queues the thread for the scheduler to pick. We are about to
     // enter it directly instead, so take it back off the queue and make it
     // current — otherwise the kernel would run a process it does not believe

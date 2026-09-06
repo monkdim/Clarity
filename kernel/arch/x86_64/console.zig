@@ -29,12 +29,47 @@ pub fn init() void {
     port.out8(COM1 + 4, 0x0B);
 }
 
+// ── output atomicity ────────────────────────────────────
+//
+// The timer preempts a thread between any two instructions, so two threads
+// printing at once would interleave *inside* a line — one thread's bytes
+// landing in the middle of another's word. On a single CPU, holding off
+// interrupts for the length of a call is exactly a console lock: nothing else
+// can run, so nothing else can print.
+//
+// It saves and restores rather than ending with a bare `sti`, because print
+// is also called from the exception reporter and from other paths where
+// interrupts are already off and must stay off.
+//
+// The cost is real on real hardware: serial_out busy-waits on the UART, so a
+// 40-character line at 38400 baud holds interrupts off for about 10 ms — a
+// whole timer tick. Under QEMU the port write returns immediately, which is
+// what the gate measures. A buffered console that hands bytes to an
+// interrupt-driven writer is the fix, and is not this change.
+fn lock() u64 {
+    const flags = asm volatile ("pushfq; popq %[out]"
+        : [out] "=r" (-> u64),
+        :
+        : "memory"
+    );
+    asm volatile ("cli" ::: "memory");
+    return flags;
+}
+
+fn unlock(flags: u64) void {
+    if ((flags & 0x200) != 0) asm volatile ("sti" ::: "memory");
+}
+
 pub fn print(s: []const u8) void {
+    const flags = lock();
+    defer unlock(flags);
     for (s) |c| putchar(c);
 }
 
 pub fn println(s: []const u8) void {
-    print(s);
+    const flags = lock();
+    defer unlock(flags);
+    for (s) |c| putchar(c);
     putchar('\n');
 }
 
@@ -70,8 +105,11 @@ fn putchar(c: u8) void {
 /// std.fmt, no allocator) so it is safe to call from the earliest boot
 /// paths and from panic handlers.
 pub fn print_hex(v: u64) void {
+    const flags = lock();
+    defer unlock(flags);
     const digits = "0123456789abcdef";
-    print("0x");
+    putchar('0');
+    putchar('x');
     var i: u6 = 60;
     var started = false;
     while (true) : (i -= 4) {
@@ -86,6 +124,8 @@ pub fn print_hex(v: u64) void {
 
 /// Print an unsigned value in decimal.
 pub fn print_dec(v: u64) void {
+    const flags = lock();
+    defer unlock(flags);
     if (v == 0) {
         putchar('0');
         return;

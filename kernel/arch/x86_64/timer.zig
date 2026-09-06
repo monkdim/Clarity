@@ -33,11 +33,16 @@ pub fn init(target_hz: u32) void {
 fn timer_irq(frame: *idt.InterruptFrame) callconv(.Interrupt) void {
     _ = frame;
     ticks += 1;
+    // Acknowledge before switching away. The PIC will not raise another
+    // timer interrupt until it sees this, and the switch may not come back
+    // for a whole round of the run queue — acknowledging afterwards would
+    // stop the clock at the first preemption.
     idt.end_of_interrupt(TIMER_VECTOR);
-    // Cooperatively yield to the scheduler. The dispatch path
-    // chooses the next thread; if it's a different one, the
-    // arch-level switch happens before we return from this IRQ.
-    sched.schedule();
+    // A real switch. This used to call sched.schedule(), which only chooses
+    // the next thread without moving to it — so the comment here claimed
+    // "the arch-level switch happens before we return from this IRQ" and
+    // nothing of the sort took place.
+    sched.preempt();
 }
 
 pub fn uptime_ms() u64 { return ticks * (1000 / hz); }

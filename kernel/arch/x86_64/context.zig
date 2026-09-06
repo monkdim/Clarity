@@ -42,8 +42,9 @@ comptime {
 /// past the highest valid byte.
 pub fn init_kernel_thread(ctx: *Context, stack_top: u64, entry: *const fn (u64) callconv(.C) noreturn, arg: u64) void {
     var rsp = stack_top & ~@as(u64, 0xF);
-    // Pre-push the six callee-saved registers our switch_to will pop.
-    rsp -= 8 * 6;
+    // Pre-push exactly what switch_to pops, in the order it pops them: the
+    // six callee-saved registers, then RFLAGS (pushed first, so popped last).
+    rsp -= 8 * 7;
     const slots: [*]u64 = @ptrFromInt(rsp);
     slots[0] = 0;             // r15
     slots[1] = 0;             // r14
@@ -51,6 +52,11 @@ pub fn init_kernel_thread(ctx: *Context, stack_top: u64, entry: *const fn (u64) 
     slots[3] = 0;             // r12
     slots[4] = 0;             // rbx
     slots[5] = arg;           // rbp — repurposed; first instruction of `entry` will move it to rdi
+    // IF=1 (bit 9) and the reserved bit 1, which is always set. A thread that
+    // started with interrupts off could never be preempted, and the first
+    // switch into a new thread often comes from inside the timer's interrupt
+    // gate, where IF is 0 — so this has to be stated, not inherited.
+    slots[6] = 0x202;         // rflags
     ctx.rsp = rsp;
     ctx.rbp = 0;
     ctx.rbx = 0;

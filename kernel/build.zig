@@ -30,6 +30,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .code_model = .kernel,
     });
+    // No red zone. On x86-64 SysV a leaf function may use the 128 bytes
+    // below %rsp without adjusting it — but an interrupt taken at the same
+    // privilege level pushes its frame at %rsp, straight through that area.
+    // It cost nothing while no interrupt ever arrived; with the timer running
+    // it is silent corruption of whichever leaf function was unlucky.
+    kernel.root_module.red_zone = false;
+
     kernel.setLinkerScript(b.path("boot/linker.ld"));
     kernel.addAssemblyFile(b.path("boot/start.S"));
     kernel.addAssemblyFile(b.path("arch/x86_64/context.S"));
