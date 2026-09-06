@@ -18,7 +18,7 @@
 //! something compares bytes.
 
 const std = @import("std");
-const console = @import("arch/x86_64/console.zig");
+const console = @import("arch/console.zig");
 const vfs = @import("fs/vfs.zig");
 
 const PATH = "/bin/hello.txt";

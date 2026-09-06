@@ -23,6 +23,9 @@ const virtio_input = @import("arch/aarch64/virtio_input.zig");
 const keyboard = @import("arch/aarch64/keyboard.zig");
 const line = @import("drivers/line.zig");
 const stdin = @import("drivers/stdin.zig");
+const vfs = @import("fs/vfs.zig");
+const tmpfs = @import("fs/tmpfs.zig");
+const fstest = @import("fstest.zig");
 const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
@@ -84,6 +87,14 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // A kernel heap, over the page allocator. Nothing on this architecture
     // needed one until something had to parse an ELF.
     heap.init();
+
+    // A filesystem. The first subsystem to arrive here already written:
+    // fs/vfs.zig and fs/tmpfs.zig import std, the heap, and each other, and
+    // needed no change at all to run on this machine. The selftest below is
+    // the same file the x86_64 kernel runs, which is why it is worth saying
+    // — a port that shares its code and a port that has a second copy of it
+    // look identical from a boot log.
+    filesystem_selftest();
 
     // A process's address space — built, installed, questioned, and taken
     // apart again. Nothing runs in it yet; that it can exist at all is what
@@ -837,6 +848,26 @@ fn screen_selftest() void {
     } else {
         console.println("  [FAIL] framebuffer: wrote a pattern, read back something else");
     }
+}
+
+/// Mount a root filesystem and prove a path resolves.
+///
+/// Needs the heap, so it runs after heap.init(). Everything it exercises —
+/// resolution, create, write, read back, directory listing — is code the
+/// x86_64 kernel has been running since long before this architecture could
+/// allocate a page, and none of it needed changing.
+fn filesystem_selftest() void {
+    vfs.init();
+    tmpfs.mount_root() catch |e| {
+        console.print("  [FAIL] vfs: could not mount a root: ");
+        console.println(@errorName(e));
+        return;
+    };
+    fstest.run() catch |e| {
+        console.print("  [FAIL] vfs: ");
+        console.println(@errorName(e));
+        return;
+    };
 }
 
 /// Find the keyboard and read what is typed on it, a line at a time.
