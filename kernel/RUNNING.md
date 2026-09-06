@@ -243,12 +243,13 @@ does not exist yet, and no way to start a program because nothing can `exec`.
 It ends when its input does — three seconds of nothing — so a boot with
 nobody at the keyboard still finishes.
 
-**Typing while it is busy loses characters.** The keyboard is polled and only
-a read polls it, so nothing drains the device's 64-event queue while a
-command runs. Forty characters typed at a waiting prompt all arrive; the same
-forty sent while `help` is printing arrive as ten. Nobody types faster than
-the shell echoes, so this bites tests rather than people — but it is why
-`tools/key_check.py` waits for each prompt before typing the next line.
+**Typing while it is busy used to lose characters.** The keyboard was polled
+and only a read polled it, so nothing drained the device's 64-event queue
+while a command ran. Forty characters typed at a waiting prompt all arrived;
+the same forty sent while `help` was printing arrived as nine, and the Enter
+with them. The keyboard now has its own GIC interrupt and system calls run
+with interrupts unmasked, so all forty arrive — `tools/key_check.py` sends
+them without waiting for the prompt and fails if fewer come back.
 
 `/bin/clarity-init` — the compiled, linked ELF running at EL0 — calls
 `read(0, ...)` twice. The first time it deliberately points at its own

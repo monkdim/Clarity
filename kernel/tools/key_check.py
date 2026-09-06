@@ -87,6 +87,25 @@ SHELL_SESSION = [
 ]
 SHELL_EXIT_STATUS = 7
 
+# And one burst that is deliberately not polite about the prompt.
+#
+# Everything above waits for the shell to ask before typing at it, which is
+# what a person does and is not what breaks. This sends `help` and then, with
+# no pause at all, forty more characters — so they land while the shell is
+# writing its eight lines of output and the kernel is inside `write`.
+#
+# It is a real measurement and not a formality. Before the keyboard had an
+# interrupt, and while system calls ran with interrupts masked, this arrived
+# as nine characters and no Enter: the device queue holds sixty-four events,
+# QEMU makes four per key, and nothing emptied it until the next read. The
+# shell answered `count abcdefghi` and then gave up on end of input. So a
+# kernel that regresses to polling fails here rather than passing quietly.
+#
+# `count` is the command because the shell answers it with a number: the
+# check is against what the shell *received*, not against what the screen
+# shows, and forty is a different answer from nine.
+BUSY_PAYLOAD = "".join("abcdefghij"[i % 10] for i in range(40))
+
 # What the screen must show, on a row of its own, after everything has run.
 #
 # This used to be the kernel's own corrected line, "  > hello", printed near
@@ -355,6 +374,15 @@ def main():
                       % "".join(keys))
                 return 1
             send_keys(m, keys)
+        # The burst. `help` is waited for like everything else; what follows
+        # it is not waited for at all, which is the whole point.
+        if not wait_for_count(log, SHELL_PROMPT, prompts_seen(log) + 1,
+                              time.time() + 60, qemu):
+            print("FAIL: the shell stopped prompting before the busy burst")
+            return 1
+        send_keys(m, list("help"))
+        send_keys(m, list("count " + BUSY_PAYLOAD))
+
         if not wait_for_count(log, SHELL_PROMPT, prompts_seen(log) + 1,
                               time.time() + 60, qemu):
             print("FAIL: the shell stopped prompting before exit")
@@ -448,6 +476,51 @@ def main():
                 if candidate.startswith("$ ") or "clarity-sh" in candidate:
                     print("  " + candidate)
             return 1
+    # And the burst, which is the one command that was not typed at a waiting
+    # prompt. Both halves are required, because they fail differently: the
+    # echo says every character reached the kernel, and the answer says the
+    # whole line — Enter included — reached the shell. A kernel that dropped
+    # the last few would still echo a plausible-looking line and then sit
+    # there with no command to run.
+    busy_echo = "$ count " + BUSY_PAYLOAD
+    if busy_echo not in text:
+        print("FAIL: %d characters were typed while the shell was writing, "
+              "and this is what arrived:" % (len("count ") + len(BUSY_PAYLOAD)))
+        for candidate in text.splitlines():
+            if candidate.startswith("$ count "):
+                print("  %s  (%d of %d characters)"
+                      % (candidate, len(candidate) - 2,
+                         len("count ") + len(BUSY_PAYLOAD)))
+        return 1
+    # The answer has to be the line straight after the echo. Searching the
+    # whole log for "40" would find it in a memory size or a tick count and
+    # pass on a shell that never answered at all.
+    lines = text.splitlines()
+    where = lines.index(busy_echo) if busy_echo in lines else -1
+    answer = lines[where + 1].strip() if 0 <= where < len(lines) - 1 else ""
+    if answer != str(len(BUSY_PAYLOAD)):
+        print("FAIL: the shell echoed the busy line but answered %r, not %r"
+              % (answer, str(len(BUSY_PAYLOAD))))
+        return 1
+
+    # And that the keyboard's interrupt is the thing doing the work. Reads
+    # poll the device queue too, so a keyboard whose interrupt never reached
+    # this core still delivers keys — slowly, and losing them under exactly
+    # the load the burst above applies. Without this line, a broken GIC
+    # routing would show up only as an intermittent failure of that burst.
+    served = 0
+    for candidate in lines:
+        if "keyboard: " in candidate and "interrupt" in candidate and \
+                "serviced" in candidate:
+            served = int(candidate.split("keyboard: ")[1].split()[0])
+    if served == 0:
+        print("FAIL: keys arrived, but the kernel serviced no keyboard "
+              "interrupts — the device is being polled, not routed")
+        for candidate in lines:
+            if "keyboard" in candidate:
+                print("  " + candidate)
+        return 1
+
     want_exit = "shell: ran at EL0, read its own input"
     if want_exit not in text:
         print("FAIL: the shell did not run to completion")
@@ -466,7 +539,10 @@ def main():
     print("      (%d bytes of screenshot, every character cell checked)"
           % len(shot_bytes))
     print("      the shell answered %d commands and exited %d as asked"
-          % (len(SHELL_SESSION), SHELL_EXIT_STATUS))
+          % (len(SHELL_SESSION) + 1, SHELL_EXIT_STATUS))
+    print("      %d characters typed while it was writing all arrived, "
+          "over %d keyboard interrupts"
+          % (len("count ") + len(BUSY_PAYLOAD), served))
     return 0
 
 

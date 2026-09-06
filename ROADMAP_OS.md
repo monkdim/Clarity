@@ -53,11 +53,15 @@ every pull request; anything not gated is called out as unverified.
     enforces that rather than this kernel intending it
   - kernel threads switching, cooperatively and preemptively
   - a 1024×768 framebuffer with the boot log drawn on it, 64×48 characters,
-    and a keyboard over virtio-input with a line discipline above it
+    and a keyboard over virtio-input — on its own GIC interrupt, with a line
+    discipline above it
+  - tmpfs and the VFS, the same files the x86_64 kernel runs
+  - a shell, reading its own input and running commands against that
+    filesystem
 
   This is no longer "the start of the Apple Silicon track". It is not parity
-  either: there is no scheduler, no filesystem and no shell on this side. See
-  **Outstanding on aarch64** below.
+  either: there is no scheduler on this side. See **Outstanding on aarch64**
+  below.
 - **The kernel reaches userspace.** It writes a small ELF to
   `/bin/clarity-init`, and `spawn_user` reads it back off the VFS, parses it,
   maps its segments into a fresh address space, switches CR3 and enters ring
@@ -256,16 +260,15 @@ What is left, in rough order:
   preemptively, and the boot selftest drives it directly. Nothing keeps run
   queues, priorities or a process table, so programs run one after another
   rather than at the same time.
-- **A filesystem.** Programs are loaded from ELFs embedded in the kernel
-  image because there is nowhere to read one from. The VFS and tmpfs on the
-  x86_64 side are architecture-neutral Zig and should cross over largely
-  intact.
-- **A shell.** `read(2)` delivers a line to a program, and the line
-  discipline echoes and edits, but nothing holds a terminal or a session.
-  This is the increment that makes the ARM side feel like an operating
-  system rather than a boot log.
-- **Interrupt-driven input.** The keyboard is polled. The GIC routing for
-  the virtio slots is in the device tree and nothing reads it.
+- **A filesystem with something under it.** tmpfs and the VFS run here now,
+  unchanged from the x86_64 side, and `cat` reads through them. There is
+  still no disk, so the root is tmpfs and programs are still loaded from ELFs
+  embedded in the kernel image — there is nowhere else to read one from.
+- **A session.** The shell reads, parses and runs commands, and that is all
+  it is: nothing holds a terminal, a process table or a working directory,
+  and `exit` ends the boot's last program rather than returning to anything.
+  There is no `exec`, so the shell cannot start a program, and no `getdents`,
+  so it has `cat` and no `ls`.
 - **Real blocking.** `read(2)` cannot block: there is no scheduler to block a
   thread on, so it spins and reports end of input after three seconds. That
   is a stand-in, and it is documented as one in `drivers/stdin.zig`.

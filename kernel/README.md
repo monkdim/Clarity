@@ -58,9 +58,15 @@ claim with no marker behind it is in "What does not run yet".
   out of a screenshot — replaying the console's own wrapping and scrolling
   over the serial log to work out what each cell should hold, then comparing
   every pixel against a glyph it renders itself from `tools/font8x8.txt`
-- **a keyboard**: virtio-input over the virtio-mmio bus, found by walking the
-  thirty-two slots the device tree names rather than by knowing where QEMU
-  puts them
+- **a keyboard, on its own interrupt**: virtio-input over the virtio-mmio bus,
+  found by walking the thirty-two slots the device tree names rather than by
+  knowing where QEMU puts them, and delivered through the GIC on the SPI that
+  same node names. Events land in a ring here, so typing survives a program
+  that is busy — which it did not before: the device queue holds sixty-four
+  events, four to a key press, and only a read used to empty it. Measured at
+  the shell: forty characters typed while `help` printed arrived as nine, and
+  now arrive as forty. `tools/key_check.py` types them and fails if fewer
+  come back
 - **a filesystem, shared with x86_64 and unchanged**: `fs/vfs.zig` and
   `fs/tmpfs.zig` import `std`, the heap and each other and nothing else, so
   they run here as written. The marker comes from `fstest.zig` — the *same
@@ -158,19 +164,16 @@ Not written:
   block either: there is no scheduler to block a thread on, so a read spins
   and reports end of input after three seconds — a stand-in for blocking, not
   blocking.
-- **Characters typed while a program is busy are lost.** The keyboard is
-  polled and only a read polls it, so nothing drains the device's queue while
-  a command runs or its output is written; the queue is 64 events, or 16 key
-  presses. Measured: 40 characters typed at a prompt the shell is reading all
-  arrive, the same 40 sent while it prints `help` arrive as 10. No person
-  types faster than the shell echoes, so this bites tests rather than people —
-  but the honest fix is interrupt-driven input, and the GIC routing for the
-  virtio slots is in the device tree and still unread. The keycode table covers the main block only — no function keys,
-  keypad, arrows or modifiers past shift, because nothing reads them yet and
-  a table of untested entries is a table of guesses. The line editor has
-  backspace and nothing else: no kill-line, no history, no cursor keys. The
-  keyboard is polled rather than interrupt-driven; the GIC routing for the
-  virtio slots is in the device tree and nothing reads it.
+- The keycode table covers the main block only — no function keys, keypad,
+  arrows or modifiers past shift, because nothing reads them yet and a table
+  of untested entries is a table of guesses. The line editor has backspace and
+  nothing else: no kill-line, no history, no cursor keys.
+- Preemption stops at the kernel's door. System calls run with interrupts on,
+  so devices are serviced during one, but a time slice that expires inside a
+  system call is ignored rather than taken: suspending a half-finished call
+  would leave its frame on a stack nothing returns to until that thread runs
+  again, and there is no scheduler yet that could say what should happen when
+  it does. A program in a long system call therefore cannot be preempted.
 - On aarch64: a scheduler and a filesystem. Threads can be switched, but
   nothing keeps run queues, priorities or a process table — the boot selftest
   drives the switching primitive directly. Programs are loaded from an ELF
