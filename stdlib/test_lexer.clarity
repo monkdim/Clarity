@@ -182,4 +182,5 @@ if failed == 0 {
     show "All {passed} self-hosting lexer tests passed!"
 } else {
     show "{passed} passed, {failed} failed"
+    exit(1)
 }

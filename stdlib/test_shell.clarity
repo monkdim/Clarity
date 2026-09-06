@@ -251,4 +251,7 @@ if failed == 0 {
     show "All tests passed!"
 } else {
     show "{failed} test(s) FAILED"
+    -- Without this the runner sees a clean exit and reports PASS for a file
+    -- with failing assertions, which is how these went unnoticed in CI.
+    exit(1)
 }
