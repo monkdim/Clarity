@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const multiboot = @import("../boot/multiboot2.zig");
-const console = @import("../arch/x86_64/console.zig");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SHIFT: u6 = 12;
@@ -23,10 +22,11 @@ var total_pages: usize = 0;
 var free_pages: usize = 0;
 var next_hint: usize = 0;
 
+// Physical end of the loaded kernel image, from the linker script.
+extern const __kernel_phys_end: u8;
+
 pub fn init(memory_map: []const multiboot.MemoryMapEntry) void {
-    console.println("    pmm: memset bitmap");
     @memset(&bitmap, 0xFF); // every page reserved by default
-    console.println("    pmm: scanning memory map");
     for (memory_map) |entry| {
         if (entry.region_type != @intFromEnum(multiboot.MemoryRegionType.available)) continue;
         const start_page = entry.base_addr >> PAGE_SHIFT;
@@ -40,11 +40,14 @@ pub fn init(memory_map: []const multiboot.MemoryMapEntry) void {
         }
         total_pages = @max(total_pages, end_page);
     }
-    console.println("    pmm: reserving low memory");
-    // First MiB is always reserved; the kernel image is reserved by
-    // the linker script keep-out region.
+    // Reserve the first MiB (BIOS/legacy) and the whole loaded kernel image
+    // (code, rodata, data, bss, boot page tables, and boot stack) so we
+    // never allocate a page the kernel is already using.
+    const kernel_end: usize = @intFromPtr(&__kernel_phys_end);
+    const kernel_end_page = (kernel_end + PAGE_SIZE - 1) >> PAGE_SHIFT;
+    const reserve_upto = @max(@as(usize, 256), kernel_end_page);
     var p: usize = 0;
-    while (p < 256 and p < total_pages) : (p += 1) {
+    while (p < reserve_upto and p < total_pages) : (p += 1) {
         if (!is_set(p)) {
             set_bit(p);
             free_pages -= 1;

@@ -51,6 +51,11 @@ SECTIONS {
         *(.bss .bss.*)
     }
 
+    /* Physical end of the loaded kernel image (LMA). pmm reserves
+       [0, __kernel_phys_end) so it never hands out pages occupied by the
+       kernel, its boot page tables, or its stack. */
+    __kernel_phys_end = . - KERNEL_VMA;
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.note.*)
