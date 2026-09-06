@@ -8,6 +8,22 @@
 //! kernel code can print identically on both architectures.
 
 const vm = @import("vm.zig");
+const text = @import("../../graphics/console.zig");
+
+/// Where else everything printed should go.
+///
+/// Null until there is a screen, which cannot be before the device tree has
+/// been read — and by then the console has already said several things. Those
+/// early lines exist only on the serial line, which is correct: they are about
+/// finding the machine, and one of the things being found is the display.
+///
+/// Opt-in and set once, so the ordinary path stays a single MMIO write. The
+/// x86_64 side mirrors to VGA the same way and for the same reason.
+var mirror: ?*text.Console = null;
+
+pub fn set_mirror(c: *text.Console) void {
+    mirror = c;
+}
 
 /// The PL011's physical address on QEMU's `virt`, seen through the kernel's
 /// direct map. It has to be a constant rather than something read from the
@@ -87,4 +103,5 @@ pub fn print_dec(v: u64) void {
 fn putchar(c: u8) void {
     while ((mmio_read(UARTFR) & FR_TXFF) != 0) {}
     mmio_write(UARTDR, c);
+    if (mirror) |m| m.put(c);
 }

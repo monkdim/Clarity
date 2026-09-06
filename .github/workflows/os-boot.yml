@@ -200,6 +200,15 @@ jobs:
           qemu-system-aarch64 --version | head -1
           zig version
 
+      # graphics/font8x8.zig is generated from tools/font8x8.txt and checked
+      # in, so building the kernel needs no Python. This is what stops the two
+      # drifting: edit the text file without regenerating and the boot gate
+      # says so, rather than the screen quietly showing the old glyphs.
+      - name: The console font is not stale
+        run: |
+          cd kernel
+          python3 tools/make_font.py --check
+
       - name: Build the aarch64 kernel
         run: |
           cd kernel
@@ -335,6 +344,8 @@ jobs:
              && grep -q "clarity-demo: all checks passed" serial-arm.log \
              && grep -q "float 3.1415929203539825 1.4142135623730951 6.25" serial-arm.log \
              && grep -q "\[ok\] demo: a Clarity program ran on aarch64" serial-arm.log \
+             && grep -q "\[ok\] console on screen:" serial-arm.log \
+             && grep -q "\[ok\] console: 95 glyphs drawn, screen scrolled" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \

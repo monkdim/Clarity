@@ -48,9 +48,18 @@ carries on headless, which is why the flag is not optional if you want to see
 anything. Drop `-serial stdio` for `-serial file:boot.log` if you would rather
 have the log in a file than mixed into the QEMU window's terminal.
 
-You should get a 1024×768 window: slate background, blue border, and four
-colour patches — red, green, blue, white. That picture is the test the boot
-gate checks pixel by pixel.
+You should get a 1024×768 window. It shows a test pattern first — slate
+background, blue border, four colour patches — and then the boot log itself,
+in white on slate, 64 columns by 48 rows. Everything the kernel says from the
+`[ok] console on screen` line onward appears there as well as on the serial
+line.
+
+That is what the boot gate checks: it screenshots the display and compares
+*every character cell* against what the serial log says should be there,
+rendering the glyphs itself from `tools/font8x8.txt`. The kernel draws from
+`graphics/font8x8.zig`, which is generated from that file — so a generator
+that dropped a row, a console that wrapped at the wrong column, or a scroll
+that sheared by a pixel makes the two disagree.
 
 The serial log should report the machine describing itself:
 
@@ -214,10 +223,19 @@ display.
 
 ```sh
 python3 tools/fb_check.py zig-out/bin/clarity-kernel-aarch64.img
+python3 tools/make_font.py --png /tmp/font.png   # look at the font
+python3 tools/make_font.py --check               # is the generated .zig stale?
 ```
 
-Boots the ARM kernel, takes a screendump through QEMU's monitor, and verifies
-the colours at the coordinates the kernel draws them. The rest of the boot
+`fb_check.py` boots the ARM kernel, takes a screendump through QEMU's monitor,
+and reads the text back out of it — replaying the console's own wrapping and
+scrolling over the serial log to work out what each cell should hold, then
+comparing every pixel.
+
+`make_font.py` regenerates `graphics/font8x8.zig` from `tools/font8x8.txt`.
+The `.zig` is checked in, so building needs no Python; `--check` is what stops
+the two drifting, and `--png` draws the font out so it can be looked at, which
+is the only way to proofread eight bytes per glyph. The rest of the boot
 assertions live in `.github/workflows/os-boot.yml`, which boots the x86 image
 three times and requires all fifteen markers on every attempt, and boots the
 ARM image twice — once with 512 MiB and once with 4 GiB, because a machine
