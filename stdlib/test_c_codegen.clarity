@@ -369,6 +369,18 @@ if CC == null {
     same("null_coalesce_evaluates_left_once", "mut n = 0\nfn bump() { n = n + 1\nreturn n }\nshow bump() ?? 99\nshow n")
     same("type_builtin", "show type(null)\nshow type(true)\nshow type(1)\nshow type(1.5)\nshow type(\"s\")\nshow type([1])\nshow type({\"a\": 1})\nclass Foo { fn init() {} }\nshow type(Foo())")
 
+    -- A top-level function mentioned as a value, rather than called. The
+    -- reference used to emit `v_twice`, a variable that does not exist; it
+    -- now emits a closure wrapping the C function. The shadowing cases are
+    -- the ones that matter: when a local or a parameter binds the same name,
+    -- that is what the program meant, and the function must not win.
+    same("function_as_value", "fn twice(n) { return n * 2 }\nfn apply(f, n) { return f(n) }\nshow apply(twice, 5)")
+    same("function_as_value_two_args", "fn add(a, b) { return a + b }\nfn apply2(f, a, b) { return f(a, b) }\nshow apply2(add, 3, 4)")
+    same("function_as_value_zero_args", "fn nine() { return 9 }\nfn apply(f, n) { return f(n) }\nshow apply(nine, 0)")
+    same("function_as_value_in_map", "fn twice(n) { return n * 2 }\nshow map([1, 2, 3], twice)")
+    same("local_shadows_function_name", "fn twice(n) { return n * 2 }\nfn shadow() { let twice = 99\nreturn twice }\nshow shadow()")
+    same("param_shadows_function_name", "fn twice(n) { return n * 2 }\nfn shadow2(twice) { return twice + 1 }\nshow shadow2(7)")
+
     -- ── stage 21: TCP sockets ──
     -- Native-only: the interpreter's I/O is Bun's, which has no synchronous
     -- socket call to diff against, so this asserts the compiled binary's

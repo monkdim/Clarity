@@ -1176,6 +1176,9 @@ class CCodegen {
         this.fn_names = []      -- top-level function names (call → f_name)
         this.closure_id = 0     -- next hoisted-closure id
         this.tmp_id = 0         -- next generated C temporary name
+        this.fn_arity = {}      -- top-level function name → parameter count
+        this.fn_values = {}     -- functions referenced as values (need a thunk)
+        this.local_names = []   -- names bound inside the function being emitted
         this.closure_defs = []  -- emitted closure function bodies (line lists)
     }
 
@@ -1475,7 +1478,19 @@ class CCodegen {
         if nt == "StringLiteral" { return "cl_str(\"" + _c_escape(node.value) + "\")" }
         if nt == "BoolLiteral" { return if node.value { "cl_bool(1)" } else { "cl_bool(0)" } }
         if nt == "NullLiteral" { return "cl_null()" }
-        if nt == "Identifier" { return "v_" + node.name }
+        if nt == "Identifier" {
+            -- A bare mention of a top-level function — `apply(twice, 5)`, not
+            -- `twice(5)`, which CallExpression handles directly — is a value.
+            -- Emitting `v_twice` would name a variable that does not exist,
+            -- and `f_twice` is the C function, not a Value; so wrap it in a
+            -- closure. Skipped when something nearer binds the same name,
+            -- because then the local is what the program meant.
+            if has(this.fn_arity, node.name) and not contains(this.local_names, node.name) {
+                this.fn_values[node.name] = true
+                return "cl_closure_new(&__fnval_" + node.name + ", 0, 0)"
+            }
+            return "v_" + node.name
+        }
         if nt == "ThisExpression" { return "v_this" }
         if nt == "FnExpression" { return this._closure(node) }
         if nt == "UnaryOp" {
@@ -1691,11 +1706,46 @@ class CCodegen {
     }
 
     fn function(node) {
+        this.local_names = this._bound_names(node)
         mut lines = [this._fn_signature(node) + " {"]
         for s in _block_stmts(node.body) { for l in this.stmt(s, 1) { push(lines, l) } }
         push(lines, "  return cl_null();")
         push(lines, "}")
+        this.local_names = []
         return lines
+    }
+
+    -- Every name this function binds: its parameters, and any `let`/`mut` or
+    -- loop variable anywhere inside it. Used only to decide whether a mention
+    -- of a top-level function's name actually refers to that function.
+    fn _bound_names(node) {
+        mut names = []
+        for p in node.params {
+            let pname = if type(p) == "list" { p[0] } else { p }
+            push(names, pname)
+        }
+        this._collect_bound(_block_stmts(node.body), names)
+        return names
+    }
+
+    fn _collect_bound(stmts, acc) {
+        for s in stmts {
+            let nt = s.node_type
+            if nt == "LetStatement" { push(acc, s.name) }
+            elif nt == "ForStatement" {
+                if s.variable != null { push(acc, s.variable) }
+                this._collect_bound(_block_stmts(s.body), acc)
+            }
+            elif nt == "WhileStatement" { this._collect_bound(_block_stmts(s.body), acc) }
+            elif nt == "IfStatement" {
+                this._collect_bound(_block_stmts(s.body), acc)
+                if s.elif_clauses != null {
+                    for clause in s.elif_clauses { this._collect_bound(_block_stmts(clause[1]), acc) }
+                }
+                if s.else_body != null { this._collect_bound(_block_stmts(s.else_body), acc) }
+            }
+        }
+        return null
     }
 
     -- Resolve a class's callable methods, walking the parent chain so an
@@ -1762,7 +1812,11 @@ class CCodegen {
         mut classes = []
         mut top = []
         for stmt in tree.body {
-            if stmt.node_type == "FnStatement" { push(fns, stmt); push(this.fn_names, stmt.name) }
+            if stmt.node_type == "FnStatement" {
+                push(fns, stmt)
+                push(this.fn_names, stmt.name)
+                this.fn_arity[stmt.name] = len(stmt.params)
+            }
             elif stmt.node_type == "ClassStatement" {
                 push(classes, stmt)
                 push(this.classes, stmt.name)
@@ -1828,9 +1882,23 @@ class CCodegen {
             push(out, "Value __closure_" + str(cid) + "(Value* __a, Value* __cap);")
             cid += 1
         }
+        -- A top-level function used as a value needs a closure-shaped wrapper:
+        -- the closure convention is (args array, captures) but a top-level
+        -- function takes its parameters individually, so the thunk unpacks.
+        for fname in keys(this.fn_values) {
+            push(out, "Value __fnval_" + fname + "(Value* __a, Value* __cap);")
+        }
         push(out, "")
         for cdef in this.closure_defs { for l in cdef { push(out, l) } push(out, "") }
         for l in fn_body { push(out, l) }
+        for fname in keys(this.fn_values) {
+            mut argv = []
+            mut ai = 0
+            while ai < this.fn_arity[fname] { push(argv, "__a[" + str(ai) + "]"); ai += 1 }
+            push(out, "Value __fnval_" + fname + "(Value* __a, Value* __cap) { (void)__cap; (void)__a; return f_" +
+                fname + "(" + join(argv, ", ") + "); }")
+        }
+        push(out, "")
         for l in class_body { push(out, l) }
         push(out, "int main(int argc, char** argv) {")
         push(out, "  cl_argc = argc; cl_argv = argv;")

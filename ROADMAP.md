@@ -80,9 +80,12 @@ lands with codegen tests that diff native output against the interpreter.
   expression position, `??`, and `type()`. All three now compile and are diffed against the
   interpreter, including the two cases a careless implementation gets wrong — the untaken `if` arm
   must not run, and `??` must evaluate its left side exactly once.
-  **Still open:** a named top-level function used as a *value* (`apply(twice, 5)`) does not
-  compile — the reference emits `f_twice`, which is the C function, not a Value. Closures assigned
-  to variables do work, so the fix is to emit a closure wrapper for the name.
+- **Named functions as values (done).** `apply(twice, 5)` used to emit `v_twice`, a variable that
+  does not exist. A bare mention of a top-level function now emits a closure wrapping it, with a
+  thunk that unpacks the closure convention's argument array into the function's individual
+  parameters. The emitter tracks the names each function binds — parameters, `let`/`mut`, loop
+  variables — so a local shadowing a function name still resolves to the local, which is what the
+  program meant.
 - **Sockets (done).** `tcp_listen` / `tcp_port` / `tcp_accept` / `tcp_connect` / `tcp_send` /
   `tcp_recv` / `tcp_close` — blocking IPv4 TCP straight onto the C runtime, with failures reported
   as `-1` rather than aborting, because a compiled tool that dies on a refused connection is much
