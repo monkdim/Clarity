@@ -183,7 +183,16 @@ def compare_cell(px, w, col, row, glyph):
     return None
 
 
-def wait_for_marker(log_path, deadline):
+def wait_for_marker(log_path, deadline, proc=None):
+    """Wait for the boot marker, or for the deadline, or for QEMU to die.
+
+    Watching the process matters more than it looks. Without it, a QEMU that
+    refused to start is indistinguishable from a kernel that booted slowly:
+    both sit here until the deadline and report "never reached the boot
+    marker", which names the one cause that is not what happened. That is not
+    hypothetical — this check failed exactly that way once, and the message
+    sent the search in the wrong direction.
+    """
     while time.time() < deadline:
         try:
             with open(log_path, "rb") as f:
@@ -191,8 +200,43 @@ def wait_for_marker(log_path, deadline):
                     return True
         except FileNotFoundError:
             pass
+        if proc is not None and proc.poll() is not None:
+            return False
         time.sleep(0.25)
     return False
+
+
+def why_not(log_path, qemu_out, proc):
+    """Everything known about a boot that did not get there, as text.
+
+    Printed on the one failure that used to print nothing at all. How far the
+    serial log got says whether the kernel died early or was merely slow;
+    QEMU's own output says whether it ever started.
+    """
+    lines = []
+    if proc.poll() is not None:
+        lines.append("QEMU exited with %d before the marker appeared."
+                     % proc.returncode)
+    else:
+        lines.append("QEMU is still running; the kernel did not get there in "
+                     "time.")
+    try:
+        with open(log_path, "rb") as f:
+            serial = f.read()
+        lines.append("serial log: %d bytes, last lines:" % len(serial))
+        tail = serial.decode("utf-8", "replace").splitlines()[-12:]
+        lines.extend("  " + t for t in tail)
+    except FileNotFoundError:
+        lines.append("serial log: never created — QEMU wrote nothing at all.")
+    try:
+        with open(qemu_out, "rb") as f:
+            out = f.read().decode("utf-8", "replace").strip()
+        if out:
+            lines.append("QEMU said:")
+            lines.extend("  " + t for t in out.splitlines()[-12:])
+    except FileNotFoundError:
+        pass
+    return "\n".join(lines)
 
 
 def settled_screendump(sock_path, out_path, deadline):
@@ -259,6 +303,9 @@ def main():
     log = os.path.join(tmp, "serial.log")
     sock = os.path.join(tmp, "mon.sock")
     shot = os.path.join(tmp, "screen.ppm")
+    # QEMU's own stdout and stderr, kept rather than discarded: when it
+    # refuses to start, this is the only place that says why.
+    qemu_out = os.path.join(tmp, "qemu.out")
 
     qemu = subprocess.Popen([
         "qemu-system-aarch64",
@@ -271,14 +318,21 @@ def main():
         "-display", "none",
         "-monitor", "unix:%s,server,nowait" % sock,
         "-no-reboot",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    ], stdout=open(qemu_out, "wb"), stderr=subprocess.STDOUT)
 
     failures = []
     scrolls = 0
     try:
-        deadline = time.time() + 120
-        if not wait_for_marker(log, deadline):
-            raise SystemExit("fb_check: kernel never reached the boot marker")
+        # Generous, and deliberately so. This boot has no keyboard attached,
+        # which makes it the fastest configuration there is — nine seconds to
+        # the marker on the machine this was written on. A number thirty times
+        # that is not a margin being tuned; it is there so that when this does
+        # fail, "too slow" is ruled out and the report below is about
+        # something real.
+        deadline = time.time() + 300
+        if not wait_for_marker(log, deadline, qemu):
+            raise SystemExit("fb_check: kernel never reached the boot marker\n"
+                             + why_not(log, qemu_out, qemu))
         deadline = time.time() + 120
         settled_screendump(sock, shot, deadline)
         if not os.path.exists(shot):
