@@ -11,6 +11,25 @@
 const std = @import("std");
 const pmm = @import("pmm.zig");
 
+/// Where physical memory appears in the kernel's address space.
+///
+/// Both architectures keep a direct map of all of physical memory; they put
+/// it at different addresses, because each is constrained by its own paging
+/// structure — x86_64's canonical upper half, and the first address AArch64's
+/// TTBR1 translates with a 39-bit VA space. This file only needs to turn a
+/// frame the page allocator returned into something it can write to, so the
+/// address is the only part that differs.
+///
+/// Was 0xFFFF_8000_0000_0000 written out three times, which was correct for
+/// exactly as long as there was one architecture.
+const DIRECT_MAP: usize = switch (@import("builtin").cpu.arch) {
+    // Matches mm/vmm.zig and boot/start.S.
+    .x86_64 => 0xFFFF_8000_0000_0000,
+    // Taken from the definition rather than copied, so the two cannot drift.
+    .aarch64 => @import("../arch/aarch64/vm.zig").KERNEL_VA_BASE,
+    else => @compileError("no direct map defined for this architecture"),
+};
+
 const SLAB_CLASSES = [_]usize{ 32, 64, 128, 256, 512, 1024, 2048, 4096 };
 const SLAB_COUNT = SLAB_CLASSES.len;
 
@@ -70,7 +89,7 @@ pub fn alloc(size: usize) ?[*]u8 {
     if (size > 4096) {
         const pages = (size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
         const phys = pmm.alloc_pages(pages) orelse return null;
-        return @ptrFromInt(0xFFFF_8000_0000_0000 + phys);
+        return @ptrFromInt(DIRECT_MAP + phys);
     }
     const class_idx = pick_class(size) orelse return null;
     const slab = &slabs[class_idx];
@@ -88,7 +107,7 @@ pub fn free(ptr: [*]u8, size: usize) void {
         var i: usize = 0;
         while (i < pages) : (i += 1) {
             const virt: u64 = @intFromPtr(ptr) + i * pmm.PAGE_SIZE;
-            const phys = virt - 0xFFFF_8000_0000_0000;
+            const phys = virt - DIRECT_MAP;
             pmm.free_page(phys);
         }
         return;
@@ -110,7 +129,7 @@ fn pick_class(size: usize) ?usize {
 fn grow_slab(slab: *Slab) bool {
     const phys = pmm.alloc_page() orelse return false;
     slab.pages_owned += 1;
-    const base: usize = @intCast(0xFFFF_8000_0000_0000 + phys);
+    const base: usize = @intCast(DIRECT_MAP + phys);
     var offset: usize = 0;
     while (offset + slab.object_size <= pmm.PAGE_SIZE) : (offset += slab.object_size) {
         const node: *SlabFreeNode = @ptrFromInt(base + offset);

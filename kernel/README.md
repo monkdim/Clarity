@@ -69,6 +69,12 @@ claim with no marker behind it is in "What does not run yet".
 - kernel threads switching, cooperatively and preemptively — the preemption
   test's threads never yield, and it checks not only that both ran but that
   each resumed inside its own code, which counters alone cannot see
+- **a program loaded from an ELF**: `/bin/clarity-init` for aarch64 is built
+  by a compiler and laid out by a linker into three segments with different
+  permissions and a `.bss` whose memory size exceeds its file size. It runs
+  twice, in two address spaces, over frames the first run returned — so its
+  own checks that `.bss` reads zero and `.data` came from the file are checks
+  on the loader, and its exit status carries the verdict
 
 ## What does not run yet
 
@@ -82,10 +88,10 @@ Written, compiles, and nothing has ever executed it:
 
 Not written:
 
-- On aarch64: a scheduler, a filesystem, an ELF loader. Threads can be
-  switched, but nothing keeps run queues, priorities or a process table —
-  the boot selftest drives the switching primitive directly. The EL0 program
-  is assembled into the kernel image, not loaded from anywhere.
+- On aarch64: a scheduler and a filesystem. Threads can be switched, but
+  nothing keeps run queues, priorities or a process table — the boot selftest
+  drives the switching primitive directly. Programs are loaded from an ELF
+  embedded in the kernel image, because there is nowhere to read one from.
 - Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired:
   read, write, open, close, mmap, brk, exit, fork, exec, wait, kill,
   getpid, getppid, nanosleep, clock_gettime, ioctl. The rest return
@@ -138,11 +144,14 @@ kernel/
 │   └── devfs.zig procfs.zig — written, unreached
 ├── loader/
 │   ├── elf.zig             ELF64 parser
-│   └── load.zig            load an ELF into a fresh address space
+│   ├── segments.zig        map PT_LOADs into a space — shared by both
+│   ├── load.zig            x86_64: page tables, regions, brk
+│   └── load_aarch64.zig    aarch64: page tables, I-cache, page ownership
 ├── drivers/                framebuffer, ps2, pci wired; ahci, virtio_net stubs
 ├── graphics/fb.zig         architecture-independent drawing surface
 ├── user/
-│   ├── init.zig            /bin/clarity-init
+│   ├── init.zig            /bin/clarity-init (x86_64)
+│   ├── init_aarch64.zig    /bin/clarity-init (aarch64)
 │   ├── clarity_demo.clarity → clarity_demo.c, the compiled Clarity program
 │   ├── libc/               a freestanding libc: stdio, string, math, malloc
 │   └── user.ld             static user link layout

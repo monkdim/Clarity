@@ -17,6 +17,7 @@ const heap = @import("../mm/heap.zig");
 const elf = @import("elf.zig");
 const pmm = @import("../mm/pmm.zig");
 const vmm = @import("../mm/vmm.zig");
+const segments = @import("segments.zig");
 
 pub const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
 pub const USER_STACK_PAGES: u64 = 8;
@@ -78,37 +79,32 @@ pub fn load_into_new_space(exe: elf.LoadedExecutable, image: []const u8, gpa: st
     };
 }
 
-fn map_segment(space: *vmm.AddressSpace, seg: elf.Segment, image: []const u8) LoadError!void {
-    const start = page_round_down(seg.vaddr);
-    const end = page_round_up(seg.vaddr + seg.memsz);
-    const segment_offset = seg.vaddr - start;
+/// What loader/segments.zig needs to know about x86_64: how a page gets
+/// mapped, and where a physical frame appears to the kernel.
+pub const Ops = struct {
+    pub const Space = vmm.AddressSpace;
 
-    var addr = start;
-    while (addr < end) : (addr += pmm.PAGE_SIZE) {
-        const phys = pmm.alloc_page() orelse return error.OutOfMemory;
-        // Zero the page first so BSS regions read as 0.
-        zero_phys(phys);
+    pub fn map(space: *Space, virt: u64, phys: u64, writable: bool, executable: bool) !void {
         var flags: u64 = vmm.PAGE_PRESENT | vmm.PAGE_USER;
-        if (seg.writable()) flags |= vmm.PAGE_WRITE;
-        if (!seg.executable()) flags |= vmm.PAGE_NX;
-        vmm.map_page(space, addr, phys, flags) catch return error.OutOfMemory;
-
-        // Copy any file-backed bytes that fall in this page.
-        const page_off_in_segment = if (addr >= seg.vaddr) addr - seg.vaddr + 0 else 0;
-        const file_remaining = if (page_off_in_segment >= seg.filesz) 0 else seg.filesz - page_off_in_segment;
-        if (file_remaining > 0) {
-            const dst_offset = if (addr < seg.vaddr) segment_offset else 0;
-            const copy_len = @min(file_remaining, pmm.PAGE_SIZE - dst_offset);
-            const src = image[seg.file_offset + page_off_in_segment ..][0..copy_len];
-            const dst: [*]u8 = @ptrFromInt(0xFFFF_8000_0000_0000 + phys + dst_offset);
-            @memcpy(dst[0..copy_len], src);
-        }
+        if (writable) flags |= vmm.PAGE_WRITE;
+        if (!executable) flags |= vmm.PAGE_NX;
+        return vmm.map_page(space, virt, phys, flags);
     }
 
-    // Record the region for the page-fault + brk machinery.
+    pub fn phys_to_virt(phys: u64) u64 {
+        return 0xFFFF_8000_0000_0000 + phys;
+    }
+};
+
+fn map_segment(space: *vmm.AddressSpace, seg: elf.Segment, image: []const u8) LoadError!void {
+    try segments.map_segment(Ops, space, seg, image);
+
+    // Record the region for the page-fault + brk machinery. This part is not
+    // shared: it is what the x86_64 side does with a mapped range afterwards,
+    // and the aarch64 side has no page-fault machinery to record it for yet.
     space.regions.append(heap.allocator(), .{
-        .start = start,
-        .end = end,
+        .start = page_round_down(seg.vaddr),
+        .end = page_round_up(seg.vaddr + seg.memsz),
         .flags = if (seg.writable()) vmm.PAGE_WRITE else 0,
         .backing = .{ .anonymous = {} },
     }) catch return error.OutOfMemory;
@@ -138,15 +134,9 @@ fn destroy_address_space(space: *vmm.AddressSpace, gpa: std.mem.Allocator) void 
     gpa.destroy(space);
 }
 
-inline fn page_round_down(v: u64) u64 {
-    return v & ~@as(u64, pmm.PAGE_SIZE - 1);
-}
-
-inline fn page_round_up(v: u64) u64 {
-    return (v + pmm.PAGE_SIZE - 1) & ~@as(u64, pmm.PAGE_SIZE - 1);
-}
+const page_round_down = segments.page_round_down;
+const page_round_up = segments.page_round_up;
 
 fn zero_phys(phys: u64) void {
-    const ptr: [*]u8 = @ptrFromInt(0xFFFF_8000_0000_0000 + phys);
-    @memset(ptr[0..pmm.PAGE_SIZE], 0);
+    segments.zero(Ops, phys);
 }

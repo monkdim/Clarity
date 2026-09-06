@@ -23,6 +23,8 @@ const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
 const trap = @import("arch/aarch64/trap.zig");
 const threadtest = @import("threadtest_aarch64.zig");
+const heap = @import("mm/heap.zig");
+const loader = @import("loader/load_aarch64.zig");
 const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
@@ -73,6 +75,10 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // before this: the kernel had no idea where RAM was.
     memory_selftest(tree, dtb_phys);
 
+    // A kernel heap, over the page allocator. Nothing on this architecture
+    // needed one until something had to parse an ELF.
+    heap.init();
+
     // A process's address space — built, installed, questioned, and taken
     // apart again. Nothing runs in it yet; that it can exist at all is what
     // moving the kernel out of TTBR0 was for.
@@ -86,6 +92,10 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // More than one thread. Cooperatively first, then with the timer taking
     // the CPU away from a thread that never offers it.
     threadtest.run();
+
+    // And finally a program that was compiled and linked rather than
+    // assembled into this image.
+    init_program();
 
     // A screen. Everything this kernel has said so far went out a serial
     // line; this is the first thing it can show.
@@ -435,6 +445,123 @@ fn process_space_selftest() void {
         console.print_dec(after.free_pages);
         console.println("");
     }
+}
+
+/// The aarch64 /bin/clarity-init, embedded by build.zig. A real ELF, from a
+/// compiler and a linker.
+const INIT_ELF = @embedFile("init_elf_aarch64");
+
+/// Load that ELF into a fresh address space and run it.
+///
+/// Everything the probe above proves, this proves again without the kernel
+/// having chosen any of it. The probe's layout was the kernel's: one page of
+/// code at an address main_aarch64.zig picked, with the same file writing
+/// both ends of the agreement. Here a linker decided there would be three
+/// segments, which permissions each has, and that the last one's memory size
+/// exceeds its file size — and the loader had to be right about all of it
+/// without being told.
+fn init_program() void {
+    if (pmm.stats().total_pages == 0) {
+        console.println("  [--] no physical memory; /bin/clarity-init not loaded");
+        return;
+    }
+
+    console.print("  init: ");
+    console.print_dec(INIT_ELF.len);
+    console.println(" bytes of ELF, embedded in the kernel image");
+
+    // Twice, in two different address spaces.
+    //
+    // Once would leave two things unproven. The page accounting cannot
+    // balance across a first load, because parsing the ELF is the first thing
+    // on this architecture ever to use the kernel heap and the slab keeps the
+    // page it took — a real allocation that is not a leak. Measuring across
+    // the *second* load separates the two: the heap is warm, so anything
+    // missing at the end is the loader's.
+    //
+    // And a loader that works once is not a loader. The second run gets its
+    // own address space with its own ASID, over frames the first one just
+    // returned, which is what every load after the first will be.
+    const first = run_init(3, true);
+    const before = pmm.stats();
+    const second = run_init(4, false);
+    const after = pmm.stats();
+
+    const balanced = after.free_pages == before.free_pages;
+
+    if (first.ok and second.ok and balanced) {
+        console.print("  [ok] init: a compiled, linked ELF ran at EL0 twice, printed ");
+        console.print_dec(first.wrote);
+        console.print(" bytes, exited ");
+        console.print_dec(first.code);
+        console.println(" each time, and every page came back");
+    } else {
+        console.print("  [FAIL] init: first(ok=");
+        console.print_dec(@intFromBool(first.ok));
+        console.print(" status=");
+        console.print_dec(first.status);
+        console.print(" code=");
+        console.print_dec(first.code);
+        console.print(" wrote=");
+        console.print_dec(first.wrote);
+        console.print(") second(ok=");
+        console.print_dec(@intFromBool(second.ok));
+        console.print(" status=");
+        console.print_dec(second.status);
+        console.print(" code=");
+        console.print_dec(second.code);
+        console.print(") pages ");
+        console.print_dec(before.free_pages);
+        console.print("->");
+        console.print_dec(after.free_pages);
+        console.println("");
+        if (trap.last_fault) |f| trap.report_fault(f);
+    }
+}
+
+const InitRun = struct {
+    ok: bool = false,
+    status: u64 = 0,
+    code: u64 = 0,
+    wrote: u64 = 0,
+};
+
+/// One load, run and teardown. `announce` prints where the linker put things,
+/// which is worth seeing once and not twice.
+fn run_init(asid: u16, announce: bool) InitRun {
+    var proc = loader.load(INIT_ELF, asid, heap.allocator()) catch |e| {
+        console.print("  [FAIL] init: could not load the ELF: ");
+        console.println(@errorName(e));
+        return .{};
+    };
+
+    if (announce) {
+        console.print("  init: entry ");
+        console.print_hex(proc.entry);
+        console.print(", stack ");
+        console.print_hex(proc.user_sp);
+        console.print(", ");
+        console.print_dec(proc.range_count);
+        console.println(" mapped ranges");
+    }
+
+    paging.activate(&proc.space);
+    trap.reset();
+    const status = trap.enter_user(proc.entry, proc.user_sp);
+    const wrote = trap.bytes_written;
+    const code = trap.exit_status;
+    paging.deactivate();
+    loader.release(&proc);
+
+    // 42 is what init_aarch64.zig exits with, and it only reaches that line
+    // after its own .bss, .data and floating-point checks. Those print their
+    // own verdicts above, so a failure here says which step it was.
+    return .{
+        .ok = status == trap.EXIT_DONE and code == 42 and wrote > 0,
+        .status = status,
+        .code = code,
+        .wrote = wrote,
+    };
 }
 
 /// Ask the translation hardware what the address space actually looks like.

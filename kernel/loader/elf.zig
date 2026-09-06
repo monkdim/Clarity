@@ -9,7 +9,7 @@
 //!   * EI_CLASS == ELFCLASS64
 //!   * EI_DATA  == ELFDATA2LSB
 //!   * e_type   == ET_EXEC or ET_DYN (treated as a static PIE)
-//!   * e_machine == EM_X86_64
+//!   * e_machine == this kernel's architecture
 //!   * Loadable segments must be PT_LOAD; we ignore PT_NOTE /
 //!     PT_DYNAMIC / PT_TLS / PT_GNU_* for now (loader hand-off
 //!     doesn't need them yet — userspace is statically linked).
@@ -26,6 +26,16 @@ pub const ELFDATA2LSB: u8 = 1;
 pub const ET_EXEC: u16 = 2;
 pub const ET_DYN: u16 = 3;
 pub const EM_X86_64: u16 = 62;
+pub const EM_AARCH64: u16 = 183;
+
+/// The machine this kernel can run. An ELF for the other architecture is
+/// rejected rather than loaded and jumped into, which is the difference
+/// between an error message and a machine that stops.
+pub const EM_NATIVE: u16 = switch (@import("builtin").cpu.arch) {
+    .x86_64 => EM_X86_64,
+    .aarch64 => EM_AARCH64,
+    else => @compileError("no ELF machine number for this architecture"),
+};
 
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
@@ -114,7 +124,7 @@ pub fn parse(bytes: []const u8, gpa: std.mem.Allocator) ParseError!LoadedExecuta
     if (hdr.e_ident[4] != ELFCLASS64) return error.Not64Bit;
     if (hdr.e_ident[5] != ELFDATA2LSB) return error.NotLittleEndian;
     if (hdr.e_type != ET_EXEC and hdr.e_type != ET_DYN) return error.UnsupportedType;
-    if (hdr.e_machine != EM_X86_64) return error.UnsupportedMachine;
+    if (hdr.e_machine != EM_NATIVE) return error.UnsupportedMachine;
     if (hdr.e_phentsize != @sizeOf(ProgramHeader)) return error.BadPhdrTable;
 
     const phoff = hdr.e_phoff;
