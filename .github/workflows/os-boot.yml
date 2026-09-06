@@ -349,6 +349,7 @@ jobs:
              && grep -q "\[ok\] console: 95 glyphs drawn, screen scrolled" serial-arm.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm.log \
              && grep -q "\[ok\] console input:" serial-arm.log \
+             && grep -q "init: nothing typed, end of input" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
@@ -392,6 +393,7 @@ jobs:
           if grep -q "hello from EL0 on aarch64" serial-arm-pan.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-pan.log \
              && grep -q "\[ok\] console input:" serial-arm-pan.log \
+             && grep -q "init: nothing typed, end of input" serial-arm-pan.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-pan.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm-pan.log \
              && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm-pan.log \
@@ -432,6 +434,7 @@ jobs:
           if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-4g.log \
              && grep -q "\[ok\] console input:" serial-arm-4g.log \
+             && grep -q "init: nothing typed, end of input" serial-arm-4g.log \
              && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
              && grep -q "\[ok\] process address space:" serial-arm-4g.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-4g.log \
@@ -453,6 +456,14 @@ jobs:
       - name: Screenshot the display and check the pixels
         run: python3 kernel/tools/fb_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img
 
+      # A note on the marker these three boots require from read(2).
+      #
+      # Nobody types during them, so what they assert is the *end of input*
+      # path: the init program calls read(0, ...), waits, and is told there is
+      # nothing — which is what a closed stdin looks like and what a shell has
+      # to handle. That the call reaches a program at all is the claim; that
+      # it delivers a line is the typing step's, below.
+      #
       # The boots above prove the kernel finds a keyboard and runs the line
       # discipline. They cannot prove either one works: "0 lines" is what a
       # perfectly working driver reports when nobody is typing, so no marker
@@ -474,5 +485,11 @@ jobs:
       # erasing anything satisfies the first and not the second. So this step
       # also screenshots the display and checks every character cell against a
       # replay of the serial log, using fb_check's own model of the console.
+      #
+      # It also types a line at the *program*: after the boot selftest, the
+      # compiled ELF at EL0 calls read(2) twice — once with a pointer into its
+      # own read-only text, which the kernel must refuse because it translates
+      # the buffer for writing, and once with a real buffer, which must get
+      # back the line the refusal did not eat.
       - name: Type at the keyboard and check what it read and drew
         run: python3 kernel/tools/key_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img

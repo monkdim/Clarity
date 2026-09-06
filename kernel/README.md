@@ -61,6 +61,14 @@ claim with no marker behind it is in "What does not run yet".
 - **a keyboard**: virtio-input over the virtio-mmio bus, found by walking the
   thirty-two slots the device tree names rather than by knowing where QEMU
   puts them
+- **`read(2)`**: a program at EL0 asks for a line and gets one. The buffer is
+  translated through the process's own page tables **for writing** — a
+  pointer into the program's own read-only text is refused with `EFAULT`,
+  which the init program checks by passing one deliberately, because a kernel
+  that translated it for reading (the same call `write` makes, and the easy
+  mistake) would find the page perfectly readable and scribble through its own
+  map into the program's instructions. A refused read also must not eat the
+  line: the second read gets it back
 - **typing, and seeing it**: a canonical-mode line discipline joins the two —
   characters are echoed to the screen as they arrive, backspace erases, Enter
   hands over a line. CI types at it: `tools/key_check.py` sends the alphabet
@@ -128,9 +136,11 @@ Compiled, but only on x86_64, and never executed past detection:
 
 Not written:
 
-- Nothing *above* the line discipline. Lines go to a boot selftest that
-  prints them; there is no `read(2)`, no process holding a terminal, and so
-  no shell. The keycode table covers the main block only — no function keys,
+- No shell. `read(2)` reaches a program now, but nothing keeps a terminal, a
+  session or a process table, so the only reader is a boot selftest and the
+  init program. Reading also does not really block: there is no scheduler to
+  block a thread on, so a read spins and reports end of input after three
+  seconds — which is a stand-in for blocking, not blocking. The keycode table covers the main block only — no function keys,
   keypad, arrows or modifiers past shift, because nothing reads them yet and
   a table of untested entries is a table of guesses. The line editor has
   backspace and nothing else: no kill-line, no history, no cursor keys. The
@@ -140,9 +150,10 @@ Not written:
   nothing keeps run queues, priorities or a process table — the boot selftest
   drives the switching primitive directly. Programs are loaded from an ELF
   embedded in the kernel image, because there is nowhere to read one from.
-- On aarch64, three system calls exist — `write`, `brk`, `exit` — and every
-  other number returns `ENOSYS`. They are the three a freestanding C library
-  needs, and the rest wait on a VFS and a process table.
+- On aarch64, four system calls exist — `read`, `write`, `brk`, `exit` — and
+  every other number returns `ENOSYS`. Three are what a freestanding C
+  library needs and the fourth is what a shell will; the rest wait on a VFS
+  and a process table.
 - Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired on x86_64:
   read, write, open, close, mmap, brk, exit, fork, exec, wait, kill,
   getpid, getppid, nanosleep, clock_gettime, ioctl. The rest return
@@ -189,6 +200,7 @@ kernel/
 │   ├── vmm.zig             x86 4-level page tables, AddressSpace
 │   └── heap.zig            slab allocator over the pmm
 ├── drivers/line.zig        characters into lines — echo, backspace, Enter
+├── drivers/stdin.zig       one editor, shared by the selftest and read(2)
 ├── sched/
 │   ├── process.zig         one Process per address space, many Threads
 │   └── scheduler.zig       preemptive priority round-robin

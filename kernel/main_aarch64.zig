@@ -22,6 +22,7 @@ const virtio_mmio = @import("arch/aarch64/virtio_mmio.zig");
 const virtio_input = @import("arch/aarch64/virtio_input.zig");
 const keyboard = @import("arch/aarch64/keyboard.zig");
 const line = @import("drivers/line.zig");
+const stdin = @import("drivers/stdin.zig");
 const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
@@ -833,65 +834,73 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     console.print_dec(n);
     console.println(" slots");
 
-    // Read what gets typed, a line at a time, bounded by the timer rather
-    // than by a spin count: how many times this loop goes round in a second
-    // depends on the machine, and the window the keys have to arrive in
-    // should not. The timer is known to be delivering interrupts by here —
-    // timer_selftest ran several screens ago and would have said so if it
-    // were not.
-    //
-    // Two bounds, because there are two things being waited for. FIRST_WAIT
-    // is what a boot with nobody at the keyboard costs; QUIET_WAIT is how
-    // long after the last key this decides the typing has stopped, and every
-    // character resets it so a long line is not cut off halfway.
+    // Everything that reads the console reads it through drivers/stdin.zig,
+    // this selftest and read(2) alike. One editor, not one each: two editors
+    // polling the same keyboard would each see half of what was typed, and
+    // the half each got would depend on which happened to ask first.
+    stdin.init(.{
+        .poll = keyboard.poll,
+        .echo = console.putc,
+        // The physical counter, not the interrupt count: read(2) runs with
+        // interrupts masked, where the interrupt count does not move and a
+        // timeout built on it never expires.
+        .ticks = timer.hundredths,
+    });
+
+    // Bounded by the timer rather than by a spin count: how many times a loop
+    // goes round in a second depends on the machine, and the window the keys
+    // have to arrive in should not. The timer is known to be delivering
+    // interrupts by here — timer_selftest ran several screens ago and would
+    // have said so if it were not.
     //
     // Nothing may be typed at all, which is why this reports what it saw
     // rather than passing or failing. The checking is tools/key_check.py's
     // job, because only something outside the kernel can make keys happen.
-    const FIRST_WAIT: u64 = 300; // 3 s at the 100 Hz the timer is set to
-    const QUIET_WAIT: u64 = 200; // 2 s of silence ends the read
+    const WAIT: u64 = 300; // 3 s at the 100 Hz the timer is set to
     const MAX_LINES: usize = 4;
 
-    var editor = line.Editor.init(console.putc);
+    var buf: [line.MAX_LINE + 1]u8 = undefined;
     var lines: usize = 0;
     var characters: usize = 0;
 
-    console.println("  type at it; two seconds of quiet ends the read");
-    console.print("  > ");
+    console.println("  type at it; three seconds of quiet ends the read");
 
-    var deadline = timer.ticks() + FIRST_WAIT;
-    while (timer.ticks() < deadline and lines < MAX_LINES) {
-        const c = keyboard.poll() orelse continue;
-        deadline = timer.ticks() + QUIET_WAIT;
-        const done = editor.feed(c) orelse continue;
+    while (lines < MAX_LINES) {
+        console.print("  > ");
+        const got = stdin.read(&buf, WAIT);
+        if (got == 0) {
+            // Nothing typed. End the prompt's line so the next message does
+            // not run on from it.
+            console.println("");
+            break;
+        }
+
+        // The newline stdin puts back on is where the line ends, not part of
+        // it. Trimming it here rather than in stdin is deliberate: read(2)
+        // wants it, and a printed line does not.
+        const body = buf[0 .. got - 1];
+        lines += 1;
+        characters += body.len;
 
         // Printed on its own line rather than left on screen, because the
         // echo shows what was typed and this shows what the kernel *has* —
         // and the whole point of a line discipline is that those two differ
         // wherever something was corrected.
-        lines += 1;
-        characters += done.len;
         console.print("  line ");
         console.print_dec(lines);
         console.print(": \"");
-        console.print(done);
+        console.print(body);
         console.println("\"");
-        if (lines < MAX_LINES) console.print("  > ");
     }
 
     // A line still being typed when the time ran out is reported too. Left
     // out, a test that lost the Enter would look exactly like one that lost
     // the whole line.
-    if (editor.len > 0) {
-        // On its own row: the echo of what was typed is still on the current
-        // one, and running this into the end of it makes a log line that
-        // reads as neither.
-        console.println("");
+    const rest = stdin.partial();
+    if (rest.len > 0) {
         console.print("  unfinished: \"");
-        console.print(editor.buf[0..editor.len]);
+        console.print(rest);
         console.println("\"");
-    } else if (lines < MAX_LINES) {
-        console.println("");
     }
 
     console.print("  [ok] console input: ");
@@ -901,9 +910,9 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     console.print(if (characters == 1) " character, from " else " characters, from ");
     console.print_dec(keyboard.presses);
     console.print(if (keyboard.presses == 1) " key press (" else " key presses (");
-    console.print_dec(editor.ignored);
+    console.print_dec(stdin.ignored());
     console.print(" ignored, ");
-    console.print_dec(editor.dropped);
+    console.print_dec(stdin.dropped());
     console.println(" dropped)");
 }
 
