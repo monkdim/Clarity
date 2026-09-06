@@ -502,6 +502,45 @@ if CC == null {
         "show \"survived\"\ntcp_close(cli)\ntcp_close(srv)",
         "survived")
 
+    -- ── rest parameters ───────────────────────────────────
+    -- The emitted C is fixed-arity, so a variadic Clarity function needs the
+    -- surplus arguments gathered into a list — and the callee needs to know
+    -- how many it was given, which is why every calling convention here now
+    -- carries a count. Before this, `fn f(a, ...rest)` emitted
+    -- `Value v_...rest`, which is not C.
+    same("rest_top_level",
+        "fn f(a, ...rest) { return str(a) + \":\" + join(rest, \",\") + \":\" + str(len(rest)) }\n" +
+        "show f(1)\nshow f(1, 2)\nshow f(1, 2, 3)")
+    same("rest_only",
+        "fn g(...all) { return str(len(all)) + \"=\" + join(all, \"+\") }\n" +
+        "show g()\nshow g(7, 8, 9)")
+    same("rest_in_class",
+        "class C {\n" +
+        "    fn init(name, ...tags) { this.name = name\n this.tags = tags }\n" +
+        "    fn describe(...extra) { return this.name + \"[\" + join(this.tags, \",\") + \"]\" + str(len(extra)) }\n" +
+        "}\n" +
+        "let c = C(\"x\", \"a\", \"b\")\n" +
+        "show c.describe()\nshow c.describe(1, 2)")
+    same("rest_in_closure",
+        "let lam = fn(a, ...more) { return str(a) + \"|\" + str(len(more)) + \"|\" + join(more, \".\") }\n" +
+        "show lam(1)\nshow lam(1, 2, 3)\n" +
+        "show map([1, 2, 3], fn(x, ...ignored) { return x * 10 })")
+    same("rest_as_value",
+        "fn named(a, ...tail) { return str(a) + \"-\" + str(len(tail)) }\n" +
+        "let v = named\nshow v(5)\nshow v(5, 6, 7)\n" +
+        "fn nofix(...only) { return str(len(only)) }\n" +
+        "let n = nofix\nshow n(1, 2, 3, 4)")
+
+    -- A call that supplies fewer arguments than the function declares gets
+    -- null for the rest, which is what the interpreter does. The emitted C
+    -- used to read past the end of the argument array instead — and a method
+    -- with parameters called with none was handed a null pointer.
+    same("missing_arguments_are_null",
+        "fn two(a, b) { return str(a) + \"/\" + str(b) }\n" +
+        "show two(1)\nshow two()\n" +
+        "class M {\n    fn init() { this.k = 1 }\n    fn m(a, b) { return str(a) + \"~\" + str(b) }\n}\n" +
+        "show M().m()\nshow M().m(9)")
+
     -- ── objects answer keys/values/entries/has ────────────
     -- An object is a map with a class name attached, and asking it what it
     -- holds should say so. It did not: the three backends gave three
