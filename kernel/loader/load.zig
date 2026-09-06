@@ -109,9 +109,10 @@ fn alloc_address_space(gpa: std.mem.Allocator) LoadError!*vmm.AddressSpace {
         .pml4_phys = pml4,
         .regions = .{},
     };
-    // Share the kernel half (PML4 entries 256..511) by copying
-    // them from the bootstrap PML4. vmm.kernel_pml4_template() is
-    // expected to expose them as a 512-entry array.
+    // The upper half has to be the kernel's, or the instruction after this
+    // space's CR3 is installed is unmapped and the machine triple-faults.
+    // This used to be a comment describing the intent, with no code.
+    vmm.share_kernel_half(pml4);
     return space;
 }
 

@@ -221,10 +221,11 @@ fn sys_exit(args: Args) i64 {
     console.print_dec(@intCast(@as(u32, @bitCast(code))));
     console.println("");
     if (sched.current_thread() == null) {
-        // The ring 3 self-test runs before the scheduler owns userspace, so
-        // there is no thread to mark dead and nothing to switch to. Stop
-        // cleanly rather than spinning in the dispatcher looking for a
-        // runnable thread that does not exist.
+        // Defensive: every path into ring 3 now goes through a scheduler
+        // thread, so this should not happen. If something ever enters
+        // userspace without one, there is nothing to mark dead and nothing
+        // to switch to — stop cleanly rather than spinning in the dispatcher
+        // looking for a runnable thread that does not exist.
         console.println("  [halt] no scheduler context");
         while (true) asm volatile ("cli; hlt");
     }

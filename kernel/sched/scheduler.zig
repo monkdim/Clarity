@@ -20,6 +20,7 @@ const elf = @import("../loader/elf.zig");
 const loader = @import("../loader/load.zig");
 const process = @import("process.zig");
 const vfs = @import("../fs/vfs.zig");
+const console = @import("../arch/x86_64/console.zig");
 
 pub const Priority = enum(u8) {
     high = 0,
@@ -315,9 +316,32 @@ pub fn run_queued() void {
         while (i < Priority.count()) : (i += 1) {
             if (!queues[i].is_empty()) any = true;
         }
-        if (!any) return;
+        if (!any) break;
         yield();
     }
+    // The boot context is a resume point on *this* frame, and it stops being
+    // one the moment this call returns. Left set, a thread that exits later
+    // would find it, "switch back to boot", and resume inside a run_queued
+    // that already finished — re-running whatever the boot path did next.
+    // Clearing rip is how yield knows there is no boot coroutine left.
+    boot_context.rip = 0;
+}
+
+/// Make `t` the running thread directly, without the run queue picking it.
+///
+/// `spawn_user` queues the thread it builds, which is what you want when the
+/// scheduler is going to dispatch it. The first process is the exception: the
+/// boot path enters it by hand, so the thread has to come back *off* the
+/// queue and be installed as current. Otherwise the kernel believes nothing
+/// is running — getpid would answer 0, exit would have no thread to end, and
+/// a later yield could hand the CPU to a thread that is already on it.
+pub fn adopt_current(t: *Thread) void {
+    _ = queues[@intFromEnum(t.priority)].remove(t);
+    t.state = .running;
+    current = t;
+    // An interrupt taken in ring 3 lands on the stack the TSS names, so RSP0
+    // has to be this thread's before the CPU is ever in ring 3.
+    if (t.kernel_stack_top != 0) gdt.set_kernel_stack(t.kernel_stack_top);
 }
 
 pub fn block(reason: WaitReason) void {
@@ -345,7 +369,14 @@ pub fn exit(code: i32) noreturn {
         c.exit_code = code;
         // Reaping is the parent's responsibility via waitpid.
     }
-    while (true) schedule();
+    // Switch away for real. This used to be `while (true) schedule()`, which
+    // picks a successor but never moves to it — so a thread that called exit
+    // carried straight on through the loop, dead and still running, forever.
+    // A zombie is never re-queued, so yield returns only when there is
+    // genuinely nothing left to run.
+    yield();
+    console.println("  [halt] nothing left to run");
+    while (true) asm volatile ("cli; hlt");
 }
 
 pub fn run() noreturn {

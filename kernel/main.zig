@@ -22,7 +22,7 @@ const vfs = @import("fs/vfs.zig");
 const tmpfs = @import("fs/tmpfs.zig");
 const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
-const usermode = @import("usermode.zig");
+const initprog = @import("initprog.zig");
 const threadtest = @import("threadtest.zig");
 const fstest = @import("fstest.zig");
 
@@ -131,22 +131,19 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         hang();
     };
 
-    // 9. Leave ring 0 for the first time.
+    // 9. The first real process. This supersedes the hand-mapped ring 3
+    //    self-test: it enters ring 3 the same way, but from an actual ELF
+    //    read out of the filesystem, so it also covers elf.parse, segment
+    //    mapping into a fresh address space, and the CR3 switch — none of
+    //    which had ever run, because nothing could open a file to reach them.
     //
-    //    This runs before spawn_user because everything spawn_user needs — an
-    //    ELF loader, a per-process address space, the scheduler's user path —
-    //    rests on the CPU being able to reach ring 3 and come back through
-    //    the syscall trampoline, and nothing had ever tested that. The
-    //    self-test does it with nothing else in the way: a few mapped pages
-    //    and a program that writes a line and exits. Its two markers are what
-    //    the boot gate checks.
-    usermode.run_first_user_program() catch |err| {
-        console.print("PANIC: first user program: ");
+    //    It does not return. The process owns the CPU until it exits, and
+    //    there is no other thread to schedule when it does.
+    initprog.run() catch |err| {
+        console.print("PANIC: /bin/clarity-init: ");
         console.println(@errorName(err));
-        hang();
     };
-
-    unreachable;
+    hang();
 }
 
 fn idle_loop() noreturn {
