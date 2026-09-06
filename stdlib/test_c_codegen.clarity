@@ -149,6 +149,50 @@ if CC == null {
     same("lang_match_subject_once", "mut calls = 0\nfn subj() { calls = calls + 1\nreturn 3 }\nmatch subj() { when 1 { show \"a\" }\nwhen 2 { show \"b\" }\nelse { show \"c\" } }\nshow calls")
     same("lang_interface", "interface Shape { fn area() }\nclass Sq impl Shape { fn init(s) { this.s = s }\nfn area() { return this.s * this.s } }\nshow Sq(4).area()")
 
+    -- Exceptions. Every file in the compiler chain uses try/catch, so until
+    -- these compiled, `clarity cc` could not build the Clarity compiler.
+    same("exc_catch", "fn risky(n) { if n > 2 { throw \"too big: \" + str(n) }\nreturn n * 10 }\nfn guarded(n) { try { return risky(n) } catch e { return \"caught \" + e } }\nshow guarded(1)\nshow guarded(5)")
+    -- A throw crossing several frames, which is the case a plain C return
+    -- could not express and setjmp/longjmp exists for.
+    same("exc_deep", "fn d3() { throw \"from-deep\" }\nfn d2() { return d3() }\nfn d1() { return d2() }\nfn catcher() { try { return d1() } catch e { return \"got \" + e } }\nshow catcher()")
+    -- Nested handlers: a throw from inside a catch must reach the *enclosing*
+    -- handler, not the one it is already inside, which would loop forever.
+    same("exc_nested", "fn nested() { try { try { throw \"inner\" } catch e { throw \"wrapped(\" + e + \")\" } } catch e2 { return e2 } }\nshow nested()")
+    same("exc_finally", "mut log = []\nfn f(n) { try { if n > 2 { throw \"big\" }\npush(log, \"try-ok\")\nreturn \"ret-\" + str(n) } catch e { push(log, \"catch-\" + e)\nreturn \"caught\" } finally { push(log, \"finally-\" + str(n)) } }\nshow f(1)\nshow f(5)\nshow log")
+    same("exc_payloads", "fn t(v) { try { throw v } catch e { return e } }\nshow t(42)\nshow t([1, 2])\nshow t({\"a\": 1})")
+    -- A local written inside the try and read after the catch. C leaves a
+    -- non-volatile local of the setjmp's own function indeterminate here, so
+    -- this is what the volatile storage is for; without it the value is
+    -- whatever happened to be in a register.
+    same("exc_mutated_local", "fn m() { mut acc = 0\ntry { acc = acc + 5\nthrow \"x\" } catch e { acc = acc + 100 }\nreturn acc }\nshow m()")
+    -- The same shape as exc_mutated_local, but inside a closure. A closure is
+    -- its own C function, so it decides on its own whether its locals need
+    -- volatile storage; taking the enclosing function's answer would leave a
+    -- closure with a try, written at top level, with ordinary locals.
+    same("exc_closure_local", "let f = fn(n) { mut acc = n\ntry { acc = acc + 5\nthrow \"x\" } catch e { acc = acc + 100 }\nreturn acc }\nshow f(1)\nshow map([1, 2], f)")
+    -- A throw from inside a closure has to reach the caller's handler, across
+    -- the C frames the higher-order builtin adds.
+    same("exc_through_hof", "fn run() { try { return map([1, 2, 3], fn(x) { if x == 2 { throw \"at \" + str(x) }\nreturn x }) } catch e { return \"caught \" + e } }\nshow run()")
+    same("exc_gc", "fn t(v) { try { throw v } catch e { return e } }\nmut i = 0\nmut last = \"\"\nwhile i < 20000 { last = t(\"payload-\" + str(i))\ni = i + 1 }\nshow last")
+    -- An uncaught throw is deliberately *not* compared against the
+    -- interpreter: the interpreter prints its internal signal object and
+    -- exits 0, while the compiled binary reports on stderr and exits 1. The
+    -- native behaviour is the better one, so this asserts it directly rather
+    -- than matching the interpreter's.
+    nat_eq("exc_uncaught_stdout", "show \"before\"\nthrow \"boom\"\nshow \"after\"", "before")
+
+    -- The last builtins with no native implementation. base64 is checked at
+    -- all three padding lengths, and the digests are the published FIPS 180-4
+    -- vectors — matching the interpreter here also means matching everyone
+    -- else's sha256, which is the point of a hash.
+    same("bi_base64", "show encode64(\"hi\")\nshow encode64(\"a\")\nshow encode64(\"abc\")\nshow encode64(\"hello world!\")\nshow decode64(encode64(\"round trip with padding\"))\nshow decode64(\"aGVsbG8=\")")
+    same("bi_hash", "show hash(\"\")\nshow hash(\"abc\")\nshow hash(\"The quick brown fox jumps over the lazy dog\")")
+    -- cwd and random cannot be compared value-for-value — one depends on where
+    -- the test runs and the other is meant to differ every time — so this
+    -- asserts the type, which is the part that must agree.
+    same("bi_cwd_random_types", "show type(cwd())\nshow type(random())\nshow type(random(10))\nshow type(random(5, 9))")
+    nat_eq("bi_random_range", "mut ok = true\nmut i = 0\nwhile i < 500 { let r = random(5, 9)\nif r < 5 or r >= 9 { ok = false }\ni = i + 1 }\nshow ok", "true")
+
     -- ── stage 3: classes ──
     same("class_counter", "class Counter { fn init(start) { this.n = start }\nfn inc() { this.n = this.n + 1 }\nfn get() { return this.n } }\nlet c = Counter(5)\nc.inc()\nc.inc()\nshow c.get()")
     same("class_to_string", "class Point { fn init(x, y) { this.x = x\nthis.y = y }\nfn to_string() { return \"(\" + str(this.x) + \", \" + str(this.y) + \")\" } }\nshow Point(3, 4)")

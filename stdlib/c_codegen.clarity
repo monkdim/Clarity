@@ -187,6 +187,10 @@ static int cl_method_count = 0;
 static char* cl_to_cstr(Value v);
 static char* cl_repr(Value v);
 static char* cl_display(Value v);
+/* The value a `throw` is carrying. Declared here rather than with the rest
+   of the exception machinery because gc_collect scans it as a root, and that
+   comes first in the file. */
+static Value cl_thrown;
 static int cl_equal(Value a, Value b);
 static ClMethod cl_find_method(const char* cls, const char* m);
 static char* cl_obj_display(Value v);
@@ -296,6 +300,7 @@ GC_NOSAN static void gc_collect(void){
   gc_scan((char*)&regs, (char*)&regs + sizeof(regs));
   for(size_t gi=0; gi<cl_globals_n; gi++)      /* roots: module-level bindings */
     gc_scan((char*)cl_globals[gi], (char*)cl_globals[gi] + sizeof(Value));
+  gc_scan((char*)&cl_thrown, (char*)&cl_thrown + sizeof(Value));  /* roots: value in flight */
   while(gc_work_len){                            /* transitive closure */
     GCObj* o = gc_work[--gc_work_len];
     gc_scan((char*)(o+1), (char*)(o+1) + o->size);
@@ -637,6 +642,175 @@ static Value cl_hof_reduce(Value lst, Value fn, Value init){
   for(long i=0;i<n;i++){ Value a[2]={ acc, cl_index(it, cl_int(i)) }; acc=cl_call(fn, a); }
   return acc;
 }
+/* ── encoding, hashing, environment ── */
+static const char CL_B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static Value cl_encode64(Value v){
+  const unsigned char* in = (const unsigned char*)v.s;
+  size_t n = strlen((const char*)in);
+  size_t outlen = 4 * ((n + 2) / 3);
+  char* o = (char*)cl_alloc(outlen + 1);
+  size_t i = 0, j = 0;
+  while(i + 2 < n){
+    unsigned long t = ((unsigned long)in[i]<<16) | ((unsigned long)in[i+1]<<8) | in[i+2];
+    o[j++]=CL_B64[(t>>18)&63]; o[j++]=CL_B64[(t>>12)&63];
+    o[j++]=CL_B64[(t>>6)&63];  o[j++]=CL_B64[t&63];
+    i += 3;
+  }
+  if(i < n){                       /* 1 or 2 bytes left; pad to a quantum */
+    unsigned long t = (unsigned long)in[i] << 16;
+    int two = (i + 1 < n);
+    if(two) t |= (unsigned long)in[i+1] << 8;
+    o[j++]=CL_B64[(t>>18)&63]; o[j++]=CL_B64[(t>>12)&63];
+    o[j++]= two ? CL_B64[(t>>6)&63] : '=';
+    o[j++]='=';
+  }
+  o[j]=0;
+  return cl_str(o);
+}
+
+static int cl_b64_val(char c){
+  if(c>='A'&&c<='Z') return c-'A';
+  if(c>='a'&&c<='z') return c-'a'+26;
+  if(c>='0'&&c<='9') return c-'0'+52;
+  if(c=='+') return 62;
+  if(c=='/') return 63;
+  return -1;                       /* '=' and anything else */
+}
+
+static Value cl_decode64(Value v){
+  const char* in = v.s; size_t n = strlen(in);
+  char* o = (char*)cl_alloc(n + 1);
+  size_t j = 0; int quad[4]; int q = 0;
+  for(size_t i=0;i<n;i++){
+    int d = cl_b64_val(in[i]);
+    if(d < 0) continue;            /* skip padding and whitespace */
+    quad[q++] = d;
+    if(q == 4){
+      o[j++] = (char)((quad[0]<<2) | (quad[1]>>4));
+      o[j++] = (char)(((quad[1]&15)<<4) | (quad[2]>>2));
+      o[j++] = (char)(((quad[2]&3)<<6) | quad[3]);
+      q = 0;
+    }
+  }
+  if(q == 3){                      /* two bytes encoded */
+    o[j++] = (char)((quad[0]<<2) | (quad[1]>>4));
+    o[j++] = (char)(((quad[1]&15)<<4) | (quad[2]>>2));
+  } else if(q == 2){               /* one byte encoded */
+    o[j++] = (char)((quad[0]<<2) | (quad[1]>>4));
+  }
+  o[j]=0;
+  return cl_str(o);
+}
+
+/* SHA-256, FIPS 180-4. The interpreter's hash() is node's createHash('sha256')
+   and returns lowercase hex, so this has to agree with it byte for byte. */
+static unsigned long cl_rotr(unsigned long x, int n){ return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFFul; }
+
+static Value cl_sha256_hex(Value v){
+  static const unsigned long K[64] = {
+    0x428a2f98ul,0x71374491ul,0xb5c0fbcful,0xe9b5dba5ul,0x3956c25bul,0x59f111f1ul,0x923f82a4ul,0xab1c5ed5ul,
+    0xd807aa98ul,0x12835b01ul,0x243185beul,0x550c7dc3ul,0x72be5d74ul,0x80deb1feul,0x9bdc06a7ul,0xc19bf174ul,
+    0xe49b69c1ul,0xefbe4786ul,0x0fc19dc6ul,0x240ca1ccul,0x2de92c6ful,0x4a7484aaul,0x5cb0a9dcul,0x76f988daul,
+    0x983e5152ul,0xa831c66dul,0xb00327c8ul,0xbf597fc7ul,0xc6e00bf3ul,0xd5a79147ul,0x06ca6351ul,0x14292967ul,
+    0x27b70a85ul,0x2e1b2138ul,0x4d2c6dfcul,0x53380d13ul,0x650a7354ul,0x766a0abbul,0x81c2c92eul,0x92722c85ul,
+    0xa2bfe8a1ul,0xa81a664bul,0xc24b8b70ul,0xc76c51a3ul,0xd192e819ul,0xd6990624ul,0xf40e3585ul,0x106aa070ul,
+    0x19a4c116ul,0x1e376c08ul,0x2748774cul,0x34b0bcb5ul,0x391c0cb3ul,0x4ed8aa4aul,0x5b9cca4ful,0x682e6ff3ul,
+    0x748f82eeul,0x78a5636ful,0x84c87814ul,0x8cc70208ul,0x90befffaul,0xa4506cebul,0xbef9a3f7ul,0xc67178f2ul };
+  unsigned long h[8] = {0x6a09e667ul,0xbb67ae85ul,0x3c6ef372ul,0xa54ff53aul,
+                        0x510e527ful,0x9b05688cul,0x1f83d9abul,0x5be0cd19ul};
+  const unsigned char* msg = (const unsigned char*)v.s;
+  size_t len = strlen((const char*)msg);
+  size_t total = ((len + 9 + 63) / 64) * 64;
+  unsigned char* buf = (unsigned char*)cl_alloc(total);
+  memset(buf, 0, total);
+  memcpy(buf, msg, len);
+  buf[len] = 0x80;
+  unsigned long long bits = (unsigned long long)len * 8ull;
+  for(int i=0;i<8;i++) buf[total-1-i] = (unsigned char)((bits >> (8*i)) & 0xFF);
+
+  for(size_t off=0; off<total; off+=64){
+    unsigned long w[64];
+    for(int i=0;i<16;i++){
+      const unsigned char* p = buf + off + i*4;
+      w[i] = ((unsigned long)p[0]<<24)|((unsigned long)p[1]<<16)|((unsigned long)p[2]<<8)|p[3];
+    }
+    for(int i=16;i<64;i++){
+      unsigned long s0 = cl_rotr(w[i-15],7) ^ cl_rotr(w[i-15],18) ^ (w[i-15] >> 3);
+      unsigned long s1 = cl_rotr(w[i-2],17) ^ cl_rotr(w[i-2],19) ^ (w[i-2] >> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) & 0xFFFFFFFFul;
+    }
+    unsigned long a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+    for(int i=0;i<64;i++){
+      unsigned long S1 = cl_rotr(e,6) ^ cl_rotr(e,11) ^ cl_rotr(e,25);
+      unsigned long ch = (e & f) ^ ((~e & 0xFFFFFFFFul) & g);
+      unsigned long t1 = (hh + S1 + ch + K[i] + w[i]) & 0xFFFFFFFFul;
+      unsigned long S0 = cl_rotr(a,2) ^ cl_rotr(a,13) ^ cl_rotr(a,22);
+      unsigned long mj = (a & b) ^ (a & c) ^ (b & c);
+      unsigned long t2 = (S0 + mj) & 0xFFFFFFFFul;
+      hh=g; g=f; f=e; e=(d+t1)&0xFFFFFFFFul; d=c; c=b; b=a; a=(t1+t2)&0xFFFFFFFFul;
+    }
+    h[0]=(h[0]+a)&0xFFFFFFFFul; h[1]=(h[1]+b)&0xFFFFFFFFul;
+    h[2]=(h[2]+c)&0xFFFFFFFFul; h[3]=(h[3]+d)&0xFFFFFFFFul;
+    h[4]=(h[4]+e)&0xFFFFFFFFul; h[5]=(h[5]+f)&0xFFFFFFFFul;
+    h[6]=(h[6]+g)&0xFFFFFFFFul; h[7]=(h[7]+hh)&0xFFFFFFFFul;
+  }
+  char* o = (char*)cl_alloc(65);
+  for(int i=0;i<8;i++) sprintf(o + i*8, "%08lx", h[i]);
+  o[64]=0;
+  return cl_str(o);
+}
+
+static Value cl_cwd(void){
+  char* o = (char*)cl_alloc(4096);
+  if(!getcwd(o, 4096)) { o[0]=0; }
+  return cl_str(o);
+}
+
+/* Seeded once, lazily: a compiled tool that returns the same "random" numbers
+   on every run would be a surprising thing to ship. */
+static int cl_rand_ready = 0;
+static double cl_rand_unit(void){
+  if(!cl_rand_ready){ srand((unsigned)time(0) ^ (unsigned)getpid()); cl_rand_ready = 1; }
+  return (double)rand() / ((double)RAND_MAX + 1.0);
+}
+static Value cl_random0(void){ return cl_float(cl_rand_unit()); }
+static Value cl_random1(Value n){ return cl_int((long)(cl_rand_unit() * cl_num(n))); }
+static Value cl_random2(Value a, Value b){
+  double lo = cl_num(a), hi = cl_num(b);
+  return cl_int((long)(cl_rand_unit() * (hi - lo)) + (long)lo);
+}
+
+/* ── exceptions ──
+ *
+ * A stack of setjmp handlers, innermost first, and one slot for the value in
+ * flight. `throw` records the value and longjmps to the nearest handler; with
+ * no handler it reports and exits, because a compiled program silently
+ * ignoring an uncaught throw would be worse than one that stops.
+ *
+ * cl_thrown is a GC root — it is often the only reference to the value while
+ * the stack that held it is being unwound.
+ *
+ * Note on setjmp and local variables: C leaves a non-volatile local of the
+ * function containing the setjmp indeterminate if it is modified inside the
+ * try. The emitter therefore gives `let`/`mut` locals of any function
+ * containing a try `volatile` storage. A parameter reassigned inside a try is
+ * the one case still relying on the compiler's returns_twice handling rather
+ * than on the standard; clang and gcc both spill across setjmp, but it is a
+ * gap and is recorded as one.
+ */
+typedef struct ClHandler { jmp_buf buf; struct ClHandler* prev; } ClHandler;
+static ClHandler* cl_handlers = 0;
+
+static void cl_throw(Value v){
+  cl_thrown = v;
+  if(!cl_handlers){
+    fprintf(stderr, "clarity: uncaught throw: %s\n", cl_display(v));
+    exit(1);
+  }
+  longjmp(cl_handlers->buf, 1);
+}
+
 static Value cl_hof_each(Value lst, Value fn){
   Value it=cl_iter(lst); long n=cl_length(it);
   for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_call(fn, a); }
@@ -1249,6 +1423,33 @@ static void cl_show(Value v){ char* s=cl_display(v); printf("%s\n", s); }
 
 -- Statement list of a block. Parsed bodies (if/while/fn) are Block nodes
 -- carrying `.statements`; tolerate a bare list or null too.
+-- Does this statement list contain a try anywhere inside it? Decides whether
+-- a function's locals need volatile storage: C leaves a non-volatile local of
+-- the function containing a setjmp indeterminate if the try modifies it.
+-- Closures are their own C functions and are checked separately when emitted.
+fn _has_try(stmts) {
+    for s in stmts {
+        let nt = s.node_type
+        if nt == "TryCatch" { return true }
+        if nt == "IfStatement" {
+            if _has_try(_block_stmts(s.body)) { return true }
+            if s.elif_clauses != null {
+                for clause in s.elif_clauses { if _has_try(_block_stmts(clause[1])) { return true } }
+            }
+            if s.else_body != null and _has_try(_block_stmts(s.else_body)) { return true }
+        }
+        if nt == "WhileStatement" or nt == "ForStatement" {
+            if _has_try(_block_stmts(s.body)) { return true }
+        }
+        if nt == "MatchStatement" {
+            for arm in s.arms { if _has_try(_block_stmts(arm[1])) { return true } }
+            if s.default != null and _has_try(_block_stmts(s.default)) { return true }
+        }
+        if nt == "Block" { if _has_try(_block_stmts(s)) { return true } }
+    }
+    return false
+}
+
 fn _block_stmts(b) {
     if b == null { return [] }
     try { return b.statements } catch e {}
@@ -1311,6 +1512,8 @@ class CCodegen {
         this.fn_values = {}     -- functions referenced as values (need a thunk)
         this.local_names = []   -- names bound inside the function being emitted
         this.closure_defs = []  -- emitted closure function bodies (line lists)
+        this.volatile_locals = false  -- true while emitting a function with a try
+        this.finally_stack = []       -- finally bodies enclosing the statement being emitted
     }
 
     fn _next_closure() {
@@ -1426,6 +1629,14 @@ class CCodegen {
             if node.else_body != null { this._free_stmts(_block_stmts(node.else_body), bound, acc) }
             return
         }
+        if nt == "TryCatch" {
+            this._free_stmts(_block_stmts(node.try_body), bound, acc)
+            let inner = if node.catch_var != null { this._set_add(bound, node.catch_var) } else { bound }
+            if node.catch_body != null { this._free_stmts(_block_stmts(node.catch_body), inner, acc) }
+            if node.finally_body != null { this._free_stmts(_block_stmts(node.finally_body), bound, acc) }
+            return
+        }
+        if nt == "ThrowStatement" { this._free_expr(node.value, bound, acc); return }
         if nt == "MatchStatement" {
             this._free_expr(node.subject, bound, acc)
             for arm in node.arms {
@@ -1486,7 +1697,15 @@ class CCodegen {
             push(lines, "  Value " + vname + " = __cap[" + str(ci) + "];")
             ci += 1
         }
+        -- A closure is its own C function, so whether its locals need volatile
+        -- storage depends on whether *it* contains a try — not on the function
+        -- it was written inside. Without saving and restoring this, a closure
+        -- with a try emitted from a context that has none would get ordinary
+        -- locals, which is the -O2 hazard the volatile is there to prevent.
+        let outer_volatile = this.volatile_locals
+        this.volatile_locals = _has_try(_block_stmts(node.body))
         for s in _block_stmts(node.body) { for l in this.stmt(s, 1) { push(lines, l) } }
+        this.volatile_locals = outer_volatile
         push(lines, "  return cl_null();")
         push(lines, "}")
         push(this.closure_defs, lines)
@@ -1580,6 +1799,13 @@ class CCodegen {
         if name == "merge" and n == 0 { return "cl_map_new()" }
         if name == "print" and n > 0 { return "cl_print((Value[]){" + join(args, ", ") + "}, " + str(n) + ")" }
         if name == "print" and n == 0 { return "cl_print(0, 0)" }
+        if name == "encode64" and n == 1 { return "cl_encode64(" + args[0] + ")" }
+        if name == "decode64" and n == 1 { return "cl_decode64(" + args[0] + ")" }
+        if name == "hash" and n == 1 { return "cl_sha256_hex(" + args[0] + ")" }
+        if name == "cwd" and n == 0 { return "cl_cwd()" }
+        if name == "random" and n == 0 { return "cl_random0()" }
+        if name == "random" and n == 1 { return "cl_random1(" + args[0] + ")" }
+        if name == "random" and n == 2 { return "cl_random2(" + args[0] + ", " + args[1] + ")" }
         -- strings
         if name == "upper" and n == 1 { return "cl_upper(" + args[0] + ")" }
         if name == "lower" and n == 1 { return "cl_lower(" + args[0] + ")" }
@@ -1799,7 +2025,8 @@ class CCodegen {
         let pad = repeat("  ", indent)
         let nt = node.node_type
         if nt == "LetStatement" {
-            return [pad + "Value v_" + node.name + " = " + this.expr(node.value) + ";"]
+            let qual = if this.volatile_locals { "volatile Value v_" } else { "Value v_" }
+            return [pad + qual + node.name + " = " + this.expr(node.value) + ";"]
         }
         if nt == "AssignStatement" {
             if node.target.node_type == "Identifier" {
@@ -1849,8 +2076,30 @@ class CCodegen {
             return [pad + "(void)(" + this.expr(node.expression) + ");"]
         }
         if nt == "ReturnStatement" {
-            if node.value != null { return [pad + "return " + this.expr(node.value) + ";"] }
-            return [pad + "return cl_null();"]
+            let val = if node.value != null { this.expr(node.value) } else { "cl_null()" }
+            if len(this.finally_stack) == 0 { return [pad + "return " + val + ";"] }
+            -- Returning out of a try has to run the finally blocks it is
+            -- leaving, innermost first. The value is computed before they run,
+            -- because a finally must not change what is being returned, and
+            -- the handlers those blocks belong to are already popped by the
+            -- time control reaches here only on the normal path — so pop them
+            -- explicitly.
+            let id = this.tmp_id
+            this.tmp_id += 1
+            let t = "__ret" + str(id)
+            mut lines = [pad + "{ Value " + t + " = " + val + ";"]
+            mut i = len(this.finally_stack) - 1
+            -- Emitting the finally bodies here means they run on this path as
+            -- well as on the fall-through and throw paths.
+            let saved = this.finally_stack
+            this.finally_stack = []
+            while i >= 0 {
+                for st in _block_stmts(saved[i]) { for l in this.stmt(st, indent + 1) { push(lines, l) } }
+                i = i - 1
+            }
+            this.finally_stack = saved
+            push(lines, pad + "  return " + t + "; }")
+            return lines
         }
         if nt == "IfStatement" {
             mut lines = [pad + "if(cl_truthy(" + this.expr(node.condition) + ")) {"]
@@ -1885,8 +2134,18 @@ class CCodegen {
             push(lines, pad + "}")
             return lines
         }
-        if nt == "BreakStatement" { return [pad + "break;"] }
-        if nt == "ContinueStatement" { return [pad + "continue;"] }
+        if nt == "BreakStatement" {
+            -- A break that leaves a try would skip its finally. Working out
+            -- which of the enclosing finallys lie between here and the loop
+            -- needs more bookkeeping than this has; refusing is honest, and
+            -- silently skipping a finally would not be.
+            if len(this.finally_stack) > 0 { this.unsupported("break inside a try with a finally", node.line) }
+            return [pad + "break;"]
+        }
+        if nt == "ContinueStatement" {
+            if len(this.finally_stack) > 0 { this.unsupported("continue inside a try with a finally", node.line) }
+            return [pad + "continue;"]
+        }
         if nt == "MatchStatement" {
             -- The interpreter matches by `==` against each arm's evaluated
             -- pattern — there is no destructuring — so this is an if/else
@@ -1923,6 +2182,37 @@ class CCodegen {
             -- ROADMAP, not silently different.
             return []
         }
+        if nt == "ThrowStatement" {
+            return [pad + "cl_throw(" + this.expr(node.value) + ");"]
+        }
+        if nt == "TryCatch" {
+            let id = this.tmp_id
+            this.tmp_id += 1
+            let h = "__h" + str(id)
+            mut lines = [pad + "{ ClHandler " + h + "; " + h + ".prev = cl_handlers; cl_handlers = &" + h + ";"]
+            push(lines, pad + "  if(setjmp(" + h + ".buf) == 0) {")
+            -- The handler is popped on both paths before the body runs, so a
+            -- throw from inside a catch block goes to the *enclosing* handler
+            -- rather than back to this one, which would loop forever.
+            if node.finally_body != null { push(this.finally_stack, node.finally_body) }
+            for st in _block_stmts(node.try_body) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+            if node.finally_body != null { pop(this.finally_stack) }
+            push(lines, pad + "    cl_handlers = " + h + ".prev;")
+            push(lines, pad + "  } else {")
+            push(lines, pad + "    cl_handlers = " + h + ".prev;")
+            if node.catch_var != null {
+                push(lines, pad + "    Value v_" + node.catch_var + " = cl_thrown;")
+            }
+            if node.catch_body != null {
+                for st in _block_stmts(node.catch_body) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+            }
+            push(lines, pad + "  }")
+            if node.finally_body != null {
+                for st in _block_stmts(node.finally_body) { for l in this.stmt(st, indent + 1) { push(lines, l) } }
+            }
+            push(lines, pad + "}")
+            return lines
+        }
         if nt == "FnStatement" { return [] }   -- hoisted separately
         this.unsupported("statement " + nt, node.line)
         return []
@@ -1939,11 +2229,16 @@ class CCodegen {
 
     fn function(node) {
         this.local_names = this._bound_names(node)
+        -- C leaves a non-volatile local of the function containing a setjmp
+        -- indeterminate if it is modified inside the try. Any function with a
+        -- try therefore gets volatile locals; see the exception runtime.
+        this.volatile_locals = _has_try(_block_stmts(node.body))
         mut lines = [this._fn_signature(node) + " {"]
         for s in _block_stmts(node.body) { for l in this.stmt(s, 1) { push(lines, l) } }
         push(lines, "  return cl_null();")
         push(lines, "}")
         this.local_names = []
+        this.volatile_locals = false
         return lines
     }
 
@@ -1975,6 +2270,16 @@ class CCodegen {
                     for clause in s.elif_clauses { this._collect_bound(_block_stmts(clause[1]), acc) }
                 }
                 if s.else_body != null { this._collect_bound(_block_stmts(s.else_body), acc) }
+            }
+            elif nt == "TryCatch" {
+                this._collect_bound(_block_stmts(s.try_body), acc)
+                if s.catch_var != null { push(acc, s.catch_var) }
+                if s.catch_body != null { this._collect_bound(_block_stmts(s.catch_body), acc) }
+                if s.finally_body != null { this._collect_bound(_block_stmts(s.finally_body), acc) }
+            }
+            elif nt == "MatchStatement" {
+                for arm in s.arms { this._collect_bound(_block_stmts(arm[1]), acc) }
+                if s.default != null { this._collect_bound(_block_stmts(s.default), acc) }
             }
         }
         return null
