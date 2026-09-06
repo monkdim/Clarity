@@ -792,7 +792,19 @@ class Interpreter {
                     if node.catch_var != null {
                         catch_env.set(node.catch_var, caught["value"], true)
                     }
-                    let result = this.exec_Block(node.catch_body, catch_env)
+                    -- A `return` or a `throw` inside the catch block leaves by
+                    -- signal, and the finally must still run: it used to be
+                    -- skipped entirely, so `finally` was honoured when the try
+                    -- returned and quietly not when the catch did.
+                    mut result = null
+                    try {
+                        result = this.exec_Block(node.catch_body, catch_env)
+                    } catch from_catch {
+                        if node.finally_body != null {
+                            this.exec_Block(node.finally_body, env)
+                        }
+                        throw from_catch
+                    }
                     if node.finally_body != null {
                         this.exec_Block(node.finally_body, env)
                     }
@@ -804,7 +816,15 @@ class Interpreter {
             if node.catch_var != null {
                 catch_env.set(node.catch_var, caught, true)
             }
-            let result = this.exec_Block(node.catch_body, catch_env)
+            mut result = null
+            try {
+                result = this.exec_Block(node.catch_body, catch_env)
+            } catch from_catch {
+                if node.finally_body != null {
+                    this.exec_Block(node.finally_body, env)
+                }
+                throw from_catch
+            }
             if node.finally_body != null {
                 this.exec_Block(node.finally_body, env)
             }

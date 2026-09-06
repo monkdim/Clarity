@@ -159,6 +159,14 @@ if CC == null {
     -- handler, not the one it is already inside, which would loop forever.
     same("exc_nested", "fn nested() { try { try { throw \"inner\" } catch e { throw \"wrapped(\" + e + \")\" } } catch e2 { return e2 } }\nshow nested()")
     same("exc_finally", "mut log = []\nfn f(n) { try { if n > 2 { throw \"big\" }\npush(log, \"try-ok\")\nreturn \"ret-\" + str(n) } catch e { push(log, \"catch-\" + e)\nreturn \"caught\" } finally { push(log, \"finally-\" + str(n)) } }\nshow f(1)\nshow f(5)\nshow log")
+    -- `finally` when the catch block leaves by return or by throw. Both used
+    -- to skip it: the interpreter propagated the signal straight out of the
+    -- catch, and the backend emitted the finally only on the fall-through
+    -- path. A `same()` alone could not have caught that — the two agreed
+    -- with each other while both were wrong — so the expected output is
+    -- asserted directly as well.
+    same("exc_finally_paths", "mut log = []\nfn a() { try { push(log, \"try\")\nreturn \"T\" } catch e { push(log, \"catch\")\nreturn \"C\" } finally { push(log, \"fin-try\") } }\nfn b() { try { throw \"boom\" } catch e { push(log, \"catch\")\nreturn \"C\" } finally { push(log, \"fin-catch\") } }\nfn c() { try { try { throw \"inner\" } catch e { push(log, \"rethrowing\")\nthrow \"wrapped\" } finally { push(log, \"fin-rethrow\") } } catch outer { return \"outer got \" + outer } }\nshow a()\nshow b()\nshow c()\nshow log")
+    nat_eq("exc_finally_paths_exact", "mut log = []\nfn a() { try { push(log, \"try\")\nreturn \"T\" } catch e { push(log, \"catch\")\nreturn \"C\" } finally { push(log, \"fin-try\") } }\nfn b() { try { throw \"boom\" } catch e { push(log, \"catch\")\nreturn \"C\" } finally { push(log, \"fin-catch\") } }\nfn c() { try { try { throw \"inner\" } catch e { push(log, \"rethrowing\")\nthrow \"wrapped\" } finally { push(log, \"fin-rethrow\") } } catch outer { return \"outer got \" + outer } }\nshow a()\nshow b()\nshow c()\nshow log", "T\nC\nouter got wrapped\n[\"try\", \"fin-try\", \"catch\", \"fin-catch\", \"rethrowing\", \"fin-rethrow\"]")
     same("exc_payloads", "fn t(v) { try { throw v } catch e { return e } }\nshow t(42)\nshow t([1, 2])\nshow t({\"a\": 1})")
     -- A local written inside the try and read after the catch. C leaves a
     -- non-volatile local of the setjmp's own function indeterminate here, so
