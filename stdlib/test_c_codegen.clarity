@@ -38,6 +38,14 @@ let IS_LINUX = CC != null and contains(exec("uname"), "Linux")
 -- machine code, and self-modifying code elsewhere needs extra care.
 let IS_X64 = IS_LINUX and contains(exec("uname -m"), "x86_64")
 
+-- Where a stdlib source file is, depending on where the runner was started.
+fn _find_file(name) {
+    for cand in ["stdlib", ".", "../stdlib"] {
+        if exists(cand + "/" + name) { return cand + "/" + name }
+    }
+    return null
+}
+
 fn interp_run(src) {
     let i = Interpreter(null, null)
     i.run(parse(tokenize(src, "<t>"), src))
@@ -501,6 +509,93 @@ if CC == null {
         "mut i = 0\nwhile i < 8 { tcp_send(cli, \"data after close\")\ni = i + 1 }\n" +
         "show \"survived\"\ntcp_close(cli)\ntcp_close(srv)",
         "survived")
+
+    -- ── every builtin _builtin_call emits is in _NATIVE_BUILTINS ──
+    --
+    -- Those two lists have to agree, and nothing made them. _NATIVE_BUILTINS
+    -- is what _is_global consults to decide whether a name used inside a
+    -- closure is a free variable to capture; _builtin_call is what turns a
+    -- name into runtime C. Twenty names were in the second and not the first,
+    -- so a closure calling sort, entries, hash, find, pop, print, values or
+    -- thirteen others captured it as a variable and emitted a `v_sort` that
+    -- nothing declares. The failure surfaced in the C compiler, on generated
+    -- code, naming a variable the program never wrote.
+    --
+    -- Checked against the source text rather than at run time because
+    -- _builtin_call is a chain of `if name == "..."`, which nothing can
+    -- enumerate from inside the program. Reading the compiler's own source is
+    -- unusual for a test; leaving the invariant unchecked is worse.
+    let cg_path = _find_file("c_codegen.clarity")
+    if cg_path == null {
+        show "  (c_codegen.clarity not found from here — builtin table check skipped)"
+    } else {
+        let cg = read(cg_path)
+        let decl_start = index_of(cg, "let _NATIVE_BUILTINS = {")
+        let body_start = index_of(cg, "fn _builtin_call(name, args) {")
+        assert_eq(decl_start >= 0 and body_start >= 0, true, "builtin_tables_located")
+        if decl_start >= 0 and body_start >= 0 {
+            let tail = substring(cg, decl_start, len(cg))
+            let decl_text = substring(tail, 0, index_of(tail, "\n}\n"))
+            -- Every quoted string in the table literal is a builtin name.
+            -- Odd-indexed pieces of a split on the quote character are what
+            -- was between quotes.
+            let decl_pieces = split(decl_text, "\"")
+            mut declared = {}
+            mut di = 1
+            while di < len(decl_pieces) { declared[decl_pieces[di]] = true
+                                          di += 2 }
+
+            -- Every `if name == "x"` in _builtin_call names a builtin it
+            -- emits. The first piece of the split is what came before the
+            -- first one, so it is skipped.
+            let call_pieces = split(substring(cg, body_start, len(cg)), "if name == \"")
+            mut missing = []
+            mut ci = 1
+            while ci < len(call_pieces) {
+                let piece = call_pieces[ci]
+                let q = index_of(piece, "\"")
+                if q > 0 {
+                    let name = substring(piece, 0, q)
+                    if not has(declared, name) and not contains(missing, name) { push(missing, name) }
+                }
+                ci += 1
+            }
+            assert_eq(join(sort(missing), " "), "", "every emitted builtin is declared in _NATIVE_BUILTINS")
+        }
+    }
+
+    -- And the consequence, end to end: each of these inside a closure.
+    same("builtins_inside_a_closure",
+        "let names = [\"c\", \"a\", \"b\"]\n" +
+        "each([1], fn(_) { show sort(names) })\n" +
+        "each([1], fn(_) { show str(len(entries({ \"k\": 1 }))) })\n" +
+        "each([1], fn(_) { show hash(\"abc\") })\n" +
+        "each([1], fn(_) { show str(find([1, 2, 3], fn(v) { return v > 1 })) })\n" +
+        "each([1], fn(_) { show str(some([1, 2], fn(v) { return v > 1 })) })\n" +
+        "each([1], fn(_) { show str(every([1, 2], fn(v) { return v > 0 })) })\n" +
+        "each([1], fn(_) { show reverse([1, 2, 3]) })\n" +
+        "each([1], fn(_) { show unique([1, 1, 2]) })\n" +
+        "each([1], fn(_) { show values({ \"a\": 1 }) })\n" +
+        "each([1], fn(_) { show flat([[1], [2]]) })\n" +
+        "each([1], fn(_) { show str(pow(2.0, 3.0)) })\n" +
+        "each([1], fn(_) { show encode64(\"hi\") + decode64(\"aGk=\") })\n" +
+        "each([1], fn(_) { show str(bool(1)) })\n" +
+        "each([1], fn(_) { mut l = [1, 2]\n show str(pop(l)) })")
+
+    -- A local that shadows a builtin name is still a local, so a closure
+    -- referring to it has to capture it. The reference used to be left
+    -- uncaptured — the compiler saw a builtin — and the closure body named a
+    -- variable nothing declared.
+    same("closure_captures_a_shadowed_builtin",
+        "fn go() {\n" +
+        "    let lines = [\"x\", \"y\"]\n" +
+        "    let sort = 3\n" +
+        "    let time = \"noon\"\n" +
+        "    each([1], fn(_) { show str(len(lines)) + \"/\" + str(sort) + \"/\" + time })\n" +
+        "    return null\n" +
+        "}\n" +
+        "go()\n" +
+        "each([1], fn(_) { show sort([2, 1]) })")
 
     -- ── rest parameters ───────────────────────────────────
     -- The emitted C is fixed-arity, so a variadic Clarity function needs the
