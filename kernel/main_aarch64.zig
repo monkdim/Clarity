@@ -20,6 +20,7 @@ const fwcfg = @import("arch/aarch64/fwcfg.zig");
 const fdt = @import("boot/fdt.zig");
 const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
+const paging = @import("arch/aarch64/paging.zig");
 const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
@@ -70,6 +71,11 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // before this: the kernel had no idea where RAM was.
     memory_selftest(tree, dtb_phys);
 
+    // A process's address space — built, installed, questioned, and taken
+    // apart again. Nothing runs in it yet; that it can exist at all is what
+    // moving the kernel out of TTBR0 was for.
+    process_space_selftest();
+
     // A screen. Everything this kernel has said so far went out a serial
     // line; this is the first thing it can show.
     screen_selftest();
@@ -77,6 +83,152 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     console.println("ClarityOS aarch64: EL1 boot ok");
 
     hang();
+}
+
+/// Build a process's low half, install it, and ask the hardware what it did.
+///
+/// Every claim here is answered by the MMU rather than by reading back a
+/// descriptor this code just wrote: `at s1e0r` and `at s1e0w` run real
+/// stage-1 translations with EL0 permissions. Reading the table back would
+/// only prove the store landed, which was never in doubt.
+///
+/// The data page is filled through the *direct map* and never through the
+/// user address, which is not fastidiousness: PSTATE.PAN makes an EL1 access
+/// to EL0-accessible memory fault on any core that implements it, so a kernel
+/// that populated a process's memory through the process's own addresses
+/// would work on some machines and not others.
+fn process_space_selftest() void {
+    if (pmm.stats().total_pages == 0) {
+        console.println("  [--] no physical memory; process address space not exercised");
+        return;
+    }
+
+    const before = pmm.stats();
+
+    var space = paging.create(1) orelse {
+        console.println("  [FAIL] address space: could not allocate a root table");
+        return;
+    };
+
+    const backing = pmm.alloc_page() orelse {
+        console.println("  [FAIL] address space: no page to back the mapping");
+        return;
+    };
+    const MAGIC: u64 = 0xA11C_1747_0000_0001;
+    const cell = vm.ptr_to_phys(*volatile u64, backing);
+    cell.* = MAGIC;
+
+    // Somewhere a process would plausibly be, and far from anything the
+    // kernel uses — the point of a separate address space is that this
+    // number means nothing in the kernel's own.
+    const UVA: u64 = 0x0000_0000_1000_0000;
+
+    paging.map_page(&space, UVA, backing, paging.MAP_USER | paging.MAP_WRITE) catch |e| {
+        console.print("  [FAIL] address space: map_page said ");
+        console.println(@errorName(e));
+        return;
+    };
+
+    // Building a space is not entering it. Until `activate`, the address is
+    // still nothing at all — if this translated, the mapping would be leaking
+    // into whatever address space happens to be current.
+    const before_activate = mmu.translate_user_read(UVA);
+
+    // A second page, mapped read-only and executable — a process's text.
+    // Presence is the easy half of a page table; permissions are the half
+    // that decides whether a process can write over its own code, and the
+    // only way to see the difference is to ask for a write translation and
+    // be refused.
+    const text_backing = pmm.alloc_page() orelse {
+        console.println("  [FAIL] address space: no page to back the text mapping");
+        return;
+    };
+    const TEXT_UVA: u64 = 0x0000_0000_0040_0000;
+    paging.map_page(&space, TEXT_UVA, text_backing, paging.MAP_USER | paging.MAP_EXEC) catch |e| {
+        console.print("  [FAIL] address space: text map_page said ");
+        console.println(@errorName(e));
+        return;
+    };
+
+    paging.activate(&space);
+    const user_r = mmu.translate_user_read(UVA);
+    const user_w = mmu.translate_user_write(UVA);
+    const text_r = mmu.translate_user_read(TEXT_UVA);
+    const text_w = mmu.translate_user_write(TEXT_UVA);
+
+    // The kernel has to survive the switch. It is in TTBR1 and the process is
+    // in TTBR0, so it should — but "should" is what the UART is for.
+    const kernel_survived = mmu.translate(vm.phys_to_virt(0x0900_0000));
+
+    // What the tables say, walked without the MMU. Answers for a space that
+    // is not installed, which is how a process's memory gets inspected.
+    const table_says = paging.lookup(&space, UVA);
+
+    paging.unmap_page(&space, UVA);
+    paging.unmap_page(&space, TEXT_UVA);
+    const after_unmap = mmu.translate_user_read(UVA);
+
+    paging.deactivate();
+    const after_deactivate = mmu.translate_user_read(UVA);
+
+    // The data is still there. If a page table had been allocated on top of
+    // it — the mistake that makes a process corrupt its own memory — this is
+    // where it shows.
+    const held = cell.* == MAGIC;
+
+    pmm.free_page(backing);
+    pmm.free_page(text_backing);
+    paging.destroy(&space);
+    const after = pmm.stats();
+
+    const ok = before_activate == null and
+        user_r != null and user_r.? == backing and
+        user_w != null and user_w.? == backing and
+        text_r != null and text_r.? == text_backing and
+        text_w == null and
+        table_says != null and table_says.? == backing and
+        kernel_survived != null and kernel_survived.? == 0x0900_0000 and
+        after_unmap == null and
+        after_deactivate == null and
+        held and
+        after.free_pages == before.free_pages;
+
+    if (ok) {
+        console.print("  [ok] process address space: ");
+        console.print_hex(UVA);
+        console.print(" -> ");
+        console.print_hex(backing);
+        console.print(" for EL0 read and write, ");
+        console.print_hex(TEXT_UVA);
+        console.print(" read-only (a write there faults), kernel unaffected, ");
+        console.println("unmapped and torn down with every page returned");
+    } else {
+        console.print("  [FAIL] process address space: pre=");
+        console.print_hex(before_activate orelse 0);
+        console.print(" r=");
+        console.print_hex(user_r orelse 0);
+        console.print(" w=");
+        console.print_hex(user_w orelse 0);
+        console.print(" text_r=");
+        console.print_hex(text_r orelse 0);
+        console.print(" text_w=");
+        console.print_hex(text_w orelse 0);
+        console.print(" table=");
+        console.print_hex(table_says orelse 0);
+        console.print(" kernel=");
+        console.print_hex(kernel_survived orelse 0);
+        console.print(" unmapped=");
+        console.print_hex(after_unmap orelse 0);
+        console.print(" off=");
+        console.print_hex(after_deactivate orelse 0);
+        console.print(" held=");
+        console.print_dec(@intFromBool(held));
+        console.print(" pages ");
+        console.print_dec(before.free_pages);
+        console.print("->");
+        console.print_dec(after.free_pages);
+        console.println("");
+    }
 }
 
 /// Ask the translation hardware what the address space actually looks like.

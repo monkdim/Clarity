@@ -235,9 +235,18 @@ jobs:
           # after it — the device tree, fw_cfg's DMA, the framebuffer, the page
           # the allocator wrote through — is therefore going through the high
           # map, because there is no longer any other map to go through.
+          #
+          # The process marker says a second address space was built in
+          # TTBR0, installed, and questioned with `at s1e0r`/`at s1e0w` — the
+          # hardware confirming that a page mapped read-write for EL0
+          # translates both ways, that a page mapped read-only translates for
+          # a read and *faults* for a write, that the kernel's own mappings
+          # survived the switch, and that every table page came back when the
+          # space was torn down.
           if grep -q "\[ok\] device tree at" serial-arm.log \
              && grep -q "\[ok\] identity map dropped:" serial-arm.log \
              && grep -q "\[ok\] direct map covers all of RAM" serial-arm.log \
+             && grep -q "\[ok\] process address space:" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
@@ -275,6 +284,7 @@ jobs:
           echo "-------------------------"
           if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
              && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
+             && grep -q "\[ok\] process address space:" serial-arm-4g.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-4g.log; then
             echo "PASS: the direct map was extended over all 4 GiB and the allocator manages it"
           else
