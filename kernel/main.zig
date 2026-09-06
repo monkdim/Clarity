@@ -47,6 +47,7 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     // Parse the multiboot2 info blob into a BootInfo. Allocator-free, so
     // the memory map aliases the firmware-supplied table — it must be
     // consumed by pmm before we repurpose low memory.
+    console.println("  .. parsing multiboot2 info");
     const parsed = multiboot.ParsedBootInfo.parse(@ptrFromInt(mb_info_phys), null) catch {
         console.println("PANIC: multiboot2 info parse failed");
         hang();
@@ -57,12 +58,15 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         .rsdp = parsed.rsdp_v2 orelse parsed.rsdp_v1,
         .cmdline = parsed.cmdline,
     };
+    console.println("  .. multiboot2 parsed");
 
     // 2. Memory: physical page allocator over the boot memory map,
     //    then a clean page-table tree owned by the kernel, then a
     //    slab allocator for kernel objects.
     pmm.init(boot_info.memory_map);
+    console.println("  .. pmm ok");
     vmm.init();
+    console.println("  .. vmm ok");
     heap.init();
     console.println("  [ok] memory: pmm + vmm + heap");
 
