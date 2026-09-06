@@ -348,6 +348,7 @@ jobs:
              && grep -q "\[ok\] console on screen:" serial-arm.log \
              && grep -q "\[ok\] console: 95 glyphs drawn, screen scrolled" serial-arm.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm.log \
+             && grep -q "\[ok\] console input:" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
@@ -390,6 +391,7 @@ jobs:
           echo "-------------------------"
           if grep -q "hello from EL0 on aarch64" serial-arm-pan.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-pan.log \
+             && grep -q "\[ok\] console input:" serial-arm-pan.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-pan.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm-pan.log \
              && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm-pan.log \
@@ -429,6 +431,7 @@ jobs:
           echo "-------------------------"
           if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-4g.log \
+             && grep -q "\[ok\] console input:" serial-arm-4g.log \
              && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
              && grep -q "\[ok\] process address space:" serial-arm-4g.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-4g.log \
@@ -450,16 +453,26 @@ jobs:
       - name: Screenshot the display and check the pixels
         run: python3 kernel/tools/fb_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img
 
-      # The boots above prove the kernel finds a keyboard. They cannot prove
-      # it reads one: "read 0 characters" is what a perfectly working driver
-      # says when nobody is typing, so no marker in a log nobody typed into
-      # can tell that apart from a queue the device never writes to.
+      # The boots above prove the kernel finds a keyboard and runs the line
+      # discipline. They cannot prove either one works: "0 lines" is what a
+      # perfectly working driver reports when nobody is typing, so no marker
+      # in a log nobody typed into can tell that from a queue the device never
+      # writes to.
       #
-      # This boots again with QEMU's monitor on a socket and types — fifty-two
-      # keys, which QEMU turns into four events each, so well over two hundred
-      # events through a queue of sixty-four. A driver that never hands its
-      # buffers back would deliver the first sixteen keys and go quiet, which
-      # is exactly the bug this length is here to catch: it was found by
-      # typing seven keys into an eight-deep queue and reading back six.
-      - name: Type at the keyboard and check what it read
+      # This boots again with QEMU's monitor on a socket and types two lines.
+      #
+      # The first is the alphabet twice: fifty-two keys, which QEMU turns into
+      # four events each, so well over two hundred events through a virtqueue
+      # of sixty-four. A driver that never hands its buffers back delivers the
+      # first sixteen keys and goes quiet — which is the bug this length is
+      # here to catch, found by typing seven keys into an eight-deep queue and
+      # reading back six.
+      #
+      # The second is "helxo", two backspaces, "lo". The kernel must end up
+      # holding "hello" and the *screen* must show "hello" — those are two
+      # different claims, and a console that echoed the backspaces without
+      # erasing anything satisfies the first and not the second. So this step
+      # also screenshots the display and checks every character cell against a
+      # replay of the serial log, using fb_check's own model of the console.
+      - name: Type at the keyboard and check what it read and drew
         run: python3 kernel/tools/key_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img

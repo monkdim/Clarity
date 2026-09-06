@@ -6,8 +6,10 @@
 //! on either machine.
 //!
 //! Deliberately small. There is no cursor to blink, no colour escape, no
-//! scrollback: a boot log needs characters, newlines and scrolling, and every
-//! one of those is a thing that can be got wrong, so the list stops there.
+//! scrollback: a boot log needs characters, newlines, tabs, backspace and
+//! scrolling, and every one of those is a thing that can be got wrong, so the
+//! list stops there. Backspace is the newest and the only one that is here
+//! for something being typed rather than something being printed.
 
 const fb = @import("fb.zig");
 const font = @import("font8x8.zig");
@@ -67,6 +69,26 @@ pub const Console = struct {
                 self.next_row();
             },
             '\r' => self.col = 0,
+            // Backspace moves the cursor and draws nothing, which is what a
+            // terminal does and not what is convenient here. The convenient
+            // version — step back and blank the cell — would make this
+            // console the only one that erases on its own, so a caller
+            // written against it would leave the character behind on every
+            // real terminal. Erasing is the caller's business, and it spells
+            // it the way everything else does: backspace, space, backspace.
+            //
+            // Backing up off the left edge lands on the end of the row above,
+            // because a line long enough to wrap is still one line to whoever
+            // is editing it. Not above the top of the screen, though: those
+            // rows have been scrolled away and there is nothing to go back to.
+            8 => {
+                if (self.col > 0) {
+                    self.col -= 1;
+                } else if (self.row > 0) {
+                    self.row -= 1;
+                    self.col = self.cols - 1;
+                }
+            },
             // Tab stops every eight columns, computed rather than drawn: a tab
             // that drew eight spaces would erase whatever it passed over,
             // which is the wrong answer for a console and the easy one.

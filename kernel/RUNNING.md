@@ -147,7 +147,7 @@ suspect.
 command has not, because the machine writing it has no Mac. If it does not
 work, the boot log up to the point it stops is the useful thing to report.
 
-### A keyboard
+### A keyboard, and typing
 
 ```sh
 qemu-system-aarch64 \
@@ -162,17 +162,28 @@ qemu-system-aarch64 \
 so a key press arrives as a virtio-input event on the MMIO bus, and the extra
 `-device` is what puts one there. The kernel finds it by walking the
 thirty-two bus slots the device tree names and reading each one's registers,
-then spends three seconds reading whatever is typed:
+then asks for input:
 
 ```
   [ok] keyboard: virtio-input on a bus of 32 slots
-  keyboard: read 7 characters from 7 key presses: "clarity"
+  type at it; two seconds of quiet ends the read
+  > hello
+  line 1: "hello"
+  > 
+  [ok] console input: 1 line, 5 characters, from 6 key presses (0 ignored, 0 dropped)
 ```
+
+Type into the QEMU window and the characters appear after the `>`, on the
+screen and on the serial line both. Backspace erases. Enter ends the line,
+and the kernel prints back what it has — which is the point of the two lines
+being separate: the echo shows what was *typed* and the `line` shows what the
+kernel *holds*, and wherever something was corrected those differ.
 
 Three seconds of nothing ends it, as does two seconds of quiet after the last
 key, so a boot with nobody at the keyboard costs three seconds and no more.
-Shift works; the table is the main key block only, so function keys, the
-keypad and the arrows type nothing.
+Four lines at most, then it moves on. Shift works; the table is the main key
+block only, so function keys, the keypad and the arrows type nothing — and
+are counted as `ignored` rather than silently dropped.
 
 Drop the `-device` and the kernel says so and carries on. It prints the bus
 rather than a summary of it, because "no keyboard" is also what a driver
@@ -185,20 +196,29 @@ was read and what was in it:
        slot 0xa003e00: transport version 1, device id 4
 ```
 
-The `keyboard: read` line cannot be an `[ok]`, and that is the whole
-difficulty with testing an input device: reading nothing is exactly what a
-working driver does when nobody types, so no marker in a log nobody typed
-into can tell that from a queue the device never writes to.
+None of those lines can be an `[ok]`, and that is the whole difficulty with
+testing an input device: reading nothing is exactly what a working driver
+does when nobody types, so no marker in a log nobody typed into can tell that
+from a queue the device never writes to.
 
 `tools/key_check.py` is what closes it. It boots this same command line with
-QEMU's monitor on a socket and types the alphabet twice through `sendkey` —
-the monitor's own path into the input device, the same one a keypress in the
-QEMU window takes — then requires the kernel to report back exactly those
-fifty-two characters. Fifty-two is not arbitrary: QEMU turns each key into
-four events, so the run puts over two hundred through a queue of sixty-four,
-and it only passes if the driver really gives its buffers back to the device
-rather than draining the ring it filled at start-up. Breaking that one line
-makes it read sixteen characters and stop.
+QEMU's monitor on a socket and types two lines, then checks two different
+things about them:
+
+- **the alphabet twice** — fifty-two keys, which QEMU turns into four events
+  each, so well over two hundred through a virtqueue of sixty-four. A shorter
+  line fits in the ring the driver hands the device at start-up and would
+  pass whether or not buffers are ever given back. Breaking the refill makes
+  this read exactly sixteen characters and stop.
+- **`helxo`, backspace, backspace, `lo`** — the line discipline's own job.
+  The kernel must end up holding `hello`, *and* the screenshot must show
+  `  > hello` on a row of its own. Those are two claims: a console that
+  echoed the backspaces without erasing anything satisfies the first and not
+  the second.
+
+The screen half uses `fb_check.py`'s model of the console, imported rather
+than copied, so there is one description of how a character cell gets filled
+in and both checks fail if it stops matching `graphics/console.zig`.
 
 ### What it does not do yet
 
@@ -239,9 +259,10 @@ nothing keeps run queues, priorities, or a process table, so programs run one
 after another rather than at the same time. They are loaded from ELFs embedded
 in the kernel image rather than read from anywhere: no filesystem, no shell.
 `write` goes straight to the serial console because there is no VFS to route
-it through. There is text on screen and there is a keyboard, but nothing
-joins them: no tty, no line discipline, no `read(2)`, and so no shell. Those
-are the next thing.
+it through. Text on screen and the keyboard are joined now — typing echoes,
+backspace erases, Enter hands over a line — but only as far as a boot
+selftest that prints the line back. There is no `read(2)`, no process holding
+a terminal, and so no shell. That is the next thing.
 
 ## x86-64 — the one that runs programs
 
@@ -288,9 +309,9 @@ scrolling over the serial log to work out what each cell should hold, then
 comparing every pixel.
 
 `key_check.py` boots it with a keyboard attached and a monitor socket, types
-through `sendkey`, and compares what the kernel says it read against what was
-sent. Between them the two scripts check the console in both directions
-without a person looking at anything.
+through `sendkey`, and compares both what the kernel says it read and what
+ends up on the screen against what was sent. Between them the two scripts
+check the console in both directions without a person looking at anything.
 
 `make_font.py` regenerates `graphics/font8x8.zig` from `tools/font8x8.txt`.
 The `.zig` is checked in, so building needs no Python; `--check` is what stops

@@ -86,7 +86,8 @@ def expected_screen(log_bytes):
 
     Returns (grid, scrolls), or None if the log never got as far as turning
     the screen console on. Mirrors graphics/console.zig: wrap at the right
-    edge, tab to the next multiple of eight, scroll at the bottom.
+    edge, tab to the next multiple of eight, backspace to the previous cell
+    (across the left edge to the row above), scroll at the bottom.
 
     Bytes, not text. The kernel's messages contain em dashes, and the console
     draws one cell per *byte* — so a three-byte character occupies three
@@ -116,6 +117,16 @@ def expected_screen(log_bytes):
             next_row()
         elif ch == 0x0D:
             col = 0
+        elif ch == 0x08:
+            # Backspace moves and draws nothing, the same as the console does
+            # and the same as a terminal does. What erases is the sequence the
+            # line editor sends — backspace, space, backspace — and that only
+            # comes out right here if this half of it draws nothing.
+            if col > 0:
+                col -= 1
+            elif row > 0:
+                row -= 1
+                col = COLS - 1
         elif ch == 0x09:
             stop = min((col + 8) & ~7, COLS)
             while col < stop:

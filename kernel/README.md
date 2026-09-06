@@ -60,10 +60,18 @@ claim with no marker behind it is in "What does not run yet".
   every pixel against a glyph it renders itself from `tools/font8x8.txt`
 - **a keyboard**: virtio-input over the virtio-mmio bus, found by walking the
   thirty-two slots the device tree names rather than by knowing where QEMU
-  puts them. CI types at it — `tools/key_check.py` sends fifty-two keys
-  through QEMU's monitor and requires the kernel to report back exactly those
-  characters, which is the only way to tell a driver that delivers nothing
-  from a boot where nobody pressed anything
+  puts them
+- **typing, and seeing it**: a canonical-mode line discipline joins the two —
+  characters are echoed to the screen as they arrive, backspace erases, Enter
+  hands over a line. CI types at it: `tools/key_check.py` sends the alphabet
+  twice through QEMU's monitor (fifty-two keys, over two hundred virtqueue
+  events, which is what proves the driver recycles its buffers), then sends
+  `helxo`, two backspaces and `lo`. The kernel must end up holding `hello`
+  **and** the screenshot must show `hello` on a row of its own — two
+  different claims, and a console that echoed the backspaces without erasing
+  anything satisfies only the first. Typing at all is the part no marker in a
+  log can establish: "0 lines" is exactly what a working driver reports when
+  nobody is at the keyboard
 - per-process address spaces in TTBR0 — three-level tables, ASID-tagged,
   with permissions verified by asking the MMU to translate as EL0 would
 - **a program at EL0**: `hello from EL0 on aarch64` in the boot log is
@@ -99,23 +107,35 @@ claim with no marker behind it is in "What does not run yet".
 
 ## What does not run yet
 
-Written, compiles, and nothing has ever executed it:
+Written, and **not even compiled** — Zig never parses a file nothing
+imports, so these are not checked by any build and could contain anything:
 
-- `fs/devfs.zig`, `fs/procfs.zig`, `drivers/tty.zig` — nothing imports
-  devfs or procfs, and tty is reached only from devfs
-- `boot/uefi.zig` — nothing imports it
-- `drivers/ahci.zig`, `drivers/virtio_net.zig` — scanned for at boot, and
-  every operation past detection returns `NotImplemented`
+- `fs/devfs.zig`, `fs/procfs.zig`, `drivers/tty.zig`, `boot/uefi.zig`
+
+That is measured rather than assumed: appending a line of deliberate nonsense
+to each of them produces zero errors from `zig build` and `zig build aarch64`
+alike. This section used to claim they compiled; they do not, and the
+difference matters, because "compiles but never runs" is a much smaller
+problem than "has never been looked at by a compiler". `drivers/tty.zig` in
+particular sketches a line discipline, and the working one is
+`drivers/line.zig` — written fresh rather than resurrected, and confirmed to
+be in the build by the same nonsense test.
+
+Compiled, but only on x86_64, and never executed past detection:
+
+- `drivers/ahci.zig`, `drivers/virtio_net.zig` — both scan PCI correctly and
+  every operation after that returns `NotImplemented`
 
 Not written:
 
-- Nothing *routes* the keyboard anywhere. The driver reads keys and the
-  console writes text, and no code joins them: there is no line discipline, no
-  tty, no `read(2)`, and so no shell. The keycode table covers the main
-  block only — no function keys, keypad, arrows or modifiers past shift,
-  because nothing reads them yet and a table of untested entries is a table
-  of guesses. The driver is polled rather than interrupt-driven; the GIC
-  routing for the virtio slots is in the device tree and nothing reads it.
+- Nothing *above* the line discipline. Lines go to a boot selftest that
+  prints them; there is no `read(2)`, no process holding a terminal, and so
+  no shell. The keycode table covers the main block only — no function keys,
+  keypad, arrows or modifiers past shift, because nothing reads them yet and
+  a table of untested entries is a table of guesses. The line editor has
+  backspace and nothing else: no kill-line, no history, no cursor keys. The
+  keyboard is polled rather than interrupt-driven; the GIC routing for the
+  virtio slots is in the device tree and nothing reads it.
 - On aarch64: a scheduler and a filesystem. Threads can be switched, but
   nothing keeps run queues, priorities or a process table — the boot selftest
   drives the switching primitive directly. Programs are loaded from an ELF
@@ -168,6 +188,7 @@ kernel/
 │   ├── pmm.zig             bitmap page-frame allocator (both architectures)
 │   ├── vmm.zig             x86 4-level page tables, AddressSpace
 │   └── heap.zig            slab allocator over the pmm
+├── drivers/line.zig        characters into lines — echo, backspace, Enter
 ├── sched/
 │   ├── process.zig         one Process per address space, many Threads
 │   └── scheduler.zig       preemptive priority round-robin
@@ -196,7 +217,7 @@ kernel/
 │   └── user.ld             static user link layout, both architectures
 ├── tools/
 │   ├── fb_check.py         boots ARM, screenshots it, reads the text back
-│   ├── key_check.py        boots ARM, types at it, reads the keys back
+│   ├── key_check.py        boots ARM, types at it, checks the lines and pixels
 │   ├── font8x8.txt         the console font, as 95 glyphs of ASCII art
 │   ├── make_font.py        turns that into font8x8.zig, and into a picture
 │   └── run_x86.sh          builds the GRUB ISO `zig build run` boots

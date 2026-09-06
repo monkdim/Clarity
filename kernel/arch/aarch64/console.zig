@@ -100,6 +100,16 @@ pub fn print_dec(v: u64) void {
     }
 }
 
+/// One byte to the console, control characters included.
+///
+/// `print` exists for messages; this exists for echoing what someone typed,
+/// where the bytes go out one at a time and several of them are not
+/// printable. Same path, so an echoed character reaches the screen exactly
+/// as a printed one does.
+pub fn putc(c: u8) void {
+    putchar(c);
+}
+
 fn putchar(c: u8) void {
     while ((mmio_read(UARTFR) & FR_TXFF) != 0) {}
     mmio_write(UARTDR, c);
