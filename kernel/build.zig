@@ -134,18 +134,21 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(kernel);
 
     // `zig build run` — boot the kernel under QEMU.
-    const qemu = b.addSystemCommand(&.{
-        "qemu-system-x86_64",
-        "-cpu",       "qemu64,+sse,+sse2",
-        "-m",         "256M",
-        "-serial",    "stdio",
-        "-no-reboot",
-        "-no-shutdown",
-        "-kernel",
-    });
+    //
+    // Through a script rather than a direct QEMU invocation, because QEMU
+    // cannot boot this image with `-kernel`: it is multiboot2, and `-kernel`
+    // on x86 wants a bzImage or an ELF with a PVH note. It used to try
+    // anyway, and every `zig build run` ended in
+    //
+    //   Error loading uncompressed kernel without PVH ELF Note
+    //
+    // with nothing on the serial line. The script builds the same GRUB rescue
+    // ISO the boot gate builds, so `zig build run` and CI boot the same way.
+    const qemu = b.addSystemCommand(&.{"sh"});
+    qemu.addFileArg(b.path("tools/run_x86.sh"));
     qemu.addArtifactArg(kernel);
 
-    const run_step = b.step("run", "Boot the kernel under QEMU");
+    const run_step = b.step("run", "Boot the x86-64 kernel under QEMU (builds a GRUB ISO)");
     run_step.dependOn(&qemu.step);
 
     // ── AArch64 (Apple-Silicon-class) kernel ──────────────
@@ -187,4 +190,24 @@ pub fn build(b: *std.Build) void {
     const aarch64_step = b.step("aarch64", "Build the AArch64 kernel");
     aarch64_step.dependOn(&b.addInstallArtifact(kernel_arm, .{}).step);
     aarch64_step.dependOn(&install_arm_bin.step);
+
+    // `zig build run-aarch64`. This one QEMU really can boot with `-kernel`:
+    // the image carries an ARM64 Linux Image header, which is the format
+    // `-kernel` expects on this architecture — and following that protocol is
+    // also what gets the kernel handed a device tree.
+    const qemu_arm = b.addSystemCommand(&.{
+        "qemu-system-aarch64",
+        "-M",         "virt",
+        "-cpu",       "cortex-a72",
+        "-m",         "512",
+        "-device",    "ramfb",
+        "-serial",    "stdio",
+        "-no-reboot",
+        "-kernel",
+    });
+    qemu_arm.addFileArg(kernel_arm_bin.getOutput());
+    qemu_arm.step.dependOn(aarch64_step);
+
+    const run_arm_step = b.step("run-aarch64", "Boot the AArch64 kernel under QEMU");
+    run_arm_step.dependOn(&qemu_arm.step);
 }

@@ -12,6 +12,21 @@ zig build            # x86-64  -> zig-out/bin/clarity-kernel
 zig build aarch64    # aarch64 -> zig-out/bin/clarity-kernel-aarch64.img
 ```
 
+To just see one boot, without reading the rest of this file:
+
+```sh
+zig build run            # x86-64: builds a GRUB ISO, boots it, serial on stdout
+zig build run-aarch64    # aarch64: boots the image, opens a window with the screen
+```
+
+The x86 one goes through `tools/run_x86.sh` because QEMU's `-kernel` cannot
+load a multiboot2 image; the script builds the same rescue ISO the boot gate
+builds, so `zig build run` and CI boot the kernel identically. It needs
+`grub-mkrescue` and `xorriso`, and says so by name if they are missing.
+
+Both boots end by halting on purpose — the kernel has nothing left to do, so
+it stops rather than resetting. Ctrl-A X quits QEMU.
+
 The aarch64 build produces two files. The `.img` is the bootable one: a flat
 binary carrying an ARM64 Linux Image header, which is what makes a bootloader
 treat it as a kernel — and hand it a device tree. The ELF beside it has the
