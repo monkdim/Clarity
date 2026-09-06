@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const console = @import("arch/aarch64/console.zig");
+const mmu = @import("arch/aarch64/mmu.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
 /// is at EL1 with a stack and a zeroed .bss. `dtb_phys` is the device tree
@@ -26,6 +27,14 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
 
     install_vectors();
     console.println("  [ok] exception vectors (VBAR_EL1)");
+
+    // Turning translation on is the riskiest step of ARM bring-up: get the
+    // attributes wrong and the next instruction fetch faults with no
+    // console left to report it. Reaching the line below means the identity
+    // map, the device attributes covering the UART, and the cache settings
+    // are all correct.
+    mmu.init();
+    mmu.report();
 
     console.println("ClarityOS aarch64: EL1 boot ok");
 
