@@ -747,6 +747,18 @@ fn os_cmd_build(cli_args) {
     show bold("  Building ClarityOS")
     show ""
     _zig_build(_OS_KERNEL_DIR, "kernel")
+
+    -- The freestanding runtime embeds the transpiled JS entry bundle via
+    -- @embedFile, which can only reach files inside its own module tree.
+    -- Stage the dist bundle into runtime/freestanding/ before building.
+    let _bundle_src = "native/dist/clarity-entry.js"
+    let _bundle_dst = _OS_RUNTIME_DIR + "/clarity-entry.js"
+    if exists(_bundle_src) {
+        exec_full("cp " + _quote(_bundle_src) + " " + _quote(_bundle_dst))
+    } else {
+        show yellow("  warning: " + _bundle_src + " missing — run `clarity transpile --bundle` first")
+    }
+
     _zig_build(_OS_RUNTIME_DIR, "runtime")
 
     if not exists(_OS_KERNEL_BIN) {
