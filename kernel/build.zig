@@ -50,4 +50,29 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Boot the kernel under QEMU");
     run_step.dependOn(&qemu.step);
+
+    // ── AArch64 (Apple-Silicon-class) kernel ──────────────
+    //
+    // Built under its own step (`zig build aarch64`) rather than the
+    // default install, so the x86_64 build and its boot gate are wholly
+    // unaffected. QEMU's `virt` machine is the CI target.
+    const aarch64_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+
+    const kernel_arm = b.addExecutable(.{
+        .name = "clarity-kernel-aarch64",
+        .root_source_file = b.path("main_aarch64.zig"),
+        .target = aarch64_target,
+        .optimize = optimize,
+    });
+    kernel_arm.setLinkerScript(b.path("boot/linker_aarch64.ld"));
+    kernel_arm.addAssemblyFile(b.path("arch/aarch64/boot.S"));
+    kernel_arm.addAssemblyFile(b.path("arch/aarch64/vectors.S"));
+    kernel_arm.entry = .{ .symbol_name = "_start" };
+
+    const aarch64_step = b.step("aarch64", "Build the AArch64 kernel");
+    aarch64_step.dependOn(&b.addInstallArtifact(kernel_arm, .{}).step);
 }

@@ -1,6 +1,6 @@
 -- KyanOS app content painter tests — rebrand phase K4.
 
-from "kyan_apps.clarity" import new_editor, editor_input, editor_click, paint_editor, _editor_layout, paint_prism, new_prism, prism_hit, paint_terminal_content, new_shell, shell_input, paint_shell, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
+from "kyan_apps.clarity" import new_editor, editor_input, editor_click, paint_editor, _editor_layout, _syntax_color, paint_prism, new_prism, prism_hit, paint_terminal_content, new_shell, shell_input, paint_shell, paint_files_content, paint_monitor_content, paint_monitor, new_monitor, monitor_tick, paint_settings_content, paint_settings, settings_hit, new_prefs, paint_calc_content, paint_calc, app_painters, new_calc, calc_press, calc_key_at, new_files, files_entries, files_nav, files_up, files_goto, files_click, files_hit, _files_layout, paint_files, _file_kind
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 
@@ -178,6 +178,27 @@ fed.clear(0xFF000000)
 paint_editor(fed, 0, 0, 480, 320, t, new_editor(), true)
 assert_eq(fed.get_pixel(4, 40), t["surface_elevated"], "the editor draws a line-number gutter")
 assert(painted(fed, 0xFF000000), "the editor paints its text buffer")
+
+-- syntax highlighting: token kinds map to distinct, theme-driven colours
+-- (both Obsidian and Quartz define these keys, so code stays legible in
+-- either scheme rather than relying on a hardcoded dark palette)
+assert_eq(_syntax_color("keyword", t), t["accent_secondary"], "keywords use the violet accent")
+assert_eq(_syntax_color("declaration", t), t["accent_secondary"], "declarations share the keyword colour")
+assert_eq(_syntax_color("import", t), t["accent_tertiary"], "imports use the indigo accent")
+assert_eq(_syntax_color("string", t), t["success"], "strings use the success colour")
+assert_eq(_syntax_color("number", t), t["warning"], "numbers use the warning colour")
+assert_eq(_syntax_color("comment", t), t["foreground_muted"], "comments are muted")
+assert_eq(_syntax_color("identifier", t), t["foreground"], "identifiers use the plain foreground")
+assert(_syntax_color("keyword", t) != _syntax_color("string", t), "keyword and string colours differ")
+-- real code paints highlighted, and the caret maths still lines up
+let edh = new_editor()
+edh["lines"] = ["let x = 42  -- comment", "fn main() { show \"hi\" }"]
+edh["cy"] = 0
+edh["cx"] = 5
+let fhl = framebuffer(480, 320)
+fhl.clear(0xFF000000)
+paint_editor(fhl, 0, 0, 480, 320, t, edh, true)
+assert(painted(fhl, 0xFF000000), "the editor paints syntax-highlighted code")
 
 -- ── Files ──
 show "-- Kyan apps: files --"

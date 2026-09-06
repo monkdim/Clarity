@@ -36,7 +36,7 @@ pub fn init(fb: multiboot.Framebuffer) !void {
     while (i < pages) : (i += 1) {
         const phys = fb.addr + i * 0x1000;
         const virt = 0xFFFF_C000_0000_0000 + i * 0x1000;
-        try vmm.map_page(undefined, virt, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE);
+        try vmm.map_page(vmm.kernel(), virt, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE);
     }
     pixels = @ptrFromInt(0xFFFF_C000_0000_0000);
 }

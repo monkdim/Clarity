@@ -398,6 +398,57 @@ assert(dsr.terminal_input("help\n"), "terminal_input routes to the shell when no
 assert(len(dsr._app_ui["terminal"]["lines"]) > sbefore, "the routed command extends the scrollback")
 assert_eq(dsr._app_ui["terminal"]["input"], "", "Enter clears the routed input line")
 
+-- ── Window resize through the desktop (corner handle) ──
+-- The bottom-right resize handle overlaps an app's content rect, so an
+-- app content-click handler could swallow the press and leave windows
+-- unresizable. Guard every interactive app against that regression.
+show "-- KyanDesktop: windows resize by the corner --"
+for rapp in ["editor", "files", "calc", "settings", "terminal"] {
+    let dr = kyan_desktop(1000, 640, theme)
+    dr.boot(null)
+    let rw = dr.open(rapp, 150, 120, 400, 300)
+    let rpx = rw.x + rw.width - 4
+    let rpy = rw.y + rw.height - 4
+    dr.handle_mouse(mk_mouse(rpx, rpy, "press", 1))
+    assert_eq(dr.wm.drag_mode(), "resize", rapp + ": corner press starts a resize")
+    dr.handle_mouse(mk_mouse(rpx + 50, rpy + 40, "motion", 0))
+    assert(rw.width > 400 and rw.height > 300, rapp + ": dragging the corner grows the window")
+    dr.handle_mouse(mk_mouse(rpx + 50, rpy + 40, "release", 0))
+    assert(not dr.wm.is_dragging(), rapp + ": release ends the resize")
+}
+
+-- ── Dock: drag to reorder ──────────────────────────
+show "-- KyanDesktop: dock reorder --"
+let dd = kyan_desktop(1000, 640, theme)
+dd.boot(null)
+let dd_before = str(dd.pinned)
+let dd_lay = dd._dock_layout()
+let dd_first = dd_lay["icons"][0]
+let dd_third = dd_lay["icons"][2]
+let dd_app = dd_first["app"]
+-- press starts both the activation and a potential drag
+dd.handle_mouse(mk_mouse(dd_first["x"] + 22, dd_first["y"] + 22, "press", 1))
+assert_eq(dd._dock_drag, dd_app, "pressing a dock icon arms a drag for that app")
+-- moving onto the third slot moves the icon there
+dd.handle_mouse(mk_mouse(dd_third["x"] + 22, dd_third["y"] + 22, "motion", 0))
+assert_eq(dd.pinned[2], dd_app, "dragging moves the icon to the slot under the pointer")
+assert_eq(len(dd.pinned), 7, "reordering neither adds nor drops icons")
+assert(str(dd.pinned) != dd_before, "the dock order actually changed")
+-- release ends the drag
+dd.handle_mouse(mk_mouse(dd_third["x"] + 22, dd_third["y"] + 22, "release", 0))
+assert(dd._dock_drag == null, "releasing ends the dock drag")
+
+-- a click with no motion must not reorder anything
+let dc2 = kyan_desktop(1000, 640, theme)
+dc2.boot(null)
+let dc2_before = str(dc2.pinned)
+let dc2_lay = dc2._dock_layout()
+dc2.handle_mouse(mk_mouse(dc2_lay["icons"][1]["x"] + 22, dc2_lay["icons"][1]["y"] + 22, "press", 1))
+dc2.handle_mouse(mk_mouse(dc2_lay["icons"][1]["x"] + 22, dc2_lay["icons"][1]["y"] + 22, "release", 0))
+assert_eq(str(dc2.pinned), dc2_before, "a plain dock click leaves the order untouched")
+-- and it still launches the app it was pointed at
+assert(contains(dc2.running(), dc2_lay["icons"][1]["app"]), "a dock click still launches its app")
+
 -- ── close ────────────────────────────────────────
 
 assert(d.close("terminal"), "close terminal")

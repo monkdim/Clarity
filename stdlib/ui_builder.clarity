@@ -29,7 +29,8 @@ let WIDGET_PALETTE = [
     {"kind": "RadioButton","import": "widgets.clarity", "props": ["label_text"]},
     {"kind": "Tabs",       "import": "widgets.clarity", "props": ["titles"]},
     {"kind": "TreeView",   "import": "widgets.clarity", "props": ["roots"]},
-    {"kind": "Dropdown",   "import": "widgets.clarity", "props": ["items"]}
+    {"kind": "Dropdown",   "import": "widgets.clarity", "props": ["items"]},
+    {"kind": "Tooltip",    "import": "widgets.clarity", "props": ["text"]}
 ]
 
 class UiNode {

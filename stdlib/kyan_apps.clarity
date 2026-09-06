@@ -13,6 +13,7 @@ from "font.clarity" import builtin_font, draw_text, draw_text_scaled, draw_text_
 from "atlas_font.clarity" import shared_atlas, draw_atlas_text, measure_atlas_text
 from "graphics.clarity" import rgba
 from "theme_kyan.clarity" import kyan_gradient_stops
+from "highlight.clarity" import highlight_spans
 
 -- ── Prism — the game hub ────────────────────────────────
 
@@ -550,6 +551,21 @@ fn editor_click(state, x, y, w, h, px, py) {
     return true
 }
 
+-- Map a highlight_spans() token kind onto a theme colour. Driven entirely
+-- by theme keys that both Obsidian (dark) and Quartz (light) define, so
+-- code stays legible in either scheme rather than hardcoding a dark palette.
+fn _syntax_color(kind, t) {
+    if kind == "keyword" or kind == "declaration" { return t["accent_secondary"] }
+    if kind == "import" { return t["accent_tertiary"] }
+    if kind == "builtin" { return t["accent"] }
+    if kind == "string" { return t["success"] }
+    if kind == "number" { return t["warning"] }
+    if kind == "boolean" or kind == "null" or kind == "this" { return t["accent"] }
+    if kind == "comment" { return t["foreground_muted"] }
+    if kind == "operator" or kind == "punctuation" { return t["ink_soft"] }
+    return t["foreground"]
+}
+
 fn paint_editor(fb, x, y, w, h, theme, state, focused) {
     let t = theme
     let atlas = shared_atlas()
@@ -574,7 +590,17 @@ fn paint_editor(fb, x, y, w, h, theme, state, focused) {
         let num = str(li + 1)
         let nw = measure_atlas_text(atlas, num, 13, 0)[0]
         draw_atlas_text(fb, x + L["gutter"] - 10 - nw, ly, num, atlas, t["foreground_muted"], {"size": 13})
-        draw_atlas_text(fb, L["text_x"], ly, state["lines"][li], atlas, t["foreground"], {"size": _ED_SIZE})
+        -- syntax-highlighted line: draw each token span in its own colour,
+        -- advancing by the measured width so the run lines up exactly with
+        -- the flat layout the caret maths assumes.
+        mut sx = L["text_x"]
+        for span in highlight_spans(state["lines"][li]) {
+            let stext = span["text"]
+            if len(stext) > 0 {
+                draw_atlas_text(fb, sx, ly, stext, atlas, _syntax_color(span["kind"], t), {"size": _ED_SIZE})
+                sx = sx + measure_atlas_text(atlas, stext, _ED_SIZE, 0)[0]
+            }
+        }
         r = r + 1
     }
     -- cursor caret

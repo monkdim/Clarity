@@ -4,31 +4,144 @@ This document tracks **what's next for KyanOS**. The 1.0 development history (Ph
 
 ---
 
-## Where we are (July 2026)
+## Where we are (September 2026)
 
-KyanOS is **experimental and under active development.** Here is the honest, in-repo state — see [AUDIT.md](AUDIT.md) for the file-by-file evidence behind each line:
+KyanOS is **experimental and under active development**, but the boot path is
+no longer hypothetical. Each claim below is backed by a CI gate that runs on
+every pull request; anything not gated is called out as unverified.
 
-- **The layers exist; the boot path is not yet real.** The Zig micro-kernel, the freestanding runtime, init, the compositor, the window manager, and the apps are all written and in the tree — but boot-to-desktop has not been compiled, linked, or booted end to end, and the kernel does not yet build in CI. Multiboot2 → ELF loader → SYSCALL → fork/exec/wait are scaffolded, not wired. Bare-metal boot is a goal, not a verified claim.
-- **One language, top to bottom.** ~50,000 lines of Clarity above the syscall boundary. The kernel, runtime, init, tmpfs/devfs/procfs, input pipeline, compositor, window manager, dock, launcher, settings panel, and the default apps are all in this repo — well-built and unit-tested as modules, though the boundaries between them are still bridged by test stubs rather than a live desktop.
-- **The Kyan identity.** Obsidian (dark, default) and Quartz (light) are the two modes of the flagship identity, sharing one violet→cyan signature; the spring themes (Meadow, Bloom, Watercolor, Midnight) remain as selectable legacy palettes. Switchable live in **Settings → Appearance**.
-- **Performance targets, not yet gates.** Under-5 s boot, 60 fps, under-256 MB idle, under-250 ms app launch are the goals. None is verified — there is no booting desktop to measure yet.
+- **The x86_64 kernel boots, verified on every PR.** GRUB loads the
+  multiboot2 kernel, the boot stub switches to long mode, and the kernel runs
+  its full init sequence to the `ClarityOS ready.` marker on serial:
 
-What this document is *not*: a phase-by-phase chronicle. The phase tables that used to live here are in git history at any commit before this rewrite.
+  ```
+  ClarityOS micro-kernel starting...
+    [ok] GDT + IDT
+    [ok] memory: pmm + vmm + heap
+    [ok] scheduler
+    [ok] syscalls
+    [ok] vfs + rootfs
+    [ok] drivers
+  ClarityOS ready.
+  ```
+
+  The `OS boot (linux-x64, TCG)` job builds the kernel, wraps it in a GRUB
+  rescue ISO, and boots it under QEMU **three times, requiring all three** to
+  reach the marker — reliability is part of the gate, not a re-run away.
+- **An AArch64 (Apple-Silicon-class) kernel boots too.** A second gate,
+  `OS boot (aarch64, TCG)`, builds the ARM64 kernel and boots it on QEMU's
+  `virt` machine: EL2→EL1 drop, FP/SIMD enabled, PL011 UART up. This is the
+  start of the Apple Silicon track, not parity — the ARM kernel does not yet
+  have memory management, scheduling, or drivers.
+- **There is still no userspace.** After printing `ClarityOS ready.` the
+  kernel tries to spawn `/bin/clarity-init` and fails: the freestanding
+  runtime does not build. This is *the* gap between "the kernel boots" and
+  "the OS runs" — see **Userspace runtime** below.
+- **One language above the syscall boundary.** ~50,000 lines of Clarity: the
+  runtime, init, tmpfs/devfs/procfs, input pipeline, compositor, window
+  manager, dock, launcher, and the default apps. The desktop is exercised by
+  a large unit-test suite (60 test files, all green) and by render
+  verification, but it runs hosted — it has not yet run *on* the kernel,
+  because there is no userspace to host it.
+- **The Kyan identity.** Obsidian (dark, default) and Quartz (light) share one
+  violet→cyan signature; the spring themes remain as selectable legacy
+  palettes. Switchable live in **Settings → Appearance**.
+- **Performance targets, still not gates.** Under-5 s boot, 60 fps,
+  under-256 MB idle, under-250 ms app launch. None is measured: there is no
+  booting desktop to measure yet.
 
 ---
 
-## CI smoke test (the last piece of the developer workflow)
+## Userspace runtime — the critical path
 
-The `clarity os` CLI subcommand is now wired (`build`, `run`, `iso`, `install`); `read_bytes`/`write_bytes` builtins exist; a cross-platform QEMU launcher in `stdlib/qemu.clarity` picks HVF on macOS and KVM on Linux. What's still missing is a **headless QEMU boot in CI** that greps the serial output for the `KyanOS ready.` marker.
+This is the single blocker between a booting kernel and a usable OS, and it is
+larger than it looks.
 
-The infrastructure is there: `clarity os run --headless --boot-test "KyanOS ready."` does the right thing locally; `run_vm.clarity` already understands `boot_test_marker` + `timeout_seconds`. The remaining work is in `.github/workflows/ci.yml`:
+`runtime/freestanding` builds `clarity-runtime` (QuickJS evaluating the
+transpiled Clarity bundle) as the binary the kernel spawns as
+`/bin/clarity-init`. It does not compile. Two distinct problems:
 
-- Install zig (the actions ecosystem has `goto-bus-stop/setup-zig` or equivalent).
-- Install qemu-system-x86 + ovmf via apt on Ubuntu, brew on macOS.
-- Run `./native/dist/clarity os build && ./native/dist/clarity os run --headless --boot-test "KyanOS ready." --timeout 120` after the existing self-hosted tests.
-- Cache `kernel/zig-out` and `runtime/freestanding/zig-out` so subsequent runs are fast.
+1. **No freestanding libc.** QuickJS's C sources `#include <stdlib.h>`,
+   `<stdio.h>`, `<assert.h>`, `<string.h>`. The build targets
+   `x86_64-freestanding` with `-ffreestanding`, so those headers do not
+   exist. `libc_shim.zig` supplies ~18 functions (malloc/free, mem*, str*,
+   write/read, abort, clock) but **no C headers at all**, and QuickJS needs
+   far more than 18 functions — the printf family, `strtod`, `qsort`,
+   `setjmp`/`longjmp`, math, and file I/O among them. Writing that header +
+   implementation layer is the bulk of the work.
+2. **No single-file bundle.** `@embedFile` needs one self-contained script.
+   `transpile.py --bundle` emits the stdlib as many `.js` modules plus a
+   139-byte `clarity-entry.js` stub that ES-`import`s its siblings — which a
+   freestanding QuickJS cannot resolve. A real single-file bundle step is
+   required.
 
-Skipped today because (a) it adds 5–10 minutes to every PR, and (b) needs a cache strategy that's its own design call.
+**Two candidate routes, neither started:**
+
+- **Finish the freestanding libc** (above). The Clarity semantics come for
+  free because they already exist as JavaScript; the work is bounded and
+  well-understood, just broad.
+- **Finish `runtime/native_vm`** — a pure-Zig Clarity bytecode VM, so no libc
+  is needed at all. Attractive in principle, but it is a **484-line
+  skeleton**: taking it to "runs the stdlib" means reimplementing the whole
+  Clarity runtime (strings, maps, lists, classes, closures, GC) in Zig, which
+  is *larger* than the libc route, not smaller.
+
+A third option worth evaluating before committing: build the runtime against
+**static musl** rather than bare freestanding, and implement the Linux syscall
+subset musl needs in the kernel (which already has a syscall dispatch table).
+That trades "write a libc" for "implement syscalls", which may be the smaller
+and more reusable job.
+
+---
+
+## Kernel — verified and outstanding
+
+**Verified working** (exercised by the boot gate):
+
+- Multiboot2 boot, higher-half link, long-mode entry, and page tables mapping
+  the identity window, the HHDM (`0xFFFF_8000_…`, which the VMM depends on),
+  and the kernel window.
+- Physical page allocator over the firmware memory map, reserving the whole
+  loaded kernel image so it cannot hand out its own pages.
+- Slab heap, scheduler init, syscall MSR wiring, VFS + tmpfs root mount.
+- Driver init: PS/2 (8042) with bounded status waits, framebuffer mapping
+  through the real kernel address space.
+
+**Outstanding on x86_64:**
+
+- **ELF loader → `execve` → userspace.** Scaffolded, never exercised, and
+  blocked on the runtime above.
+- **Exception handlers that report.** A fault today is silent: no handler
+  prints a register dump, so a bad access simply stops the machine. This cost
+  real debugging time and should be fixed early.
+- **AHCI and virtio-net are skeletons.** Both scan PCI correctly, but
+  `attach`/`send_frame`/`recv_frame` are `NotImplemented`. PCI enumeration
+  itself is real.
+
+**Outstanding on aarch64** (in rough order): exception vectors, MMU/TTBR page
+tables, the generic timer, then sharing the memory manager, scheduler and VFS
+with x86_64 behind an arch abstraction. The shared subsystems are mostly
+architecture-neutral Zig already, but they reach into port I/O, GDT/IDT and
+x86 4-level paging, so they cross over one phase at a time.
+
+---
+
+## CI gates (the developer workflow)
+
+Both OS gates are live in `.github/workflows/os-boot.yml`:
+
+- **`OS boot (linux-x64, TCG)`** — `zig build` the kernel, `grub-mkrescue` a
+  kernel-only rescue ISO, boot it under `qemu-system-x86_64` three times,
+  require `ClarityOS ready.` on all three.
+- **`OS boot (aarch64, TCG)`** — `zig build aarch64`, boot under
+  `qemu-system-aarch64 -M virt`, require the EL1 marker.
+
+Both are deliberately **kernel-only**: they do not depend on the userspace
+runtime, so they gate the kernel today rather than waiting on it. Once the
+runtime builds, a third gate should boot the full ISO and assert a marker
+printed from *Clarity* code — that is the real "the OS runs" test.
+
+GitHub runners have no `/dev/kvm`, so both boot under TCG.
 
 ---
 
@@ -57,19 +170,41 @@ Things that work today are useful in QEMU. Real hardware coverage is shallow.
 
 The toolkit ships the widgets needed to build the eleven default apps. Filling out the long tail:
 
-- **Widgets.** Dropdown, RadioButton, Toggle, Tabs, TreeView, Tooltip — all deferred from Phase 60.
-- **Window animations.** Drag-to-reorder in the dock; minimize-to-dock animation.
-- **Files.** Tree-view sidebar, file previews (PDF/image/text), drag-and-drop between panes.
-- **Editor.** Syntax highlighting (the LSP exists; the editor isn't wired to it yet), tabs, minimap.
-- **Calculator.** Scientific mode (trig, log, powers, memory).
+- **Widgets — done.** Dropdown, RadioButton, Toggle, Tabs, TreeView and Tooltip
+  have all landed; the Phase 60 deferral list is clear.
+- **Shipped since:** window controls (close/minimize/zoom) and dock restore,
+  window resize by the corner handle, a scientific Calculator, a Files
+  tree-view sidebar plus a details/preview pane, switchable Settings panes, a
+  live System Monitor, a Prism game-detail view, an interactive Terminal echo
+  shell, and a real text Editor with lexer-backed syntax highlighting.
+- **Still open — window animations.** Drag-to-reorder in the dock;
+  minimize-to-dock animation.
+- **Still open — Files.** Drag-and-drop between panes; PDF/image previews
+  (image previews are gated on the decoders below).
+- **Still open — Editor.** Tabs, minimap, and wiring the editor to the LSP for
+  diagnostics (highlighting is done, via the lexer).
 
 ---
 
 ## Runtime & terminal
 
-- **PTY.** The terminal app uses pipes today, which works for line-buffered output and is wrong for anything that wants raw mode (vim, less, ncurses apps). Adding `forkpty()` to the freestanding runtime closes this.
-- **Hot reload.** The app framework supports module reload at the protocol level; the runtime hook that actually swaps modules in a live process is the gap.
-- **Native bytecode VM.** `runtime/native_vm/` is a Zig implementation of the Clarity bytecode VM that would let the runtime ditch QuickJS. Roughly half of its ~54 opcodes are implemented; the rest return `error.NotImplemented`, and `load_bundle` is still a stub. Treat as a stretch goal for 1.x.
+- **PTY — done on the hosted build.** `stdlib/pty.clarity` drives a real PTY
+  via `openpty` + `posix_spawn` through FFI (`posix_spawn` rather than
+  `forkpty` so the Bun runtime is never left forked), and the Terminal app
+  runs a live shell on it where `pty_supported()` is true. What remains is a
+  PTY inside *ClarityOS*, which is gated on the freestanding runtime existing
+  at all. Hosts without a PTY fall back to the built-in echo shell.
+- **Hot reload.** The app framework supports module reload at the protocol
+  level; the runtime hook that actually swaps modules in a live process is the
+  gap.
+- **Native bytecode VM.** `runtime/native_vm/` is a Zig implementation of the
+  Clarity bytecode VM that would let the runtime ditch QuickJS. Measured
+  state: 54 opcodes defined, **20 implemented** (not half), `load_bundle`
+  still returns `error.NotImplemented`, 484 lines in total. Note the real
+  cost: finishing it means reimplementing Clarity's runtime semantics —
+  strings, maps, lists, classes, closures, GC — in Zig, which is a *larger*
+  job than porting a freestanding libc, since the JavaScript runtime already
+  provides those semantics. Treat as a stretch goal for 1.x.
 
 ---
 
@@ -98,6 +233,38 @@ A first-class, private, on-device AI studio shipped *with* KyanOS — port of th
 **Phasing when the time comes.** (1) Hosted Clarity Hearth on the KyanOS desktop — Clarity cockpit + `llama.cpp` FFI chat + HTTP to an existing ComfyUI — proves the whole spine. (2) Generalize the pipelines (branding → config) and port the non-GPU parts. (3) Chase the OS-native endgame: `llama.cpp` built for KyanOS → CPU chat inside the OS, with image/3D hosted until the GPU stack exists.
 
 **Ties to the language track.** The Clarity→C native compiler (see [GAPS.md](GAPS.md)) is the enabler for any pure-Clarity inference experiment — as it grows SIMD intrinsics / a BLAS FFI, a Clarity-native inference path gets progressively less absurd. A fun north-star, not a dependency.
+
+---
+
+## The long goal — Apple hardware, and PC games
+
+The stated ambition is a Mac-quality desktop that runs well on Apple hardware
+while still being able to play PC games. Those two halves pull in opposite
+directions, and it is worth writing down why.
+
+**Apple hardware means AArch64.** Apple Silicon is ARM64, so it needs the
+aarch64 kernel (now booting at EL1 under QEMU) taken all the way: MMU, timers,
+interrupts, then Apple-specific bring-up — the M-series boot protocol, device
+tree, AIC interrupt controller, and Apple's own display/USB/NVMe blocks, none
+of which are PC-standard. Running under virtualization on Apple hardware
+(Virtualization.framework) is a far shorter path to "runs on a Mac" and is
+worth doing first: it exercises the same aarch64 kernel without needing a
+single Apple hardware driver.
+
+**PC games mean x86 plus a Windows compatibility layer plus a GPU.** A native
+PC game needs, at minimum: an x86_64 userspace, a Win32/DirectX translation
+layer of Wine/Proton scale, a real GPU driver, and a graphics API
+(Vulkan/Metal). Each of those is a multi-year project in its own right, and
+the GPU driver is the single largest deferral in this document. On Apple
+Silicon it additionally needs x86→ARM binary translation, i.e. a Rosetta-class
+translator.
+
+**Honest sequencing.** Nothing here starts before the userspace runtime
+exists — an OS that cannot run its own init cannot run a game. The realistic
+order is: userspace → desktop running on the kernel → GPU/graphics stack →
+virtualized-on-Mac → Apple-native aarch64 → any game-compatibility work. The
+gaming ambition is best treated as a direction, not a milestone, until the
+graphics stack is real.
 
 ---
 

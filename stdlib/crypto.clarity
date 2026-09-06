@@ -1,16 +1,21 @@
 -- Clarity Crypto — hashing, HMAC, random bytes, and UUID generation.
--- Standard library module for cryptographic operations.
--- Delegates to system tools (openssl, /dev/urandom) for real crypto.
+--
+-- SHA-256 and HMAC-SHA256 are implemented in pure Clarity (sha256.clarity)
+-- and are pinned to FIPS 180-4 / RFC 4231 vectors. That matters because a
+-- shell-out to `sha256sum`/openssl is unavailable exactly where hashing is
+-- most needed: inside a `clarity cc` native binary on a machine without
+-- those tools, and inside ClarityOS itself (no coreutils, no openssl).
+--
+-- The remaining digests (sha512/sha1/md5) still delegate to system tools
+-- and therefore keep that dependency; porting them is tracked in ROADMAP.md
+-- under the services stdlib tier.
+
+from "sha256.clarity" import sha256_hex, hmac_sha256_hex
 
 -- ── Hashing ───────────────────────────────────────────────
 
-fn sha256(input) {
-    let result = exec_full("echo -n " + _quote(input) + " | sha256sum 2>/dev/null || echo -n " + _quote(input) + " | shasum -a 256 2>/dev/null")
-    let output = trim(result.stdout)
-    -- sha256sum outputs: "hash  -" or "hash  filename"
-    let parts = split(output, " ")
-    return parts[0]
-}
+-- Pure Clarity — no external tools, works in native binaries and in the OS.
+fn sha256(input) { return sha256_hex(input) }
 
 fn sha512(input) {
     let result = exec_full("echo -n " + _quote(input) + " | sha512sum 2>/dev/null || echo -n " + _quote(input) + " | shasum -a 512 2>/dev/null")
@@ -47,16 +52,8 @@ fn hash_file(path, algorithm) {
 
 -- ── HMAC ──────────────────────────────────────────────────
 
-fn hmac_sha256(key, message) {
-    let result = exec_full("echo -n " + _quote(message) + " | openssl dgst -sha256 -hmac " + _quote(key) + " 2>/dev/null")
-    let output = trim(result.stdout)
-    -- openssl outputs: "(stdin)= hash" or just "hash"
-    if contains(output, "= ") {
-        let idx = index_of(output, "= ")
-        return substring(output, idx + 2, len(output))
-    }
-    return output
-}
+-- Pure Clarity — no external tools.
+fn hmac_sha256(key, message) { return hmac_sha256_hex(key, message) }
 
 fn hmac_sha512(key, message) {
     let result = exec_full("echo -n " + _quote(message) + " | openssl dgst -sha512 -hmac " + _quote(key) + " 2>/dev/null")
