@@ -72,6 +72,28 @@ pub fn init(hz: u64) void {
     asm volatile ("msr daifclr, #2" ::: "memory");
 }
 
+/// Hundredths of a second since the CPU came up, from the physical counter.
+///
+/// `ticks()` counts *interrupts*, which makes it useless as a clock anywhere
+/// interrupts are masked — and exception entry from EL0 masks them, so it is
+/// frozen for the whole of a system call. A timeout built on it does not
+/// expire inside read(2); it waits for ever. That was measured, by breaking
+/// the thing that refills a read and watching the kernel stop dead rather
+/// than report end of input.
+///
+/// CNTPCT_EL0 is the counter the timer compares against. It runs whether or
+/// not anyone is listening, which is what a clock has to do. Scaled to
+/// hundredths so the numbers mean the same as they did when they were
+/// interrupt counts at 100 Hz.
+pub fn hundredths() u64 {
+    const freq = read_cntfrq();
+    if (freq == 0) return 0;
+    const now = asm volatile ("mrs %[out], cntpct_el0"
+        : [out] "=r" (-> u64),
+    );
+    return now / (freq / 100);
+}
+
 pub fn frequency() u64 {
     return read_cntfrq();
 }

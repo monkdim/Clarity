@@ -841,7 +841,10 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     stdin.init(.{
         .poll = keyboard.poll,
         .echo = console.putc,
-        .ticks = timer.ticks,
+        // The physical counter, not the interrupt count: read(2) runs with
+        // interrupts masked, where the interrupt count does not move and a
+        // timeout built on it never expires.
+        .ticks = timer.hundredths,
     });
 
     // Bounded by the timer rather than by a spin count: how many times a loop

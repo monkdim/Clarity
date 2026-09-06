@@ -54,6 +54,16 @@ KEYS = ALPHABET + ["ret"] + list("helxo") + ["backspace", "backspace"] + \
     list("lo") + ["ret"]
 EXPECTED_LINES = ["".join(ALPHABET), "hello"]
 
+# And then the same keyboard, read by a *program*. /bin/clarity-init runs
+# twice, in two address spaces, and asks for a line each time — so these are
+# typed at its prompt rather than at the kernel's, and they must come back out
+# of read(2) rather than out of the line discipline's own report.
+#
+# Two different words, because two identical ones would not show a second run
+# that replayed the first run's input instead of reading its own.
+INIT_WORDS = ["alpha", "beta"]
+INIT_PROMPT = b"init: type a line: "
+
 
 def wait_for(log_path, marker, deadline, proc=None):
     """Wait for `marker` to appear in the log, or for the deadline to pass.
@@ -70,6 +80,26 @@ def wait_for(log_path, marker, deadline, proc=None):
         except FileNotFoundError:
             pass
         if proc is not None and proc.poll() is not None:
+            return False
+        time.sleep(0.1)
+    return False
+
+
+def wait_for_count(log_path, marker, count, deadline, proc):
+    """Wait until `marker` has appeared at least `count` times.
+
+    The init program runs twice and prompts once per run, so "the prompt is
+    in the log" is true from the first run onward and says nothing about the
+    second. Counting is what tells the two apart.
+    """
+    while time.time() < deadline:
+        try:
+            with open(log_path, "rb") as f:
+                if f.read().count(marker) >= count:
+                    return True
+        except FileNotFoundError:
+            pass
+        if proc.poll() is not None:
             return False
         time.sleep(0.1)
     return False
@@ -129,6 +159,15 @@ def reported_lines(text):
     out = []
     for line in text.splitlines():
         if line.startswith("  line ") and line.count('"') >= 2:
+            out.append(line.split('"')[1])
+    return out
+
+
+def program_lines(text):
+    """What /bin/clarity-init says read(2) handed it."""
+    out = []
+    for line in text.splitlines():
+        if line.startswith("  init: read ") and line.count('"') >= 2:
             out.append(line.split('"')[1])
     return out
 
@@ -219,6 +258,19 @@ def main():
             print("FAIL: the kernel never reported what it read")
             return 1
 
+        # Now the same keyboard, read by a program. /bin/clarity-init asks for
+        # a line on each of its two runs; each prompt has to be waited for
+        # separately, because the kernel's read gives up a few seconds after
+        # the prompt appears and typing early would be typing into nothing.
+        for i, word in enumerate(INIT_WORDS):
+            if not wait_for_count(log, INIT_PROMPT, i + 1, time.time() + 120,
+                                  qemu):
+                print("FAIL: the init program never asked for line %d" % (i + 1))
+                return 1
+            for k in list(word) + ["ret"]:
+                m.sendall(("sendkey %s\n" % k).encode())
+                time.sleep(0.05)
+
         # Let the boot finish before looking at the screen.
         #
         # The first version screenshotted here, straight after the input
@@ -253,6 +305,30 @@ def main():
                 print("  " + candidate)
         return 1
 
+    # What the program got out of read(2), which is a different path from the
+    # one above: through a system call, into a buffer in its own address
+    # space, translated for writing through its own page tables.
+    from_program = program_lines(text)
+    if from_program != INIT_WORDS:
+        print("FAIL: typed %r at the program, read(2) gave it %r"
+              % (INIT_WORDS, from_program))
+        for candidate in text.splitlines():
+            if "init: read" in candidate or "user read" in candidate:
+                print("  " + candidate)
+        return 1
+
+    # And that the refusal happened. Without this the two lines above would
+    # pass just as well on a kernel that never checked the buffer at all —
+    # the bad pointer is the program's first read, and if it were accepted
+    # the line would be delivered into read-only text and never reach the
+    # buffer that gets printed.
+    refusals = text.count("[ok] user read: a bad buffer was refused")
+    if refusals != len(INIT_WORDS):
+        print("FAIL: expected %d refused reads, saw %d — the kernel is not "
+              "checking that a read buffer is writable"
+              % (len(INIT_WORDS), refusals))
+        return 1
+
     problems, grid = check_screen(log_bytes, shot)
     if problems:
         print("FAIL: the screen does not show what the kernel said")
@@ -282,9 +358,9 @@ def main():
               "picture was taken" % wanted)
         return 1
 
-    print("PASS: typed %d keys, the kernel read %r, and the screen shows "
-          "%r on a row of its own"
-          % (len(KEYS), got, wanted))
+    print("PASS: the kernel read %r, read(2) gave the program %r "
+          "(after refusing a read-only buffer both times), and the screen "
+          "shows %r on a row of its own" % (got, from_program, wanted))
     print("      (%d bytes of screenshot, every character cell checked)"
           % len(shot_bytes))
     return 0

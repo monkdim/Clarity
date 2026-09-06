@@ -16,8 +16,13 @@ pub const Source = struct {
     poll: *const fn () ?u8,
     /// Where the echo goes.
     echo: *const fn (u8) void,
-    /// A monotonic counter, for the idle timeout. Ticks rather than
-    /// microseconds because a tick is what the kernel has.
+    /// A monotonic counter in hundredths of a second, for the idle timeout.
+    ///
+    /// It has to keep moving with interrupts masked, because read(2) is
+    /// entered from EL0 with them masked and stays that way. A counter that
+    /// is really a count of timer interrupts stands still there, and a
+    /// timeout built on one never expires — which is not a slow read, it is
+    /// a hung kernel.
     ticks: *const fn () u64,
 };
 
