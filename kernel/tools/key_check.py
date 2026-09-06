@@ -74,13 +74,29 @@ INIT_PROMPT = b"init: type a line: "
 # rather than measuring that.
 SHELL_BANNER = b"clarity-sh: type help"
 SHELL_PROMPT = b"$ "
+# Each entry is the keys to send and what the shell must say back. Keys
+# rather than text, so one of them can be typed wrong and corrected: the
+# backspace goes through the kernel's line discipline exactly as it does at
+# the kernel's own prompt, and the shell must receive the corrected line.
 SHELL_SESSION = [
-    # what to type,          what the shell must say back
-    ("echo hello from kyan", "hello from kyan"),
-    ("count abcde",          "5"),
-    ("frobnicate",           "clarity-sh: unknown command: frobnicate"),
+    (list("echo hello from kyan"), "hello from kyan"),
+    (list("count abcde"), "5"),
+    (list("frobnicate"), "clarity-sh: unknown command: frobnicate"),
+    # "echo kyam" -> backspace -> "n". The shell must hear "echo kyan".
+    (list("echo kyam") + ["backspace"] + list("n"), "kyan"),
 ]
 SHELL_EXIT_STATUS = 7
+
+# What the screen must show, on a row of its own, after everything has run.
+#
+# This used to be the kernel's own corrected line, "  > hello", printed near
+# the start of the input tests. Adding the shell pushed it off the top of a
+# forty-eight row screen before the screenshot is taken, and the check failed
+# — correctly, and for a reason that says the assertion was wrong rather than
+# the kernel. It now names the shell's corrected line instead, which is among
+# the last things printed and therefore still there. Same property: a line
+# typed with a mistake in it, fixed with backspace, shown right.
+SCREEN_ROW = "$ echo kyan"
 
 
 def wait_for(log_path, marker, deadline, proc=None):
@@ -132,18 +148,19 @@ def prompts_seen(log_path):
         return 0
 
 
-def send_line(m, text):
-    """Type `text` and press return.
+def send_keys(m, keys):
+    """Send each key, then return.
 
-    `sendkey` names a key, not a character, so the few punctuation marks these
-    commands use have to be spelled out. Anything not in the table would be
-    typed as its own name and silently produce nothing, so it raises instead.
+    An entry is either a single character or a QEMU key name such as
+    "backspace". `sendkey` names keys, not characters, so a character with no
+    name would be sent as itself and silently do nothing — which would make a
+    test pass for the wrong reason. Anything unrecognised raises instead.
     """
     names = {" ": "spc", "-": "minus", ".": "dot", "/": "slash"}
-    for c in text:
-        key = names.get(c, c)
-        if len(key) == 1 and not (c.isalnum()):
-            raise SystemExit("key_check: no sendkey name for %r" % c)
+    for k in keys:
+        key = names.get(k, k)
+        if len(key) == 1 and not key.isalnum():
+            raise SystemExit("key_check: no sendkey name for %r" % k)
         m.sendall(("sendkey %s\n" % key).encode())
         time.sleep(0.05)
     m.sendall(b"sendkey ret\n")
@@ -331,17 +348,18 @@ def main():
         if not wait_for(log, SHELL_BANNER, time.time() + 200, qemu):
             print("FAIL: the shell never started")
             return 1
-        for command, _ in SHELL_SESSION:
+        for keys, _ in SHELL_SESSION:
             if not wait_for_count(log, SHELL_PROMPT, prompts_seen(log) + 1,
                                   time.time() + 60, qemu):
-                print("FAIL: the shell stopped prompting before %r" % command)
+                print("FAIL: the shell stopped prompting before %r"
+                      % "".join(keys))
                 return 1
-            send_line(m, command)
+            send_keys(m, keys)
         if not wait_for_count(log, SHELL_PROMPT, prompts_seen(log) + 1,
                               time.time() + 60, qemu):
             print("FAIL: the shell stopped prompting before exit")
             return 1
-        send_line(m, "exit %d" % SHELL_EXIT_STATUS)
+        send_keys(m, list("exit %d" % SHELL_EXIT_STATUS))
 
         if not wait_for(log, fb_check.BOOT_MARKER, time.time() + 300, qemu):
             print("FAIL: the kernel read the input but never finished booting")
@@ -406,7 +424,7 @@ def main():
     # correction together: "hello" appears nowhere else in a boot log, and
     # after "  > " it can only have got there by five keys, two backspaces and
     # two more keys coming out right.
-    wanted = "  > " + EXPECTED_LINES[1]
+    wanted = SCREEN_ROW
     rows = ["".join(chr(c) for c in row) for row in grid]
     if not any(r.startswith(wanted) for r in rows):
         # Deliberately does not name a cause. Two produce this: the typing
@@ -422,10 +440,10 @@ def main():
     # What the shell said back. This is a third path again: the kernel read the
     # keys, read(2) delivered them to a program, and that program decided what
     # they meant and answered.
-    for command, want in SHELL_SESSION:
+    for keys, want in SHELL_SESSION:
         if want not in text:
             print("FAIL: typed %r at the shell, but %r is not in its output"
-                  % (command, want))
+                  % ("".join(keys), want))
             for candidate in text.splitlines():
                 if candidate.startswith("$ ") or "clarity-sh" in candidate:
                     print("  " + candidate)
