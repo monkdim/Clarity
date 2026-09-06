@@ -201,6 +201,52 @@ pub fn enabled() bool {
     return (sctlr & 1) != 0;
 }
 
+/// Make instructions the kernel just wrote visible to the instruction fetch.
+///
+/// Writing a program into a page and then jumping to it goes through two
+/// different caches: the store lands in the data cache, and the fetch reads
+/// the instruction cache, which knows nothing about it. Cleaning the data
+/// cache to the point of unification and invalidating the instruction cache
+/// over the same range is what connects them.
+///
+/// QEMU's TCG models neither cache and would run correctly without any of
+/// this, which is exactly why it is here: loading a program is the operation
+/// where "works in the emulator, fails on the machine" is the default
+/// outcome. Line sizes come from CTR_EL0 rather than a constant, because they
+/// differ between cores — and between the two caches on the same core.
+pub fn sync_instructions(start: u64, len: usize) void {
+    if (len == 0) return;
+    const ctr = asm volatile ("mrs %[out], ctr_el0"
+        : [out] "=r" (-> u64),
+    );
+    const d_line: u64 = @as(u64, 4) << @as(u6, @intCast((ctr >> 16) & 0xF));
+    const i_line: u64 = @as(u64, 4) << @as(u6, @intCast(ctr & 0xF));
+    const end = start + len;
+
+    var a = start - (start % d_line);
+    while (a < end) : (a += d_line) {
+        asm volatile ("dc cvau, %[a]"
+            :
+            : [a] "r" (a),
+            : "memory"
+        );
+    }
+    asm volatile ("dsb ish" ::: "memory");
+
+    a = start - (start % i_line);
+    while (a < end) : (a += i_line) {
+        asm volatile ("ic ivau, %[a]"
+            :
+            : [a] "r" (a),
+            : "memory"
+        );
+    }
+    asm volatile (
+        \\dsb ish
+        \\isb
+        ::: "memory");
+}
+
 /// Where this code is actually executing. Taken from the program counter, so
 /// it is evidence rather than a restatement of the linker script: if the
 /// branch into the high mapping had not happened, this would print a low

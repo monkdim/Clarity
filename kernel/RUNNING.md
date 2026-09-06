@@ -47,8 +47,15 @@ The serial log should report the machine describing itself:
   ram 0x40000000 + 512 MiB
   [ok] direct map covers all of RAM (0 GiB added beyond the boot stub's block)
   [ok] pmm: 512 MiB managed, 129347 pages free, allocated 0x402bd000 and it holds
-  [ok] process address space: 0x10000000 -> 0x402be000 for EL0 read and write, 0x400000 read-only (a write there faults), kernel unaffected, unmapped and torn down with every page returned
+  [ok] process address space: 0x10000000 -> 0x402c0000 for EL0 read and write, 0x400000 read-only (a write there faults), kernel unaffected, unmapped and torn down with every page returned
+  [ok] EL0: a program ran, read 41 from its own memory, called the kernel twice, got 42 back, and wrote it where the kernel could see it
+  [ok] EL0: the timer interrupted it 18 times while it ran, and it carried on afterwards
+  [ok] EL0: and when it wrote to its read-only text at 0x400000, the kernel took the CPU back
 ```
+
+The tick count in the middle line varies — it is however many times the 100 Hz
+timer happened to fire during the process's delay loop, and the check is only
+that it fired at all.
 
 Change `-m 512` and the RAM line follows it — that is the kernel reading the
 device tree rather than assuming a machine. Try `-m 4096` and the direct-map
@@ -99,14 +106,16 @@ work, the boot log up to the point it stops is the useful thing to report.
 
 ### What it does not do yet
 
-Prints to the serial line, draws a fixed pattern, allocates physical pages,
-runs in the high half, and can build, install and tear down a process's
-address space in TTBR0 — with the permissions checked by asking the MMU to
-translate as EL0 would, so a read-only page really does refuse a write.
+It can now do the thing an operating system is for: run a program that is not
+the kernel. Unprivileged code executes at EL0 in its own address space, calls
+into the kernel and gets answers back, is preempted by the timer and carries
+on, and is stopped by the kernel when it does something it is not allowed to.
 
-Nothing runs in one of those spaces yet. No EL0, no system calls, no context
-switch, no userland, no text on screen, no keyboard, no programs. Those are on
-the x86 side, and are being brought across.
+What is missing is everything above that. There is no scheduler on this
+architecture, so there is one process, and it is a probe assembled into the
+kernel image rather than a file — no ELF loader, no filesystem, no shell. No
+text on screen, no keyboard. Those exist on the x86 side and are being brought
+across.
 
 ## x86-64 — the one that runs programs
 

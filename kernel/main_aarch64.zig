@@ -21,6 +21,7 @@ const fdt = @import("boot/fdt.zig");
 const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
+const trap = @import("arch/aarch64/trap.zig");
 const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
@@ -76,6 +77,11 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // moving the kernel out of TTBR0 was for.
     process_space_selftest();
 
+    // And now something runs inside one. This is the line the whole aarch64
+    // port has been walking towards: code executing at EL0, in its own
+    // address space, trapping into the kernel and being answered.
+    userland_selftest();
+
     // A screen. Everything this kernel has said so far went out a serial
     // line; this is the first thing it can show.
     screen_selftest();
@@ -83,6 +89,188 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     console.println("ClarityOS aarch64: EL1 boot ok");
 
     hang();
+}
+
+// The EL0 probe, assembled in arch/aarch64/user.S and living in .rodata: from
+// the kernel's side it is data to be copied into a process's page, not code to
+// be run here.
+extern const __user_probe_start: u8;
+extern const __user_probe_end: u8;
+extern const __user_fault_start: u8;
+extern const __user_fault_end: u8;
+
+/// Where the probe's pages go in its own address space. These numbers are
+/// also written into the probe itself — it loads from USER_DATA and stores to
+/// USER_TEXT by absolute address — so the two have to agree, and there is no
+/// mechanism yet (no ELF loader on this architecture) that would let them
+/// agree by construction.
+const USER_TEXT: u64 = 0x0040_0000;
+const USER_DATA: u64 = 0x1000_0000;
+const USER_STACK_TOP: u64 = 0x2000_0000;
+
+/// The value the kernel leaves in the process's data page, and what it should
+/// come back as after the process has read it, asked the kernel to increment
+/// it, and written it back.
+const SEED: u64 = 41;
+
+/// Run a program at EL0.
+///
+/// Everything before this has been the kernel talking about itself. This is
+/// the first code on this architecture that runs *without* the privilege to
+/// do what it likes, in an address space that is not the kernel's, and gets
+/// back into the kernel only through the door the kernel opened.
+///
+/// The probe is entered twice, deliberately. The first run ends with a system
+/// call, which is the path a program takes; the second ends with a fault,
+/// which is the path a program takes when it is wrong. A kernel that can only
+/// do the first has no way to survive the second, and re-entering EL0 after a
+/// fault is what shows the kernel really got the CPU back rather than
+/// stumbling on.
+fn userland_selftest() void {
+    if (pmm.stats().total_pages == 0) {
+        console.println("  [--] no physical memory; EL0 not exercised");
+        return;
+    }
+
+    var space = paging.create(2) orelse {
+        console.println("  [FAIL] EL0: no root table");
+        return;
+    };
+
+    const text_phys = pmm.alloc_page() orelse {
+        console.println("  [FAIL] EL0: no page for text");
+        return;
+    };
+    const data_phys = pmm.alloc_page() orelse {
+        console.println("  [FAIL] EL0: no page for data");
+        return;
+    };
+    const stack_phys = pmm.alloc_page() orelse {
+        console.println("  [FAIL] EL0: no page for a stack");
+        return;
+    };
+
+    // Copy the probe into the process's text page, through the direct map —
+    // never through the user mapping, which PSTATE.PAN may refuse.
+    const blob_start = @intFromPtr(&__user_probe_start);
+    const blob_len = @intFromPtr(&__user_fault_end) - blob_start;
+    const fault_offset = @intFromPtr(&__user_fault_start) - blob_start;
+    const src: [*]const u8 = @ptrCast(&__user_probe_start);
+    const dst: [*]u8 = vm.ptr_to_phys([*]u8, text_phys);
+    var i: usize = 0;
+    while (i < blob_len) : (i += 1) dst[i] = src[i];
+
+    // Those were stores, and EL0 is about to fetch instructions from them.
+    // The two go through different caches.
+    mmu.sync_instructions(@intFromPtr(dst), blob_len);
+
+    const seed_cell = vm.ptr_to_phys(*volatile u64, data_phys);
+    seed_cell.* = SEED;
+
+    paging.map_page(&space, USER_TEXT, text_phys, paging.MAP_USER | paging.MAP_EXEC) catch {
+        console.println("  [FAIL] EL0: could not map text");
+        return;
+    };
+    paging.map_page(&space, USER_DATA, data_phys, paging.MAP_USER | paging.MAP_WRITE) catch {
+        console.println("  [FAIL] EL0: could not map data");
+        return;
+    };
+    paging.map_page(&space, USER_STACK_TOP - pmm.PAGE_SIZE, stack_phys, paging.MAP_USER | paging.MAP_WRITE) catch {
+        console.println("  [FAIL] EL0: could not map a stack");
+        return;
+    };
+
+    paging.activate(&space);
+
+    // ── Run one: a program that works ───────────────────────────────────
+    trap.reset();
+    const exit_a = trap.enter_user(USER_TEXT, USER_STACK_TOP);
+    const answer = trap.done_value;
+    const argument = trap.last_argument;
+    const calls = trap.calls;
+    // What EL0 stored, read back through the kernel's own map: proof the
+    // write landed in the physical page rather than somewhere that merely
+    // looked right from EL0.
+    const written_back = seed_cell.*;
+    const preempted = trap.ticks_leaving - trap.ticks_entering;
+
+    // ── Run two: a program that is wrong ────────────────────────────────
+    // It stores to its own text page, which is mapped read-only for EL0.
+    trap.reset();
+    const exit_b = trap.enter_user(USER_TEXT + fault_offset, USER_STACK_TOP);
+    const fault = trap.last_fault;
+
+    paging.deactivate();
+
+    // Is the kernel still a working kernel?
+    //
+    // Taking an exception from EL0 masks interrupts, and the way back out of
+    // one is `ret`, not `eret` — so unless something puts DAIF back, the
+    // kernel returns from a process with its timer switched off and no sign
+    // of it until the next thing that needs to be scheduled. Bounded in spins
+    // rather than in time, for the same reason the boot timer test is: a
+    // deadline in ticks would wait forever for exactly the thing whose
+    // absence it is checking.
+    const ticks_before = timer.ticks();
+    var spins: u64 = 0;
+    while (timer.ticks() == ticks_before and spins < 100_000_000) : (spins += 1) {
+        asm volatile ("nop");
+    }
+    const still_ticking = timer.ticks() > ticks_before;
+
+    const ran_ok = exit_a == trap.EXIT_DONE and
+        calls == 2 and
+        argument == SEED and
+        answer == SEED + 1 and
+        written_back == SEED + 1 and
+        preempted > 0;
+
+    const caught_ok = exit_b == trap.EXIT_FAULT and
+        fault != null and
+        fault.?.ec == trap.EC_DATA_ABORT and
+        fault.?.far == USER_TEXT and
+        fault.?.elr >= USER_TEXT and fault.?.elr < USER_TEXT + pmm.PAGE_SIZE;
+
+    if (ran_ok and caught_ok and still_ticking) {
+        console.print("  [ok] EL0: a program ran, read ");
+        console.print_dec(SEED);
+        console.print(" from its own memory, called the kernel twice, got ");
+        console.print_dec(answer);
+        console.println(" back, and wrote it where the kernel could see it");
+        console.print("  [ok] EL0: the timer interrupted it ");
+        console.print_dec(preempted);
+        console.println(" times while it ran, and it carried on afterwards");
+        console.print("  [ok] EL0: and when it wrote to its read-only text at ");
+        console.print_hex(USER_TEXT);
+        console.println(", the kernel took the CPU back — and still had its own timer");
+    } else {
+        console.print("  [FAIL] EL0: exit_a=");
+        console.print_dec(exit_a);
+        console.print(" calls=");
+        console.print_dec(calls);
+        console.print(" arg=");
+        console.print_dec(argument);
+        console.print(" answer=");
+        console.print_dec(answer);
+        console.print(" written_back=");
+        console.print_dec(written_back);
+        console.print(" ticks_while_running=");
+        console.print_dec(preempted);
+        console.print(" exit_b=");
+        console.print_dec(exit_b);
+        console.print(" still_ticking=");
+        console.print_dec(@intFromBool(still_ticking));
+        console.println("");
+        if (fault) |f| trap.report_fault(f) else console.println("    no fault recorded");
+    }
+
+    paging.unmap_page(&space, USER_TEXT);
+    paging.unmap_page(&space, USER_DATA);
+    paging.unmap_page(&space, USER_STACK_TOP - pmm.PAGE_SIZE);
+    pmm.free_page(text_phys);
+    pmm.free_page(data_phys);
+    pmm.free_page(stack_phys);
+    paging.destroy(&space);
 }
 
 /// Build a process's low half, install it, and ask the hardware what it did.
