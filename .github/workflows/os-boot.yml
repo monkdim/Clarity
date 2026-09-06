@@ -80,6 +80,10 @@ jobs:
           #                                 the last page that has no file
           #                                 behind it, which one hand-made
           #                                 segment could never have shown
+          #   "[ok] user heap"           -- brk grew the process's heap and
+          #                                 the pages it mapped are really
+          #                                 there: the program writes through
+          #                                 the new break and reads it back
           #   "hello from /bin/..."      -- an ELF was read out of the
           #                                 filesystem, parsed, mapped into a
           #                                 fresh address space, and run at
@@ -111,6 +115,7 @@ jobs:
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"
             grep -q "hello from /bin/clarity-init" "serial-$attempt.log" || missing="$missing init-process"
             grep -q "\[ok\] user .bss zeroed" "serial-$attempt.log" || missing="$missing user-bss"
+            grep -q "\[ok\] user heap" "serial-$attempt.log" || missing="$missing user-heap"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
             if [ -z "$missing" ]; then
               echo "--> attempt $attempt: PASS"

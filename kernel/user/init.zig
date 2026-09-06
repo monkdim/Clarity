@@ -14,6 +14,7 @@
 const std = @import("std");
 
 const NR_WRITE: u64 = 1;
+const NR_BRK: u64 = 9;
 const NR_EXIT: u64 = 12;
 
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
@@ -29,6 +30,23 @@ fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
 
 fn write(fd: u64, buf: []const u8) i64 {
     return syscall3(NR_WRITE, fd, @intFromPtr(buf.ptr), buf.len);
+}
+
+/// Minimal hex, because a userspace with no libc still has to be able to say
+/// what a number was. Fixed 16 digits: no allocation, no formatting library,
+/// and nothing that could itself be the thing that is broken.
+fn write_hex(v: u64) void {
+    const digits = "0123456789abcdef";
+    var buf: [19]u8 = undefined;
+    buf[0] = '0';
+    buf[1] = 'x';
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const nib: u8 = @intCast((v >> @intCast(60 - i * 4)) & 0xF);
+        buf[2 + i] = digits[nib];
+    }
+    buf[18] = '\n';
+    _ = write(1, &buf);
 }
 
 fn exit(code: u64) noreturn {
@@ -61,6 +79,38 @@ export fn _start() callconv(.C) noreturn {
         _ = write(1, "  [ok] user .bss zeroed\n");
     } else {
         _ = write(1, "  [FAIL] user .bss held garbage\n");
+    }
+
+    // A heap. brk(0) reports the current break; asking for more maps pages
+    // that were not there before. This is what malloc will sit on.
+    const before = syscall3(NR_BRK, 0, 0, 0);
+    if (before <= 0) {
+        _ = write(1, "  [FAIL] user heap: brk(0) reported no break\n");
+        exit(1);
+    }
+    const want = @as(u64, @intCast(before)) + 8192;
+    const after = syscall3(NR_BRK, want, 0, 0);
+    if (after < 0 or @as(u64, @intCast(after)) != want) {
+        _ = write(1, "  [FAIL] user heap: brk did not grow\n");
+        _ = write(1, "    before ");
+        write_hex(@bitCast(before));
+        _ = write(1, "    wanted ");
+        write_hex(want);
+        _ = write(1, "    got    ");
+        write_hex(@bitCast(after));
+        exit(1);
+    }
+
+    // Checking the return value alone would prove nothing — the kernel could
+    // return the number without mapping anything. Write through the new
+    // break and read it back, volatile so neither end can be folded away. If
+    // the page is not mapped this faults instead, which the boot log shows.
+    const cell: *volatile u64 = @ptrFromInt(@as(usize, @intCast(before)) + 16);
+    cell.* = 0xC0FFEE;
+    if (cell.* == 0xC0FFEE) {
+        _ = write(1, "  [ok] user heap: brk grew and the memory holds\n");
+    } else {
+        _ = write(1, "  [FAIL] user heap: wrote to brk memory, read back wrong\n");
     }
 
     exit(0);

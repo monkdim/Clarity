@@ -97,6 +97,19 @@ fn write_msr(msr: u32, value: u64) void {
 ///
 /// Ten pushes before the call keeps the frame 16-byte aligned, which System V
 /// requires at the call site; the saved %rax doubles as that padding.
+///
+/// The return path restores the argument registers rather than discarding
+/// them. The ABI (System V AMD64, A.2.1) says a syscall destroys %rcx and
+/// %r11 and *nothing else*, so a compiler is entitled to keep a live value in
+/// %rsi or %rdx across one. This used to `addq $56, %rsp` over the saved
+/// %rdi/%rsi/%rdx/%r10/%r8/%r9 and hand back whatever the kernel had left in
+/// them, which is a program reading a garbage pointer out of a register it
+/// had every right to trust. It went unnoticed while the only user program
+/// made one call at a time and used nothing across them.
+///
+/// The tail needs no scratch register: %rcx and %r11 are loaded from the
+/// kernel stack before %rsp is loaded from it, so the last read happens while
+/// the stack is still there.
 pub fn syscall_entry() callconv(.Naked) void {
     asm volatile (
         \\ swapgs
@@ -115,11 +128,16 @@ pub fn syscall_entry() callconv(.Naked) void {
         \\ movq %rax, %rdi
         \\ movq %rsp, %rsi
         \\ call dispatch_syscall_c
-        \\ addq $56, %rsp
+        \\ popq %rdi
+        \\ popq %rsi
+        \\ popq %rdx
         \\ popq %r10
-        \\ popq %r11
-        \\ popq %rcx
-        \\ movq %r10, %rsp
+        \\ popq %r8
+        \\ popq %r9
+        \\ addq $8, %rsp
+        \\ movq 16(%rsp), %rcx
+        \\ movq 8(%rsp), %r11
+        \\ movq (%rsp), %rsp
         \\ swapgs
         \\ sysretq
     );

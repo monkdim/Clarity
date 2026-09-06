@@ -26,6 +26,12 @@ pub const Process = struct {
     fd_table: std.AutoHashMapUnmanaged(i32, *Fd) = .{},
     next_fd: i32 = 3,
 
+    /// Top of the heap, and where it began. `brk_start` is the page after the
+    /// last loaded segment; the break never goes below it. Both are zero for
+    /// a process with no loaded image, which is every kernel thread.
+    brk: u64 = 0,
+    brk_start: u64 = 0,
+
     pub const State = enum { runnable, running, sleeping, zombie };
 
     pub const ZombieRecord = struct {
