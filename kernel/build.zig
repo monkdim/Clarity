@@ -42,6 +42,45 @@ pub fn build(b: *std.Build) void {
     kernel.addAssemblyFile(b.path("arch/x86_64/context.S"));
     kernel.entry = .{ .symbol_name = "_start" };
 
+    // ── the first user program ──────────────────────────
+    //
+    // Built as its own freestanding executable and embedded in the kernel
+    // image, rather than assembled byte by byte inside the kernel as it was
+    // before. A linker's output is what the loader will actually meet:
+    // several PT_LOADs with different permissions, and a .bss whose p_memsz
+    // exceeds its p_filesz. None of that was exercised by one hand-made
+    // segment.
+    //
+    // It rides in the kernel image because the physical memory allocator
+    // already reserves that; a GRUB module would land somewhere pmm is free
+    // to hand out, which is a separate problem to solve properly.
+    const user_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+        .cpu_features_sub = std.Target.x86.featureSet(&.{
+            .mmx, .sse, .sse2, .avx, .avx2,
+        }),
+        .cpu_features_add = std.Target.x86.featureSet(&.{
+            .soft_float,
+        }),
+    });
+    const init_prog = b.addExecutable(.{
+        .name = "clarity-init",
+        .root_source_file = b.path("user/init.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSmall,
+    });
+    init_prog.setLinkerScript(b.path("user/user.ld"));
+    init_prog.entry = .{ .symbol_name = "_start" };
+    init_prog.pie = false;
+
+    // Hands the built ELF to the kernel as an embeddable file. getEmittedBin
+    // also makes the kernel depend on it, so it is built first.
+    kernel.root_module.addAnonymousImport("init_elf", .{
+        .root_source_file = init_prog.getEmittedBin(),
+    });
+
     b.installArtifact(kernel);
 
     // `zig build run` — boot the kernel under QEMU.

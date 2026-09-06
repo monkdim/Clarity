@@ -76,6 +76,10 @@ jobs:
           #                                 cannot produce this line
           #   "[ok] vfs"                 -- a path resolved: a file was created,
           #                                 written, and read back by name
+          #   "[ok] user .bss zeroed"    -- the loader zero-filled the part of
+          #                                 the last page that has no file
+          #                                 behind it, which one hand-made
+          #                                 segment could never have shown
           #   "hello from /bin/..."      -- an ELF was read out of the
           #                                 filesystem, parsed, mapped into a
           #                                 fresh address space, and run at
@@ -106,6 +110,7 @@ jobs:
             grep -q "\[ok\] preemption" "serial-$attempt.log" || missing="$missing preemption"
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"
             grep -q "hello from /bin/clarity-init" "serial-$attempt.log" || missing="$missing init-process"
+            grep -q "\[ok\] user .bss zeroed" "serial-$attempt.log" || missing="$missing user-bss"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
             if [ -z "$missing" ]; then
               echo "--> attempt $attempt: PASS"
