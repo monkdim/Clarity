@@ -95,13 +95,20 @@ pub const IretFrame = extern struct {
     ss: u64,
 };
 
-/// Issue iretq using a pre-built frame at the current RSP.
-pub fn enter_userland(_: u64) callconv(.Naked) noreturn {
-    // the iret-frame RSP arrives in %rdi (SysV ABI) and is consumed by the
-    // asm; unused from Zig's view, hence `_`.
+/// Enter ring 3 with a frame already built at `frame_rsp`.
+///
+/// Not `callconv(.Naked)`: a naked function has no ABI, so Zig refuses to
+/// call one, and this was previously uncallable — it only compiled because
+/// nothing reached it. A normal function works because the prologue is
+/// irrelevant once %rsp is replaced and `iretq` leaves for good.
+pub fn enter_userland(frame_rsp: u64) noreturn {
     asm volatile (
-        \\ mov %rdi, %rsp
-        \\ swapgs                      // user GS, before iretq
+        \\ movq %[frame], %%rsp
+        \\ swapgs
         \\ iretq
+        :
+        : [frame] "r" (frame_rsp),
+        : "memory"
     );
+    unreachable;
 }

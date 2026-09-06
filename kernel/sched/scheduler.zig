@@ -15,6 +15,7 @@ const heap = @import("../mm/heap.zig");
 const pmm = @import("../mm/pmm.zig");
 const vmm = @import("../mm/vmm.zig");
 const context = @import("../arch/x86_64/context.zig");
+const gdt = @import("../arch/x86_64/gdt.zig");
 const elf = @import("../loader/elf.zig");
 const loader = @import("../loader/load.zig");
 const process = @import("process.zig");
@@ -195,8 +196,11 @@ pub fn spawn_user(path: []const u8) !*Thread {
     // 4. Build the IRET frame so the first dispatch lands in user
     //    mode at the ELF entry point.
     const user_rflags: u64 = 0x202;            // IF=1, reserved bit 1 = 1
-    const user_cs: u16 = 0x1B;                  // user code, ring 3
-    const user_ss: u16 = 0x23;                  // user data, ring 3
+    // From the GDT, not written out: SYSRET fixes the order of the user
+    // descriptor pair, so user *data* comes first and the numeric values are
+    // the reverse of the obvious guess.
+    const user_cs: u16 = gdt.USER_CODE;
+    const user_ss: u16 = gdt.USER_DATA;
     t.iret_rsp = context.build_iret_frame(t.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, user_rflags, user_cs, user_ss);
 
     queues[@intFromEnum(Priority.normal)].enqueue(t);
@@ -323,7 +327,7 @@ pub fn exec(path: []const u8) !void {
     // Tear down the old address space; the new one replaces it.
     proc.address_space = loaded.address_space;
     cur.cr3 = loaded.address_space.pml4_phys;
-    cur.iret_rsp = context.build_iret_frame(cur.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, 0x202, 0x1B, 0x23);
+    cur.iret_rsp = context.build_iret_frame(cur.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, 0x202, gdt.USER_CODE, gdt.USER_DATA);
     proc.name = path;
 
     // Re-enter user mode with the new image.
