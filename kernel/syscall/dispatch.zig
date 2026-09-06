@@ -10,6 +10,8 @@
 const std = @import("std");
 const sched = @import("../sched/scheduler.zig");
 const vfs = @import("../fs/vfs.zig");
+const console = @import("../arch/x86_64/console.zig");
+const arch_syscall = @import("../arch/x86_64/syscall.zig");
 
 /// Canonical syscall numbers — must match stdlib/kernel_abi.clarity.
 pub const Nr = enum(u32) {
@@ -96,9 +98,10 @@ pub const Errno = enum(i32) {
 };
 
 pub fn init() void {
-    // TODO: program IA32_STAR, IA32_LSTAR, IA32_FMASK MSRs to point
-    // the SYSCALL instruction at syscall_entry; install int 0x80 in
-    // the IDT for legacy / debugging.
+    // Program IA32_EFER.SCE, STAR, LSTAR and FMASK, and point the entry
+    // trampoline at a kernel stack. Until this ran, `syscall` from ring 3 was
+    // an invalid opcode — this module was reachable only in principle.
+    arch_syscall.init();
 }
 
 /// Called from the syscall-entry trampoline with the six argument
@@ -144,10 +147,25 @@ fn sys_read(args: Args) i64 {
 
 fn sys_write(args: Args) i64 {
     const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
+    // Note: the buffer is a raw user pointer and is not validated. Nothing
+    // here checks that the range is mapped, user-owned, or even canonical, so
+    // a bad pointer faults in the kernel. Validation belongs with the rest of
+    // the user-memory access layer, which does not exist yet.
     const buf: [*]const u8 = @ptrFromInt(args.a1);
     const len: usize = @intCast(args.a2);
-    const n = vfs.write(fd, buf[0..len]) catch return -@as(i64, @intFromEnum(Errno.eio));
-    return @intCast(n);
+    if (vfs.write(fd, buf[0..len])) |n| {
+        return @intCast(n);
+    } else |_| {
+        // Before anything has opened descriptors of its own, stdout and
+        // stderr go to the kernel console rather than failing. A program that
+        // cannot report why it is unhappy is much harder to debug than one
+        // whose first write lands somewhere visible.
+        if (fd == 1 or fd == 2) {
+            console.print(buf[0..len]);
+            return @intCast(len);
+        }
+        return -@as(i64, @intFromEnum(Errno.ebadf));
+    }
 }
 
 fn sys_open(args: Args) i64 {
@@ -198,7 +216,19 @@ fn sys_ioctl(args: Args) i64 {
 }
 
 fn sys_exit(args: Args) i64 {
-    sched.exit(@intCast(@as(i64, @bitCast(args.a0))));
+    const code: i32 = @intCast(@as(i64, @bitCast(args.a0)));
+    console.print("\n  [exit] status=");
+    console.print_dec(@intCast(@as(u32, @bitCast(code))));
+    console.println("");
+    if (sched.current_thread() == null) {
+        // The ring 3 self-test runs before the scheduler owns userspace, so
+        // there is no thread to mark dead and nothing to switch to. Stop
+        // cleanly rather than spinning in the dispatcher looking for a
+        // runnable thread that does not exist.
+        console.println("  [halt] no scheduler context");
+        while (true) asm volatile ("cli; hlt");
+    }
+    sched.exit(code);
 }
 
 fn sys_getpid() i64 {

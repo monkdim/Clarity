@@ -1,54 +1,78 @@
 //! SYSCALL/SYSRET fast-path setup.
 //!
-//! On boot we point IA32_LSTAR at our entry trampoline, configure
-//! IA32_STAR with the kernel + user segment selectors, and mask off
-//! IF in IA32_FMASK so interrupts don't fire on the user → kernel
-//! transition before we've swapped to a kernel stack.
+//! Userspace sets %rax to the syscall number and the arguments in
+//! %rdi/%rsi/%rdx/%r10/%r8/%r9, then issues `syscall`. The CPU stashes the
+//! return address in %rcx and RFLAGS in %r11, loads CS/SS from IA32_STAR, and
+//! jumps to IA32_LSTAR — all *without* switching stacks. Everything else is
+//! ours to do.
 //!
-//! The entry trampoline:
-//!   1. swapgs       — flips kernel GS into place
-//!   2. saves user rsp into per-CPU storage
-//!   3. loads kernel rsp from per-CPU storage
-//!   4. pushes the saved user rsp + flags onto the kernel stack
-//!   5. saves the rest of the user-visible register state
-//!   6. calls dispatch.dispatch(nr, args)
-//!   7. restores registers
-//!   8. swapgs back, sysretq
+//! Two things about the entry path are easy to get subtly wrong and fail in
+//! ways that look like random corruption rather than a clear fault:
+//!
+//!   - The argument registers overlap the System V ones. %rdi already holds
+//!     the first syscall argument, so writing the syscall number into it
+//!     before reading it destroys that argument. The trampoline builds the
+//!     argument block on the kernel stack and passes a pointer instead, which
+//!     removes the shuffle entirely.
+//!   - The user %rsp must be restored *after* the saved %rcx and %r11 are
+//!     popped, not before: popping into %rsp first moves the stack pointer to
+//!     the user stack and the remaining pops then read user memory.
 
 const std = @import("std");
 const dispatch = @import("../../syscall/dispatch.zig");
+const gdt = @import("gdt.zig");
 
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
 const IA32_FMASK: u32 = 0xC000_0084;
+const IA32_GS_BASE: u32 = 0xC000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
-/// Per-CPU scratch area we reach via gs:0.
+/// Per-CPU scratch reached through %gs. The trampoline hardcodes the offsets,
+/// so they are asserted rather than trusted.
 pub const PerCpu = extern struct {
-    kernel_rsp: u64,
-    user_rsp_save: u64,
-    current_thread: u64,
+    kernel_rsp: u64 = 0,
+    user_rsp_save: u64 = 0,
+    current_thread: u64 = 0,
 };
 
-pub var per_cpu: PerCpu align(16) = undefined;
-
-pub fn init() void {
-    // EFER.SCE = 1 (enable SYSCALL/SYSRET)
-    write_msr(IA32_EFER, read_msr(IA32_EFER) | 1);
-    // STAR: kernel CS=0x08 in [47:32]; user CS=0x18 in [63:48] (the
-    // CPU computes user_cs = STAR[63:48]+16 for sysret which lands
-    // at 0x28+? — easier: set user base to 0x10 so user_cs = 0x1B,
-    // user_ss = 0x23 with the RPL bits the GDT already has).
-    write_msr(IA32_STAR, (@as(u64, 0x0008) << 32) | (@as(u64, 0x0010) << 48));
-    write_msr(IA32_LSTAR, @intFromPtr(&syscall_entry));
-    // Mask IF + DF + TF on entry; let the handler re-enable as it
-    // sees fit.
-    write_msr(IA32_FMASK, 0x0000_0700);
-    write_msr(IA32_KERNEL_GS_BASE, @intFromPtr(&per_cpu));
+comptime {
+    std.debug.assert(@offsetOf(PerCpu, "kernel_rsp") == 0);
+    std.debug.assert(@offsetOf(PerCpu, "user_rsp_save") == 8);
 }
 
-inline fn read_msr(msr: u32) u64 {
+pub var per_cpu: PerCpu align(16) = .{};
+
+/// Stack the syscall trampoline switches to. Separate from the TSS's RSP0
+/// because SYSCALL does not switch stacks itself and does not consult the TSS.
+var syscall_stack: [16 * 1024]u8 align(16) = undefined;
+
+pub fn init() void {
+    per_cpu.kernel_rsp = @intFromPtr(&syscall_stack) + syscall_stack.len;
+
+    // EFER.SCE — without this `syscall` is an invalid opcode.
+    write_msr(IA32_EFER, read_msr(IA32_EFER) | 1);
+
+    // STAR[47:32] is the kernel selector pair: SYSCALL loads CS from it and
+    // SS from it+8, so 0x08/0x10. STAR[63:48] is the user base: SYSRET loads
+    // SS from base+8 and CS from base+16, so 0x10 gives 0x18/0x20 — which is
+    // why gdt.zig puts the user *data* descriptor first.
+    write_msr(IA32_STAR, (@as(u64, gdt.KERNEL_CODE) << 32) |
+        (@as(u64, gdt.STAR_USER_BASE) << 48));
+    write_msr(IA32_LSTAR, @intFromPtr(&syscall_entry));
+
+    // Clear TF, IF and DF on entry. IF especially: an interrupt taken between
+    // the `syscall` and the stack switch would run on the user stack.
+    write_msr(IA32_FMASK, 0x0000_0700);
+
+    // While in the kernel, GS points at per_cpu and the shadow holds the
+    // user's value; `swapgs` on each boundary keeps that true.
+    write_msr(IA32_GS_BASE, @intFromPtr(&per_cpu));
+    write_msr(IA32_KERNEL_GS_BASE, 0);
+}
+
+fn read_msr(msr: u32) u64 {
     var lo: u32 = undefined;
     var hi: u32 = undefined;
     asm volatile ("rdmsr"
@@ -59,69 +83,66 @@ inline fn read_msr(msr: u32) u64 {
     return (@as(u64, hi) << 32) | lo;
 }
 
-inline fn write_msr(msr: u32, value: u64) void {
-    const lo: u32 = @truncate(value);
-    const hi: u32 = @truncate(value >> 32);
+fn write_msr(msr: u32, value: u64) void {
     asm volatile ("wrmsr"
         :
-        : [lo] "{eax}" (lo),
-          [hi] "{edx}" (hi),
+        : [lo] "{eax}" (@as(u32, @truncate(value))),
+          [hi] "{edx}" (@as(u32, @truncate(value >> 32))),
           [msr] "{ecx}" (msr),
     );
 }
 
-/// SYSCALL entry point. Naked because we own register conventions
-/// and the user RSP is still in %rsp on entry.
+/// SYSCALL entry. Naked: on entry %rsp still points at the *user* stack and
+/// nothing may touch it before the switch.
+///
+/// Ten pushes before the call keeps the frame 16-byte aligned, which System V
+/// requires at the call site; the saved %rax doubles as that padding.
 pub fn syscall_entry() callconv(.Naked) void {
     asm volatile (
-        \\ swapgs                          // kernel GS in place
-        \\ mov %rsp, %gs:8                 // save user rsp
-        \\ mov %gs:0, %rsp                 // load kernel rsp
-        \\
-        \\ // Build a complete trap-style frame on the kernel stack
-        \\ // so we can restore the user state precisely on return.
-        \\ push %rcx                       // user rip (saved by SYSCALL)
-        \\ push %r11                       // user rflags (saved by SYSCALL)
-        \\ push %gs:8                      // user rsp
-        \\ push %rax
-        \\ push %rdi
-        \\ push %rsi
-        \\ push %rdx
-        \\ push %r10
-        \\ push %r8
-        \\ push %r9
-        \\
-        \\ // Dispatch(nr=rax, a0..a5 in rdi/rsi/rdx/r10/r8/r9)
-        \\ // The C dispatch function expects (nr, args struct) but
-        \\ // here we hand it the six raw args.
-        \\ mov %rax, %rdi                  // nr
-        \\ // The other arg registers are already in the right slots
-        \\ // for the System V calling convention except r10 -> rcx.
-        \\ mov %r10, %rcx
+        \\ swapgs
+        \\ movq %rsp, %gs:8
+        \\ movq %gs:0, %rsp
+        \\ pushq %rcx
+        \\ pushq %r11
+        \\ pushq %gs:8
+        \\ pushq %rax
+        \\ pushq %r9
+        \\ pushq %r8
+        \\ pushq %r10
+        \\ pushq %rdx
+        \\ pushq %rsi
+        \\ pushq %rdi
+        \\ movq %rax, %rdi
+        \\ movq %rsp, %rsi
         \\ call dispatch_syscall_c
-        \\
-        \\ // Pop everything we pushed (rax holds the return value).
-        \\ pop %r9
-        \\ pop %r8
-        \\ pop %r10
-        \\ pop %rdx
-        \\ pop %rsi
-        \\ pop %rdi
-        \\ add $8, %rsp                    // skip saved rax (we want our return value)
-        \\ pop %rsp                        // restore user rsp from frame
-        \\ pop %r11                        // user rflags
-        \\ pop %rcx                        // user rip
-        \\
+        \\ addq $56, %rsp
+        \\ popq %r10
+        \\ popq %r11
+        \\ popq %rcx
+        \\ movq %r10, %rsp
         \\ swapgs
         \\ sysretq
     );
 }
 
-/// C-callable bridge: takes the six syscall args System V style,
-/// forwards to dispatch.dispatch, returns the i64 result in rax.
-export fn dispatch_syscall_c(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) callconv(.C) i64 {
+/// The six pushed argument registers, in the order the trampoline pushes
+/// them, so a pointer to the lowest one is a pointer to this struct.
+const RawArgs = extern struct {
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+};
+
+export fn dispatch_syscall_c(nr: u64, args: *const RawArgs) callconv(.C) i64 {
     return dispatch.dispatch(nr, .{
-        .a0 = a0, .a1 = a1, .a2 = a2,
-        .a3 = a3, .a4 = a4, .a5 = a5,
+        .a0 = args.a0,
+        .a1 = args.a1,
+        .a2 = args.a2,
+        .a3 = args.a3,
+        .a4 = args.a4,
+        .a5 = args.a5,
     });
 }

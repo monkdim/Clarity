@@ -14,6 +14,9 @@ pub const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITE: u64 = 1 << 1;
 pub const PAGE_USER: u64 = 1 << 2;
 pub const PAGE_NX: u64 = 1 << 63;
+/// PS in a PDPT or PD entry: this entry maps a 1 GiB or 2 MiB page directly
+/// rather than pointing at the next level.
+pub const PAGE_HUGE: u64 = 1 << 7;
 
 pub const ADDR_MASK: u64 = 0x000FFFFFFFFFF000;
 
@@ -78,12 +81,47 @@ pub fn map_page(space: *AddressSpace, virt: u64, phys: u64, flags: u64) !void {
             const new_table = pmm.alloc_page() orelse return error.OutOfMemory;
             zero_page(new_table);
             entry.* = new_table | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        } else if (level > 0 and (entry.* & PAGE_HUGE) != 0) {
+            // A 1 GiB or 2 MiB page already covers this address. Its frame
+            // address is *not* a page table, so descending into it would
+            // write page-table entries into whatever data lives there and
+            // leave the mapping unchanged — silent corruption. The boot stub
+            // identity-maps the first gigabyte with 2 MiB pages, so this is
+            // the normal case for any 4 KiB mapping below 1 GiB, not an edge
+            // case. Split it into a full table covering the same range with
+            // the same permissions, then carry on down.
+            try split_huge_page(entry, level);
         }
         table_phys = entry.* & ADDR_MASK;
     }
     const leaf = phys_to_table(table_phys);
     leaf[indices[3]] = (phys & ADDR_MASK) | flags | PAGE_PRESENT;
     flush_tlb_entry(virt);
+}
+
+/// Replace a huge-page entry with a table of smaller entries covering exactly
+/// the same range and permissions. `level` is 1 for a 1 GiB PDPT entry (split
+/// into 512 × 2 MiB) and 2 for a 2 MiB PD entry (split into 512 × 4 KiB).
+fn split_huge_page(entry: *u64, level: usize) !void {
+    const old = entry.*;
+    const base = old & ADDR_MASK;
+    // Everything except the frame address and PS; PS stays set on the children
+    // only when they are themselves huge (a 1 GiB split yields 2 MiB pages).
+    // Note the PAT bit moves between huge (bit 12) and 4 KiB (bit 7) entries;
+    // nothing here sets it, so it is dropped rather than translated.
+    const flags = old & ~ADDR_MASK & ~PAGE_HUGE;
+    const child_stride: u64 = if (level == 1) 2 * 1024 * 1024 else 4096;
+    const child_huge: u64 = if (level == 1) PAGE_HUGE else 0;
+
+    const table_phys = pmm.alloc_page() orelse return error.OutOfMemory;
+    const table = phys_to_table(table_phys);
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        table[i] = (base + @as(u64, i) * child_stride) | flags | child_huge;
+    }
+    // The parent must stay as permissive as the widest child; the leaf entries
+    // carry the real permissions.
+    entry.* = table_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 }
 
 pub fn unmap_page(space: *AddressSpace, virt: u64) void {

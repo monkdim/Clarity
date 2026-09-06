@@ -22,6 +22,7 @@ const vfs = @import("fs/vfs.zig");
 const tmpfs = @import("fs/tmpfs.zig");
 const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
+const usermode = @import("usermode.zig");
 
 extern const __kernel_phys_end: u8;
 
@@ -109,18 +110,23 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     };
     console.println("  [ok] drivers");
 
-    // 7. Hand off to userspace. The first user process is the
-    //    Clarity runtime executing /init.clarity. Schedule it and
-    //    drop into the dispatch loop; we never come back.
     console.println("ClarityOS ready.");
-    _ = sched.spawn_kthread(idle_loop, "[idle]", .idle) catch unreachable;
-    _ = sched.spawn_user("/bin/clarity-init") catch |err| {
-        console.print("PANIC: spawn /bin/clarity-init: ");
+
+    // 7. Leave ring 0 for the first time.
+    //
+    //    This runs before spawn_user because everything spawn_user needs — an
+    //    ELF loader, a per-process address space, the scheduler's user path —
+    //    rests on the CPU being able to reach ring 3 and come back through
+    //    the syscall trampoline, and nothing had ever tested that. The
+    //    self-test does it with nothing else in the way: a few mapped pages
+    //    and a program that writes a line and exits. Its two markers are what
+    //    the boot gate checks.
+    usermode.run_first_user_program() catch |err| {
+        console.print("PANIC: first user program: ");
         console.println(@errorName(err));
         hang();
     };
 
-    sched.run();
     unreachable;
 }
 
