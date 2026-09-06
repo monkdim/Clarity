@@ -1,0 +1,72 @@
+//! /bin/clarity-init — the first user program, as a compiler builds it.
+//!
+//! This replaces 47 bytes of machine code written out by hand inside the
+//! kernel. Those bytes proved the CPU could reach ring 3 and come back, but
+//! they proved almost nothing about the loader: one segment, no BSS, and a
+//! layout the kernel itself had chosen. A linker's output is the real test —
+//! it decides how many segments there are, what permissions each gets, and
+//! how much of the last page is file-backed rather than zero-filled.
+//!
+//! Freestanding, with no libc, because ClarityOS has none yet. The syscalls
+//! are written out directly, which doubles as the smallest possible statement
+//! of the ABI a libc will eventually sit on.
+
+const std = @import("std");
+
+const NR_WRITE: u64 = 1;
+const NR_EXIT: u64 = 12;
+
+fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> i64),
+        : [nr] "{rax}" (nr),
+          [a0] "{rdi}" (a0),
+          [a1] "{rsi}" (a1),
+          [a2] "{rdx}" (a2),
+        : "rcx", "r11", "memory"
+    );
+}
+
+fn write(fd: u64, buf: []const u8) i64 {
+    return syscall3(NR_WRITE, fd, @intFromPtr(buf.ptr), buf.len);
+}
+
+fn exit(code: u64) noreturn {
+    _ = syscall3(NR_EXIT, code, 0, 0);
+    unreachable;
+}
+
+/// A mutable copy of the greeting, so the image has a writable segment as
+/// well as a read-only one. A single read-only PT_LOAD would not exercise
+/// the loader's per-segment permissions at all.
+var greeting = "hello from /bin/clarity-init\n".*;
+
+/// Zero-initialised, so it lands in .bss — where p_memsz exceeds p_filesz and
+/// the loader has to zero the difference rather than copy it. Getting that
+/// wrong leaves "uninitialised" globals holding whatever was in the page,
+/// which stays invisible until it is a very confusing bug.
+var bss_probe: u64 = 0;
+
+export fn _start() callconv(.C) noreturn {
+    _ = write(1, &greeting);
+
+    // Through a volatile pointer, so the compiler cannot fold this. It can
+    // otherwise see that bss_probe is declared zero and nothing else writes
+    // it, prove the branch, and emit the success message unconditionally —
+    // which would make this pass whether or not .bss was actually zeroed,
+    // i.e. test nothing at all.
+    const probe: *volatile u64 = &bss_probe;
+    probe.* +%= 1;
+    if (probe.* == 1) {
+        _ = write(1, "  [ok] user .bss zeroed\n");
+    } else {
+        _ = write(1, "  [FAIL] user .bss held garbage\n");
+    }
+
+    exit(0);
+}
+
+pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+    _ = write(2, "  [FAIL] user panic\n");
+    exit(1);
+}
