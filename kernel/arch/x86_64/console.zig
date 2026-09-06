@@ -38,8 +38,20 @@ pub fn println(s: []const u8) void {
     putchar('\n');
 }
 
+// VGA mirroring is opt-in. The VGA buffer is addressed through the HHDM
+// (0xFFFF_8000_..), so a write faults on any path where that mapping isn't
+// live — and if it faults inside panic() it storms the log with the panic
+// prefix forever. Serial (pure port I/O) never faults, so the early console
+// stays serial-only until a driver explicitly turns VGA on.
+var vga_enabled: bool = false;
+
+pub fn enable_vga() void {
+    vga_enabled = true;
+}
+
 fn putchar(c: u8) void {
     serial_out(c);
+    if (!vga_enabled) return;
     if (c == '\n') {
         cursor_x = 0;
         cursor_y += 1;
