@@ -9,7 +9,7 @@ from "graphics.clarity" import framebuffer, BLACK, WHITE
 from "ui.clarity" import Widget, WidgetRoot
 from "layout.clarity" import FlexLayout, GridLayout, StackLayout, flex_row, flex_column, grid, stack
 from "theme.clarity" import dark, light, default, theme_color, theme_font, theme_spacing
-from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view, Toggle, RadioButton, RadioGroup, Tabs, toggle, radio_button, radio_group, tabs, TreeView, Dropdown, tree_view, dropdown
+from "widgets.clarity" import Label, Button, Checkbox, ProgressBar, Slider, TextInput, ScrollView, ListView, label, button, checkbox, progress_bar, slider, text_input, scroll_view, list_view, Toggle, RadioButton, RadioGroup, Tabs, toggle, radio_button, radio_group, tabs, TreeView, Dropdown, tree_view, dropdown, tooltip
 from "event_bus.clarity" import InputBus
 from "input.clarity" import EV_KEY, EV_REL, EV_SYN, REL_X, REL_Y, REL_WHEEL, BTN_LEFT, KEY_PRESS, KEY_RELEASE
 from "keymap.clarity" import KEY_TAB, KEY_LEFTSHIFT, KEY_A, Modifiers
@@ -544,6 +544,63 @@ tb.set_bounds(10, 70, 300, 32); tb._paint(wfb)
 tv.set_bounds(10, 110, 180, 120); tv._paint(wfb)
 dd.set_bounds(200, 110, 110, 28); dd._paint(wfb)
 assert(true, "new widgets paint onto a framebuffer")
+
+-- ── Tooltip — hover dwell + overlay placement ───────
+
+show "-- UI: tooltip --"
+-- local paint probe: any pixel differing from the cleared background
+fn tt_drew(fb) {
+    mut yy = 0
+    while yy < fb.height {
+        mut xx = 0
+        while xx < fb.width {
+            if fb.get_pixel(xx, yy) != 0xFF000000 { return true }
+            xx = xx + 2
+        }
+        yy = yy + 2
+    }
+    return false
+}
+let tt_target = button("Save")
+tt_target.set_bounds(100, 50, 80, 30)
+let tt = tooltip("Save the current file")
+tt.attach(tt_target)
+tt.set_theme(dark())
+
+-- dwell: it only appears after the pointer rests long enough
+assert(not tt.update(10, 10, 1000), "no tip while the pointer is elsewhere")
+assert(not tt.update(140, 60, 200), "hovering under the delay does not show it yet")
+assert(tt.update(140, 60, 400), "hovering past the delay shows the tip")
+assert(not tt.update(10, 10, 16), "leaving the target hides the tip")
+assert(not tt.update(140, 60, 100), "re-entering restarts the dwell timer")
+
+-- placement: centred under the target
+tt.update(140, 60, 1000)
+let tb_rect = tt.bubble_rect(800, 600)
+assert_eq(tb_rect[0], 100 + int((80 - tb_rect[2]) / 2), "the bubble centres on the target")
+assert_eq(tb_rect[1], 50 + 30 + tt.gap, "the bubble sits below the target")
+-- flips above the target rather than overflowing the bottom edge
+tt_target.set_bounds(100, 580, 80, 30)
+let tb_flip = tt.bubble_rect(800, 600)
+assert(tb_flip[1] < 580, "the bubble flips above the target at the bottom edge")
+-- clamps into the screen instead of running off the left
+tt_target.set_bounds(0, 50, 80, 30)
+assert_eq(tt.bubble_rect(800, 600)[0], 0, "the bubble clamps to the left screen edge")
+
+-- overlay painting: draws when shown, nothing when hidden
+tt_target.set_bounds(100, 50, 80, 30)
+let tt_fb = framebuffer(400, 200)
+tt_fb.clear(0xFF000000)
+tt.paint_overlay(tt_fb)
+assert(tt_drew(tt_fb), "the tooltip paints its bubble when shown")
+tt.hide()
+let tt_fb2 = framebuffer(400, 200)
+tt_fb2.clear(0xFF000000)
+tt.paint_overlay(tt_fb2)
+assert(not tt_drew(tt_fb2), "a hidden tooltip paints nothing")
+
+-- a tooltip never swallows input
+assert(not tt.handle_event(me_press(140, 60, 1)), "the tooltip does not consume events")
 
 -- ── Summary ─────────────────────────────────────────
 

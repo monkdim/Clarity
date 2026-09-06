@@ -1042,6 +1042,102 @@ fn dropdown(items) { return Dropdown(items) }
 
 -- Local helper duplicated from ui.clarity (modules can't re-import each
 -- other's private helpers cleanly without circular deps).
+-- ── Tooltip — hover help text ──────────────────────────
+--
+-- A tooltip is an overlay, not a child: parenting it to the widget it
+-- describes would clip it to that widget's bounds and bury it inside that
+-- subtree's z-order. Instead it observes a target's screen rect plus the
+-- pointer, and paints last, above the tree.
+--
+--   let tip = tooltip("Save the current file")
+--   tip.attach(save_button)
+--   -- each frame, after input:
+--   tip.update(mouse_x, mouse_y, frame_ms)
+--   -- and after painting the widget tree:
+--   tip.paint_overlay(fb)
+
+class Tooltip < Widget {
+    fn init(text_value) {
+        this._setup_widget()
+        this.role = "tooltip"
+        this.focusable = false
+        this.text = text_value ?? ""
+        this.target = null
+        this.shown = false
+        this.delay_ms = 500        -- pointer dwell before it appears
+        this.hover_ms = 0
+        this.pad_x = 8
+        this.pad_y = 5
+        this.gap = 6               -- distance from the target edge
+    }
+
+    fn attach(widget) { this.target = widget; return this }
+    fn set_text(v) { this.text = v }
+    fn set_delay(ms) { this.delay_ms = ms }
+    fn hide() { this.shown = false; this.hover_ms = 0 }
+
+    -- True while the pointer rests inside the target.
+    fn hovering(mx, my) {
+        if this.target == null { return false }
+        if not this.target.visible { return false }
+        let r = this.target.screen_rect()
+        return mx >= r[0] and mx < r[0] + r[2] and my >= r[1] and my < r[1] + r[3]
+    }
+
+    -- Advance the dwell timer by one frame; returns whether the tip shows.
+    fn update(mx, my, dt_ms) {
+        if not this.hovering(mx, my) {
+            this.hover_ms = 0
+            this.shown = false
+            return false
+        }
+        this.hover_ms = this.hover_ms + dt_ms
+        this.shown = this.hover_ms >= this.delay_ms
+        return this.shown
+    }
+
+    fn size() {
+        let f = theme_font(this.theme())
+        let m = measure_text(f, this.text)
+        return [m[0] + this.pad_x * 2, m[1] + this.pad_y * 2]
+    }
+
+    -- Centred under the target, nudged to stay on screen, and flipped
+    -- above the target when it would overflow the bottom edge.
+    fn bubble_rect(fb_w, fb_h) {
+        let s = this.size()
+        let bw = s[0]
+        let bh = s[1]
+        if this.target == null { return [0, 0, bw, bh] }
+        let r = this.target.screen_rect()
+        mut bx = r[0] + int((r[2] - bw) / 2)
+        mut by = r[1] + r[3] + this.gap
+        if by + bh > fb_h { by = r[1] - bh - this.gap }
+        if by < 0 { by = 0 }
+        if bx + bw > fb_w { bx = fb_w - bw }
+        if bx < 0 { bx = 0 }
+        return [bx, by, bw, bh]
+    }
+
+    -- Paint above the rest of the tree. A no-op unless shown.
+    fn paint_overlay(fb) {
+        if not this.shown { return null }
+        if this.text == "" { return null }
+        let t = this.theme()
+        let f = theme_font(t)
+        let b = this.bubble_rect(fb.width, fb.height)
+        fill_rect(fb, b[0], b[1], b[2], b[3], theme_color(t, "surface_elevated"))
+        rect(fb, b[0], b[1], b[2], b[3], theme_color(t, "border"))
+        draw_text(fb, b[0] + this.pad_x, b[1] + this.pad_y, this.text, f, theme_color(t, "foreground"))
+    }
+
+    -- A tooltip never consumes input and draws nothing in tree order.
+    fn _handle(event) { return false }
+    fn _paint(fb) { return null }
+}
+
+fn tooltip(text) { return Tooltip(text) }
+
 fn _event_kind_local(event) {
     let t = type(event)
     if t == "MouseEvent" { return "mouse" }
