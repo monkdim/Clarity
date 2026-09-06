@@ -58,6 +58,12 @@ claim with no marker behind it is in "What does not run yet".
   out of a screenshot — replaying the console's own wrapping and scrolling
   over the serial log to work out what each cell should hold, then comparing
   every pixel against a glyph it renders itself from `tools/font8x8.txt`
+- **a keyboard**: virtio-input over the virtio-mmio bus, found by walking the
+  thirty-two slots the device tree names rather than by knowing where QEMU
+  puts them. CI types at it — `tools/key_check.py` sends fifty-two keys
+  through QEMU's monitor and requires the kernel to report back exactly those
+  characters, which is the only way to tell a driver that delivers nothing
+  from a boot where nobody pressed anything
 - per-process address spaces in TTBR0 — three-level tables, ASID-tagged,
   with permissions verified by asking the MMU to translate as EL0 would
 - **a program at EL0**: `hello from EL0 on aarch64` in the boot log is
@@ -103,9 +109,13 @@ Written, compiles, and nothing has ever executed it:
 
 Not written:
 
-- Nothing reads a keyboard on aarch64, so the console on screen is output
-  only. QEMU's `virt` machine has no PS/2 controller; it needs a virtio-input
-  driver, which does not exist yet.
+- Nothing *routes* the keyboard anywhere. The driver reads keys and the
+  console writes text, and no code joins them: there is no line discipline, no
+  tty, no `read(2)`, and so no shell. The keycode table covers the main
+  block only — no function keys, keypad, arrows or modifiers past shift,
+  because nothing reads them yet and a table of untested entries is a table
+  of guesses. The driver is polled rather than interrupt-driven; the GIC
+  routing for the virtio slots is in the device tree and nothing reads it.
 - On aarch64: a scheduler and a filesystem. Threads can be switched, but
   nothing keeps run queues, priorities or a process table — the boot selftest
   drives the switching primitive directly. Programs are loaded from an ELF
@@ -150,6 +160,9 @@ kernel/
 │   ├── paging.zig          per-process TTBR0 page tables
 │   ├── trap.zig            trap frame, system calls, faults, user pointers
 │   ├── console.zig         PL011
+│   ├── virtio_mmio.zig     the virtio MMIO transport, legacy and modern
+│   ├── virtio_input.zig    virtio-input: one event virtqueue
+│   ├── keyboard.zig        Linux keycodes into characters
 │   ├── gic.zig  timer.zig  fwcfg.zig  ramfb.zig
 ├── mm/
 │   ├── pmm.zig             bitmap page-frame allocator (both architectures)
@@ -183,6 +196,7 @@ kernel/
 │   └── user.ld             static user link layout, both architectures
 ├── tools/
 │   ├── fb_check.py         boots ARM, screenshots it, reads the text back
+│   ├── key_check.py        boots ARM, types at it, reads the keys back
 │   ├── font8x8.txt         the console font, as 95 glyphs of ASCII art
 │   ├── make_font.py        turns that into font8x8.zig, and into a picture
 │   └── run_x86.sh          builds the GRUB ISO `zig build run` boots

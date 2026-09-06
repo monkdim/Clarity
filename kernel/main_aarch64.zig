@@ -18,6 +18,9 @@ const mmu = @import("arch/aarch64/mmu.zig");
 const ramfb = @import("arch/aarch64/ramfb.zig");
 const fwcfg = @import("arch/aarch64/fwcfg.zig");
 const fdt = @import("boot/fdt.zig");
+const virtio_mmio = @import("arch/aarch64/virtio_mmio.zig");
+const virtio_input = @import("arch/aarch64/virtio_input.zig");
+const keyboard = @import("arch/aarch64/keyboard.zig");
 const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
@@ -102,6 +105,11 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // has finished is a screenshot, not a console.
     screen_selftest();
     open_screen_console();
+
+    // A keyboard. Nothing on this architecture could read one: QEMU's `virt`
+    // has no PS/2 controller, which is also true of the hardware this is
+    // aimed at, so the way in is the virtio bus rather than a port.
+    keyboard_selftest(tree);
 
     // And finally a program that was compiled and linked rather than
     // assembled into this image.
@@ -762,6 +770,102 @@ fn screen_selftest() void {
     } else {
         console.println("  [FAIL] framebuffer: wrote a pattern, read back something else");
     }
+}
+
+/// Find the keyboard and read what it says.
+///
+/// The bus slots come from the device tree — thirty-two of them on `virt`,
+/// identical, with whatever is in each discoverable only by reading its
+/// registers. Hardcoding 0x0a000000 and a stride of 0x200 would work on this
+/// machine and nowhere else.
+///
+/// Reading is checked by making QEMU type: tools/key_check.py sends keys
+/// through the monitor and requires the kernel to report exactly them. A
+/// driver that came up and delivered nothing would otherwise look identical
+/// to one that came up and nobody pressed anything.
+fn keyboard_selftest(tree: ?fdt.Fdt) void {
+    const t = tree orelse {
+        console.println("  [--] no device tree; no virtio bus to look on");
+        return;
+    };
+
+    var slots: [40]fdt.Region = undefined;
+    const n = fdt.node_regs(&t, "virtio_mmio@", &slots);
+    if (n == 0) {
+        console.println("  [--] no virtio-mmio slots in the device tree");
+        return;
+    }
+
+    var bases: [40]u64 = undefined;
+    for (slots[0..n], 0..) |r, i| bases[i] = r.base;
+
+    if (!virtio_input.init(bases[0..n])) {
+        // Usually not a failure of this code at all: it means QEMU was
+        // started without `-device virtio-keyboard-device`, and there is no
+        // keyboard to find. But "no keyboard" is also what a driver looking
+        // at the wrong addresses says, and what one that rejects the
+        // transport version the devices actually speak says, so the failure
+        // path prints the bus rather than a summary of it. Success does not:
+        // a list of every slot on every boot is noise until the day it is
+        // the only thing that would explain the silence.
+        console.print("  [--] ");
+        console.print_dec(n);
+        console.println(" virtio slots, none of them a usable keyboard:");
+        for (bases[0..n]) |b| {
+            const magic: *volatile u32 = @ptrFromInt(vm.phys_to_virt(b));
+            const ver: *volatile u32 = @ptrFromInt(vm.phys_to_virt(b) + 4);
+            const did: *volatile u32 = @ptrFromInt(vm.phys_to_virt(b) + 8);
+            if (magic.* != virtio_mmio.MAGIC or did.* == 0) continue;
+            console.print("       slot ");
+            console.print_hex(b);
+            console.print(": transport version ");
+            console.print_dec(ver.*);
+            console.print(", device id ");
+            console.print_dec(did.*);
+            console.println("");
+        }
+        return;
+    }
+
+    console.print("  [ok] keyboard: virtio-input on a bus of ");
+    console.print_dec(n);
+    console.println(" slots");
+
+    // Read whatever gets typed, bounded by the timer rather than by a spin
+    // count: how many times this loop goes round in a second depends on the
+    // machine, and the window the keys have to arrive in should not. The
+    // timer is known to be delivering interrupts by here — timer_selftest ran
+    // several screens ago and would have said so if it were not.
+    //
+    // Two bounds, because there are two things being waited for. FIRST_WAIT
+    // is how long a boot with nobody at the keyboard costs; QUIET_WAIT is how
+    // long after the last key this decides the typing has stopped, and it is
+    // reset by every character so a long string is not cut off halfway.
+    //
+    // Nothing may be typed at all, which is why this reports what it saw
+    // rather than passing or failing. The checking is tools/key_check.py's
+    // job, because only something outside the kernel can make keys happen.
+    const FIRST_WAIT: u64 = 300; // 3 s at the 100 Hz the timer is set to
+    const QUIET_WAIT: u64 = 200; // 2 s of silence ends the read
+
+    var typed: [96]u8 = undefined;
+    var count: usize = 0;
+    var deadline = timer.ticks() + FIRST_WAIT;
+    while (timer.ticks() < deadline and count < typed.len) {
+        if (keyboard.poll()) |c| {
+            typed[count] = c;
+            count += 1;
+            deadline = timer.ticks() + QUIET_WAIT;
+        }
+    }
+
+    console.print("  keyboard: read ");
+    console.print_dec(count);
+    console.print(" characters from ");
+    console.print_dec(keyboard.presses);
+    console.print(" key presses: \"");
+    console.print(typed[0..count]);
+    console.println("\"");
 }
 
 /// The console's screen half, once there is a screen.
