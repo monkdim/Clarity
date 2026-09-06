@@ -173,6 +173,28 @@ pub fn build(b: *std.Build) void {
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/vectors.S"));
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/user.S"));
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/context.S"));
+
+    // /bin/clarity-init for aarch64: a real program, built by a compiler and
+    // laid out by a linker, embedded in the kernel image for the loader to
+    // find. Same link script as the x86_64 one — it only names addresses and
+    // alignments, both of which apply here.
+    const user_arm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const init_prog_arm = b.addExecutable(.{
+        .name = "clarity-init-aarch64",
+        .root_source_file = b.path("user/init_aarch64.zig"),
+        .target = user_arm_target,
+        .optimize = .ReleaseSmall,
+    });
+    init_prog_arm.setLinkerScript(b.path("user/user.ld"));
+    init_prog_arm.entry = .{ .symbol_name = "_start" };
+    init_prog_arm.pie = false;
+    kernel_arm.root_module.addAnonymousImport("init_elf_aarch64", .{
+        .root_source_file = init_prog_arm.getEmittedBin(),
+    });
     kernel_arm.entry = .{ .symbol_name = "_start" };
 
     // The bootable artefact is the flat binary, not the ELF.

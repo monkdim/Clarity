@@ -272,6 +272,22 @@ jobs:
           # had the CPU taken away from it. That last one is the one a kernel
           # that never really left EL1 could not produce.
           #
+          # The init markers are a different claim again: that program was not
+          # assembled into the kernel image. A compiler built it and a linker
+          # laid it out into three segments with different permissions and a
+          # .bss whose memory size exceeds its file size, and the loader had
+          # to be right about all of it without being told.
+          #
+          # It runs *twice*, in two address spaces, and that is not repetition
+          # for its own sake. The second run gets frames the first one just
+          # returned, so ".bss zeroed" and ".data came from the file" only
+          # hold if the loader really re-zeroed and re-copied them. Removing
+          # the zeroing was measured to pass the first run and fail the
+          # second.
+          #
+          # The program's exit status carries its own verdict, so a check it
+          # reports as failed fails this gate rather than merely printing.
+          #
           # The last two markers are about threads rather than processes. The
           # trace has to be exactly ABABABa: a switch that went nowhere leaves
           # a letter repeated and a switch that lost a thread leaves it short.
@@ -289,6 +305,11 @@ jobs:
              && grep -q "\[ok\] EL0: and when it wrote to its read-only text" serial-arm.log \
              && grep -q "\[ok\] context switch: ABABABa" serial-arm.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm.log \
+             && grep -q "hello from /bin/clarity-init on aarch64" serial-arm.log \
+             && grep -q "\[ok\] user .bss zeroed" serial-arm.log \
+             && grep -q "\[ok\] user .data came from the file" serial-arm.log \
+             && grep -q "\[ok\] user fp: 355/113" serial-arm.log \
+             && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
@@ -331,6 +352,7 @@ jobs:
           if grep -q "hello from EL0 on aarch64" serial-arm-pan.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-pan.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm-pan.log \
+             && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm-pan.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-pan.log \
              && ! grep -q "AARCH64 EXCEPTION" serial-arm-pan.log; then
             echo "PASS: the kernel never touched a user address directly"
@@ -369,6 +391,7 @@ jobs:
              && grep -q "\[ok\] process address space:" serial-arm-4g.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-4g.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm-4g.log \
+             && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm-4g.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-4g.log; then
             echo "PASS: the direct map was extended over all 4 GiB and the allocator manages it"
           else

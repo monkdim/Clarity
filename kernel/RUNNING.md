@@ -70,6 +70,15 @@ hello from EL0 on aarch64
   [ok] EL0: and when it wrote to its read-only text at 0x400000, the kernel took the CPU back
   [ok] context switch: ABABABa — two threads alternated and handed the CPU back
   [ok] preemption: B ran (7583766) while A (9416843) never yielded — 6 switches in 7 ticks, each thread resuming in its own code
+  init: 74208 bytes of ELF, embedded in the kernel image
+  init: entry 0x40100000, stack 0x7fffffc0, 4 mapped ranges
+  [ok] user .data came from the file
+hello from /bin/clarity-init on aarch64
+  [ok] user .bss zeroed
+  [ok] user .data writable
+  [ok] user fp: 355/113 in a v register
+  ... the same four lines again, from the second run ...
+  [ok] init: a compiled, linked ELF ran at EL0 twice, printed 168 bytes, exited 42 each time, and every page came back
 ```
 
 The spin counts and the tick count vary — it is however many times the 100 Hz
@@ -132,8 +141,16 @@ on, and is stopped by the kernel when it does something it is not allowed to.
 Kernel threads switch, cooperatively and preemptively, carrying their address
 space with them.
 
-The one unprintable line above is the point: `hello from EL0 on aarch64` came
-from a user program, not from the kernel.
+Two of those lines came from user programs rather than from the kernel:
+`hello from EL0 on aarch64`, from a probe assembled into the kernel image, and
+`hello from /bin/clarity-init on aarch64`, from an ELF that a compiler built
+and a linker laid out into three segments.
+
+The second runs twice, in two address spaces, and that is not repetition. The
+second run gets the frames the first one just gave back, so `.bss zeroed` and
+`.data came from the file` hold only if the loader really re-zeroed and
+re-copied them — removing the zeroing passes the first run and fails the
+second.
 
 Try it on a CPU that implements Privileged Access Never — `-cpu max` instead
 of `-cpu cortex-a72` — and it still works, because the kernel never touches a
@@ -144,10 +161,11 @@ both.
 
 What is missing is everything above that. There is no *scheduler* — the
 switching primitive exists and the boot selftest drives it directly, but
-nothing keeps run queues, priorities, or a process table. The one EL0 program
-is assembled into the kernel image rather than loaded from a file: no ELF
-loader, no filesystem, no shell. No text on screen, no keyboard. Those exist
-on the x86 side and are being brought across.
+nothing keeps run queues, priorities, or a process table. Programs are loaded
+from an ELF embedded in the kernel image rather than read from anywhere: no
+filesystem, no shell. `write` goes straight to the serial console because
+there is no VFS to route it through. No text on screen, no keyboard. Those
+exist on the x86 side and are being brought across.
 
 ## x86-64 — the one that runs programs
 
