@@ -44,4 +44,10 @@ SECTIONS {
         *(.note.*)
         *(.comment)
     }
+
+    /* What the ARM64 Image header advertises as image_size: everything a
+     * bootloader must reserve, .bss and the boot stack included. Getting this
+     * short would let the bootloader place something — the device tree, an
+     * initrd — inside memory the kernel is about to zero. */
+    __image_size = __stack_top - 0x40080000;
 }

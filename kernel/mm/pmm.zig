@@ -10,7 +10,6 @@
 //! easy to reason about.
 
 const std = @import("std");
-const multiboot = @import("../boot/multiboot2.zig");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SHIFT: u6 = 12;
@@ -18,36 +17,61 @@ pub const PAGE_SHIFT: u6 = 12;
 const MAX_PAGES = 1 << 24; // up to 64 GiB
 var bitmap: [MAX_PAGES / 8]u8 = undefined;
 
+/// One past the highest page index any region reached — the bound the
+/// allocator scans within. Distinct from `total_pages` because a machine
+/// whose RAM starts high (ARM's starts at 0x4000_0000) has a large gap of
+/// indices below it that exist in the bitmap and are not memory.
+var max_page: usize = 0;
+
+/// Pages of real, usable memory. What the machine actually has.
 var total_pages: usize = 0;
 var free_pages: usize = 0;
 var next_hint: usize = 0;
 
-// Physical end of the loaded kernel image, from the linker script.
-extern const __kernel_phys_end: u8;
+/// Start a fresh map. Everything is reserved until a region says otherwise,
+/// so a page nobody described can never be handed out.
+///
+/// Building the map through these four calls, rather than by handing the
+/// allocator a boot structure, is what makes it architecture-neutral: x86
+/// learns its memory from a multiboot2 map and ARM from a device tree, and
+/// neither format needs to be known here.
+pub fn begin() void {
+    @memset(&bitmap, 0xFF);
+    max_page = 0;
+    total_pages = 0;
+    free_pages = 0;
+    next_hint = 0;
+}
 
-pub fn init(memory_map: []const multiboot.MemoryMapEntry) void {
-    @memset(&bitmap, 0xFF); // every page reserved by default
-    for (memory_map) |entry| {
-        if (entry.region_type != @intFromEnum(multiboot.MemoryRegionType.available)) continue;
-        const start_page = entry.base_addr >> PAGE_SHIFT;
-        const page_count = entry.length >> PAGE_SHIFT;
-        if (start_page >= MAX_PAGES) continue;
-        const end_page = @min(start_page + page_count, MAX_PAGES);
-        var p = start_page;
-        while (p < end_page) : (p += 1) {
+/// Mark a range as usable RAM.
+pub fn add_available(base: u64, len: u64) void {
+    const first = base >> PAGE_SHIFT;
+    if (first >= MAX_PAGES) return;
+    const last = @min((base + len) >> PAGE_SHIFT, MAX_PAGES);
+    var p = first;
+    while (p < last) : (p += 1) {
+        if (is_set(p)) {
             clear_bit(p);
             free_pages += 1;
+            total_pages += 1;
         }
-        total_pages = @max(total_pages, end_page);
     }
-    // Reserve the first MiB (BIOS/legacy) and the whole loaded kernel image
-    // (code, rodata, data, bss, boot page tables, and boot stack) so we
-    // never allocate a page the kernel is already using.
-    const kernel_end: usize = @intFromPtr(&__kernel_phys_end);
-    const kernel_end_page = (kernel_end + PAGE_SIZE - 1) >> PAGE_SHIFT;
-    const reserve_upto = @max(@as(usize, 256), kernel_end_page);
-    var p: usize = 0;
-    while (p < reserve_upto and p < total_pages) : (p += 1) {
+    max_page = @max(max_page, last);
+}
+
+/// Mark a range as in use: the kernel image, a framebuffer, the device tree
+/// itself — anything already occupying memory the map called available.
+///
+/// Rounds outward. A reservation that covered only whole pages inside the
+/// range would leave the page holding its first byte allocatable, which is
+/// the kind of overlap that corrupts something once and never reproduces.
+pub fn reserve(base: u64, len: u64) void {
+    if (len == 0) return;
+    const first = base >> PAGE_SHIFT;
+    if (first >= MAX_PAGES) return;
+    const last = @min((base + len + PAGE_SIZE - 1) >> PAGE_SHIFT, MAX_PAGES);
+    var p = first;
+    while (p < last) : (p += 1) {
         if (!is_set(p)) {
             set_bit(p);
             free_pages -= 1;
@@ -55,11 +79,25 @@ pub fn init(memory_map: []const multiboot.MemoryMapEntry) void {
     }
 }
 
+/// Finish the map and point the allocator at the first free page, so the
+/// first allocation on a machine whose RAM starts high does not scan a
+/// quarter of a million reserved bits to find it.
+pub fn finish() void {
+    var p: usize = 0;
+    while (p < max_page) : (p += 1) {
+        if (!is_set(p)) {
+            next_hint = p;
+            return;
+        }
+    }
+    next_hint = 0;
+}
+
 pub fn alloc_page() ?u64 {
     var i = next_hint;
     var scanned: usize = 0;
-    while (scanned < total_pages) : (scanned += 1) {
-        if (i >= total_pages) i = 0;
+    while (scanned < max_page) : (scanned += 1) {
+        if (i >= max_page) i = 0;
         if (!is_set(i)) {
             set_bit(i);
             free_pages -= 1;
@@ -78,7 +116,7 @@ pub fn alloc_pages(count: usize) ?u64 {
     var run: usize = 0;
     var run_start: usize = 0;
     var i: usize = 0;
-    while (i < total_pages) : (i += 1) {
+    while (i < max_page) : (i += 1) {
         if (!is_set(i)) {
             if (run == 0) run_start = i;
             run += 1;
@@ -97,7 +135,7 @@ pub fn alloc_pages(count: usize) ?u64 {
 
 pub fn free_page(phys_addr: u64) void {
     const page = phys_addr >> PAGE_SHIFT;
-    if (page >= total_pages) return;
+    if (page >= max_page) return;
     if (!is_set(page)) return; // double-free; ignore
     clear_bit(page);
     free_pages += 1;

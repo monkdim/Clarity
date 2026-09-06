@@ -192,6 +192,7 @@ jobs:
           cd kernel
           zig build aarch64
           test -f zig-out/bin/clarity-kernel-aarch64
+          test -f zig-out/bin/clarity-kernel-aarch64.img
 
       - name: Boot the aarch64 kernel under QEMU and assert the marker
         run: |
@@ -200,7 +201,7 @@ jobs:
             -M virt \
             -cpu cortex-a72 \
             -m 512 \
-            -kernel kernel/zig-out/bin/clarity-kernel-aarch64 \
+            -kernel kernel/zig-out/bin/clarity-kernel-aarch64.img \
             -device ramfb \
             -serial stdio \
             -display none \
@@ -213,15 +214,26 @@ jobs:
           # MMU on; the timer one says an interrupt was actually delivered —
           # the vectors had been installed since the ARM kernel first booted
           # and nothing had ever reached them.
+          # The device tree marker says the kernel was handed one and parsed
+          # it. That only happens because the image now carries an ARM64
+          # Image header: given an ELF, QEMU jumps to the entry point and
+          # loads no device tree at all, so x0 arrives empty.
+          #
+          # The pmm marker says a page was allocated, written through, read
+          # back, freed, and that the page came from outside the kernel image
+          # — allocating alone would prove only that a bit was flipped.
+          #
           # The framebuffer marker says the kernel configured ramfb through
           # fw_cfg and read its own pattern back out of the display memory.
           # It does not say the machine is showing it — that is the next step.
-          if grep -q "\[ok\] framebuffer:" serial-arm.log \
+          if grep -q "\[ok\] device tree at" serial-arm.log \
+             && grep -q "\[ok\] pmm:" serial-arm.log \
+             && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
              && grep -q "\[ok\] aarch64 timer: interrupts delivered" serial-arm.log; then
-            echo "PASS: aarch64 reached EL1, MMU on, took a timer interrupt, and drew a screen"
+            echo "PASS: aarch64 reached EL1, read its device tree, allocated a page, and drew a screen"
           else
-            echo "FAIL: aarch64 did not reach EL1, took no timer interrupt, or drew no screen"
+            echo "FAIL: aarch64 boot, device tree, page allocator or screen did not come up"
             exit 1
           fi
 
@@ -232,4 +244,4 @@ jobs:
       # again with a monitor socket, takes a screendump, and checks the exact
       # colours at the exact coordinates main_aarch64.zig draws them.
       - name: Screenshot the display and check the pixels
-        run: python3 kernel/tools/fb_check.py kernel/zig-out/bin/clarity-kernel-aarch64
+        run: python3 kernel/tools/fb_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img

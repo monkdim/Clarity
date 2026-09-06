@@ -170,6 +170,20 @@ pub fn build(b: *std.Build) void {
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/vectors.S"));
     kernel_arm.entry = .{ .symbol_name = "_start" };
 
+    // The bootable artefact is the flat binary, not the ELF.
+    //
+    // A bootloader following the ARM64 Linux boot protocol reads the header
+    // at offset 0 of a raw image; handed an ELF instead, QEMU jumps to the
+    // entry point and loads no device tree, so the kernel has no way to learn
+    // what machine it is on. The ELF is still installed alongside it, because
+    // it carries the symbols a debugger and a disassembler need.
+    const kernel_arm_bin = b.addObjCopy(kernel_arm.getEmittedBin(), .{ .format = .bin });
+    const install_arm_bin = b.addInstallBinFile(
+        kernel_arm_bin.getOutput(),
+        "clarity-kernel-aarch64.img",
+    );
+
     const aarch64_step = b.step("aarch64", "Build the AArch64 kernel");
     aarch64_step.dependOn(&b.addInstallArtifact(kernel_arm, .{}).step);
+    aarch64_step.dependOn(&install_arm_bin.step);
 }
