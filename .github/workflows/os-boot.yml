@@ -288,6 +288,21 @@ jobs:
           # The program's exit status carries its own verdict, so a check it
           # reports as failed fails this gate rather than merely printing.
           #
+          # And then the demo markers, which are what all of the above was
+          # for: a Clarity program, compiled to C by `clarity cc
+          # --freestanding` and linked against kernel/user/libc, running on
+          # this architecture. The C is the same file the x86_64 side
+          # compiles; the library is the same source, with an AArch64 half for
+          # its three architecture-specific pieces — the system call stubs,
+          # the entry point, and setjmp.
+          #
+          # The float line is checked literally, and not because printf is
+          # fragile. Those three doubles come out of strtod, the library's own
+          # arithmetic, a hardware square root and dtoa, and a subtly wrong
+          # one of those still prints a plausible number. Requiring the exact
+          # digits — the same digits the x86_64 gate requires — is what makes
+          # that a check rather than a look.
+          #
           # The heap marker is the one a C library will sit on. brk(0) reports
           # the break, asking for more maps pages that were not there, and the
           # program writes through the new break and reads it back — because
@@ -317,6 +332,9 @@ jobs:
              && grep -q "\[ok\] user fp: 355/113" serial-arm.log \
              && grep -q "\[ok\] user heap: brk grew" serial-arm.log \
              && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm.log \
+             && grep -q "clarity-demo: all checks passed" serial-arm.log \
+             && grep -q "float 3.1415929203539825 1.4142135623730951 6.25" serial-arm.log \
+             && grep -q "\[ok\] demo: a Clarity program ran on aarch64" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
