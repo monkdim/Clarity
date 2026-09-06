@@ -33,8 +33,20 @@ fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
     );
 }
 
+/// Write all of it, however many calls that takes.
+///
+/// write(2) is allowed to accept less than it was offered and say so, and
+/// this kernel's does: it caps a single call at 256 bytes. A caller that
+/// ignores the return value therefore loses everything past the cap — which
+/// is what happened to `help` the first time this shell ran, cut off in the
+/// middle of the sentence explaining why there is no `ls`.
 fn write(s: []const u8) void {
-    _ = syscall3(NR_WRITE, 1, @intFromPtr(s.ptr), s.len);
+    var done: usize = 0;
+    while (done < s.len) {
+        const n = syscall3(NR_WRITE, 1, @intFromPtr(s.ptr) + done, s.len - done);
+        if (n <= 0) return; // the console is gone; there is nowhere to complain
+        done += @intCast(n);
+    }
 }
 
 fn read_line(buf: []u8) i64 {
