@@ -126,13 +126,23 @@
 -- here, but the transpiled binary silently mangles the whole string, so after
 -- editing the prelude, rebuild and run `clarity cc` on a sample to verify.
 
-let C_PRELUDE = """#define _GNU_SOURCE 1
+let C_PRELUDE = """#ifndef CLARITY_FREESTANDING
+#define _GNU_SOURCE 1
+#endif
+/* CLARITY_FREESTANDING is defined by `clarity cc --freestanding`, for targets
+   with no operating system underneath — ClarityOS itself, to begin with. It
+   drops the parts of this runtime that are POSIX rather than C: files,
+   /proc-backed memory access, process control, dynamic loading and sockets.
+   What is left needs a C library of about fifteen functions, which is a
+   thing one can write; what it drops needs an operating system that already
+   exists, which is the thing being built. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <setjmp.h>
 #include <ctype.h>
+#ifndef CLARITY_FREESTANDING
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -145,6 +155,21 @@ let C_PRELUDE = """#define _GNU_SOURCE 1
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#endif
+
+/* Fatal-error reporting. Hosted, it goes to stderr, where a diagnostic
+   belongs. Freestanding, it goes to printf: a target with no operating system
+   has one console, and asking its C library for the whole FILE* machinery —
+   stderr, fprintf — to report an error it is about to die from is a large
+   thing to require for a small gain. */
+static void cl_eprint(const char* prefix, const char* msg){
+#ifdef CLARITY_FREESTANDING
+  printf("%s%s\n", prefix, msg);
+#else
+  fprintf(stderr, "%s%s\n", prefix, msg);
+#endif
+}
+static void cl_die(const char* msg){ cl_eprint("", msg); exit(1); }
 
 /* command-line argv, captured in main for the args() builtin */
 static int cl_argc = 0;
@@ -581,7 +606,7 @@ static Value cl_set_field(Value obj, const char* name, Value val){
   return val;
 }
 static void cl_register(const char* cls, const char* m, ClMethod fn){
-  if(cl_method_count >= 1024){ fprintf(stderr, "clarity: method table overflow (>1024 methods)\n"); exit(1); }
+  if(cl_method_count >= 1024){ cl_die("clarity: method table overflow (>1024 methods)"); }
   cl_method_table[cl_method_count].cls=cls;
   cl_method_table[cl_method_count].m=m;
   cl_method_table[cl_method_count].fn=fn;
@@ -762,16 +787,32 @@ static Value cl_sha256_hex(Value v){
 }
 
 static Value cl_cwd(void){
+#ifdef CLARITY_FREESTANDING
+  /* No working directory without a filesystem. The empty string is what the
+     hosted path also returns when getcwd fails, so callers already handle it. */
+  return cl_str("");
+#else
   char* o = (char*)cl_alloc(4096);
   if(!getcwd(o, 4096)) { o[0]=0; }
   return cl_str(o);
+#endif
 }
 
 /* Seeded once, lazily: a compiled tool that returns the same "random" numbers
    on every run would be a surprising thing to ship. */
 static int cl_rand_ready = 0;
 static double cl_rand_unit(void){
-  if(!cl_rand_ready){ srand((unsigned)time(0) ^ (unsigned)getpid()); cl_rand_ready = 1; }
+  if(!cl_rand_ready){
+#ifdef CLARITY_FREESTANDING
+    /* No clock and no pid to mix in yet. Stated rather than hidden: on a
+       freestanding target the sequence is the same on every run until the
+       host gains a time source to seed from. */
+    srand(1);
+#else
+    srand((unsigned)time(0) ^ (unsigned)getpid());
+#endif
+    cl_rand_ready = 1;
+  }
   return (double)rand() / ((double)RAND_MAX + 1.0);
 }
 static Value cl_random0(void){ return cl_float(cl_rand_unit()); }
@@ -805,7 +846,7 @@ static ClHandler* cl_handlers = 0;
 static void cl_throw(Value v){
   cl_thrown = v;
   if(!cl_handlers){
-    fprintf(stderr, "clarity: uncaught throw: %s\n", cl_display(v));
+    cl_eprint("clarity: uncaught throw: ", cl_display(v));
     exit(1);
   }
   longjmp(cl_handlers->buf, 1);
@@ -993,6 +1034,9 @@ static Value cl_is_space(Value v){ const char* s=v.s; if(!s[0]) return cl_bool(0
 static Value cl_conv_int(Value v){ if(v.t==T_STR) return cl_int(strtol(v.s, 0, 10)); if(v.t==T_FLOAT) return cl_int((long)v.f); if(v.t==T_BOOL) return cl_int(v.i); return cl_int(v.i); }
 static Value cl_conv_float(Value v){ if(v.t==T_STR) return cl_float(strtod(v.s, 0)); return cl_float(cl_num(v)); }
 
+#ifndef CLARITY_FREESTANDING
+/* Excluded by the freestanding profile — file I/O: fopen/fread/fwrite/access. A freestanding target has no
+   filesystem to open. */
 /* ── app stdlib: file I/O ── */
 static Value cl_read_file(Value pv){
   FILE* f=fopen(pv.s, "rb"); if(!f) return cl_null();
@@ -1028,6 +1072,7 @@ static Value cl_write_bytes(Value pv, Value lv){
   if(lv.t==T_LIST){ List* l=(List*)lv.o; for(long j=0;j<l->len;j++){ unsigned char c=(unsigned char)(l->items[j].i & 0xFF); fwrite(&c, 1, 1, f); } }
   fclose(f); return cl_bool(1);
 }
+#endif /* !CLARITY_FREESTANDING */
 /* type(v): the same names the interpreter reports, including the class name
    for an instance — code that branches on type() has to agree across the two
    backends or the same program means different things compiled. */
@@ -1044,6 +1089,9 @@ static Value cl_type_of(Value v){
   return cl_str("null");
 }
 
+#ifndef CLARITY_FREESTANDING
+/* Excluded by the freestanding profile — TCP sockets, and the /proc-backed memory access below them: both are
+   the operating system, not the C language. */
 /* ── TCP sockets ──
    Blocking IPv4 TCP, thin enough to read in one sitting and enough to build an
    HTTP client and server on top of. Every call reports failure as -1 (or an
@@ -1200,10 +1248,14 @@ static Value cl_write_mem(Value pidv, Value addrv, Value lv){
   if(w<0) return cl_int(0);
   return cl_int((long)w);
 }
+#endif /* !CLARITY_FREESTANDING */
 
 /* ── app stdlib: process/env ── */
 static Value cl_env(Value kv, Value dv){ const char* v=getenv(kv.s); if(v) return cl_str(cl_strdup(v)); return dv; }
 static Value cl_args(void){ Value out=cl_list_new(); for(int i=1;i<cl_argc;i++) cl_list_add(out, cl_str(cl_argv[i])); return out; }
+#ifndef CLARITY_FREESTANDING
+/* Excluded by the freestanding profile — process control and the clock: popen/fork/execl/waitpid/nanosleep/
+   clock_gettime. */
 
 /* ── app stdlib: exec / process ── */
 /* exec(cmd): run via the shell, return stdout with one trailing newline
@@ -1235,6 +1287,7 @@ static Value cl_exec_full(Value cmdv){
 }
 static Value cl_sleep(Value sv){ double s=cl_num(sv); struct timespec ts; ts.tv_sec=(time_t)s; ts.tv_nsec=(long)((s-(double)ts.tv_sec)*1e9); nanosleep(&ts, 0); return cl_null(); }
 static Value cl_time(void){ struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return cl_float((double)ts.tv_sec + (double)ts.tv_nsec/1e9); }
+#endif /* !CLARITY_FREESTANDING */
 
 /* ── app stdlib: math ── */
 static Value cl_abs(Value v){ if(v.t==T_FLOAT) return cl_float(fabs(v.f)); return cl_int(v.i<0 ? -v.i : v.i); }
@@ -1350,6 +1403,9 @@ static void j_ser(SB* s, Value v){
 }
 static Value cl_json_string(Value v){ SB s; sb_init(&s); j_ser(&s, v); return cl_str(s.buf); }
 
+#ifndef CLARITY_FREESTANDING
+/* Excluded by the freestanding profile — native FFI: dlopen/dlsym. There is no dynamic loader on a target that
+   has no operating system. */
 /* ── app stdlib: native FFI (dlopen/dlsym) ── */
 /* ffi_open(path): dlopen a shared library so its symbols become resolvable by
    ffi_sym/ffi_call. RTLD_GLOBAL folds them into the global scope that
@@ -1415,6 +1471,7 @@ static Value cl_ffi_call(Value namev, Value sigv, Value argsv){
   if(!strcmp(sig, "ddd"))  return cl_float(((double(*)(double,double))fp)(d0, d1));
   return cl_null();
 }
+#endif /* !CLARITY_FREESTANDING */
 
 static void cl_show(Value v){ char* s=cl_display(v); printf("%s\n", s); }
 """
@@ -1497,6 +1554,31 @@ let _NATIVE_BUILTINS = {
     "tcp_send": 1, "tcp_recv": 1, "tcp_close": 1
 }
 
+-- Builtins the freestanding profile removes. These are the ones whose C
+-- helpers live behind `#ifndef CLARITY_FREESTANDING` in the prelude, so a
+-- program that calls one would reach an undeclared function and fail deep in
+-- the C compiler with a message about the generated file. Refusing here fails
+-- at the Clarity level instead, naming the builtin and the reason.
+--
+-- `env` and `args` are *not* here: getenv and argv are ISO C, and a
+-- freestanding host that has neither can supply a getenv returning NULL and an
+-- argc of zero. `exit` likewise — <stdlib.h>, not POSIX.
+let _FREESTANDING_EXCLUDED = {
+    "read": "file I/O", "write": "file I/O", "append": "file I/O",
+    "exists": "file I/O", "lines": "file I/O",
+    "read_bytes": "file I/O", "write_bytes": "file I/O",
+    "read_mem": "/proc-backed memory access", "write_mem": "/proc-backed memory access",
+    "exec": "process control", "exec_full": "process control",
+    "sleep": "the system clock", "time": "the system clock",
+    "tcp_listen": "sockets", "tcp_port": "sockets", "tcp_accept": "sockets",
+    "tcp_connect": "sockets", "tcp_send": "sockets", "tcp_recv": "sockets",
+    "tcp_close": "sockets",
+    "ffi_open": "dynamic loading", "ffi_buffer": "dynamic loading",
+    "ffi_read": "dynamic loading", "ffi_write": "dynamic loading",
+    "ffi_free": "dynamic loading", "ffi_sym": "dynamic loading",
+    "ffi_call": "dynamic loading"
+}
+
 -- ── Code generator ──────────────────────────────────────
 
 class CCodegen {
@@ -1514,6 +1596,7 @@ class CCodegen {
         this.closure_defs = []  -- emitted closure function bodies (line lists)
         this.volatile_locals = false  -- true while emitting a function with a try
         this.finally_stack = []       -- finally bodies enclosing the statement being emitted
+        this.freestanding = false     -- --freestanding: no OS underneath (see _FREESTANDING_EXCLUDED)
     }
 
     fn _next_closure() {
@@ -1766,6 +1849,11 @@ class CCodegen {
     -- A builtin call → runtime C, or "" if `name`/arity isn't a known builtin.
     fn _builtin_call(name, args) {
         let n = len(args)
+        if this.freestanding and has(_FREESTANDING_EXCLUDED, name) {
+            let why = _FREESTANDING_EXCLUDED[name]
+            push(this.errors, "native compile: {name}() is not available under --freestanding ({why} needs an operating system)")
+            return "cl_null()"
+        }
         if name == "len" and n == 1 { return "cl_int(cl_length(" + args[0] + "))" }
         if name == "push" and n == 2 { return "cl_list_add(" + args[0] + ", " + args[1] + ")" }
         if name == "str" and n == 1 { return "cl_str(cl_to_cstr(" + args[0] + "))" }
@@ -2419,7 +2507,13 @@ class CCodegen {
 
         -- Assemble: prelude, all forward declarations (so any call order and
         -- mutual recursion is free), closure bodies, function bodies, main.
-        mut out = [C_PRELUDE, ""]
+        mut out = []
+        -- Before the prelude, so its #ifndefs see it. A #define rather than a
+        -- -D flag so the emitted .c file is self-describing: whoever picks it
+        -- up can see which profile produced it.
+        if this.freestanding { push(out, "#define CLARITY_FREESTANDING 1") }
+        push(out, C_PRELUDE)
+        push(out, "")
         if len(globals) > 0 {
             push(out, "/* module-level bindings */")
             mut roots = []
@@ -2481,6 +2575,19 @@ class CCodegen {
 -- program uses a construct stage 1 doesn't support yet.
 fn compile_to_c(tree) {
     let cg = CCodegen()
+    let src = cg.compile(tree)
+    if len(cg.errors) > 0 { throw join(cg.errors, "\n") }
+    return src
+}
+
+-- The freestanding profile: the same code generator, with the POSIX half of
+-- the runtime compiled out and the builtins that needed it refused. What is
+-- left is C, not Unix — it is what `clarity cc --freestanding` emits for a
+-- target that has no operating system underneath it yet, ClarityOS being the
+-- one this exists for.
+fn compile_to_c_freestanding(tree) {
+    let cg = CCodegen()
+    cg.freestanding = true
     let src = cg.compile(tree)
     if len(cg.errors) > 0 { throw join(cg.errors, "\n") }
     return src

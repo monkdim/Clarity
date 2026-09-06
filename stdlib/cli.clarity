@@ -19,7 +19,7 @@ from "repl.clarity" import repl_start
 from "app_scaffold.clarity" import scaffold_app
 from "app_store.clarity" import app_store
 from "errors.clarity" import format_error
-from "c_codegen.clarity" import compile_to_c
+from "c_codegen.clarity" import compile_to_c, compile_to_c_freestanding
 from "c_modules.clarity" import resolve_native_imports
 from "path.clarity" import stem
 
@@ -73,6 +73,8 @@ fn _help() {
     show "  desktop               Launch the KyanOS desktop in a window (SDL2)"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  cc <file.clarity>     Compile straight to a native binary via C (-o)"
+    show "                        --freestanding: no OS underneath — emits an object"
+    show "                        and the C library symbols it still needs"
     show "  build                 Build native binary (--all, --target, --install)"
     show "  smoke                 Run smoke tests on the binary"
     show "  gen-runtime           Regenerate native/runtime.js from spec"
@@ -220,13 +222,13 @@ fn _find_cc() {
     return null
 }
 
--- `clarity cc <file.clarity> [-o out]` — compile a Clarity program straight
+-- `clarity cc <file.clarity> [-o out] [--freestanding]` — compile a Clarity program straight
 -- to a native binary through C. No Bun, no bytecode VM: real machine code.
 -- (Stage 1: the scalar core — numbers, strings, booleans, variables,
 -- if/while, and functions. Richer features are still landing.)
 fn cc_file(cli_args) {
     if len(cli_args) < 2 {
-        show red("  Usage: clarity cc <file.clarity> [-o <output>]")
+        show red("  Usage: clarity cc <file.clarity> [-o <output>] [--freestanding]")
         exit(1)
     }
     let path = cli_args[1]
@@ -236,9 +238,11 @@ fn cc_file(cli_args) {
     }
     -- output name: -o <name>, else the source stem
     mut out = stem(path)
+    mut freestanding = false
     mut i = 2
     while i < len(cli_args) {
         if cli_args[i] == "-o" and i + 1 < len(cli_args) { out = cli_args[i + 1]; i += 2 }
+        elif cli_args[i] == "--freestanding" { freestanding = true; i += 1 }
         else { i += 1 }
     }
 
@@ -261,7 +265,7 @@ fn cc_file(cli_args) {
         -- `clarity cc` has to work on a program outside the repo, whose
         -- imports all sit next to it.
         let flat = resolve_native_imports(tree, _dirname(abs), _find_stdlib_dir(), abs)
-        c_src = compile_to_c(flat)
+        c_src = if freestanding { compile_to_c_freestanding(flat) } else { compile_to_c(flat) }
     } catch e {
         show red("\n" + format_error(e, source, path))
         exit(1)
@@ -269,6 +273,16 @@ fn cc_file(cli_args) {
 
     let cfile = out + ".c"
     write(cfile, c_src)
+
+    -- A freestanding build cannot be linked here: the C library it needs is
+    -- the one the target has to supply, and this machine's is the wrong one.
+    -- So it stops at an object file, and prints the symbols that object needs
+    -- — which is the actual specification of the libc the target must have,
+    -- measured rather than guessed.
+    if freestanding {
+        _cc_freestanding(cc, cfile, out, path)
+        return
+    }
     -- FFI (dlsym) needs libdl on Linux; on modern glibc it's a harmless stub,
     -- on macOS dlsym lives in libSystem so no extra flag is needed. Unused FFI
     -- helpers are stripped at -O2, so non-FFI programs don't actually pull it.
@@ -280,6 +294,47 @@ fn cc_file(cli_args) {
         exit(1)
     }
     show green("  compiled") + " {path} → {out}  " + dim("(via {cc}; C at {cfile})")
+}
+
+-- Compile one translation unit for a target with no operating system, and
+-- report what it still needs from a C library.
+fn _cc_freestanding(cc, cfile, out, path) {
+    let obj = out + ".o"
+    -- -U_FORTIFY_SOURCE matters for the symbol list, not the code: a glibc
+    -- host with fortification on rewrites printf into __printf_chk, and the
+    -- target's C library would have no such symbol. Turning it off keeps the
+    -- list below the set of functions the target actually has to provide.
+    let comp = exec_full(cc + " -O2 -w -ffreestanding -U_FORTIFY_SOURCE -c " + _quote(cfile) + " -o " + _quote(obj))
+    if not exists(obj) {
+        show red("  >> C compilation failed:")
+        show comp.stderr
+        exit(1)
+    }
+    show green("  compiled") + " {path} → {obj}  " + dim("(freestanding; C at {cfile})")
+
+    -- `nm -u` lists exactly the undefined symbols. It is not on every machine,
+    -- so its absence is a missing note, not a failed build.
+    mut nm = null
+    for candidate in ["nm", "llvm-nm"] {
+        if len(trim(exec(candidate + " --version 2>/dev/null | head -1"))) > 0 { nm = candidate; break }
+    }
+    if nm == null {
+        show dim("  (install nm to see which C library symbols this object still needs)")
+        return
+    }
+    let listing = exec(nm + " -u " + _quote(obj) + " 2>/dev/null")
+    mut syms = []
+    for line in split(listing, "\n") {
+        mut t = trim(line)
+        -- Mach-O nm prints a leading underscore on every C symbol; ELF does not.
+        if starts(t, "U ") { t = trim(substring(t, 2, len(t))) }
+        if starts(t, "_") and contains(exec("uname"), "Darwin") { t = substring(t, 1, len(t)) }
+        if len(t) > 0 and not contains(syms, t) { push(syms, t) }
+    }
+    if len(syms) == 0 { return }
+    show ""
+    show "  needs " + str(len(syms)) + " symbol(s) from the target's C library:"
+    show "    " + join(sort(syms), " ")
 }
 
 fn check_file(path, type_check) {
