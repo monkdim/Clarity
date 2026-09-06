@@ -182,9 +182,43 @@ fn alloc_fd(inode: *Inode, flags: u32) !i64 {
     return current_table().alloc(inode, flags);
 }
 
+/// Walk `path` from the root, one component at a time, and return the inode
+/// it names — or null if some component does not exist.
+///
+/// This returned null unconditionally, which is why `vfs.open` could never
+/// find anything and `spawn_user` could never load an executable: tmpfs had
+/// working create/lookup/read/write the whole time, with nothing able to
+/// reach them.
+///
+/// Only absolute paths, because there is no per-process working directory
+/// yet. "" and "/" are the root. Empty components — a trailing slash, or a
+/// doubled one — are skipped rather than treated as a lookup of "".
 fn resolve(path: []const u8) !?*Inode {
-    _ = path;
-    return null;
+    const root = root_dentry orelse return error.NoRoot;
+    // Dentry.inode is optional (a negative dentry caches a name that is known
+    // not to exist); the root's is always present once set_root has run.
+    const root_inode = root.inode orelse return error.NoRoot;
+    if (path.len == 0 or std.mem.eql(u8, path, "/")) return root_inode;
+    if (path[0] != '/') return error.NotAbsolute;
+
+    var current: *Inode = root_inode;
+    var it = std.mem.splitScalar(u8, path[1..], '/');
+    while (it.next()) |component| {
+        if (component.len == 0) continue;
+        if (std.mem.eql(u8, component, ".")) continue;
+        // A component can only be walked *through* if it is a directory;
+        // otherwise "/etc/passwd/x" would silently resolve to passwd.
+        if (current.file_type != .directory) return error.NotADirectory;
+        current = (try current.fs.ops.lookup(current.fs, current, component)) orelse return null;
+    }
+    return current;
+}
+
+/// `resolve`, exposed for the boot self-test. Errors rather than returning
+/// null so a caller that expects the path to exist gets a diagnosable failure.
+pub fn resolve_for_test(path: []const u8) !*Inode {
+    const inode = (try resolve(path)) orelse return error.NotFound;
+    return inode;
 }
 
 /// Read the entire file at `path` into a freshly-allocated buffer.
@@ -202,9 +236,19 @@ pub fn read_file_into_heap(path: []const u8, gpa: std.mem.Allocator) ![]u8 {
     return out[0..off];
 }
 
+/// The directory that would contain `path` — everything up to the last
+/// component. Needed by open(O_CREAT), which has to hand the new name to the
+/// parent directory.
 fn resolve_parent(path: []const u8) !*Inode {
-    _ = path;
-    return error.NotFound;
+    var end: usize = path.len;
+    while (end > 0 and path[end - 1] == '/') end -= 1; // ignore a trailing slash
+    var cut: usize = end;
+    while (cut > 0 and path[cut - 1] != '/') cut -= 1;
+    // cut now sits just after the separator; drop it to name the directory,
+    // except at the root where the separator *is* the directory.
+    const dir = if (cut <= 1) "/" else path[0 .. cut - 1];
+    const inode = (try resolve(dir)) orelse return error.NotFound;
+    return inode;
 }
 
 fn basename(path: []const u8) []const u8 {
