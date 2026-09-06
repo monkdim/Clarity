@@ -15,6 +15,8 @@ const std = @import("std");
 const console = @import("arch/aarch64/console.zig");
 const timer = @import("arch/aarch64/timer.zig");
 const mmu = @import("arch/aarch64/mmu.zig");
+const ramfb = @import("arch/aarch64/ramfb.zig");
+const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
 /// is at EL1 with a stack and a zeroed .bss. `dtb_phys` is the device tree
@@ -48,6 +50,10 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
 
     timer_selftest();
 
+    // A screen. Everything this kernel has said so far went out a serial
+    // line; this is the first thing it can show.
+    screen_selftest();
+
     console.println("ClarityOS aarch64: EL1 boot ok");
 
     hang();
@@ -55,6 +61,68 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
 
 /// The vector table lives in vectors.S, 2 KiB-aligned as VBAR_EL1 requires.
 extern const aarch64_vectors: u8;
+
+const SCREEN_W: u32 = 1024;
+const SCREEN_H: u32 = 768;
+
+/// Where the four colour patches sit. Named here so the pattern that draws
+/// them and the check that reads them back cannot drift apart, and so the CI
+/// step that inspects a screenshot has coordinates to name.
+const PATCH: u32 = 120;
+const PATCH_Y: u32 = 240;
+const PATCH_X = [_]u32{ 112, 288, 464, 640 };
+const PATCH_COLOUR = [_]u32{ fb.RED, fb.GREEN, fb.BLUE, fb.WHITE };
+
+/// Bring up the display and prove something is really on it.
+///
+/// Reading the pixels back is the part that matters. Writing to memory proves
+/// only that the memory is writable — the question is whether that memory is
+/// the screen, and whether the machine agreed to scan it out. The read-back
+/// answers the first half; the screenshot CI takes answers the second, and
+/// neither is redundant.
+fn screen_selftest() void {
+    const surf_info = ramfb.init(SCREEN_W, SCREEN_H) orelse {
+        // Not a failure of this code: it means QEMU was started without
+        // `-device ramfb`, and the kernel carries on headless as before.
+        console.println("  [--] no ramfb on this machine; running headless");
+        return;
+    };
+
+    const s = fb.Surface{
+        .base = surf_info.base,
+        .width = surf_info.width,
+        .height = surf_info.height,
+        .stride = surf_info.stride,
+    };
+
+    s.clear(fb.SLATE);
+    s.frame(0, 0, SCREEN_W, SCREEN_H, 8, fb.SIGNAL);
+    for (PATCH_X, PATCH_COLOUR) |x, colour| {
+        s.fill(x, PATCH_Y, PATCH, PATCH, colour);
+    }
+
+    // Read back the centre of each patch, plus one pixel of the border and
+    // one of the background, so a surface that came up entirely one colour
+    // fails rather than passes.
+    var ok = true;
+    for (PATCH_X, PATCH_COLOUR) |x, colour| {
+        if (s.get(x + PATCH / 2, PATCH_Y + PATCH / 2) != colour) ok = false;
+    }
+    if (s.get(4, 4) != fb.SIGNAL) ok = false;
+    if (s.get(SCREEN_W / 2, SCREEN_H - 64) != fb.SLATE) ok = false;
+
+    if (ok) {
+        console.print("  [ok] framebuffer: ");
+        console.print_dec(SCREEN_W);
+        console.print("x");
+        console.print_dec(SCREEN_H);
+        console.print(" at ");
+        console.print_hex(surf_info.base);
+        console.println(", pattern reads back correct");
+    } else {
+        console.println("  [FAIL] framebuffer: wrote a pattern, read back something else");
+    }
+}
 
 /// Prove an interrupt actually arrives.
 ///
