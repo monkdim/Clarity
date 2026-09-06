@@ -32,7 +32,7 @@ const DATA_VA: u64 = 0x0000_0000_4000_1000;
 const STACK_VA: u64 = 0x0000_0000_4000_2000;
 const PAGE_SIZE: u64 = 4096;
 
-const MESSAGE = "hello from ring 3, pid 0";
+const MESSAGE = "hello from ring 3 via write(2)";
 
 /// The program, assembled from:
 ///

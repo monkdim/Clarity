@@ -92,6 +92,24 @@ pub fn map_page(space: *AddressSpace, virt: u64, phys: u64, flags: u64) !void {
             // the same permissions, then carry on down.
             try split_huge_page(entry, level);
         }
+        // Permission at a leaf is the *intersection* down the whole path: the
+        // CPU denies a user access if U/S is clear at any level, and refuses
+        // an instruction fetch if NX is set at any level. Intermediate tables
+        // this function created are already permissive, but ones it inherited
+        // are not — the boot stub builds PML4[0] and PDPT[0] with present +
+        // writable and no U/S, so a user page mapped anywhere beneath them
+        // faults on first touch with error_code P=1,U=1 no matter what the
+        // leaf says. Widen the path to match what the leaf is asking for; the
+        // leaf entries still decide what is actually reachable, which is why
+        // the supervisor-only identity map above stays supervisor-only.
+        if ((flags & PAGE_USER) != 0 and (entry.* & PAGE_USER) == 0) {
+            entry.* |= PAGE_USER;
+            flush_tlb_entry(virt);
+        }
+        if ((flags & PAGE_NX) == 0 and (entry.* & PAGE_NX) != 0) {
+            entry.* &= ~PAGE_NX;
+            flush_tlb_entry(virt);
+        }
         table_phys = entry.* & ADDR_MASK;
     }
     const leaf = phys_to_table(table_phys);
