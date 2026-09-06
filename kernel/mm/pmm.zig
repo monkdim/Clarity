@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const multiboot = @import("../boot/multiboot2.zig");
+const console = @import("../arch/x86_64/console.zig");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SHIFT: u6 = 12;
@@ -23,7 +24,9 @@ var free_pages: usize = 0;
 var next_hint: usize = 0;
 
 pub fn init(memory_map: []const multiboot.MemoryMapEntry) void {
+    console.println("    pmm: memset bitmap");
     @memset(&bitmap, 0xFF); // every page reserved by default
+    console.println("    pmm: scanning memory map");
     for (memory_map) |entry| {
         if (entry.region_type != @intFromEnum(multiboot.MemoryRegionType.available)) continue;
         const start_page = entry.base_addr >> PAGE_SHIFT;
@@ -37,6 +40,7 @@ pub fn init(memory_map: []const multiboot.MemoryMapEntry) void {
         }
         total_pages = @max(total_pages, end_page);
     }
+    console.println("    pmm: reserving low memory");
     // First MiB is always reserved; the kernel image is reserved by
     // the linker script keep-out region.
     var p: usize = 0;
