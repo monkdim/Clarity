@@ -72,11 +72,16 @@ typedef struct { const char* cls; Value fields; } Obj;
 
 /* closures: a function pointer over (arg-array, capture-array) plus the
    captured values (snapshotted by value at creation) */
-typedef Value (*ClFn)(Value*, Value*);
+/* Calling conventions carry the argument count.
+   Without it a callee cannot tell `f(1)` from `f(1, 2)`, which is what a rest
+   parameter needs to know — and what a fixed parameter needs in order to read
+   as null rather than off the end of the array when the caller supplied fewer
+   arguments than the function declares. */
+typedef Value (*ClFn)(Value*, Value*, long);
 typedef struct { ClFn fn; Value* cap; int ncap; } Closure;
 
 /* uniform method calling convention: (self, arg-array) -> Value */
-typedef Value (*ClMethod)(Value, Value*);
+typedef Value (*ClMethod)(Value, Value*, long);
 typedef struct { const char* cls; const char* m; ClMethod fn; } ClMethodEntry;
 static ClMethodEntry cl_method_table[1024];
 static int cl_method_count = 0;
@@ -502,17 +507,17 @@ static ClMethod cl_find_method(const char* cls, const char* m){
   return 0;
 }
 /* obj.method(args): resolve on the instance's class, call with the arg array */
-static Value cl_dispatch(Value self, const char* m, Value* a){
+static Value cl_dispatch(Value self, const char* m, Value* a, long n){
   const char* cls = (self.t==T_OBJECT) ? ((Obj*)self.o)->cls : "";
   ClMethod fn = cl_find_method(cls, m);
-  if(fn) return fn(self, a);
+  if(fn) return fn(self, a, n);
   return cl_null();
 }
 /* instances print via a to_string method if defined, else <Cls instance> */
 static char* cl_obj_display(Value v){
   Obj* o=(Obj*)v.o;
   ClMethod ts = cl_find_method(o->cls, "to_string");
-  if(ts){ Value r = ts(v, 0); return cl_display(r); }
+  if(ts){ Value r = ts(v, 0, 0); return cl_display(r); }
   char* out=(char*)cl_alloc(strlen(o->cls)+16);
   sprintf(out, "<%s instance>", o->cls);
   return out;
@@ -526,9 +531,23 @@ static Value cl_closure_new(ClFn fn, Value* cap, int ncap){
   for(int i=0;i<ncap;i++) c->cap[i]=cap[i];
   Value v=cl_null(); v.t=T_CLOSURE; v.o=c; return v;
 }
-static Value cl_call(Value f, Value* args){
-  if(f.t==T_CLOSURE){ Closure* c=(Closure*)f.o; return c->fn(args, c->cap); }
+static Value cl_call(Value f, Value* args, long n){
+  if(f.t==T_CLOSURE){ Closure* c=(Closure*)f.o; return c->fn(args, c->cap, n); }
   return cl_null();
+}
+
+/* The i-th argument, or null past the end.
+   Clarity lets a call supply fewer arguments than the function declares, and
+   the missing ones are null. Reading a[i] directly was fine only while every
+   call site happened to supply them all: a method with parameters called with
+   none was handed a null array and dereferenced it. */
+static Value cl_arg(Value* a, long n, long i){ return (i < n) ? a[i] : cl_null(); }
+
+/* The arguments from `i` onwards, as a list — a rest parameter's value. */
+static Value cl_rest(Value* a, long n, long i){
+  Value out = cl_list_new();
+  for(long j=i;j<n;j++) cl_list_add(out, a[j]);
+  return out;
 }
 
 /* higher-order builtins that drive a closure over a collection.
@@ -537,17 +556,17 @@ static Value cl_call(Value f, Value* args){
    while this prelude is still a source literal. */
 static Value cl_hof_map(Value lst, Value fn){
   Value out=cl_list_new(); Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_list_add(out, cl_call(fn, a)); }
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_list_add(out, cl_call(fn, a, 1)); }
   return out;
 }
 static Value cl_hof_filter(Value lst, Value fn){
   Value out=cl_list_new(); Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value e=cl_index(it, cl_int(i)); Value a[1]={ e }; if(cl_truthy(cl_call(fn, a))) cl_list_add(out, e); }
+  for(long i=0;i<n;i++){ Value e=cl_index(it, cl_int(i)); Value a[1]={ e }; if(cl_truthy(cl_call(fn, a, 1))) cl_list_add(out, e); }
   return out;
 }
 static Value cl_hof_reduce(Value lst, Value fn, Value init){
   Value acc=init; Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value a[2]={ acc, cl_index(it, cl_int(i)) }; acc=cl_call(fn, a); }
+  for(long i=0;i<n;i++){ Value a[2]={ acc, cl_index(it, cl_int(i)) }; acc=cl_call(fn, a, 2); }
   return acc;
 }
 /* ── encoding, hashing, environment ── */
@@ -737,22 +756,22 @@ static void cl_throw(Value v){
 
 static Value cl_hof_each(Value lst, Value fn){
   Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_call(fn, a); }
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; cl_call(fn, a, 1); }
   return cl_null();
 }
 static Value cl_hof_find(Value lst, Value fn){
   Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value e=cl_index(it, cl_int(i)); Value a[1]={ e }; if(cl_truthy(cl_call(fn, a))) return e; }
+  for(long i=0;i<n;i++){ Value e=cl_index(it, cl_int(i)); Value a[1]={ e }; if(cl_truthy(cl_call(fn, a, 1))) return e; }
   return cl_null();   /* JS find returns undefined; the interpreter maps that to null */
 }
 static Value cl_hof_every(Value lst, Value fn){
   Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(!cl_truthy(cl_call(fn, a))) return cl_bool(0); }
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(!cl_truthy(cl_call(fn, a, 1))) return cl_bool(0); }
   return cl_bool(1);
 }
 static Value cl_hof_some(Value lst, Value fn){
   Value it=cl_iter(lst); long n=cl_length(it);
-  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(cl_truthy(cl_call(fn, a))) return cl_bool(1); }
+  for(long i=0;i<n;i++){ Value a[1]={ cl_index(it, cl_int(i)) }; if(cl_truthy(cl_call(fn, a, 1))) return cl_bool(1); }
   return cl_bool(0);
 }
 
@@ -1370,20 +1389,22 @@ Value v_big;
 static Value* cl_global_roots[] = {&v_t, &v_m, &v_parts, &v_squares, &v_big};
 
 Value f_risky(Value v_x);
-Value f_Tally_init(Value v_this, Value* __a);
-Value f_Tally_add(Value v_this, Value* __a);
-Value cl_ctor_Tally(Value* __a);
-Value __closure_0(Value* __a, Value* __cap);
-Value __closure_1(Value* __a, Value* __cap);
+Value f_Tally_init(Value v_this, Value* __a, long __n);
+Value f_Tally_add(Value v_this, Value* __a, long __n);
+Value cl_ctor_Tally(Value* __a, long __n);
+Value __closure_0(Value* __a, Value* __cap, long __n);
+Value __closure_1(Value* __a, Value* __cap, long __n);
 
-Value __closure_0(Value* __a, Value* __cap) {
-  Value v_v = __a[0];
+Value __closure_0(Value* __a, Value* __cap, long __n) {
+  (void)__a; (void)__n;
+  Value v_v = cl_arg(__a, __n, 0);
   return cl_eq(cl_mod(v_v, cl_int(2)), cl_int(0));
   return cl_null();
 }
 
-Value __closure_1(Value* __a, Value* __cap) {
-  Value v_v = __a[0];
+Value __closure_1(Value* __a, Value* __cap, long __n) {
+  (void)__a; (void)__n;
+  Value v_v = cl_arg(__a, __n, 0);
   return cl_mul(v_v, v_v);
   return cl_null();
 }
@@ -1397,19 +1418,21 @@ Value f_risky(Value v_x) {
 }
 
 
-Value f_Tally_init(Value v_this, Value* __a) {
+Value f_Tally_init(Value v_this, Value* __a, long __n) {
+  (void)__a; (void)__n;
   cl_set_field(v_this, "n", cl_int(0));
   return cl_null();
 }
-Value f_Tally_add(Value v_this, Value* __a) {
-  Value v_k = __a[0];
+Value f_Tally_add(Value v_this, Value* __a, long __n) {
+  (void)__a; (void)__n;
+  Value v_k = cl_arg(__a, __n, 0);
   cl_set_field(v_this, "n", cl_add(cl_get_field(v_this, "n"), v_k));
   return cl_get_field(v_this, "n");
   return cl_null();
 }
-Value cl_ctor_Tally(Value* __a) {
+Value cl_ctor_Tally(Value* __a, long __n) {
   Value self = cl_object_new("Tally");
-  f_Tally_init(self, __a);
+  f_Tally_init(self, __a, __n);
   return self;
 }
 
@@ -1420,11 +1443,11 @@ int main(int argc, char** argv) {
   cl_globals = cl_global_roots; cl_globals_n = 5;
   cl_register("Tally", "init", &f_Tally_init);
   cl_register("Tally", "add", &f_Tally_add);
-  v_t = cl_ctor_Tally(0);
+  v_t = cl_ctor_Tally(0, 0);
   Value __it1 = cl_iter(cl_range2(cl_int(1), cl_int(11)));
   for(long __i1=0; __i1 < cl_length(__it1); __i1++) {
     Value v_i = cl_index(__it1, cl_int(__i1));
-    (void)(cl_dispatch(v_t, "add", (Value[]){v_i}));
+    (void)(cl_dispatch(v_t, "add", (Value[]){v_i}, 1));
   }
   cl_show(cl_add(cl_str("tally "), cl_str(cl_to_cstr(cl_get_field(v_t, "n")))));
   { ClHandler __h0; __h0.prev = cl_handlers; cl_handlers = &__h0;
