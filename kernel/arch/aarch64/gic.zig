@@ -89,9 +89,16 @@ fn configure(intid: u32) void {
 
     // Routing. SGIs and PPIs (0..31) are per-core and ignore this register —
     // writes to those bytes are architecturally reserved, so they are not
-    // made. An SPI defaults to targeting nobody, and an SPI that targets
-    // nobody is configured perfectly and never delivered; this is the line
-    // that would be missing.
+    // made. An SPI is routed by the distributor, and on a GIC with more than
+    // one CPU interface it reaches nobody until this says which.
+    //
+    // Nothing here proves that. It was tested by removing this write and
+    // running the keyboard gate, which passed: QEMU's `virt` with one vCPU
+    // builds a uniprocessor GICv2, where GICD_ITARGETSR is RAZ/WI and the
+    // only CPU interface gets the interrupt either way. So this is written
+    // because the architecture requires it of a multi-core GIC and this
+    // kernel will meet one, not because anything on this machine noticed —
+    // and it is said plainly rather than left to look verified.
     if (intid >= 32) {
         const target: *volatile u8 = @ptrFromInt(GICD_ITARGETSR + id);
         target.* = 0x01; // CPU interface 0, the only core that is running
