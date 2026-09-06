@@ -119,10 +119,31 @@ lands with codegen tests that diff native output against the interpreter.
   compile-time contract with no runtime effect on a *valid* program. The divergence that leaves,
   stated rather than hidden: a program that violates an interface is rejected by the interpreter
   and accepted by `clarity cc`.
-- **The rest of the language (next on the trunk).** With the above landed, the three examples that
-  still do not compile stop on `TryCatch`/`ThrowStatement`, `EnumStatement`, and `YieldExpression`.
-  Exceptions and enums are the tractable pair; generators need real coroutines in C and are their
-  own piece of work. Also still missing: `cwd`, `encode64`, `decode64`, `hash` (sha256), `random`.
+- **Exceptions (done).** `try`/`catch`/`finally` and `throw`, on setjmp/longjmp: a stack of
+  handlers and one slot for the value in flight, which is a GC root because during unwinding it is
+  often the only reference to it. This was the blocker for compiling the compiler: every file in
+  the chain uses try/catch, `c_codegen.clarity` itself twice, and 62 of the 218 stdlib modules do.
+  The subtlety is that C leaves a non-volatile local of the function containing the setjmp
+  indeterminate if the try modifies it, so functions containing a try get volatile locals —
+  without that, a variable written in the try and read after the catch is correct at -O0 and wrong
+  at -O2. `return` out of a try runs the finallys it leaves; `break`/`continue` across one are
+  refused rather than silently skipping it. Known and matched rather than fixed: when a `catch`
+  returns, neither the interpreter nor the backend runs the `finally` — an interpreter bug the
+  backend now reproduces, to be changed in both at once.
+- **The last builtins (done).** `cwd`, `encode64`, `decode64`, `hash` (SHA-256, asserted against
+  the published FIPS 180-4 vectors), `random`.
+- **Module-scoped names (next on the trunk).** A native build is one C translation unit, so two
+  modules that define the same top-level name collide and the build stops — correctly and loudly,
+  but it stops. Measured on the compiler's own import graph: **66 modules, 21 colliding names**,
+  with `_quote` defined in seven of them. They are almost all module-private helpers, which is
+  exactly what namespacing is for. This is what `clarity cc stdlib/cli.clarity` — compiling the
+  Clarity compiler natively — currently stops on, and it is necessary but not sufficient for that.
+  The fix is to mangle colliding top-level names per module in `c_modules.clarity`, rewriting
+  references with a scope-aware walk so a local shadowing one is left alone. Both failure modes
+  (a missed rename, a wrongly renamed local) are an undefined identifier in the generated C rather
+  than silent misbehaviour, which is what makes it tractable.
+- **Generators.** `YieldExpression` is the one construct in `examples/` still unsupported. It
+  needs real coroutines in C and is its own piece of work.
 - **Networking.** TLS, then keep-alive and chunked encoding, so the HTTP
   client can talk to real services rather than only to plaintext ones.
 - **Stage 12+ — services stdlib.** Real crypto (not the toy cipher), a real embedded key/value or
