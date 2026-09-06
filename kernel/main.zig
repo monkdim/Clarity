@@ -31,10 +31,11 @@ pub const BootInfo = struct {
     cmdline: []const u8,
 };
 
-/// Entry point invoked by the boot stub. The boot stub has already
-/// switched to long mode, set up an identity-mapped page table, and
-/// loaded a flat GDT. It hands us a parsed BootInfo.
-pub export fn kernel_main(boot_info: *const BootInfo) callconv(.C) noreturn {
+/// Entry point invoked by the boot stub. The stub switched to long mode,
+/// mapped the identity/HHDM/kernel windows, loaded a flat GDT, and passed
+/// the raw multiboot2 info blob pointer (physical, identity-mapped) in the
+/// first C argument register.
+pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     console.init();
     console.println("ClarityOS micro-kernel starting...");
 
@@ -43,11 +44,27 @@ pub export fn kernel_main(boot_info: *const BootInfo) callconv(.C) noreturn {
     idt.init();
     console.println("  [ok] GDT + IDT");
 
+    // Parse the multiboot2 info blob into a BootInfo. Allocator-free, so
+    // the memory map aliases the firmware-supplied table — it must be
+    // consumed by pmm before we repurpose low memory.
+    const parsed = multiboot.ParsedBootInfo.parse(@ptrFromInt(mb_info_phys), null) catch {
+        console.println("PANIC: multiboot2 info parse failed");
+        hang();
+    };
+    const boot_info = BootInfo{
+        .memory_map = parsed.memory_map,
+        .framebuffer = parsed.framebuffer,
+        .rsdp = parsed.rsdp_v2 orelse parsed.rsdp_v1,
+        .cmdline = parsed.cmdline,
+    };
+
     // 2. Memory: physical page allocator over the boot memory map,
     //    then a clean page-table tree owned by the kernel, then a
     //    slab allocator for kernel objects.
     pmm.init(boot_info.memory_map);
+    console.println("  .. pmm ok");
     vmm.init();
+    console.println("  .. vmm ok");
     heap.init();
     console.println("  [ok] memory: pmm + vmm + heap");
 
@@ -70,7 +87,7 @@ pub export fn kernel_main(boot_info: *const BootInfo) callconv(.C) noreturn {
     console.println("  [ok] vfs + rootfs");
 
     // 6. Drivers: console, framebuffer, PS/2 keyboard + mouse, storage.
-    drivers.init(boot_info) catch |err| {
+    drivers.init(&boot_info) catch |err| {
         console.print("PANIC: driver init failed: ");
         console.println(@errorName(err));
         hang();

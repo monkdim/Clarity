@@ -322,6 +322,24 @@ let vm_no_net = qemu_runner({"iso": "x.iso", "network": "none"})
 let argv_no_net = vm_no_net.cmd()
 assert(contains(argv_no_net, "-nic"), "network=none uses -nic")
 
+-- ── Boot-test (CI smoke test) plumbing ─────────────
+-- The CI gate runs headlessly with serial on stdio, a marker to grep for,
+-- and a timeout; the runner must carry all three so os_cmd_run can gate.
+let vm_bt = qemu_runner({
+    "iso": "claritos.iso",
+    "headless": true,
+    "serial": "stdio",
+    "boot_test_marker": "ClarityOS ready.",
+    "timeout_seconds": 180
+})
+assert_eq(vm_bt.boot_test_marker, "ClarityOS ready.", "runner carries the boot-test marker")
+assert_eq(vm_bt.timeout_seconds, 180, "runner carries the boot-test timeout")
+assert_eq(len(vm_bt.validate()), 0, "a boot-test config validates")
+let argv_bt = vm_bt.cmd()
+assert(contains(argv_bt, "-display") and contains(argv_bt, "none"), "boot test runs with no display")
+assert(contains(argv_bt, "-serial") and contains(argv_bt, "stdio"), "boot test captures serial on stdio")
+assert(contains(argv_bt, "-no-reboot"), "boot test does not reboot on a failed marker")
+
 -- ── Hardware DB ────────────────────────────────────
 
 show "-- Phase 67: hardware DB --"

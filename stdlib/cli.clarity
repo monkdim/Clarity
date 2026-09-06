@@ -697,7 +697,8 @@ fn _print_os_usage() {
     show "  run                Boot the ISO under QEMU (rebuilds if missing)"
     show "                       --headless         no graphical window"
     show "                       --no-rebuild       fail if ISO missing instead of rebuilding"
-    show "                       --boot-test <s>    expect <s> on serial within timeout"
+    show "                       --boot-test <s>    expect <s> on serial, else exit 1"
+    show "                       --timeout <n>      boot-test timeout in seconds (default 60)"
     show "  install            Write the ISO to a USB stick (not yet implemented — see ROADMAP_OS.md)"
     show "  help               Show this message"
     show ""
@@ -746,6 +747,18 @@ fn os_cmd_build(cli_args) {
     show bold("  Building ClarityOS")
     show ""
     _zig_build(_OS_KERNEL_DIR, "kernel")
+
+    -- The freestanding runtime embeds the transpiled JS entry bundle via
+    -- @embedFile, which can only reach files inside its own module tree.
+    -- Stage the dist bundle into runtime/freestanding/ before building.
+    let _bundle_src = "native/dist/clarity-entry.js"
+    let _bundle_dst = _OS_RUNTIME_DIR + "/clarity-entry.js"
+    if exists(_bundle_src) {
+        exec_full("cp " + _quote(_bundle_src) + " " + _quote(_bundle_dst))
+    } else {
+        show yellow("  warning: " + _bundle_src + " missing — run `clarity transpile --bundle` first")
+    }
+
     _zig_build(_OS_RUNTIME_DIR, "runtime")
 
     if not exists(_OS_KERNEL_BIN) {
@@ -788,8 +801,29 @@ fn os_cmd_run(cli_args) {
     mut opts = {"iso": _OS_ISO_PATH, "headless": headless, "serial": "stdio"}
     if boot_test != null {
         opts["boot_test_marker"] = boot_test
+        let tv = _arg_value(cli_args, "--timeout")
+        if tv != null { opts["timeout_seconds"] = int(tv) }
     }
     let r = qemu(opts)
+
+    -- Boot-test mode (CI smoke test): run headlessly, capture the serial
+    -- log, and gate on the marker line. Exit non-zero when it never
+    -- appears so a pipeline actually fails on a broken boot.
+    if boot_test != null {
+        show ""
+        show bold("  Boot test: ") + "expecting " + cyan(boot_test) + " on serial ..."
+        show ""
+        let res = r.run()
+        show res["stdout"]
+        show ""
+        if res["saw_marker"] {
+            show "  " + green("PASS ") + "saw marker: " + boot_test
+        } else {
+            show "  " + red("FAIL ") + "marker never appeared within the timeout: " + boot_test
+            exit(1)
+        }
+        return null
+    }
 
     show ""
     show bold("  Booting ClarityOS") + dim(" — Ctrl+A then X to quit")

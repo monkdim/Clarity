@@ -32,3 +32,4 @@ web/_atlas_*.cjs
 # Zig build artifacts (kernel + freestanding runtime)
 .zig-cache/
 zig-out/
+runtime/freestanding/clarity-entry.js

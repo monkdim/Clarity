@@ -1,0 +1,90 @@
+name: OS boot smoke test
+
+# Builds the ClarityOS kernel and boots it headlessly under QEMU, asserting
+# the kernel reaches its "ClarityOS ready." serial marker.
+#
+# Scope is deliberately the KERNEL, not the whole userspace: the kernel
+# prints the marker before it spawns the (still-in-progress freestanding)
+# runtime, so a minimal GRUB rescue ISO carrying just the kernel is the
+# right, self-contained way to verify boot. GitHub runners have no
+# /dev/kvm, so QEMU runs under TCG — hence the generous timeout.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  os-boot:
+    runs-on: ubuntu-latest
+    name: OS boot (linux-x64, TCG)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.13.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install QEMU + GRUB rescue tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 grub-pc-bin grub-common xorriso mtools
+          qemu-system-x86_64 --version | head -1
+          zig version
+
+      - name: Cache kernel Zig build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel/zig-out
+            kernel/.zig-cache
+          key: os-kernel-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld') }}
+          restore-keys: |
+            os-kernel-${{ runner.os }}-
+
+      - name: Build the kernel
+        run: |
+          cd kernel
+          zig build
+          test -f zig-out/bin/clarity-kernel
+
+      - name: Assemble a minimal GRUB rescue ISO (kernel only)
+        run: |
+          mkdir -p isodir/boot/grub
+          cp kernel/zig-out/bin/clarity-kernel isodir/boot/clarity-kernel
+          cat > isodir/boot/grub/grub.cfg <<'CFG'
+          set timeout=0
+          set default=0
+          menuentry "ClarityOS" {
+              multiboot2 /boot/clarity-kernel
+              boot
+          }
+          CFG
+          grub-mkrescue -o clarity-kernel.iso isodir
+          test -f clarity-kernel.iso
+
+      - name: Boot the kernel under QEMU and assert the ready marker
+        run: |
+          echo "Booting ClarityOS kernel (TCG); expecting 'ClarityOS ready.' on serial..."
+          # -no-reboot: halt instead of looping if the kernel faults after the
+          # marker (it will try to spawn a runtime that isn't in this ISO).
+          timeout 180 qemu-system-x86_64 \
+            -cdrom clarity-kernel.iso \
+            -boot d \
+            -m 512 \
+            -serial stdio \
+            -display none \
+            -no-reboot \
+            > serial.log 2>&1 || true
+          echo "----- serial output -----"
+          cat serial.log
+          echo "-------------------------"
+          if grep -q "ClarityOS ready." serial.log; then
+            echo "PASS: kernel reached the ready marker"
+          else
+            echo "FAIL: 'ClarityOS ready.' never appeared on serial"
+            exit 1
+          fi
