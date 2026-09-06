@@ -15,7 +15,6 @@ const multiboot = @import("multiboot2.zig");
 const main = @import("../main.zig");
 
 pub fn efi_main(handle: uefi.Handle, system_table: *uefi.tables.SystemTable) uefi.Status {
-    _ = handle;
     const con_out = system_table.con_out.?;
     _ = con_out.outputString(toUcs2("ClarityOS UEFI loader\r\n"));
 

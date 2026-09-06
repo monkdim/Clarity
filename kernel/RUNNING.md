@@ -10,7 +10,14 @@ Needs Zig 0.13. From `kernel/`:
 ```sh
 zig build            # x86-64  -> zig-out/bin/clarity-kernel
 zig build aarch64    # aarch64 -> zig-out/bin/clarity-kernel-aarch64.img
+zig build check      # compile the modules neither kernel imports
 ```
+
+That third one exists because Zig never parses a file nothing imports, so
+the first two say nothing whatever about `drivers/tty.zig`, `fs/devfs.zig`,
+`fs/procfs.zig` or `boot/uefi.zig` — deliberate nonsense in any of them
+builds clean. `check` compiles them through `checkonly.zig`. It is not a
+claim that they work; nothing in them has ever run.
 
 To just see one boot, without reading the rest of this file:
 

@@ -115,19 +115,25 @@ claim with no marker behind it is in "What does not run yet".
 
 ## What does not run yet
 
-Written, and **not even compiled** — Zig never parses a file nothing
-imports, so these are not checked by any build and could contain anything:
+Compiled by `zig build check`, and nothing has ever executed a line of it:
 
 - `fs/devfs.zig`, `fs/procfs.zig`, `drivers/tty.zig`, `boot/uefi.zig`
 
-That is measured rather than assumed: appending a line of deliberate nonsense
-to each of them produces zero errors from `zig build` and `zig build aarch64`
-alike. This section used to claim they compiled; they do not, and the
-difference matters, because "compiles but never runs" is a much smaller
-problem than "has never been looked at by a compiler". `drivers/tty.zig` in
-particular sketches a line discipline, and the working one is
-`drivers/line.zig` — written fresh rather than resurrected, and confirmed to
-be in the build by the same nonsense test.
+These used to be compiled by *nothing*. Zig never parses a file nothing
+imports, so a module outside every build is not "written and compiling" — it
+is written and unread. That was measured, not supposed: a line of deliberate
+nonsense appended to any of the four produced zero errors from `zig build`
+and `zig build aarch64` alike. `checkonly.zig` imports them and
+`zig build check` compiles it, which is on the boot gate; the same nonsense
+test now fails that step for all four while both ordinary builds stay silent.
+
+Its first run found a real one — `boot/uefi.zig` discarded a parameter with
+`_ = handle;` and then used `handle` twenty-eight lines later.
+
+The check says they are valid Zig against the code they refer to. It says
+nothing about whether they work, and they do not: `drivers/tty.zig` sketches
+a line discipline, and the working one is `drivers/line.zig`, written fresh
+rather than resurrected.
 
 Compiled, but only on x86_64, and never executed past detection:
 
@@ -233,6 +239,7 @@ kernel/
 │   ├── font8x8.txt         the console font, as 95 glyphs of ASCII art
 │   ├── make_font.py        turns that into font8x8.zig, and into a picture
 │   └── run_x86.sh          builds the GRUB ISO `zig build run` boots
+├── checkonly.zig           imports the modules no kernel does, so they compile
 ├── main.zig                x86 entry
 ├── main_aarch64.zig        ARM entry
 └── RUNNING.md              how to build and boot both
