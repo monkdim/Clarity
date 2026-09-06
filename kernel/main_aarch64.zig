@@ -113,10 +113,16 @@ const USER_TEXT: u64 = 0x0040_0000;
 const USER_DATA: u64 = 0x1000_0000;
 const USER_STACK_TOP: u64 = 0x2000_0000;
 
-/// The value the kernel leaves in the process's data page, and what it should
-/// come back as after the process has read it, asked the kernel to increment
-/// it, and written it back.
+/// The value the kernel leaves in the process's data page. The program reads
+/// it, adds one, writes it back, and exits with it — so one number has to
+/// survive a read from the process's own memory, a preemption, a write, and
+/// the exit status, and the kernel checks it at both ends.
 const SEED: u64 = 41;
+
+/// How long the probe's greeting is. Written here and in user.S, because
+/// there is nothing yet that could let one derive it from the other — an ELF
+/// loader would, and does not exist on this architecture.
+const MESSAGE_LEN: u64 = 26;
 
 /// Run a program at EL0.
 ///
@@ -188,10 +194,11 @@ fn userland_selftest() void {
     paging.activate(&space);
 
     // ── Run one: a program that works ───────────────────────────────────
+    console.println("  -- below this line, EL0 is speaking through write(2) --");
     trap.reset();
     const exit_a = trap.enter_user(USER_TEXT, USER_STACK_TOP);
-    const answer = trap.done_value;
-    const argument = trap.last_argument;
+    const answer = trap.exit_status;
+    const written = trap.bytes_written;
     const calls = trap.calls;
     // What EL0 stored, read back through the kernel's own map: proof the
     // write landed in the physical page rather than somewhere that merely
@@ -204,6 +211,8 @@ fn userland_selftest() void {
     trap.reset();
     const exit_b = trap.enter_user(USER_TEXT + fault_offset, USER_STACK_TOP);
     const fault = trap.last_fault;
+    // 0xDEAD is what the probe exits with if its illegal store was allowed.
+    const store_allowed = trap.exit_status;
 
     paging.deactivate();
 
@@ -225,7 +234,7 @@ fn userland_selftest() void {
 
     const ran_ok = exit_a == trap.EXIT_DONE and
         calls == 2 and
-        argument == SEED and
+        written == MESSAGE_LEN and
         answer == SEED + 1 and
         written_back == SEED + 1 and
         preempted > 0;
@@ -237,11 +246,13 @@ fn userland_selftest() void {
         fault.?.elr >= USER_TEXT and fault.?.elr < USER_TEXT + pmm.PAGE_SIZE;
 
     if (ran_ok and caught_ok and still_ticking) {
-        console.print("  [ok] EL0: a program ran, read ");
+        console.print("  [ok] EL0: a program wrote ");
+        console.print_dec(written);
+        console.print(" bytes through write(2), read ");
         console.print_dec(SEED);
-        console.print(" from its own memory, called the kernel twice, got ");
+        console.print(" from its own memory, and exited with ");
         console.print_dec(answer);
-        console.println(" back, and wrote it where the kernel could see it");
+        console.println(" — which the kernel found in the page it had left it");
         console.print("  [ok] EL0: the timer interrupted it ");
         console.print_dec(preempted);
         console.println(" times while it ran, and it carried on afterwards");
@@ -253,8 +264,8 @@ fn userland_selftest() void {
         console.print_dec(exit_a);
         console.print(" calls=");
         console.print_dec(calls);
-        console.print(" arg=");
-        console.print_dec(argument);
+        console.print(" written=");
+        console.print_dec(written);
         console.print(" answer=");
         console.print_dec(answer);
         console.print(" written_back=");
@@ -263,6 +274,8 @@ fn userland_selftest() void {
         console.print_dec(preempted);
         console.print(" exit_b=");
         console.print_dec(exit_b);
+        console.print(" fault_probe_exit=");
+        console.print_hex(store_allowed);
         console.print(" still_ticking=");
         console.print_dec(@intFromBool(still_ticking));
         console.println("");

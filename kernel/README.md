@@ -54,9 +54,18 @@ claim with no marker behind it is in "What does not run yet".
   and inspects the pixels
 - per-process address spaces in TTBR0 — three-level tables, ASID-tagged,
   with permissions verified by asking the MMU to translate as EL0 would
-- **a program at EL0**: it reads its own memory, calls into the kernel and
-  gets answers back, is interrupted by the timer and carries on, and when
-  it writes to its read-only text page the kernel takes the CPU back
+- **a program at EL0**: `hello from EL0 on aarch64` in the boot log is
+  printed by a user program through `write(2)`, not by the kernel. It reads
+  its own memory, is interrupted by the timer and carries on, writes its
+  answer back where the kernel can see it, and exits with a status the kernel
+  checks — and when it writes to its read-only text page, the kernel takes
+  the CPU back
+- the kernel never dereferences an address userspace gave it: a user pointer
+  is translated through the process's own page tables and read through the
+  kernel's direct map. Privileged Access Never is enabled where the CPU has
+  it, so that is enforced rather than intended — and the boot gate runs a
+  PAN-capable CPU as well as one without, because on the one without, doing
+  it the wrong way also works
 - kernel threads switching, cooperatively and preemptively — the preemption
   test's threads never yield, and it checks not only that both ran but that
   each resumed inside its own code, which counters alone cannot see
@@ -112,7 +121,7 @@ kernel/
 │   ├── vm.zig              physical ↔ kernel-virtual, in one place
 │   ├── mmu.zig             translation after the boot stub; cache upkeep
 │   ├── paging.zig          per-process TTBR0 page tables
-│   ├── trap.zig            trap frame, system calls, faults
+│   ├── trap.zig            trap frame, system calls, faults, user pointers
 │   ├── console.zig         PL011
 │   ├── gic.zig  timer.zig  fwcfg.zig  ramfb.zig
 ├── mm/
