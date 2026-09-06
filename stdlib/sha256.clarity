@@ -1,0 +1,227 @@
+-- SHA-256 and HMAC-SHA256 — pure Clarity, no external tools.
+--
+-- crypto.clarity historically shelled out to `sha256sum`/`shasum`/openssl.
+-- That makes hashing unavailable exactly where it matters most: inside a
+-- `clarity cc` native binary on a machine without those tools, and inside
+-- ClarityOS itself (no coreutils, no openssl). This module is pure Clarity,
+-- so it compiles natively for free and runs anywhere Clarity runs.
+--
+-- Correctness is pinned to published vectors (FIPS 180-4 for SHA-256,
+-- RFC 4231 for HMAC-SHA256) in test_sha256.clarity.
+--
+-- Arithmetic notes: every value stays below 2^32, and intermediate sums
+-- below 2^33, so all maths is exact in Clarity numbers (exact to 2^53).
+-- Bitwise AND/OR/XOR come from bits.clarity, which normalises the signed
+-- 32-bit results the raw operators produce.
+
+from "bits.clarity" import band, bor, bxor
+
+let _M32 = 4294967296          -- 2^32
+
+-- Powers of two up to 2^32, precomputed: bits.pow2 loops, and SHA-256
+-- shifts/rotates run tens of thousands of times per message.
+fn _pow2_table() {
+    mut t = []
+    mut v = 1
+    mut i = 0
+    while i <= 32 { push(t, v); v = v * 2; i = i + 1 }
+    return t
+}
+let _P2 = _pow2_table()
+
+fn _shr32(x, n) { return int(x / _P2[n]) }
+fn _shl32(x, n) { return (x * _P2[n]) % _M32 }
+fn _rotr32(x, n) { return bor(_shr32(x, n), _shl32(x, 32 - n)) }
+fn _add32(a, b) { return (a + b) % _M32 }
+
+let _K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]
+
+-- ── Byte helpers ────────────────────────────────────────
+
+-- UTF-8 encode a Clarity string to a list of byte values. Surrogate pairs
+-- are combined so astral characters encode as real 4-byte UTF-8 rather
+-- than CESU-8.
+fn utf8_bytes(s) {
+    mut out = []
+    mut i = 0
+    while i < len(s) {
+        mut c = char_code(char_at(s, i))
+        if c >= 0xD800 and c <= 0xDBFF and i + 1 < len(s) {
+            let lo = char_code(char_at(s, i + 1))
+            if lo >= 0xDC00 and lo <= 0xDFFF {
+                c = 0x10000 + (c - 0xD800) * 1024 + (lo - 0xDC00)
+                i = i + 1
+            }
+        }
+        if c < 0x80 {
+            push(out, c)
+        } elif c < 0x800 {
+            push(out, 192 + int(c / 64))
+            push(out, 128 + (c % 64))
+        } elif c < 0x10000 {
+            push(out, 224 + int(c / 4096))
+            push(out, 128 + (int(c / 64) % 64))
+            push(out, 128 + (c % 64))
+        } else {
+            push(out, 240 + int(c / 262144))
+            push(out, 128 + (int(c / 4096) % 64))
+            push(out, 128 + (int(c / 64) % 64))
+            push(out, 128 + (c % 64))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn _hex_byte(b) {
+    let d = "0123456789abcdef"
+    return char_at(d, int(b / 16)) + char_at(d, b % 16)
+}
+
+fn bytes_to_hex(bytes) {
+    mut out = ""
+    for b in bytes { out = out + _hex_byte(b) }
+    return out
+}
+
+-- ── SHA-256 core ────────────────────────────────────────
+
+-- Hash a list of byte values (0..255); returns the 32-byte digest as a list.
+fn sha256_bytes(msg) {
+    mut h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+    -- Padding: 0x80, then zeros until length % 64 == 56, then the message
+    -- length in bits as a 64-bit big-endian integer.
+    mut m = []
+    for b in msg { push(m, b) }
+    let bit_len = len(msg) * 8
+    push(m, 0x80)
+    while (len(m) % 64) != 56 { push(m, 0) }
+    -- 64-bit big-endian bit length, built by repeated division so it stays
+    -- exact without needing powers of two beyond the 2^32 table.
+    mut lenb = [0, 0, 0, 0, 0, 0, 0, 0]
+    mut v = bit_len
+    mut idx = 7
+    while idx >= 0 {
+        lenb[idx] = v % 256
+        v = int(v / 256)
+        idx = idx - 1
+    }
+    for lb in lenb { push(m, lb) }
+
+    mut w = []
+    mut wi = 0
+    while wi < 64 { push(w, 0); wi = wi + 1 }
+
+    mut pos = 0
+    while pos < len(m) {
+        -- 16 big-endian words from this 64-byte block
+        mut t = 0
+        while t < 16 {
+            let o = pos + t * 4
+            w[t] = m[o] * 16777216 + m[o + 1] * 65536 + m[o + 2] * 256 + m[o + 3]
+            t = t + 1
+        }
+        -- message schedule
+        t = 16
+        while t < 64 {
+            let x = w[t - 15]
+            let y = w[t - 2]
+            let s0 = bxor(bxor(_rotr32(x, 7), _rotr32(x, 18)), _shr32(x, 3))
+            let s1 = bxor(bxor(_rotr32(y, 17), _rotr32(y, 19)), _shr32(y, 10))
+            w[t] = (w[t - 16] + s0 + w[t - 7] + s1) % _M32
+            t = t + 1
+        }
+
+        mut a = h[0]
+        mut b = h[1]
+        mut c = h[2]
+        mut d = h[3]
+        mut e = h[4]
+        mut f = h[5]
+        mut g = h[6]
+        mut hh = h[7]
+
+        t = 0
+        while t < 64 {
+            let S1 = bxor(bxor(_rotr32(e, 6), _rotr32(e, 11)), _rotr32(e, 25))
+            let ch = bxor(band(e, f), band(4294967295 - e, g))
+            let temp1 = (hh + S1 + ch + _K[t] + w[t]) % _M32
+            let S0 = bxor(bxor(_rotr32(a, 2), _rotr32(a, 13)), _rotr32(a, 22))
+            let maj = bxor(bxor(band(a, b), band(a, c)), band(b, c))
+            let temp2 = _add32(S0, maj)
+            hh = g
+            g = f
+            f = e
+            e = _add32(d, temp1)
+            d = c
+            c = b
+            b = a
+            a = _add32(temp1, temp2)
+            t = t + 1
+        }
+
+        h[0] = _add32(h[0], a)
+        h[1] = _add32(h[1], b)
+        h[2] = _add32(h[2], c)
+        h[3] = _add32(h[3], d)
+        h[4] = _add32(h[4], e)
+        h[5] = _add32(h[5], f)
+        h[6] = _add32(h[6], g)
+        h[7] = _add32(h[7], hh)
+
+        pos = pos + 64
+    }
+
+    mut digest = []
+    for word in h {
+        push(digest, int(word / 16777216) % 256)
+        push(digest, int(word / 65536) % 256)
+        push(digest, int(word / 256) % 256)
+        push(digest, word % 256)
+    }
+    return digest
+}
+
+-- Hash a string (UTF-8) and return the lowercase hex digest.
+fn sha256_hex(s) { return bytes_to_hex(sha256_bytes(utf8_bytes(s))) }
+
+-- ── HMAC-SHA256 (RFC 2104) ──────────────────────────────
+
+fn hmac_sha256_bytes(key_bytes, msg_bytes) {
+    let block = 64
+    mut k = []
+    if len(key_bytes) > block {
+        k = sha256_bytes(key_bytes)
+    } else {
+        for b in key_bytes { push(k, b) }
+    }
+    while len(k) < block { push(k, 0) }
+
+    mut inner = []
+    mut outer = []
+    mut i = 0
+    while i < block {
+        push(inner, bxor(k[i], 0x36))
+        push(outer, bxor(k[i], 0x5c))
+        i = i + 1
+    }
+    for b in msg_bytes { push(inner, b) }
+    let inner_hash = sha256_bytes(inner)
+    for b in inner_hash { push(outer, b) }
+    return sha256_bytes(outer)
+}
+
+fn hmac_sha256_hex(key, message) {
+    return bytes_to_hex(hmac_sha256_bytes(utf8_bytes(key), utf8_bytes(message)))
+}

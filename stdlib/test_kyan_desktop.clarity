@@ -398,6 +398,25 @@ assert(dsr.terminal_input("help\n"), "terminal_input routes to the shell when no
 assert(len(dsr._app_ui["terminal"]["lines"]) > sbefore, "the routed command extends the scrollback")
 assert_eq(dsr._app_ui["terminal"]["input"], "", "Enter clears the routed input line")
 
+-- ── Window resize through the desktop (corner handle) ──
+-- The bottom-right resize handle overlaps an app's content rect, so an
+-- app content-click handler could swallow the press and leave windows
+-- unresizable. Guard every interactive app against that regression.
+show "-- KyanDesktop: windows resize by the corner --"
+for rapp in ["editor", "files", "calc", "settings", "terminal"] {
+    let dr = kyan_desktop(1000, 640, theme)
+    dr.boot(null)
+    let rw = dr.open(rapp, 150, 120, 400, 300)
+    let rpx = rw.x + rw.width - 4
+    let rpy = rw.y + rw.height - 4
+    dr.handle_mouse(mk_mouse(rpx, rpy, "press", 1))
+    assert_eq(dr.wm.drag_mode(), "resize", rapp + ": corner press starts a resize")
+    dr.handle_mouse(mk_mouse(rpx + 50, rpy + 40, "motion", 0))
+    assert(rw.width > 400 and rw.height > 300, rapp + ": dragging the corner grows the window")
+    dr.handle_mouse(mk_mouse(rpx + 50, rpy + 40, "release", 0))
+    assert(not dr.wm.is_dragging(), rapp + ": release ends the resize")
+}
+
 -- ── close ────────────────────────────────────────
 
 assert(d.close("terminal"), "close terminal")

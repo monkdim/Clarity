@@ -1,0 +1,84 @@
+-- SHA-256 / HMAC-SHA256 — pinned to published test vectors.
+--
+-- Every expected value below comes from a published standard (FIPS 180-4
+-- for SHA-256, RFC 4231 for HMAC-SHA256) or from the UTF-8 definition, so
+-- these tests are ground truth rather than a snapshot of our own output.
+
+from "sha256.clarity" import sha256_hex, sha256_bytes, hmac_sha256_hex, hmac_sha256_bytes, bytes_to_hex, utf8_bytes
+
+mut PASSED = 0
+mut FAILED = 0
+fn assert(v, m) { if v { PASSED += 1 } else { FAILED += 1; show "  FAIL: " + m } }
+fn assert_eq(a, e, m) {
+    if a == e { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {m}\n    expected {e}\n    got      {a}" }
+}
+
+fn repeat_byte(b, n) {
+    mut out = []
+    mut i = 0
+    while i < n { push(out, b); i = i + 1 }
+    return out
+}
+
+-- ── SHA-256 (FIPS 180-4 examples) ──
+show "-- SHA-256: published vectors --"
+assert_eq(sha256_hex(""),
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha256 of the empty string")
+assert_eq(sha256_hex("a"),
+    "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+    "sha256(\"a\")")
+assert_eq(sha256_hex("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "sha256(\"abc\") — FIPS 180-4 one-block example")
+assert_eq(sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+    "sha256 448-bit multi-block example")
+
+-- digest shape
+let dg = sha256_bytes(utf8_bytes("abc"))
+assert_eq(len(dg), 32, "the digest is 32 bytes")
+mut in_range = true
+for b in dg { if b < 0 or b > 255 { in_range = false } }
+assert(in_range, "every digest byte is 0..255")
+
+-- ── UTF-8 encoding (the byte layer the hash consumes) ──
+show "-- SHA-256: UTF-8 byte encoding --"
+assert_eq(str(utf8_bytes("A")), str([65]), "ASCII encodes as one byte")
+assert_eq(str(utf8_bytes("é")), str([195, 169]), "U+00E9 encodes as two bytes")
+assert_eq(str(utf8_bytes("€")), str([226, 130, 172]), "U+20AC encodes as three bytes")
+assert_eq(str(utf8_bytes("𝄞")), str([240, 157, 132, 158]), "a surrogate pair encodes as four-byte UTF-8, not CESU-8")
+
+-- ── HMAC-SHA256 (RFC 4231) ──
+show "-- HMAC-SHA256: RFC 4231 vectors --"
+assert_eq(bytes_to_hex(hmac_sha256_bytes(repeat_byte(0x0b, 20), utf8_bytes("Hi There"))),
+    "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+    "RFC 4231 case 1")
+assert_eq(hmac_sha256_hex("Jefe", "what do ya want for nothing?"),
+    "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+    "RFC 4231 case 2")
+assert_eq(bytes_to_hex(hmac_sha256_bytes(repeat_byte(0xaa, 20), repeat_byte(0xdd, 50))),
+    "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
+    "RFC 4231 case 3")
+-- case 6 exercises the key-longer-than-the-block path (the key is hashed first)
+assert_eq(bytes_to_hex(hmac_sha256_bytes(repeat_byte(0xaa, 131),
+        utf8_bytes("Test Using Larger Than Block-Size Key - Hash Key First"))),
+    "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+    "RFC 4231 case 6 (key longer than the 64-byte block)")
+
+-- ── Properties ──
+show "-- SHA-256: properties --"
+assert(sha256_hex("abc") != sha256_hex("abd"), "a one-character change changes the digest")
+assert_eq(sha256_hex("abc"), sha256_hex("abc"), "hashing is deterministic")
+-- a message spanning exactly one padding boundary (55/56/64 bytes) exercises
+-- the extra-block padding path
+fn times(s, n) { mut o = ""; mut i = 0; while i < n { o = o + s; i = i + 1 }; return o }
+assert_eq(len(sha256_bytes(utf8_bytes(times("x", 55)))), 32, "55-byte message hashes")
+assert_eq(len(sha256_bytes(utf8_bytes(times("x", 56)))), 32, "56-byte message forces a second padding block")
+assert_eq(len(sha256_bytes(utf8_bytes(times("x", 64)))), 32, "exactly one block hashes")
+assert(sha256_hex(times("x", 55)) != sha256_hex(times("x", 56)), "padding-boundary lengths differ")
+
+show ""
+show "SHA-256: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " sha256 test(s) failed" }
