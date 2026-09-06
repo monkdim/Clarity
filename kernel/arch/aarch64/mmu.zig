@@ -1,99 +1,164 @@
-//! AArch64 MMU bring-up for EL1.
+//! AArch64 translation, after the boot stub has turned it on.
 //!
-//! The kernel starts with the MMU off, so every access is physical and
-//! strongly ordered. Turning the MMU on is what makes normal memory
-//! cacheable (and is a prerequisite for user/kernel separation later), but
-//! it is also the single easiest way to kill the machine: get the
-//! attributes or the translation setup wrong and the very next instruction
-//! fetch faults, with no console left to say so.
+//! The dangerous part of MMU bring-up — building a table and enabling
+//! translation while executing out of the memory being remapped — happens in
+//! arch/aarch64/boot.S, before any Zig runs, because a Zig function linked
+//! for high virtual addresses cannot safely execute at physical ones: every
+//! global it touches resolves to an address that is not mapped yet.
 //!
-//! This first stage keeps the mapping deliberately trivial and identity:
-//! a 39-bit VA space (T0SZ = 25) with 4 KiB granule, described entirely by
-//! two level-1 1 GiB block descriptors —
+//! What the stub leaves behind is a single level-1 table of 1 GiB blocks,
+//! installed in both TTBR0_EL1 and TTBR1_EL1, describing exactly two things:
 //!
-//!   [0] 0x0000_0000..0x4000_0000  Device-nGnRnE   (PL011 UART lives at 0x0900_0000)
-//!   [1] 0x4000_0000..0x8000_0000  Normal write-back (QEMU virt RAM)
+//!   [0]   0x0000_0000..0x4000_0000  Device-nGnRnE   (UART, GIC, fw_cfg)
+//!   [k]   the gigabyte the kernel was loaded into, Normal write-back
 //!
-//! Identity mapping means execution continues at the same addresses the
-//! instant translation is enabled, so there is no trampoline to get wrong.
-//! Higher-half kernel mapping and per-process TTBR0 spaces come later.
+//! One table can serve both registers because a kernel virtual address is
+//! its physical address plus 0xFFFF_FF80_0000_0000, and that base is the
+//! first address TTBR1 translates — so a physical address lands on the same
+//! level-1 index either way.
+//!
+//! This file owns what happens next, and it needs information the stub could
+//! not have: how much RAM the machine really has (`map_ram`, from the device
+//! tree), and when the low half is no longer needed (`drop_identity`).
 
 const console = @import("console.zig");
+const vm = @import("vm.zig");
 
-/// Level-1 table: 512 entries, each describing 1 GiB. 4 KiB aligned as the
-/// architecture requires for a translation table base.
-var l1_table: [512]u64 align(4096) = [_]u64{0} ** 512;
+/// The level-1 table, defined in boot.S so it can be filled in before any
+/// Zig runs, and placed outside .bss so that zeroing .bss does not erase the
+/// table the code doing the zeroing is running on.
+extern var aarch64_l1_table: [512]u64;
 
-// Descriptor bits (block entry at level 1).
-const DESC_BLOCK: u64 = 0b01; // valid + block (not table)
+// Descriptor bits for a level-1 block entry. Must agree with the .set
+// directives at the top of boot.S; they are written twice because the stub
+// cannot see this file and this file cannot see the stub's assembler symbols.
+const DESC_BLOCK: u64 = 0b01; // valid + block (not a table pointer)
 const DESC_AF: u64 = 1 << 10; // access flag; without it every access faults
 const SH_INNER: u64 = 0b11 << 8; // inner shareable
 const AP_RW_EL1: u64 = 0b00 << 6; // read/write at EL1, no EL0 access
+const ATTR_NORMAL_IDX: u64 = 1; // MAIR slot 1: Normal write-back
 
-// MAIR_EL1 attribute slots.
-const ATTR_DEVICE_IDX: u64 = 0;
-const ATTR_NORMAL_IDX: u64 = 1;
-const MAIR_VALUE: u64 = (0x00 << 0) | (0xFF << 8); // Device-nGnRnE, Normal WB RW-alloc
+const GIB: u64 = 1 << 30;
 
-fn block_desc(phys: u64, attr_idx: u64, shareable: u64) u64 {
-    return phys | DESC_AF | shareable | AP_RW_EL1 | (attr_idx << 2) | DESC_BLOCK;
+fn normal_block(phys: u64) u64 {
+    return phys | DESC_AF | SH_INNER | AP_RW_EL1 | (ATTR_NORMAL_IDX << 2) | DESC_BLOCK;
 }
 
-/// TCR_EL1: 39-bit VA (T0SZ 25), 4 KiB granule, walks cacheable and inner
-/// shareable, TTBR1 disabled (nothing is mapped in the high half yet),
-/// 40-bit intermediate physical addresses.
-fn tcr_value() u64 {
-    const T0SZ: u64 = 25;
-    const IRGN0: u64 = 0b01 << 8; // walk: write-back write-allocate
-    const ORGN0: u64 = 0b01 << 10;
-    const SH0: u64 = 0b11 << 12; // inner shareable
-    const TG0: u64 = 0b00 << 14; // 4 KiB granule
-    const EPD1: u64 = 1 << 23; // no TTBR1 walks
-    const IPS: u64 = 0b010 << 32; // 40-bit PA
-    return T0SZ | IRGN0 | ORGN0 | SH0 | TG0 | EPD1 | IPS;
-}
-
-/// Build the tables and switch translation on. Identity-mapped, so control
-/// flow is unaffected — if this returns, the MMU is live.
-pub fn init() void {
-    l1_table[0] = block_desc(0x0000_0000, ATTR_DEVICE_IDX, 0); // MMIO: not shareable
-    l1_table[1] = block_desc(0x4000_0000, ATTR_NORMAL_IDX, SH_INNER); // RAM
-
+/// Publish table edits and drop every cached translation.
+///
+/// The stores above go through the same cacheable, inner-shareable
+/// attributes the table walker is configured to use, so no cache maintenance
+/// is needed here — unlike in the boot stub, where the MMU was still off and
+/// the stores were not cacheable at all.
+fn publish() void {
     asm volatile (
-        \\dsb sy
+        \\dsb ishst
+        \\tlbi vmalle1is
+        \\dsb ish
         \\isb
         ::: "memory");
+}
 
-    asm volatile (
-        \\msr mair_el1, %[mair]
-        \\msr tcr_el1,  %[tcr]
-        \\msr ttbr0_el1, %[ttbr]
-        \\isb
-        :
-        : [mair] "r" (MAIR_VALUE),
-          [tcr] "r" (tcr_value()),
-          [ttbr] "r" (@intFromPtr(&l1_table)),
-        : "memory"
-    );
+/// Extend the direct map to cover every gigabyte the device tree reported as
+/// memory.
+///
+/// The boot stub could only map the gigabyte it found itself in, because it
+/// ran before anything had read the machine's description. On a `virt` with
+/// 1 GiB of RAM that is already the whole of it and this adds nothing; on a
+/// machine with more, every page the allocator hands out above the first
+/// gigabyte would otherwise be an address the kernel cannot touch — a
+/// translation fault on first use, not a wrong answer, but only because the
+/// low half happens to be gone.
+///
+/// Returns how many gigabytes were newly mapped. Blocks already described
+/// are left alone, which is what keeps this from overwriting the device
+/// block at index 0 on a machine whose memory node starts below 1 GiB.
+pub fn map_ram(regions: []const Region) usize {
+    var added: usize = 0;
+    for (regions) |r| {
+        if (r.len == 0) continue;
+        var g = r.base / GIB;
+        const last = (r.base + r.len - 1) / GIB;
+        while (g <= last) : (g += 1) {
+            if (g >= aarch64_l1_table.len) break; // beyond a 39-bit VA space
+            if (aarch64_l1_table[g] != 0) continue;
+            aarch64_l1_table[g] = normal_block(g * GIB);
+            added += 1;
+        }
+    }
+    if (added != 0) publish();
+    return added;
+}
 
-    // Invalidate stale translations before anything can be cached, then
-    // enable translation (M), the data cache (C) and the instruction
-    // cache (I) together.
+/// What `map_ram` needs to know about a region. Structurally identical to
+/// boot/fdt.Region; declared here so this module does not depend on where
+/// the caller learned about memory — the x86 side would pass a multiboot
+/// map through the same door.
+pub const Region = struct {
+    base: u64,
+    len: u64,
+};
+
+/// Stop translating the low half of the address space.
+///
+/// Until now the same table has been installed in both TTBR0 and TTBR1, so
+/// every physical address has also been a valid virtual one and any missed
+/// conversion would have silently worked. Disabling TTBR0 walks makes that
+/// impossible: from here a physical address dereferenced by mistake is a
+/// translation fault at the point of the mistake.
+///
+/// It is also the whole point of the exercise. TTBR0 is the register the
+/// hardware switches per process; a kernel that still needs it for itself
+/// cannot hand it to userland.
+pub fn drop_identity() void {
     asm volatile (
-        \\tlbi vmalle1
-        \\dsb nsh
+        \\mrs x0, tcr_el1
+        \\orr x0, x0, #(1 << 7)
+        \\msr tcr_el1, x0
+        \\msr ttbr0_el1, xzr
         \\isb
-        \\mrs x0, sctlr_el1
-        \\orr x0, x0, #(1 << 0)
-        \\orr x0, x0, #(1 << 2)
-        \\orr x0, x0, #(1 << 12)
-        \\msr sctlr_el1, x0
+        \\tlbi vmalle1is
+        \\dsb ish
         \\isb
         ::: "x0", "memory");
 }
 
-/// True once translation is enabled — read back from SCTLR_EL1 rather than
-/// assumed, so the boot log reports what the hardware actually did.
+/// Run a real stage-1 translation through the MMU and report what came back.
+///
+/// `at s1e1w` asks the hardware the same question a store would — what does
+/// this virtual address mean at EL1, for a write — and puts the answer in
+/// PAR_EL1 without performing the access. Null means it faulted.
+///
+/// This is the difference between reporting a bit and reporting a fact. A
+/// kernel can set TCR_EL1.EPD0 and read it back all day; whether the low half
+/// is actually untranslated is a question only the translation hardware can
+/// answer, and answering it by dereferencing a low address would answer it by
+/// crashing.
+pub fn translate(virt: u64) ?u64 {
+    const par = asm volatile (
+        \\at s1e1w, %[va]
+        \\isb
+        \\mrs %[out], par_el1
+        : [out] "=r" (-> u64),
+        : [va] "r" (virt),
+        : "memory"
+    );
+    // PAR_EL1.F (bit 0) set means the translation faulted; otherwise bits
+    // [51:12] hold the physical page and the offset comes from the input.
+    if (par & 1 != 0) return null;
+    return (par & 0x000F_FFFF_FFFF_F000) | (virt & 0xFFF);
+}
+
+/// True once the low half is no longer translated — read back from TCR_EL1
+/// rather than assumed, so the boot log reports what the hardware did.
+pub fn identity_dropped() bool {
+    const tcr = asm volatile ("mrs %[out], tcr_el1"
+        : [out] "=r" (-> u64),
+    );
+    return (tcr & (1 << 7)) != 0;
+}
+
+/// True once translation is enabled — read back from SCTLR_EL1.
 pub fn enabled() bool {
     const sctlr = asm volatile ("mrs %[out], sctlr_el1"
         : [out] "=r" (-> u64),
@@ -101,8 +166,22 @@ pub fn enabled() bool {
     return (sctlr & 1) != 0;
 }
 
+/// Where this code is actually executing. Taken from the program counter, so
+/// it is evidence rather than a restatement of the linker script: if the
+/// branch into the high mapping had not happened, this would print a low
+/// address and the marker would be a lie that is visible.
+fn here() u64 {
+    return asm volatile ("adr %[out], ."
+        : [out] "=r" (-> u64),
+    );
+}
+
 pub fn report() void {
-    console.print("  [ok] MMU on (identity, 39-bit VA) sctlr.M=");
+    console.print("  [ok] MMU on (39-bit VA, direct map at ");
+    console.print_hex(vm.KERNEL_VA_BASE);
+    console.print(") sctlr.M=");
     console.print_dec(if (enabled()) 1 else 0);
+    console.print(" pc=");
+    console.print_hex(here());
     console.println("");
 }

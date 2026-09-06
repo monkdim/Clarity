@@ -136,14 +136,19 @@ const Walker = struct {
     }
 };
 
-/// Validate a device tree at `phys` and read the root's cell sizes.
+/// Validate a device tree at `addr` and read the root's cell sizes.
+///
+/// `addr` is an address this kernel can dereference, not a physical one. On a
+/// kernel running in the high half they are different numbers, and the
+/// conversion belongs to the caller, which is the only code that knows which
+/// map the blob is reachable through.
 ///
 /// Null means there is no device tree there. That is a real possibility and
 /// not an error: a bootloader is not obliged to provide one, and the caller
 /// then falls back to whatever it knows about the machine.
-pub fn parse(phys: u64) ?Fdt {
-    if (phys == 0 or phys % 4 != 0) return null;
-    const p: [*]const u8 = @ptrFromInt(phys);
+pub fn parse(addr: u64) ?Fdt {
+    if (addr == 0 or addr % 4 != 0) return null;
+    const p: [*]const u8 = @ptrFromInt(addr);
     if (be32(p, 0) != MAGIC) return null;
 
     var fdt = Fdt{

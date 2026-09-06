@@ -24,13 +24,16 @@
 //! 0x0019 selects nothing and reads back zeroes, which looks exactly like a
 //! device that is not there.
 
-/// Where the interface is. The fallback is QEMU `virt`'s address; the device
-/// tree is asked first, and on any machine that is not this one the tree is
-/// the only answer that can be right.
+const vm = @import("vm.zig");
+
+/// Where the interface is, physically. The fallback is QEMU `virt`'s address;
+/// the device tree is asked first, and on any machine that is not this one
+/// the tree is the only answer that can be right.
 const DEFAULT_BASE: u64 = 0x0902_0000;
 var base: u64 = DEFAULT_BASE;
 
-/// Point the driver at the address the device tree gave.
+/// Point the driver at the address the device tree gave. A physical address:
+/// the tree describes the machine, not this kernel's address space.
 pub fn set_base(addr: u64) void {
     base = addr;
 }
@@ -39,14 +42,18 @@ pub fn current_base() u64 {
     return base;
 }
 
+/// The registers, as addresses this kernel can dereference. The kernel runs
+/// in the high half with no identity map, so every one of these has to go
+/// through the direct map — a physical address used directly here would be a
+/// translation fault, which is the point of dropping the identity map.
 fn reg_data() u64 {
-    return base + 0x00;
+    return vm.phys_to_virt(base) + 0x00;
 }
 fn reg_selector() u64 {
-    return base + 0x08;
+    return vm.phys_to_virt(base) + 0x08;
 }
 fn reg_dma() u64 {
-    return base + 0x10;
+    return vm.phys_to_virt(base) + 0x10;
 }
 
 /// The file directory, which lists every other file by name.
@@ -110,7 +117,12 @@ fn run_dma(control: u32, length: u32, address: u64) bool {
     dma_cmd.length = @byteSwap(length);
     dma_cmd.address = @byteSwap(address);
 
-    mmio_write64(reg_dma(), @byteSwap(@intFromPtr(&dma_cmd)));
+    // Both addresses crossing into the device are physical: the command block
+    // the device fetches, and the buffer named inside it. The kernel holds
+    // them as high virtual addresses, and QEMU has no idea this kernel's page
+    // tables exist — handing it one would make it read whatever happens to
+    // live at that number in RAM.
+    mmio_write64(reg_dma(), @byteSwap(vm.virt_to_phys(@intFromPtr(&dma_cmd))));
 
     const ctl: *volatile u32 = &dma_cmd.control;
     var spins: u32 = 0;
@@ -186,5 +198,5 @@ fn eql(a: []const u8, b: []const u8) bool {
 /// choosing the file and filling it.
 pub fn write_file(key: u16, bytes: []const u8) bool {
     const control = (@as(u32, key) << 16) | DMA_SELECT | DMA_WRITE;
-    return run_dma(control, @intCast(bytes.len), @intFromPtr(bytes.ptr));
+    return run_dma(control, @intCast(bytes.len), vm.virt_to_phys(@intFromPtr(bytes.ptr)));
 }

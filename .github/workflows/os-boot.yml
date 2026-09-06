@@ -226,14 +226,59 @@ jobs:
           # The framebuffer marker says the kernel configured ramfb through
           # fw_cfg and read its own pattern back out of the display memory.
           # It does not say the machine is showing it — that is the next step.
+          #
+          # The address-space marker is the strongest of them. The kernel is
+          # linked for the high half and runs with no identity map, and that
+          # line is printed only when the *translation hardware* agrees: an
+          # `at s1e1w` on the UART's physical address faults, and one on its
+          # direct-map address returns that same physical address. Every line
+          # after it — the device tree, fw_cfg's DMA, the framebuffer, the page
+          # the allocator wrote through — is therefore going through the high
+          # map, because there is no longer any other map to go through.
           if grep -q "\[ok\] device tree at" serial-arm.log \
+             && grep -q "\[ok\] identity map dropped:" serial-arm.log \
+             && grep -q "\[ok\] direct map covers all of RAM" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
              && grep -q "\[ok\] aarch64 timer: interrupts delivered" serial-arm.log; then
-            echo "PASS: aarch64 reached EL1, read its device tree, allocated a page, and drew a screen"
+            echo "PASS: aarch64 reached EL1 in the high half, read its device tree, allocated a page, and drew a screen"
           else
-            echo "FAIL: aarch64 boot, device tree, page allocator or screen did not come up"
+            echo "FAIL: aarch64 boot, address space, device tree, page allocator or screen did not come up"
+            exit 1
+          fi
+
+      # A machine with more RAM than the boot stub could map on its own.
+      #
+      # The stub runs before anything has read the device tree, so all it can
+      # map is the gigabyte it found itself loaded into. On the 512 MiB boot
+      # above that is already the whole machine, and the code that extends the
+      # map afterwards runs but has nothing to do — it would pass with that
+      # code deleted. Four gigabytes is three blocks the kernel can only reach
+      # because it read the tree and mapped them, and the marker is printed
+      # only after the MMU has been asked to translate the last byte of RAM
+      # and has answered with the right physical address.
+      - name: Boot with 4 GiB and assert the direct map was extended
+        run: |
+          timeout 120 qemu-system-aarch64 \
+            -M virt \
+            -cpu cortex-a72 \
+            -m 4096 \
+            -kernel kernel/zig-out/bin/clarity-kernel-aarch64.img \
+            -device ramfb \
+            -serial stdio \
+            -display none \
+            -no-reboot \
+            > serial-arm-4g.log 2>&1 || true
+          echo "----- serial output -----"
+          cat serial-arm-4g.log
+          echo "-------------------------"
+          if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
+             && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
+             && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-4g.log; then
+            echo "PASS: the direct map was extended over all 4 GiB and the allocator manages it"
+          else
+            echo "FAIL: the kernel did not map all of a 4 GiB machine"
             exit 1
           fi
 

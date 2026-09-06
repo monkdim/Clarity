@@ -7,7 +7,19 @@
 //! Mirrors the x86_64 console API (init/print/println) so the shared
 //! kernel code can print identically on both architectures.
 
-const UART0_BASE: usize = 0x0900_0000;
+const vm = @import("vm.zig");
+
+/// The PL011's physical address on QEMU's `virt`, seen through the kernel's
+/// direct map. It has to be a constant rather than something read from the
+/// device tree, because the console has to work before anything can be
+/// printed about the tree — including the fact that there is not one.
+///
+/// The `+ KERNEL_VA_BASE` is what changed when the kernel moved to the high
+/// half: the physical address is still 0x0900_0000, and after the boot stub
+/// drops the identity map that address is no longer one this kernel can
+/// dereference.
+const UART0_PHYS: usize = 0x0900_0000;
+const UART0_BASE: usize = UART0_PHYS + vm.KERNEL_VA_BASE;
 const UARTDR: usize = 0x00; // data register
 const UARTFR: usize = 0x18; // flag register
 const FR_TXFF: u32 = 1 << 5; // transmit FIFO full

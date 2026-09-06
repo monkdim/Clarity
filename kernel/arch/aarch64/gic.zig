@@ -10,15 +10,20 @@
 //! Two register blocks. The *distributor* decides which interrupts exist and
 //! where they go; the *CPU interface* is what this core reads to find out
 //! which one fired and to say it has finished. Both are inside the first
-//! gigabyte, which mmu.zig already maps Device-nGnRnE, so there is no mapping
-//! work here — that was checked rather than assumed.
+//! gigabyte, which the boot stub already maps Device-nGnRnE, so there is no
+//! mapping work here — that was checked rather than assumed.
 //!
 //! Only what a timer needs is set up. A private peripheral interrupt (PPI)
 //! is per-core and needs no routing, which is why there is no GICD_ITARGETSR
 //! write below: SGIs and PPIs (INTIDs 0..31) ignore it.
 
-const DIST: u64 = 0x0800_0000;
-const CPU: u64 = 0x0801_0000;
+const vm = @import("vm.zig");
+
+/// Both blocks are inside the first gigabyte, which the boot stub maps
+/// Device-nGnRnE — reached, like every other physical address the kernel
+/// touches, through the direct map rather than directly.
+const DIST: u64 = 0x0800_0000 + vm.KERNEL_VA_BASE;
+const CPU: u64 = 0x0801_0000 + vm.KERNEL_VA_BASE;
 
 // Distributor
 const GICD_CTLR: u64 = DIST + 0x000;
