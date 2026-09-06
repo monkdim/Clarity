@@ -252,7 +252,7 @@ class TypeChecker {
         this.scope.set_type(node.name, "function")
         this.push_scope()
         for p in node.params {
-            let pname = p
+            mut pname = p
             if type(p) == "list" { pname = p[0] }
             if type(pname) == "string" {
                 -- a variadic param is stored as "...rest" but referenced as
@@ -399,7 +399,7 @@ class TypeChecker {
                 this.push_scope()
                 this.scope.set_type("this", node.name)
                 for p in method.params {
-                    let pname = p
+                    mut pname = p
                     if type(p) == "list" { pname = p[0] }
                     if type(pname) == "string" {
                         let clean = if starts(pname, "...") { substring(pname, 3, len(pname)) } else { pname }

@@ -4,7 +4,11 @@
 -- That makes hashing unavailable exactly where it matters most: inside a
 -- `clarity cc` native binary on a machine without those tools, and inside
 -- ClarityOS itself (no coreutils, no openssl). This module is pure Clarity,
--- so it compiles natively for free and runs anywhere Clarity runs.
+-- so it runs anywhere Clarity runs and needs nothing installed.
+--
+-- It does *not* yet compile with `clarity cc`: that backend still rejects
+-- `import`, so a native build has to inline what it needs. (Module-level
+-- constants like _K used to be a second blocker; those are C globals now.)
 --
 -- Correctness is pinned to published vectors (FIPS 180-4 for SHA-256,
 -- RFC 4231 for HMAC-SHA256) in test_sha256.clarity.

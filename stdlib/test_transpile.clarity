@@ -60,6 +60,27 @@ assert_absent("brace before space stays literal",
     "show \"a { 1 } b\"",
     "${")
 
+-- Control characters in a non-interpolated string. A raw newline or carriage
+-- return terminates a JS string literal, so emitting one verbatim produces
+-- unparseable JS. This is not hypothetical: stdlib/cli.clarity contains
+-- split(..., "\n"), and emitting it raw is what stopped the self-hosted
+-- transpiler from being able to rebuild the compiler from its own sources.
+assert_contains("newline is escaped, not emitted raw",
+    "let s = \"a\\nb\"",
+    "\"a\\nb\"")
+assert_absent("no raw newline inside a JS string literal",
+    "let s = \"a\\nb\"",
+    "\"a\nb\"")
+assert_contains("carriage return is escaped",
+    "let s = \"a\\rb\"",
+    "\"a\\rb\"")
+assert_contains("tab is escaped",
+    "let s = \"a\\tb\"",
+    "\"a\\tb\"")
+assert_contains("backslash is not double-escaped by the control-char pass",
+    "let s = \"a\\\\nb\"",
+    "\"a\\\\nb\"")
+
 show ""
 show "═══════════════════════════════════════"
 show "Results: {passed}/{total} passed, {failed} failed"
@@ -68,3 +89,6 @@ if failed == 0 {
 } else {
     show "{failed} test(s) FAILED"
 }
+-- Fail loudly: without this the runner sees a clean exit and the suite goes
+-- green with failing transpiler tests.
+if failed > 0 { throw str(failed) + " transpiler test(s) failed" }

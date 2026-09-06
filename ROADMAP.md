@@ -60,7 +60,17 @@ lands with codegen tests that diff native output against the interpreter.
 - **Stage 11 (done) — native FFI.** `ffi_sym`/`ffi_call` (`dlsym` + a typed C-call shim) so a
   compiled binary calls C directly.
 - **Stage 12 (done) — RE byte toolkit.** `stdlib/bytes.clarity`: endianness readers/writers + AOB
-  signature scanning, pure Clarity so it compiles for free. First Track B increment (see below).
+  signature scanning, pure Clarity. First Track B increment (see below).
+- **Module-level bindings (done).** A top-level `let`/`mut` is emitted at C file scope instead of
+  as a local of `main()`, so functions can see it (previously any module constant referenced from
+  a function simply failed to compile). Initialisers still run in source order at `main` entry, and
+  the addresses are handed to the collector as explicit roots — the conservative GC scans the C
+  stack, so a file-scope value is invisible to it without that.
+- **`clarity cc` still rejects `import` (open).** A native build must be a single file today, which
+  is why `examples/sigscan.clarity` inlines its byte helpers rather than importing
+  `bytes.clarity`, and why `sha256.clarity` does not yet compile natively. Resolving imports the
+  way the JS backend now does (parse the sibling module, merge its top-level declarations) is the
+  next step on this trunk.
 - **Networking (next on the trunk).** Sockets → an HTTP client that isn't a `curl` shell-out → an
   HTTP server → TLS. Unlocks web/API backends as native binaries.
 - **Stage 12+ — services stdlib.** Real crypto (not the toy cipher), a real embedded key/value or
@@ -75,6 +85,44 @@ lands with codegen tests that diff native output against the interpreter.
 **Done when:** a non-trivial Clarity app — a web service, a CLI with subprocesses, a data
 pipeline — compiles with `clarity cc` and runs as a single native binary with no Bun anywhere.
 
+### Self-hosting: the compiler rebuilds itself (done)
+
+"Self-hosted" was only half true. The Clarity→JS transpiler in `stdlib/transpile.clarity` could not
+regenerate the compiler bundle: its output would not even parse. Nothing failed, because
+`transpile --bundle` resolved the stdlib directory relative to the *current* directory, found no
+sources when run from the repo root, and wrote an empty bundle while reporting success — so CI
+quietly built from `native/transpile.py`, the Python reference implementation, instead.
+
+Seven distinct defects were behind it, each found by building and running the result rather than
+by reading:
+
+1. A raw newline (or CR/tab/NUL) emitted inside a JS string literal — `split(x, "\n")` in
+   `cli.clarity` alone was enough to make the compiler's own output unparseable.
+2. JS reserved words that are legal Clarity identifiers (`function`, `enum`, `import`, …) emitted
+   verbatim.
+3. A module defining `fn max` emitting `function $max` next to the runtime's imported `$max` — a
+   redeclaration ESM rejects. The shadowed import is now dropped.
+4. No `export` on top-level declarations, so no module could satisfy another's import.
+5. Property names run through reserved-word mangling, turning `env.set(...)` into `env.$set(...)`.
+6. Closures emitted as `function` rather than arrows, losing the lexical `this` a Clarity closure
+   inside a method depends on.
+7. Imported class names unknown, so `Token(...)` lost its `new`. Rather than hardcode a class list
+   (what the Python reference does), the emitter now parses the sibling module and reads its class
+   declarations.
+
+Four stdlib modules also reassigned `let` bindings — legal to the interpreter, which does not
+enforce immutability, and to the Python backend, which emits `let` for everything, but not to the
+self-hosted backend, which correctly emits `const`. Those are now `mut`.
+
+Guarded by the **Self-hosting bootstrap** CI job: seed with the Python transpiler, have the
+compiler regenerate its own bundle twice, require stage 2 and stage 3 to be byte-identical, and
+then require the self-hosted build to pass the full suite and the smoke tests — because a fixpoint
+on broken output is still broken. (That is not hypothetical: an intermediate fix reached a clean
+fixpoint with a binary that failed all 61 test files.)
+
+**Still open:** the interpreter does not enforce `let` immutability, so reassigning one is caught
+only when it reaches a backend that emits `const`.
+
 ---
 
 ## Track B — Gaming specialty: RE tooling & game mods
@@ -87,8 +135,8 @@ a small embeddable core):
 **RE / tooling direction** — *now the active sub-track (see the resolved ordering below).*
 - **Raw memory + pattern scanning.** ✅ *Stage 12:* `stdlib/bytes.clarity` gives byte buffers,
   endianness helpers (unsigned + signed, LE + BE), and AOB/signature scanning with `??`/`*`
-  wildcards, all pure-Clarity so they compile native for free; `examples/sigscan.clarity` is a
-  standalone compiled AOB scanner. **Remaining:** pointer arithmetic against a live target's
+  wildcards, all pure-Clarity; `examples/sigscan.clarity` is a standalone compiled AOB scanner
+  (it inlines the byte helpers, because `clarity cc` still rejects `import` — see Track A). **Remaining:** pointer arithmetic against a live target's
   address space (needs the process-memory piece below).
 - **Binary-format DSL.** ✅ *Stage 19:* `stdlib/binformat.clarity` — describe a layout as a list of
   field specs, then `parse` bytes into a map and `emit` a map back to bytes (`sizeof` too). Pure
