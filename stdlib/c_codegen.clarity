@@ -1582,7 +1582,18 @@ let _NATIVE_BUILTINS = {
     "json_parse": 1, "json_string": 1, "type": 1,
     "ffi_open": 1, "ffi_buffer": 1, "ffi_read": 1, "ffi_write": 1, "ffi_free": 1, "ffi_sym": 1, "ffi_call": 1,
     "tcp_listen": 1, "tcp_port": 1, "tcp_accept": 1, "tcp_connect": 1,
-    "tcp_send": 1, "tcp_recv": 1, "tcp_close": 1
+    "tcp_send": 1, "tcp_recv": 1, "tcp_close": 1,
+    -- These twenty were emitted by _builtin_call and missing here, which is
+    -- not a cosmetic gap: this set is what _is_global consults to decide
+    -- whether a name inside a closure is a free variable. A builtin missing
+    -- from it was captured instead of called, so the closure was handed a
+    -- `v_sort` that nothing declares — and the failure landed in the C
+    -- compiler, on generated code, naming a variable the program never wrote.
+    -- test_c_codegen cross-checks the two lists against the source now.
+    "bool": 1, "cwd": 1, "decode64": 1, "encode64": 1, "entries": 1,
+    "every": 1, "find": 1, "flat": 1, "hash": 1, "merge": 1, "pop": 1,
+    "pow": 1, "print": 1, "random": 1, "reverse": 1, "some": 1, "sort": 1,
+    "unique": 1, "values": 1, "zip": 1
 }
 
 -- Builtins the freestanding profile removes. These are the ones whose C
@@ -1659,7 +1670,16 @@ class CCodegen {
     -- A name that needs no capture: a native builtin, a top-level function,
     -- or a class (constructor). Everything else referenced inside a closure
     -- but not bound there is a free variable captured by value.
+    --
+    -- Unless the enclosing function shadows it. `let lines = [...]` in a
+    -- function makes `lines` that function's variable, whatever the builtin
+    -- of the same name does — so a closure referring to it has to capture it
+    -- like any other local. Without this check the reference was left
+    -- uncaptured and the closure body named a `v_lines` nothing declared,
+    -- which is a C error on generated code about a variable the program did
+    -- write, just not where the compiler looked.
     fn _is_global(name) {
+        if contains(this.local_names, name) { return false }
         return has(_NATIVE_BUILTINS, name) or contains(this.fn_names, name) or contains(this.classes, name)
     }
 
