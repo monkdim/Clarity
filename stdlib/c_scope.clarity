@@ -1,0 +1,381 @@
+-- Module-scoped names for native compilation.
+--
+-- `clarity cc` emits one C translation unit, so every module's top-level
+-- declarations land in one namespace. Two modules that both define `_quote`
+-- used to be a hard error naming both files — correct, but it made a native
+-- build impossible for any program importing more than a handful of stdlib
+-- modules. Measured across the 157 modules in stdlib: 86 names are declared
+-- in more than one, `_quote` in thirteen files and `_ord` in six.
+--
+-- This pass gives each of those a module-scoped name instead. What it has to
+-- get right is which references follow the rename, and that is a scope
+-- question, not a search-and-replace:
+--
+--   * A name bound inside a function — a parameter, a `let`, a loop or catch
+--     variable — is that function's, whatever the module declares. Binding is
+--     function-scoped here, the same rule c_codegen's own `_collect_bound`
+--     uses, so a name bound anywhere in a function shadows for all of it.
+--   * A name a module declares itself resolves to its own declaration.
+--   * A name a module imported with `from "p" import n` resolves to p's, and
+--     therefore to p's mangled name if p's was renamed.
+--   * Anything else — a builtin, a name from the runtime — is left alone.
+--
+-- Names that are unique across the whole graph are not renamed at all. The
+-- generated C stays readable, and a build that never had a collision produces
+-- exactly the output it produced before.
+
+-- A name is C-safe if it is alphanumeric or underscore. Module prefixes are
+-- derived from the file's basename, which is already that in practice, but a
+-- path is not required to be.
+fn _c_safe(s) {
+    mut out = []
+    for ch in chars(s) {
+        if is_alnum(ch) or ch == "_" { push(out, ch) } else { push(out, "_") }
+    }
+    return join(out, "")
+}
+
+fn _basename_stem(path) {
+    let segs = split(path, "/")
+    mut base = segs[len(segs) - 1]
+    if ends(base, ".clarity") { base = substring(base, 0, len(base) - 8) }
+    return _c_safe(base)
+}
+
+-- Every name a top-level statement introduces, or null.
+--
+-- A decorated declaration introduces the name of the thing it decorates, not
+-- a name of its own — missing that would leave a decorated function unrenamed
+-- while every reference to it moved.
+fn declared_name(stmt) {
+    let nt = stmt.node_type
+    if nt == "FnStatement" or nt == "ClassStatement" or nt == "LetStatement" { return stmt.name }
+    if nt == "InterfaceStatement" or nt == "EnumStatement" { return stmt.name }
+    if nt == "DecoratedStatement" { return declared_name(stmt.target) }
+    return null
+}
+
+-- Names bound anywhere inside a function body, plus its parameters.
+--
+-- Deliberately function-scoped and over-inclusive: a `let` in one branch
+-- shadows the module's name for the whole function. That is what c_codegen
+-- already assumes when it decides what a closure captures, so a different
+-- rule here would put the two out of step.
+fn _bound_in(params, body, acc) {
+    for p in params {
+        -- A rest parameter arrives as "...name".
+        if starts(p, "...") { push(acc, substring(p, 3, len(p))) } else { push(acc, p) }
+    }
+    _bound_in_stmts(_stmts_of(body), acc)
+    return acc
+}
+
+fn _stmts_of(body) {
+    if body == null { return [] }
+    if type(body) == "list" { return body }
+    if body.node_type == "Block" { return body.statements }
+    return [body]
+}
+
+fn _bound_in_stmts(stmts, acc) {
+    for s in stmts {
+        let nt = s.node_type
+        if nt == "LetStatement" { push(acc, s.name) }
+        elif nt == "DestructureLetStatement" { for t in s.targets { push(acc, t) } }
+        elif nt == "ForStatement" {
+            if s.variable != null { push(acc, s.variable) }
+            _bound_in_stmts(_stmts_of(s.body), acc)
+        }
+        elif nt == "WhileStatement" { _bound_in_stmts(_stmts_of(s.body), acc) }
+        elif nt == "IfStatement" {
+            _bound_in_stmts(_stmts_of(s.body), acc)
+            if s.elif_clauses != null {
+                for clause in s.elif_clauses { _bound_in_stmts(_stmts_of(clause[1]), acc) }
+            }
+            _bound_in_stmts(_stmts_of(s.else_body), acc)
+        }
+        elif nt == "TryCatch" {
+            _bound_in_stmts(_stmts_of(s.try_body), acc)
+            if s.catch_var != null { push(acc, s.catch_var) }
+            _bound_in_stmts(_stmts_of(s.catch_body), acc)
+            _bound_in_stmts(_stmts_of(s.finally_body), acc)
+        }
+        elif nt == "MatchStatement" {
+            for arm in s.arms { _bound_in_stmts(_stmts_of(arm[1]), acc) }
+            _bound_in_stmts(_stmts_of(s.default), acc)
+        }
+        elif nt == "Block" { _bound_in_stmts(s.statements, acc) }
+        -- A nested FnStatement introduces its own name into this scope.
+        elif nt == "FnStatement" { push(acc, s.name) }
+    }
+    return acc
+}
+
+-- ── the rewriter ────────────────────────────────────────
+--
+-- Mutates the AST in place. `rename` maps a name this module can see to the
+-- name it should now use; `bound` is the set of names shadowed by an
+-- enclosing function.
+
+class Rewriter {
+    fn init(rename, label) {
+        this.rename = rename        -- name -> replacement
+        this.label = label          -- for error messages
+    }
+
+    fn _resolve(name, bound) {
+        if contains(bound, name) { return name }
+        if has(this.rename, name) { return this.rename[name] }
+        return name
+    }
+
+    fn stmts(list, bound) {
+        for s in list { this.stmt(s, bound) }
+        return null
+    }
+
+    fn stmt(s, bound) {
+        if s == null { return null }
+        let nt = s.node_type
+
+        if nt == "LetStatement" { this.expr(s.value, bound) }
+        elif nt == "DestructureLetStatement" { this.expr(s.value, bound) }
+        elif nt == "AssignStatement" {
+            this.expr(s.target, bound)
+            this.expr(s.value, bound)
+        }
+        elif nt == "MultiAssignStatement" {
+            for t in s.targets { this.expr(t, bound) }
+            for v in s.values { this.expr(v, bound) }
+        }
+        elif nt == "FnStatement" {
+            this.stmts(_stmts_of(s.body), _bound_in(s.params, s.body, _copy(bound)))
+        }
+        elif nt == "ReturnStatement" { this.expr(s.value, bound) }
+        elif nt == "IfStatement" {
+            this.expr(s.condition, bound)
+            this.stmts(_stmts_of(s.body), bound)
+            if s.elif_clauses != null {
+                for clause in s.elif_clauses {
+                    this.expr(clause[0], bound)
+                    this.stmts(_stmts_of(clause[1]), bound)
+                }
+            }
+            this.stmts(_stmts_of(s.else_body), bound)
+        }
+        elif nt == "ForStatement" {
+            this.expr(s.iterable, bound)
+            -- The loop variable shadows inside the body and nowhere else.
+            mut inner = _copy(bound)
+            if s.variable != null { push(inner, s.variable) }
+            this.stmts(_stmts_of(s.body), inner)
+        }
+        elif nt == "WhileStatement" {
+            this.expr(s.condition, bound)
+            this.stmts(_stmts_of(s.body), bound)
+        }
+        elif nt == "TryCatch" {
+            this.stmts(_stmts_of(s.try_body), bound)
+            mut inner = _copy(bound)
+            if s.catch_var != null { push(inner, s.catch_var) }
+            this.stmts(_stmts_of(s.catch_body), inner)
+            this.stmts(_stmts_of(s.finally_body), bound)
+        }
+        elif nt == "BreakStatement" or nt == "ContinueStatement" { return null }
+        elif nt == "ThrowStatement" { this.expr(s.value, bound) }
+        elif nt == "ShowStatement" { for v in s.values { this.expr(v, bound) } }
+        elif nt == "ImportStatement" { return null }
+        elif nt == "ClassStatement" {
+            -- The parent and the interfaces are top-level names like any
+            -- other, and a renamed base class has to be followed here or the
+            -- subclass inherits from something that no longer exists.
+            if s.parent != null { s.parent = this._resolve(s.parent, bound) }
+            if s.interfaces != null {
+                mut ifaces = []
+                for i in s.interfaces { push(ifaces, this._resolve(i, bound)) }
+                s.interfaces = ifaces
+            }
+            for m in s.methods { this.stmt(m, bound) }
+        }
+        elif nt == "InterfaceStatement" { return null }
+        elif nt == "MatchStatement" {
+            this.expr(s.subject, bound)
+            for arm in s.arms {
+                this.expr(arm[0], bound)
+                this.stmts(_stmts_of(arm[1]), bound)
+            }
+            this.stmts(_stmts_of(s.default), bound)
+        }
+        elif nt == "EnumStatement" {
+            for m in s.members { if m[1] != null { this.expr(m[1], bound) } }
+        }
+        elif nt == "DecoratedStatement" {
+            for d in s.decorators { this.expr(d, bound) }
+            this.stmt(s.target, bound)
+        }
+        elif nt == "ExpressionStatement" { this.expr(s.expression, bound) }
+        elif nt == "Block" { this.stmts(s.statements, bound) }
+        else {
+            -- Loudly, not silently. A statement kind this pass does not know
+            -- is one whose references it would leave un-renamed, and the
+            -- result of that is a dangling name much further downstream.
+            throw "native compile: c_scope does not handle statement '" + nt + "' (in " + this.label + ")"
+        }
+        return null
+    }
+
+    fn expr(e, bound) {
+        if e == null { return null }
+        let nt = e.node_type
+
+        if nt == "Identifier" { e.name = this._resolve(e.name, bound) }
+        elif nt == "NumberLiteral" or nt == "StringLiteral" or nt == "BoolLiteral"
+             or nt == "NullLiteral" or nt == "ThisExpression" or nt == "AskExpression" {
+            return null
+        }
+        elif nt == "ListLiteral" { for x in e.elements { this.expr(x, bound) } }
+        elif nt == "MapLiteral" {
+            for pair in e.pairs {
+                this.expr(pair[0], bound)
+                this.expr(pair[1], bound)
+            }
+        }
+        elif nt == "BinaryOp" { this.expr(e.left, bound); this.expr(e.right, bound) }
+        elif nt == "UnaryOp" { this.expr(e.operand, bound) }
+        elif nt == "CallExpression" {
+            this.expr(e.callee, bound)
+            for a in e.arguments { this.expr(a, bound) }
+        }
+        elif nt == "MemberExpression" or nt == "OptionalMemberExpression" {
+            -- Only the object side. `.property` is a field or method name,
+            -- which lives in the object's namespace, not the module's.
+            this.expr(e.object, bound)
+        }
+        elif nt == "IndexExpression" { this.expr(e.object, bound); this.expr(e.index, bound) }
+        elif nt == "SliceExpression" {
+            this.expr(e.object, bound)
+            this.expr(e.start, bound)
+            this.expr(e.end, bound)
+        }
+        elif nt == "FnExpression" {
+            this.stmts(_stmts_of(e.body), _bound_in(e.params, e.body, _copy(bound)))
+        }
+        elif nt == "PipeExpression" { this.expr(e.value, bound); this.expr(e.function, bound) }
+        elif nt == "RangeExpression" { this.expr(e.start, bound); this.expr(e.end, bound) }
+        elif nt == "NullCoalesce" { this.expr(e.left, bound); this.expr(e.right, bound) }
+        elif nt == "SpreadExpression" or nt == "AwaitExpression" or nt == "YieldExpression" {
+            this.expr(e.value, bound)
+        }
+        elif nt == "IfExpression" {
+            this.expr(e.condition, bound)
+            this.expr(e.true_expr, bound)
+            this.expr(e.false_expr, bound)
+        }
+        elif nt == "ComprehensionExpression" {
+            this.expr(e.iterable, bound)
+            mut inner = _copy(bound)
+            if e.variable != null { push(inner, e.variable) }
+            this.expr(e.expr, inner)
+            this.expr(e.condition, inner)
+        }
+        elif nt == "MapComprehensionExpression" {
+            this.expr(e.iterable, bound)
+            mut inner = _copy(bound)
+            for v in e.variables { push(inner, v) }
+            this.expr(e.key_expr, inner)
+            this.expr(e.value_expr, inner)
+            this.expr(e.condition, inner)
+        }
+        else {
+            throw "native compile: c_scope does not handle expression '" + nt + "' (in " + this.label + ")"
+        }
+        return null
+    }
+}
+
+fn _copy(lst) {
+    mut out = []
+    for x in lst { push(out, x) }
+    return out
+}
+
+-- ── the pass ────────────────────────────────────────────
+--
+-- `mods` is an ordered list of records, one per module:
+--   { "key": resolved path, "label": short name for messages,
+--     "body": [top-level statements], "imports": { name -> exporting key } }
+--
+-- Renames colliding declarations in place and rewrites every reference.
+-- Returns the number of names it renamed, for the caller to report.
+fn scope_modules(mods) {
+    -- Which modules declare each name.
+    mut declarers = {}
+    for m in mods {
+        for s in m["body"] {
+            let n = declared_name(s)
+            if n == null { continue }
+            if not has(declarers, n) { declarers[n] = [] }
+            if not contains(declarers[n], m["key"]) { push(declarers[n], m["key"]) }
+        }
+    }
+
+    -- Module prefixes, kept distinct even when two paths share a basename.
+    mut prefix = {}
+    mut used = {}
+    for m in mods {
+        mut p = _basename_stem(m["key"])
+        if has(used, p) {
+            mut i = 2
+            while has(used, p + "_" + str(i)) { i += 1 }
+            p = p + "_" + str(i)
+        }
+        used[p] = true
+        prefix[m["key"]] = p
+    }
+
+    -- The new name for each (module, colliding name).
+    mut renamed = {}          -- key -> { name -> new_name }
+    mut count = 0
+    for m in mods { renamed[m["key"]] = {} }
+    for n in sort(keys(declarers)) {
+        if len(declarers[n]) < 2 { continue }
+        for k in declarers[n] {
+            renamed[k][n] = prefix[k] + "__" + n
+            count += 1
+        }
+    }
+    if count == 0 { return 0 }
+
+    -- Rewrite each module against what it can see: its own declarations
+    -- first, then the names it imported.
+    for m in mods {
+        mut view = {}
+        for n in keys(m["imports"]) {
+            let src = m["imports"][n]
+            if has(renamed, src) and has(renamed[src], n) { view[n] = renamed[src][n] }
+        }
+        -- A module's own declaration wins over an imported name of the same
+        -- spelling, which is what the interpreter does: the module body binds
+        -- into its own environment after the import ran.
+        for n in keys(renamed[m["key"]]) { view[n] = renamed[m["key"]][n] }
+
+        let rw = Rewriter(view, m["label"])
+        rw.stmts(m["body"], [])
+
+        -- Finally the declarations themselves. Done after the references so
+        -- the walk above compares against the names as written.
+        for s in m["body"] {
+            let n = declared_name(s)
+            if n != null and has(renamed[m["key"]], n) {
+                _set_declared_name(s, renamed[m["key"]][n])
+            }
+        }
+    }
+    return count
+}
+
+fn _set_declared_name(stmt, new_name) {
+    if stmt.node_type == "DecoratedStatement" { return _set_declared_name(stmt.target, new_name) }
+    stmt.name = new_name
+    return null
+}
