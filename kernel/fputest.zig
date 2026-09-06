@@ -77,19 +77,19 @@ fn body(mark: u64, ok: *bool, done: *bool) void {
     done.* = true;
 }
 
-fn thread_a() noreturn {
+fn thread_a(_: u64) callconv(.C) noreturn {
     body(0x3FF8000000000000, &a_ok, &a_done);   // 1.5
     sched.thread_exit(0);
 }
 
-fn thread_b() noreturn {
+fn thread_b(_: u64) callconv(.C) noreturn {
     body(0xC002000000000000, &b_ok, &b_done);   // -2.25
     sched.thread_exit(0);
 }
 
 pub fn run() !void {
-    _ = try sched.spawn_kthread(thread_a, "[fpu-a]", .normal);
-    _ = try sched.spawn_kthread(thread_b, "[fpu-b]", .normal);
+    _ = try sched.spawn_kthread(thread_a, 0, "[fpu-a]", .normal);
+    _ = try sched.spawn_kthread(thread_b, 0, "[fpu-b]", .normal);
 
     // Hands the CPU to the run queue and comes back when it drains, the same
     // way the context-switch and preemption tests do.

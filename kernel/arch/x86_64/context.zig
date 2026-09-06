@@ -67,22 +67,35 @@ comptime {
     std.debug.assert(@alignOf(Context) == 16);
 }
 
-/// Initialise a brand-new kernel thread's context so that the
-/// first switch_to lands at `entry` with `arg` in %rdi. The stack
-/// must be allocated by the caller; `stack_top` points one byte
-/// past the highest valid byte.
+/// The first thing a brand-new thread executes; see context.S.
+extern fn clarity_thread_trampoline() callconv(.C) noreturn;
+
+/// Initialise a brand-new kernel thread's context so that the first
+/// switch_to lands at `entry` with `arg` in %rdi. The stack must be
+/// allocated by the caller; `stack_top` points one byte past the highest
+/// valid byte.
+///
+/// The thread does not start at `entry` but at a trampoline, which moves the
+/// argument into the register the ABI passes arguments in. Jumping straight
+/// at the entry point cannot work: %rdi is not in the set switch_to pops, so
+/// it still holds that function's own first parameter — a pointer to some
+/// other thread's context — where the new thread's argument should be. This
+/// used to jump straight there and leave the argument in %rbp with a comment
+/// claiming the entry's first instruction would move it, which is not
+/// something a compiler does. Nothing noticed because every caller passed
+/// zero, which scheduler.zig said so in as many words.
 pub fn init_kernel_thread(ctx: *Context, stack_top: u64, entry: *const fn (u64) callconv(.C) noreturn, arg: u64) void {
     var rsp = stack_top & ~@as(u64, 0xF);
     // Pre-push exactly what switch_to pops, in the order it pops them: the
     // six callee-saved registers, then RFLAGS (pushed first, so popped last).
     rsp -= 8 * 7;
     const slots: [*]u64 = @ptrFromInt(rsp);
-    slots[0] = 0;             // r15
-    slots[1] = 0;             // r14
-    slots[2] = 0;             // r13
-    slots[3] = 0;             // r12
-    slots[4] = 0;             // rbx
-    slots[5] = arg;           // rbp — repurposed; first instruction of `entry` will move it to rdi
+    slots[0] = 0;                        // r15
+    slots[1] = 0;                        // r14
+    slots[2] = 0;                        // r13
+    slots[3] = 0;                        // r12
+    slots[4] = @intFromPtr(entry);       // rbx — the trampoline jumps here
+    slots[5] = arg;                      // rbp — the trampoline moves this to rdi
     // IF=1 (bit 9) and the reserved bit 1, which is always set. A thread that
     // started with interrupts off could never be preempted, and the first
     // switch into a new thread often comes from inside the timer's interrupt
@@ -92,7 +105,7 @@ pub fn init_kernel_thread(ctx: *Context, stack_top: u64, entry: *const fn (u64) 
     ctx.rbp = 0;
     ctx.rbx = 0;
     ctx.r12 = 0; ctx.r13 = 0; ctx.r14 = 0; ctx.r15 = 0;
-    ctx.rip = @intFromPtr(entry);
+    ctx.rip = @intFromPtr(&clarity_thread_trampoline);
 }
 
 /// Build the IRET frame on `kstack_top` that returns to user mode

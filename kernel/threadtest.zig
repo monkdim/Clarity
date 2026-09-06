@@ -11,6 +11,13 @@
 //! A, B, A, B — which is only possible if each `yield` really did save one
 //! stack and restore another, and if resuming a thread lands it back inside
 //! the yield it called rather than at its entry point.
+//!
+//! The two threads are the same function, told which one it is. That is not
+//! only tidier: it means the letters the boot gate greps for are carried in
+//! the thread's argument, so a thread that did not receive its argument
+//! prints the wrong letter and the gate fails. Passing an argument to a
+//! kernel thread had never worked, and nothing showed it, because every
+//! caller passed zero.
 
 const std = @import("std");
 const console = @import("arch/x86_64/console.zig");
@@ -34,27 +41,22 @@ fn tick(who: []const u8, round: usize) void {
     console.println(buf[0..n]);
 }
 
-fn thread_a() noreturn {
+/// `which` is the thread's argument: 0 prints A, 1 prints B. A thread that
+/// never received it would print A twice, and "[B] round 1" — which the boot
+/// gate requires — would never appear.
+fn thread_body(which: u64) callconv(.C) noreturn {
+    const name = if (which == 0) "A" else "B";
     var i: usize = 0;
     while (i < ROUNDS) : (i += 1) {
-        tick("A", i);
-        sched.yield();
-    }
-    sched.thread_exit(0);
-}
-
-fn thread_b() noreturn {
-    var i: usize = 0;
-    while (i < ROUNDS) : (i += 1) {
-        tick("B", i);
+        tick(name, i);
         sched.yield();
     }
     sched.thread_exit(0);
 }
 
 pub fn run() !void {
-    _ = try sched.spawn_kthread(thread_a, "[test-a]", .normal);
-    _ = try sched.spawn_kthread(thread_b, "[test-b]", .normal);
+    _ = try sched.spawn_kthread(thread_body, 0, "[test-a]", .normal);
+    _ = try sched.spawn_kthread(thread_body, 1, "[test-b]", .normal);
     console.println("  scheduler: two kernel threads queued");
 
     // Hands the CPU to the run queue and comes back when it drains — which
