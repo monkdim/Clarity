@@ -357,6 +357,18 @@ if CC == null {
         show "-- global_gc_rooted: mid-run GC unreliable on this platform, skipped --"
     }
 
+    -- ── expression forms the backend used to reject ──
+    -- Each of these is core language surface that only surfaced as missing
+    -- when a real stdlib module was compiled for the first time.
+    same("if_expression", "let a = if 1 > 0 { \"yes\" } else { \"no\" }\nshow a\nfn pick(n) { return if n % 2 == 0 { \"even\" } else { \"odd\" } }\nshow pick(4)\nshow pick(7)")
+    -- The untaken arm must not run: C's ?: is lazy and so is the interpreter.
+    same("if_expression_is_lazy", "mut n = 0\nfn bump() { n = n + 1\nreturn 1 }\nlet b = if false { bump() } else { 0 }\nshow b\nshow n")
+    same("null_coalesce", "let a = null\nshow a ?? \"fallback\"\nshow \"set\" ?? \"fallback\"\nlet m = {\"k\": 1}\nshow m[\"k\"] ?? 0")
+    -- The left side is evaluated exactly once, so a ternary naming it twice
+    -- would be wrong: `n` must end at 1, not 2.
+    same("null_coalesce_evaluates_left_once", "mut n = 0\nfn bump() { n = n + 1\nreturn n }\nshow bump() ?? 99\nshow n")
+    same("type_builtin", "show type(null)\nshow type(true)\nshow type(1)\nshow type(1.5)\nshow type(\"s\")\nshow type([1])\nshow type({\"a\": 1})\nclass Foo { fn init() {} }\nshow type(Foo())")
+
     -- ── stage 21: TCP sockets ──
     -- Native-only: the interpreter's I/O is Bun's, which has no synchronous
     -- socket call to diff against, so this asserts the compiled binary's
