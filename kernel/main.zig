@@ -23,6 +23,7 @@ const tmpfs = @import("fs/tmpfs.zig");
 const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
 const usermode = @import("usermode.zig");
+const threadtest = @import("threadtest.zig");
 
 extern const __kernel_phys_end: u8;
 
@@ -112,7 +113,16 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
 
     console.println("ClarityOS ready.");
 
-    // 7. Leave ring 0 for the first time.
+    // 7. Kernel threads. The context switch had never executed — the call
+    //    that would have used it was commented out — so this runs before
+    //    anything is built on top of it.
+    threadtest.run() catch |err| {
+        console.print("PANIC: kernel thread self-test: ");
+        console.println(@errorName(err));
+        hang();
+    };
+
+    // 8. Leave ring 0 for the first time.
     //
     //    This runs before spawn_user because everything spawn_user needs — an
     //    ELF loader, a per-process address space, the scheduler's user path —

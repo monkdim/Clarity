@@ -17,35 +17,23 @@ pub const Context = extern struct {
     rip: u64,
 };
 
-/// Switch from `prev` to `next`. Saves the current callee-saved
-/// state into `prev` and restores `next`. After the call, execution
-/// resumes wherever `next.rip` points — which for a brand-new
-/// thread is `arch_thread_entry`, and for a previously-running
-/// thread is the instruction right after its own switch_to call.
-pub fn switch_to(_: *Context, _: *const Context) callconv(.Naked) void {
-    // params arrive in %rdi (prev) and %rsi (next) per the SysV ABI and are
-    // used directly by the asm below; Zig sees them as unused, hence `_`.
-    asm volatile (
-        \\ push %rbp
-        \\ push %rbx
-        \\ push %r12
-        \\ push %r13
-        \\ push %r14
-        \\ push %r15
-        \\ mov  %rsp, 0(%rdi)         // prev.rsp = current rsp
-        \\ mov  $1f, %rax              // record the resume label as prev.rip
-        \\ mov  %rax, 56(%rdi)
-        \\ mov  0(%rsi), %rsp         // next.rsp -> rsp
-        \\ pop  %r15
-        \\ pop  %r14
-        \\ pop  %r13
-        \\ pop  %r12
-        \\ pop  %rbx
-        \\ pop  %rbp
-        \\ jmp  *56(%rsi)              // jump to next.rip
-        \\1:
-        \\ ret
-    );
+/// Switch from `prev` to `next`. Saves the callee-saved state onto `prev`'s
+/// own stack, records where to resume, and restores `next`. After the call,
+/// execution continues wherever `next.rip` points — for a brand-new thread
+/// its entry point, for one that has run before the instruction after its own
+/// switch_to.
+///
+/// Defined in context.S. It cannot be written here: manipulating %rsp and
+/// returning through a saved instruction pointer requires `callconv(.Naked)`,
+/// and Zig will not call a naked function because it has no ABI.
+pub extern fn clarity_switch_to(prev: *Context, next: *const Context) callconv(.C) void;
+
+pub const switch_to = clarity_switch_to;
+
+comptime {
+    // context.S hardcodes these two offsets.
+    std.debug.assert(@offsetOf(Context, "rsp") == 0);
+    std.debug.assert(@offsetOf(Context, "rip") == 56);
 }
 
 /// Initialise a brand-new kernel thread's context so that the
