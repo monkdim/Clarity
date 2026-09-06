@@ -1,97 +1,179 @@
-# KyanOS micro-kernel
+# The ClarityOS kernel
 
-The only non-Clarity code in the operating system. About ~10 K lines
-of Zig (the target — current skeleton is ~2 K) covering boot, memory
-management, scheduling, syscalls, and the small set of drivers
-needed to bring up the userspace runtime.
+The only part of ClarityOS that is not written in Clarity. About 8 000
+lines of Zig across two architectures, plus 2 000 lines of C that are not
+kernel at all — a freestanding libc, so that a program compiled by
+`clarity cc` has something to link against.
+
+Two kernels share most of that Zig. The **x86-64** side is the mature one:
+it boots, schedules, and runs real user processes, one of which is a
+Clarity program compiled to C and then to a static ELF. The **aarch64**
+side is younger and is where the project is going, because Apple Silicon
+is the hardware this is aimed at; it now runs unprivileged code at EL0 in
+its own address space.
+
+Neither has run on real hardware. Both boot under QEMU on every commit,
+and `RUNNING.md` has the commands.
+
+## What actually runs
+
+Every claim below is a marker in a boot log that CI greps for, on three
+consecutive boots for x86 and two differently-sized machines for ARM. A
+claim with no marker behind it is in "What does not run yet".
+
+**x86-64**, from `.github/workflows/os-boot.yml`:
+
+- multiboot2 boot into long mode, higher-half at `0xFFFF_FFFF_8000_0000`
+- GDT, IDT, and the FPU enabled
+- physical page allocator, 4-level page tables, a slab heap
+- preemptive priority round-robin scheduling — the preemption test is one
+  no amount of cooperation between threads could pass
+- FPU state preserved across a context switch
+- a VFS with tmpfs underneath it: path resolution, create, write, read back
+- two processes run in sequence, each loaded from an ELF written into the
+  filesystem: `/bin/clarity-init` (Zig) and `/bin/clarity-demo` (a Clarity
+  program through `clarity cc --freestanding`, linked against the libc in
+  `user/libc`)
+- in userspace: `.bss` zeroed, `brk` grows a heap that holds, SSE
+  registers survive, `exit` returns through `sysret`, and the kernel
+  outlives both processes
+
+**aarch64**, on QEMU `virt`:
+
+- boots from an ARM64 Linux Image header, so a bootloader hands it a
+  device tree — which is how it learns where its memory and devices are
+- higher-half kernel at `0xFFFF_FF80_0000_0000` on TTBR1, with the
+  identity map *dropped*: the low half is no longer translated, which is
+  checked by asking the MMU (`at s1e1w`) rather than by reading a bit back
+- physical page allocator over the memory the device tree described, with
+  the direct map extended to cover all of it
+- generic timer at 100 Hz through a GICv2, with interrupts proven to
+  arrive rather than assumed
+- a 1024×768 framebuffer through `ramfb`, checked twice: the kernel reads
+  its own pattern back, and CI takes a screenshot through QEMU's monitor
+  and inspects the pixels
+- per-process address spaces in TTBR0 — three-level tables, ASID-tagged,
+  with permissions verified by asking the MMU to translate as EL0 would
+- **a program at EL0**: it reads its own memory, calls into the kernel and
+  gets answers back, is interrupted by the timer and carries on, and when
+  it writes to its read-only text page the kernel takes the CPU back
+
+## What does not run yet
+
+Written, compiles, and nothing has ever executed it:
+
+- `fs/devfs.zig`, `fs/procfs.zig`, `drivers/tty.zig` — nothing imports
+  devfs or procfs, and tty is reached only from devfs
+- `boot/uefi.zig` — nothing imports it
+- `drivers/ahci.zig`, `drivers/virtio_net.zig` — scanned for at boot, and
+  every operation past detection returns `NotImplemented`
+
+Not written:
+
+- On aarch64: a scheduler, a filesystem, an ELF loader. The EL0 program is
+  assembled into the kernel image, not loaded from anywhere. There is one
+  process and nothing switches away from it.
+- Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired:
+  read, write, open, close, mmap, brk, exit, fork, exec, wait, kill,
+  getpid, getppid, nanosleep, clock_gettime, ioctl. The rest return
+  `ENOSYS` — sockets, pipes, dup, and most of the directory calls among
+  them.
+- No SMP on either architecture. One CPU; the others are parked in the
+  boot stub.
+- No disk. tmpfs is the root filesystem and there is nothing under it.
 
 ## Layout
 
 ```
 kernel/
 ├── boot/
-│   ├── start.S            # multiboot2 entry, switch to long mode
-│   ├── multiboot2.zig     # header + boot-info parser
-│   ├── uefi.zig           # UEFI loader stub
-│   └── linker.ld          # higher-half link layout
+│   ├── start.S             x86 multiboot2 entry, switch to long mode
+│   ├── multiboot2.zig      boot-info parser
+│   ├── fdt.zig             flattened device tree parser (ARM)
+│   ├── uefi.zig            UEFI loader stub — nothing calls it
+│   ├── linker.ld           x86 higher-half link layout
+│   └── linker_aarch64.ld   ARM higher-half link layout
 ├── arch/x86_64/
-│   ├── console.zig        # VGA + COM1 early console
-│   ├── port.zig           # in/out wrappers
-│   ├── gdt.zig            # flat 64-bit segments
-│   ├── idt.zig            # interrupt vectors + PIC remap
-│   └── paging.zig         # CR3 swap + arch hooks
+│   ├── console.zig         COM1 + optional VGA
+│   ├── port.zig  gdt.zig  idt.zig  paging.zig
+│   ├── syscall.zig         SYSCALL/SYSRET entry
+│   ├── context.zig/.S      thread switch, including CR3 and FPU state
+│   ├── fpu.zig             FXSAVE area and a clean initial image
+│   └── timer.zig           PIT
+├── arch/aarch64/
+│   ├── boot.S              Image header, EL2→EL1, MMU on, branch high
+│   ├── vectors.S           the 16 exception vectors
+│   ├── user.S              enter and leave EL0; the EL0 probe
+│   ├── vm.zig              physical ↔ kernel-virtual, in one place
+│   ├── mmu.zig             translation after the boot stub; cache upkeep
+│   ├── paging.zig          per-process TTBR0 page tables
+│   ├── trap.zig            trap frame, system calls, faults
+│   ├── console.zig         PL011
+│   ├── gic.zig  timer.zig  fwcfg.zig  ramfb.zig
 ├── mm/
-│   ├── pmm.zig            # bitmap page-frame allocator
-│   ├── vmm.zig            # 4-level page tables, AddressSpace
-│   └── heap.zig           # slab allocator over pmm
+│   ├── pmm.zig             bitmap page-frame allocator (both architectures)
+│   ├── vmm.zig             x86 4-level page tables, AddressSpace
+│   └── heap.zig            slab allocator over the pmm
 ├── sched/
-│   └── scheduler.zig      # priority round-robin, block/wake/exit
-├── syscall/
-│   └── dispatch.zig       # SYSCALL entry → handler table
+│   ├── process.zig         one Process per address space, many Threads
+│   └── scheduler.zig       preemptive priority round-robin
+├── syscall/dispatch.zig    syscall number → handler
 ├── fs/
-│   ├── vfs.zig            # VFS layer + dentry/inode/file structs
-│   └── tmpfs.zig          # in-memory root filesystem
-├── drivers/
-│   ├── init.zig           # registers all built-in drivers
-│   ├── pci.zig            # PCI bus enumeration
-│   ├── ps2.zig            # 8042 keyboard + mouse
-│   ├── framebuffer.zig    # VESA / GOP linear FB
-│   ├── ahci.zig           # SATA storage (skeleton)
-│   └── virtio_net.zig     # paravirt NIC for QEMU/KVM (skeleton)
-├── main.zig               # kernel_main()
-├── build.zig              # Zig build script
-└── README.md              # this file
+│   ├── vfs.zig             path resolution, inodes, an FsOps vtable
+│   ├── tmpfs.zig           the root filesystem
+│   └── devfs.zig procfs.zig — written, unreached
+├── loader/
+│   ├── elf.zig             ELF64 parser
+│   └── load.zig            load an ELF into a fresh address space
+├── drivers/                framebuffer, ps2, pci wired; ahci, virtio_net stubs
+├── graphics/fb.zig         architecture-independent drawing surface
+├── user/
+│   ├── init.zig            /bin/clarity-init
+│   ├── clarity_demo.clarity → clarity_demo.c, the compiled Clarity program
+│   ├── libc/               a freestanding libc: stdio, string, math, malloc
+│   └── user.ld             static user link layout
+├── tools/
+│   ├── fb_check.py         boots ARM, screenshots it, checks the pixels
+│   └── run_x86.sh          builds the GRUB ISO `zig build run` boots
+├── main.zig                x86 entry
+├── main_aarch64.zig        ARM entry
+└── RUNNING.md              how to build and boot both
 ```
+
+The `*test.zig` files at the top level (`threadtest`, `preempttest`,
+`fputest`, `fstest`) and `initprog.zig` / `clarityprog.zig` are the boot
+selftests. They are not a test framework: each one is a thing the kernel
+does at boot, printing a marker that CI requires. That is deliberate — a
+kernel subsystem that is never executed looks exactly like one that works,
+and most of the bugs found in this kernel were in code that had never run.
 
 ## Build
 
-Requires Zig 0.13 or newer. From this directory:
+Zig 0.13. From this directory:
 
-```
-zig build              # build zig-out/bin/clarity-kernel
-zig build run          # boot the kernel under QEMU (needs qemu-system-x86_64)
+```sh
+zig build              # x86-64  -> zig-out/bin/clarity-kernel
+zig build aarch64      # aarch64 -> zig-out/bin/clarity-kernel-aarch64.img
+zig build run          # boot the x86-64 kernel (builds a GRUB ISO first)
+zig build run-aarch64  # boot the aarch64 kernel, with a screen
 ```
 
-The kernel image is multiboot2-compliant, so QEMU's `-kernel` flag
-loads it directly without any bootloader. UEFI booting goes through
-a separate loader binary that lives next to the kernel and shares
-the same `kernel_main` contract.
+`RUNNING.md` has the QEMU command lines, what the output should look like,
+and the Apple Silicon path.
 
 ## Talking to the kernel from Clarity
 
-`stdlib/kernel_abi.clarity` is the single source of truth for syscall
-numbers, errno values, file mode bits, mmap flags, and signals. The
-Zig enums in `syscall/dispatch.zig` and `fs/vfs.zig` keep the same
-values so userspace and kernel agree on the wire format.
+`stdlib/kernel_abi.clarity` is the source of truth for syscall numbers,
+errno values, file mode bits, mmap flags, and signals; the Zig enums in
+`syscall/dispatch.zig` and `fs/vfs.zig` carry the same values.
 
-`stdlib/syscall.clarity` is the userspace wrapper. On Linux/macOS it
-delegates to the host runtime (Bun's fs/process APIs). When KyanOS
-is self-hosting, the same call signatures issue real `syscall`
-instructions instead — userspace code doesn't change.
+`stdlib/syscall.clarity` is the userspace wrapper. On Linux and macOS it
+delegates to the host runtime; the same signatures issue real syscall
+instructions when running on ClarityOS.
 
-`stdlib/scheduler.clarity` and `stdlib/vfs.clarity` are pure-state
-mirrors of the kernel scheduler and VFS. They run fully in-process
-and let the test suite exercise the design contracts (priority
-ordering, block/wake, path resolution, tmpfs read/write/truncate)
-without booting QEMU.
-
-## Status (Phase 65)
-
-- Boot stub, paging tables, GDT, IDT: skeleton in place
-- Physical + virtual memory, slab heap: skeleton, allocators
-  reachable through their public API
-- Scheduler: full priority queues + block/wake/exit
-- Syscall ABI: 38 calls registered; ~10 wired up (read / write /
-  open / close / exit / getpid / nanosleep / clock_gettime). The
-  rest return ENOSYS.
-- Drivers: PS/2, framebuffer, PCI iter — wired. AHCI + virtio-net:
-  scaffolds with NotImplemented bodies. USB HID, NVMe, real Intel
-  NICs: deferred to a follow-up phase.
-- VFS + tmpfs: scaffolded; tmpfs is functional through the FsOps
-  vtable, on-disk filesystems are deferred.
-
-The Clarity-side mirrors (kernel_abi, syscall, scheduler, vfs) are
-fully tested in `stdlib/test_kernel.clarity`. The kernel itself
-needs a Zig toolchain + QEMU to validate; the build script is
-checked in, the structure compiles standalone in any environment
-where those are available.
+`stdlib/scheduler.clarity` and `stdlib/vfs.clarity` are pure-state mirrors
+of the kernel's scheduler and VFS, so the design contracts (priority
+ordering, block and wake, path resolution, tmpfs read/write/truncate) can
+be exercised by `stdlib/test_kernel.clarity` without booting QEMU. They
+are models, not the kernel: passing them says the design is consistent,
+not that the kernel implements it. Only the boot log says that.
