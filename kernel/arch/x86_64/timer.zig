@@ -28,10 +28,12 @@ pub fn init(target_hz: u32) void {
     idt.set_handler(TIMER_VECTOR, timer_irq);
 }
 
-fn timer_irq() callconv(.C) void {
+// Interrupt calling convention: the CPU pushes an interrupt frame and the
+// handler must leave via `iretq`, which callconv(.C) would not do.
+fn timer_irq(frame: *idt.InterruptFrame) callconv(.Interrupt) void {
+    _ = frame;
     ticks += 1;
-    // EOI to PIC master.
-    port.out8(0x20, 0x20);
+    idt.end_of_interrupt(TIMER_VECTOR);
     // Cooperatively yield to the scheduler. The dispatch path
     // chooses the next thread; if it's a different one, the
     // arch-level switch happens before we return from this IRQ.

@@ -103,22 +103,31 @@ fn cmd(byte: u8) void {
     port.out8(PS2_CMD, byte);
 }
 
-fn kbd_irq() callconv(.C) void {
+// IRQ handlers use the interrupt calling convention: the CPU enters them
+// with an interrupt frame and they must leave via `iretq`. A callconv(.C)
+// handler would return with `ret`, popping the frame as if it were a return
+// address and corrupting the stack. Each also has to acknowledge the PIC,
+// or that IRQ line never fires again.
+fn kbd_irq(frame: *idt.InterruptFrame) callconv(.Interrupt) void {
+    _ = frame;
     const scancode = port.in8(PS2_DATA);
     const next = (kbd_head + 1) % KBD_BUF_SIZE;
     if (next != kbd_tail) {
         kbd_buf[kbd_head] = scancode;
         kbd_head = next;
     }
+    idt.end_of_interrupt(0x21);
 }
 
-fn mouse_irq() callconv(.C) void {
+fn mouse_irq(frame: *idt.InterruptFrame) callconv(.Interrupt) void {
+    _ = frame;
     const byte = port.in8(PS2_DATA);
     const next = (mouse_head + 1) % MOUSE_BUF_SIZE;
     if (next != mouse_tail) {
         mouse_buf[mouse_head] = byte;
         mouse_head = next;
     }
+    idt.end_of_interrupt(0x2C);
 }
 
 pub fn read_kbd() ?u8 {
