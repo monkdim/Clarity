@@ -436,11 +436,16 @@ static Value cl_index(Value c, Value k){
   if(c.t==T_LIST){ List* l=(List*)c.o; long idx=k.i; if(idx<0) idx+=l->len; if(idx<0||idx>=l->len) return cl_null(); return l->items[idx]; }
   if(c.t==T_MAP){ Map* m=(Map*)c.o; char* ks=cl_to_cstr(k); for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],ks)==0) return m->vals[j]; return cl_null(); }
   if(c.t==T_STR){ long n=(long)strlen(c.s); long idx=k.i; if(idx<0) idx+=n; if(idx<0||idx>=n) return cl_null(); char* ch=(char*)cl_alloc(2); ch[0]=c.s[idx]; ch[1]=0; return cl_str(ch); }
+  /* An instance reads like the map of its fields — what makes keys(obj)
+     useful, since `for k in keys(p) { p[k] }` is the loop anyone writes next.
+     A missing field is null, the same answer a map gives. */
+  if(c.t==T_OBJECT){ Obj* o=(Obj*)c.o; return cl_index(o->fields, k); }
   return cl_null();
 }
 static void cl_index_set(Value c, Value k, Value val){
   if(c.t==T_LIST){ List* l=(List*)c.o; long idx=k.i; if(idx<0) idx+=l->len; if(idx>=0&&idx<l->len) l->items[idx]=val; }
   else if(c.t==T_MAP){ char* ks=cl_to_cstr(k); cl_map_put(c, ks, val); }
+  else if(c.t==T_OBJECT){ Obj* o=(Obj*)c.o; char* ks=cl_to_cstr(k); cl_map_put(o->fields, ks, val); }
 }
 /* materialise the thing a for-loop walks: lists as-is, map keys, string chars */
 static Value cl_iter(Value v){
@@ -452,8 +457,13 @@ static Value cl_iter(Value v){
 
 /* ── builtins reachable from native code ── */
 static Value cl_range2(Value a, Value b){ Value out=cl_list_new(); for(long j=a.i;j<b.i;j++) cl_list_add(out, cl_int(j)); return out; }
-static Value cl_keys(Value v){ Value out=cl_list_new(); if(v.t==T_MAP){ Map* m=(Map*)v.o; for(long j=0;j<m->len;j++) cl_list_add(out, cl_str(m->keys[j])); } return out; }
-static Value cl_has(Value v, Value k){ if(v.t==T_MAP){ Map* m=(Map*)v.o; char* ks=cl_to_cstr(k); for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],ks)==0) return cl_bool(1); } return cl_bool(0); }
+/* An object's field map, or the value unchanged for anything else.
+   keys/values/entries/has accept an instance and answer with its fields, the
+   same as the interpreter and the transpiled backend do — an object is a map
+   with a class name attached, and asking it what it holds should say. */
+static Value cl_fields_of(Value v){ if(v.t==T_OBJECT){ Obj* o=(Obj*)v.o; return o->fields; } return v; }
+static Value cl_keys(Value vv){ Value v=cl_fields_of(vv); Value out=cl_list_new(); if(v.t==T_MAP){ Map* m=(Map*)v.o; for(long j=0;j<m->len;j++) cl_list_add(out, cl_str(m->keys[j])); } return out; }
+static Value cl_has(Value vv, Value k){ Value v=cl_fields_of(vv); if(v.t==T_MAP){ Map* m=(Map*)v.o; char* ks=cl_to_cstr(k); for(long j=0;j<m->len;j++) if(strcmp(m->keys[j],ks)==0) return cl_bool(1); } return cl_bool(0); }
 static Value cl_contains(Value a, Value b){
   if(a.t==T_STR){ char* ns=cl_to_cstr(b); return cl_bool(strstr((char*)a.s, ns)!=0); }
   if(a.t==T_LIST){ List* l=(List*)a.o; for(long j=0;j<l->len;j++) if(cl_equal(l->items[j], b)) return cl_bool(1); return cl_bool(0); }
@@ -825,12 +835,14 @@ static Value cl_zip(Value* ls, long count){
   }
   return out;
 }
-static Value cl_values(Value v){
+static Value cl_values(Value vv){
+  Value v=cl_fields_of(vv);
   Value out=cl_list_new();
   if(v.t==T_MAP){ Map* m=(Map*)v.o; for(long j=0;j<m->len;j++) cl_list_add(out, m->vals[j]); }
   return out;
 }
-static Value cl_entries(Value v){
+static Value cl_entries(Value vv){
+  Value v=cl_fields_of(vv);
   Value out=cl_list_new();
   if(v.t==T_MAP){
     Map* m=(Map*)v.o;

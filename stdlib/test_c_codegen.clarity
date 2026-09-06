@@ -502,6 +502,46 @@ if CC == null {
         "show \"survived\"\ntcp_close(cli)\ntcp_close(srv)",
         "survived")
 
+    -- ── objects answer keys/values/entries/has ────────────
+    -- An object is a map with a class name attached, and asking it what it
+    -- holds should say so. It did not: the three backends gave three
+    -- different answers — the interpreter returned its own ClarityInstance
+    -- fields (_clarityType, klass, properties), the native build returned an
+    -- empty list, and only the transpiled one answered with the program's own
+    -- field names. `same` compares the interpreter against the native binary,
+    -- so this pins two of the three together; the third is what they were
+    -- both brought into line with.
+    same("object_keys",
+        "class P {\n" +
+        "    fn init(x, y) { this.x = x\n this.y = y }\n" +
+        "}\n" +
+        "let p = P(3, 4)\n" +
+        "show keys(p)\n" +
+        "show values(p)\n" +
+        "show entries(p)\n" +
+        "show has(p, \"x\")\n" +
+        "show has(p, \"nope\")\n" +
+        "show len(keys(p))\n" +
+        "show p[\"x\"]\n" +
+        "show p[\"missing\"]\n" +
+        "mut total = 0\n" +
+        "for k in sort(keys(p)) { total = total + p[k] }\n" +
+        "show total\n" +
+        "p[\"x\"] = 30\n" +
+        "show p.x\n" +
+        "show sort(keys(p))")
+
+    -- A string inside a container prints quoted. It did in two backends and
+    -- not in the third, which showed ["a", "b"] as [a, b] — and disagreed
+    -- with its own map display, which quoted.
+    same("container_display",
+        "show [\"a\", \"b\"]\n" +
+        "show str([\"a\", \"b\"])\n" +
+        "show { \"k\": \"v\" }\n" +
+        "show [1, \"two\", true, null]\n" +
+        "show [[\"nested\"]]\n" +
+        "show join([\"a\", \"b\"], \"-\")")
+
     -- ── the freestanding profile ──────────────────────────
     -- `clarity cc --freestanding` is for a target with no operating system
     -- underneath. What it has to guarantee is narrow and checkable: the

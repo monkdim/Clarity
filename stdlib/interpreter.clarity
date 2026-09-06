@@ -100,6 +100,14 @@ class ClarityClass {
     }
 }
 
+-- The field map behind a class instance, or the value itself for anything
+-- else. Used by keys/values/entries/has so that asking a program's object
+-- what it holds answers with the program's own fields.
+fn _unwrap_props(v) {
+    if type(v) == "ClarityInstance" { return v.properties }
+    return v
+}
+
 class ClarityInstance {
     fn init(klass) {
         this._clarityType = "ClarityInstance"
@@ -326,11 +334,17 @@ class Interpreter {
         this.global_env.set("flat", fn(lst) { return flat(lst) }, true)
         this.global_env.set("zip", fn(...lists) { return zip(...lists) }, true)
         this.global_env.set("unique", fn(lst) { return unique(lst) }, true)
-        this.global_env.set("keys", fn(m) { return keys(m) }, true)
-        this.global_env.set("values", fn(m) { return values(m) }, true)
-        this.global_env.set("entries", fn(m) { return entries(m) }, true)
+        -- A class instance is a ClarityInstance here, whose own fields are
+        -- _clarityType, klass and properties — so the host's keys() reported
+        -- those three, which is this interpreter's internals rather than
+        -- anything the program wrote. The transpiled backend, where an
+        -- instance is a real JS object, has always answered with the
+        -- program's own field names; these four now agree with it.
+        this.global_env.set("keys", fn(m) { return keys(_unwrap_props(m)) }, true)
+        this.global_env.set("values", fn(m) { return values(_unwrap_props(m)) }, true)
+        this.global_env.set("entries", fn(m) { return entries(_unwrap_props(m)) }, true)
         this.global_env.set("merge", fn(...maps) { return merge(...maps) }, true)
-        this.global_env.set("has", fn(col, key) { return has(col, key) }, true)
+        this.global_env.set("has", fn(col, key) { return has(_unwrap_props(col), key) }, true)
 
         -- Strings
         this.global_env.set("split", fn(s, sep) { return split(s, sep ?? " ") }, true)
@@ -631,11 +645,14 @@ class Interpreter {
         } elif target.node_type == "IndexExpression" {
             let obj = this.evaluate(target.object, env)
             let index = this.evaluate(target.index, env)
+            -- An instance writes through its field map, matching the read
+            -- side: p["x"] = 1 and p.x = 1 are the same assignment.
+            let store = if type(obj) == "ClarityInstance" { obj.properties } else { obj }
             if node.operator == "=" {
-                obj[index] = value
+                store[index] = value
             } else {
-                let current = obj[index]
-                obj[index] = this._compound_assign(current, node.operator, value, node.line)
+                let current = store[index]
+                store[index] = this._compound_assign(current, node.operator, value, node.line)
             }
         } else {
             throw "RuntimeError: Invalid assignment target (line {node.line})"
@@ -1455,6 +1472,15 @@ class Interpreter {
                 throw "RuntimeError: Index {index} out of bounds (line {node.line})"
             }
             return obj[index]
+        }
+        -- An instance reads like the map of its fields, which is what makes
+        -- keys(obj) useful: `for k in keys(p) { p[k] }` is the loop anyone
+        -- writes next, and it used to be a TypeError. A missing field is
+        -- null, the same answer a map gives, rather than an error — indexing
+        -- is the lenient way of asking, and `.field` is the strict one.
+        if t == "ClarityInstance" {
+            if not has(obj.properties, index) { return null }
+            return obj.properties[index]
         }
         throw "TypeError: Cannot index into {cl_type_name(obj)} (line {node.line})"
     }

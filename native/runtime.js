@@ -646,7 +646,11 @@ export function display(value) {
     return String(value);
   }
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return '[' + value.map(display).join(', ') + ']';
+  // repr, not display, for the elements: a string inside a container is
+  // shown quoted, the same as the object branch below already does and the
+  // same as both other backends do. Displaying them bare made ["a", "b"]
+  // print as [a, b] here and as ["a", "b"] everywhere else.
+  if (Array.isArray(value)) return '[' + value.map(repr).join(', ') + ']';
   if (value instanceof ClarityEnum) return value.toString();
   if (value instanceof ClarityInstance) return `<${value._className} instance>`;
   if (typeof value === 'function') return `<fn ${value.name || 'anonymous'}>`;
