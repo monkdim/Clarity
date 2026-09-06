@@ -82,17 +82,25 @@ fn op_lookup(_: *vfs.Fs, parent: *vfs.Inode, name: []const u8) !?*vfs.Inode {
     return null;
 }
 
+/// Directory entries own their names. `name` belongs to the caller — often a
+/// slice of a path buffer that is about to go out of scope — so storing it
+/// directly leaves the entry pointing at whatever occupies that memory next.
+fn add_child(parent: *vfs.Inode, name: []const u8, inode: *TmpfsInode) !void {
+    const gpa = heap.allocator();
+    const owned = try gpa.dupe(u8, name);
+    const dir: *TmpfsInode = @fieldParentPtr("base", parent);
+    try dir.children.append(gpa, .{ .name = owned, .inode = inode });
+}
+
 fn op_create(_: *vfs.Fs, parent: *vfs.Inode, name: []const u8, mode: vfs.Mode) !*vfs.Inode {
     const inode = try alloc_inode(.regular, mode);
-    const dir: *TmpfsInode = @fieldParentPtr("base", parent);
-    try dir.children.append(undefined, .{ .name = name, .inode = inode });
+    try add_child(parent, name, inode);
     return &inode.base;
 }
 
 fn op_mkdir(_: *vfs.Fs, parent: *vfs.Inode, name: []const u8, mode: vfs.Mode) !*vfs.Inode {
     const inode = try alloc_inode(.directory, mode);
-    const dir: *TmpfsInode = @fieldParentPtr("base", parent);
-    try dir.children.append(undefined, .{ .name = name, .inode = inode });
+    try add_child(parent, name, inode);
     return &inode.base;
 }
 
@@ -113,12 +121,15 @@ fn op_rmdir(fs: *vfs.Fs, parent: *vfs.Inode, name: []const u8) !void {
 
 fn op_read(_: *vfs.Fs, inode: *vfs.Inode, offset: u64, buf: []u8) !usize {
     const file: *TmpfsInode = @fieldParentPtr("base", inode);
-    if (file.data == null) return 0;
-    const data = file.data.?;
-    if (offset >= data.len) return 0;
-    const remaining = data.len - offset;
-    const n = @min(remaining, buf.len);
-    @memcpy(buf[0..n], data[offset..][0..n]);
+    const data = file.data orelse return 0;
+    // Bound by the file's size, not the buffer's length. The backing buffer is
+    // rounded up to a power of two, so reading to `data.len` hands back the
+    // slack after the data as though it were file content.
+    const off: usize = @intCast(offset);
+    const size: usize = @intCast(inode.size);
+    if (off >= size or off >= data.len) return 0;
+    const n = @min(@min(size - off, buf.len), data.len - off);
+    @memcpy(buf[0..n], data[off..][0..n]);
     return n;
 }
 
@@ -141,10 +152,22 @@ fn op_write(_: *vfs.Fs, inode: *vfs.Inode, offset: u64, buf: []const u8) !usize 
 }
 
 fn op_truncate(_: *vfs.Fs, inode: *vfs.Inode, size: u64) !void {
+    const file: *TmpfsInode = @fieldParentPtr("base", inode);
+    if (size > @as(u64, @intCast(file.capacity))) return error.NoSpace;
     inode.size = size;
 }
 
 fn op_readdir(_: *vfs.Fs, inode: *vfs.Inode) ![]const vfs.DirEntry {
-    _ = inode;
-    return &.{};
+    const dir: *TmpfsInode = @fieldParentPtr("base", inode);
+    if (inode.file_type != .directory) return error.NotADirectory;
+    const gpa = heap.allocator();
+    const out = try gpa.alloc(vfs.DirEntry, dir.children.items.len);
+    for (dir.children.items, 0..) |child, i| {
+        out[i] = .{
+            .name = child.name,
+            .inode_num = child.inode.base.num,
+            .file_type = child.inode.base.file_type,
+        };
+    }
+    return out;
 }

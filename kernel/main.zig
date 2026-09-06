@@ -24,6 +24,7 @@ const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
 const usermode = @import("usermode.zig");
 const threadtest = @import("threadtest.zig");
+const fstest = @import("fstest.zig");
 
 extern const __kernel_phys_end: u8;
 
@@ -122,7 +123,15 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         hang();
     };
 
-    // 8. Leave ring 0 for the first time.
+    // 8. Filesystem. `vfs.resolve` was a stub returning null, so nothing
+    //    could open a path and spawn_user could never load an executable.
+    fstest.run() catch |err| {
+        console.print("PANIC: filesystem self-test: ");
+        console.println(@errorName(err));
+        hang();
+    };
+
+    // 9. Leave ring 0 for the first time.
     //
     //    This runs before spawn_user because everything spawn_user needs — an
     //    ELF loader, a per-process address space, the scheduler's user path —
