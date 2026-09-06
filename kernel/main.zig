@@ -23,6 +23,7 @@ const tmpfs = @import("fs/tmpfs.zig");
 const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
 const initprog = @import("initprog.zig");
+const clarityprog = @import("clarityprog.zig");
 const threadtest = @import("threadtest.zig");
 const fstest = @import("fstest.zig");
 const preempttest = @import("preempttest.zig");
@@ -172,12 +173,27 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     //    mapping into a fresh address space, and the CR3 switch — none of
     //    which had ever run, because nothing could open a file to reach them.
     //
-    //    It does not return. The process owns the CPU until it exits, and
-    //    there is no other thread to schedule when it does.
+    //    It returns when the process exits: the thread now has a kernel-side
+    //    entry context like any other, so the scheduler dispatches it and
+    //    there is somewhere to come back to.
     initprog.run() catch |err| {
         console.print("PANIC: /bin/clarity-init: ");
         console.println(@errorName(err));
+        hang();
     };
+
+    // 12. A Clarity program. Everything above this ran code written for the
+    //    kernel; this is a Clarity source file compiled to C by
+    //    `clarity cc --freestanding`, linked against kernel/user/libc, and
+    //    run as a second process — which also means the first one exited and
+    //    the kernel carried on, rather than the boot path ending inside it.
+    clarityprog.run() catch |err| {
+        console.print("PANIC: /bin/clarity-demo: ");
+        console.println(@errorName(err));
+        hang();
+    };
+
+    console.println("ClarityOS: userspace complete.");
     hang();
 }
 

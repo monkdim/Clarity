@@ -1,0 +1,52 @@
+-- /bin/clarity-demo — a Clarity program, compiled and run by ClarityOS.
+--
+-- Everything here is chosen because it fails loudly if some particular part
+-- of the stack is wrong, rather than because it makes a nice demo:
+--
+--   the class and its method     the object model and the method table
+--   try / catch / finally        setjmp and longjmp in the libc
+--   the map, sorted keys         malloc, realloc, qsort, strcmp
+--   the string work              the str* family and the arena
+--   the float line               SSE in ring 3, and printf's %g against
+--                                strtod — the shortest round-trip loop
+--   the 400-element list         enough allocation to make brk grow past
+--                                its first chunk
+--
+-- The final line is the one the boot gate greps for. It comes last on
+-- purpose: reaching it means every line above it also ran.
+
+class Tally {
+    fn init() { this.n = 0 }
+    fn add(k) { this.n = this.n + k
+                return this.n }
+}
+
+fn risky(x) {
+    if x < 0 { throw "negative: " + str(x) }
+    return x * 3
+}
+
+let t = Tally()
+for i in 1..11 { t.add(i) }
+show "tally " + str(t.n)
+
+try { show str(risky(-4)) }
+catch e { show "caught " + str(e) }
+finally { show "finally ran" }
+
+let m = { "pear": 2, "apple": 1, "fig": 3 }
+mut parts = []
+for k in sort(keys(m)) { push(parts, upper(k) + "=" + str(m[k])) }
+show join(parts, " ")
+
+let squares = map(filter([1, 2, 3, 4, 5, 6, 7, 8], fn(v) { return v % 2 == 0 }), fn(v) { return v * v })
+show "evens squared " + join(squares, ",")
+
+show "float " + str(355.0 / 113.0) + " " + str(sqrt(2.0)) + " " + str(2.5 ** 2)
+show "text " + trim("  spaced  ") + "|" + replace("a-b-c", "-", "+") + "|" + str(index_of("clarity", "rit"))
+
+mut big = []
+for i in 1..401 { push(big, str(i * i)) }
+show "list " + str(len(big)) + " last " + big[399]
+
+show "clarity-demo: all checks passed"

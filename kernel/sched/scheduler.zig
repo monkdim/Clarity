@@ -61,7 +61,6 @@ pub const Thread = struct {
     context: context.Context = .{},
     kernel_stack_top: u64 = 0,
     iret_rsp: u64 = 0,                      // for first entry to userspace
-    cr3: u64 = 0,                            // address space root
     next: ?*Thread = null,
     ticks_run: u64 = 0,
     exit_code: i32 = 0,
@@ -142,6 +141,12 @@ pub fn init() void {
     // here means it cannot be missed again: there is one kernel heap, and
     // anything with a run queue needs a process table to go with it.
     process_table = process.Table.init(heap.allocator());
+    // The boot path's own address space. It matters more than the kernel
+    // threads' does: the boot stack is a low identity-mapped address, not an
+    // HHDM one, so it is the one stack a process's address space does *not*
+    // map — and switching back to it with a process's CR3 still loaded faults
+    // on the first pop.
+    boot_context.cr3 = vmm.kernel().pml4_phys;
 }
 
 pub fn freeze() void {
@@ -164,6 +169,10 @@ pub fn spawn_kthread(entry: *const fn () noreturn, name: []const u8, priority: P
     const stack_phys = pmm.alloc_pages(stack_pages) orelse return error.OutOfMemory;
     const stack_top = 0xFFFF_8000_0000_0000 + stack_phys + stack_pages * pmm.PAGE_SIZE;
     context.init_kernel_thread(&t.context, stack_top, @ptrCast(entry), 0);
+    // Kernel threads run in the kernel's address space, and say so rather than
+    // inheriting whichever one happened to be loaded: with a user process in
+    // the picture, "whatever CR3 was current" is sometimes a process's.
+    t.context.cr3 = vmm.kernel().pml4_phys;
     t.kernel_stack_top = stack_top;
 
     queues[@intFromEnum(priority)].enqueue(t);
@@ -209,7 +218,7 @@ pub fn spawn_user(path: []const u8) !*Thread {
     const kstack_pages = 4;
     const kstack_phys = pmm.alloc_pages(kstack_pages) orelse return error.OutOfMemory;
     t.kernel_stack_top = 0xFFFF_8000_0000_0000 + kstack_phys + kstack_pages * pmm.PAGE_SIZE;
-    t.cr3 = loaded.address_space.pml4_phys;
+    t.context.cr3 = loaded.address_space.pml4_phys;
 
     // 4. Build the IRET frame so the first dispatch lands in user
     //    mode at the ELF entry point.
@@ -221,8 +230,40 @@ pub fn spawn_user(path: []const u8) !*Thread {
     const user_ss: u16 = gdt.USER_DATA;
     t.iret_rsp = context.build_iret_frame(t.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, user_rflags, user_cs, user_ss);
 
+    // Give the thread a kernel-side context too, so the scheduler can reach
+    // it the same way it reaches any other thread.
+    //
+    // Without this its Context is all zeroes, so a switch into it jumps to
+    // address 0. The first process worked around that by never going through
+    // the scheduler: the boot path took the thread back off the queue and
+    // entered ring 3 by hand. That works exactly once. A second process needs
+    // the first to be able to exit *back* to something, and there is nothing
+    // to go back to when the entry was a one-way jump off the boot stack.
+    //
+    // The trampoline runs on the thread's own kernel stack, which is an HHDM
+    // address every address space maps — so unlike the boot path, there is no
+    // window where the stack under our feet is about to be unmapped.
+    context.init_kernel_thread(&t.context, t.kernel_stack_top - context.IRET_FRAME_RESERVE, user_entry, 0);
+
     queues[@intFromEnum(Priority.normal)].enqueue(t);
     return t;
+}
+
+/// First-run entry for a user thread, called by the scheduler like any other
+/// kernel thread entry point.
+///
+/// It takes no argument, and reads `current` instead, because
+/// init_kernel_thread's argument passing has never been exercised — every
+/// caller passes zero — and a first user of it should not be the boot path.
+/// `yield` sets `current` to this thread immediately before switching here,
+/// under the same `cli` that protects the rest of the switch, so it is the
+/// right thread by construction.
+fn user_entry(_: u64) callconv(.C) noreturn {
+    const t = current orelse {
+        console.println("PANIC: user_entry with no current thread");
+        while (true) asm volatile ("cli; hlt");
+    };
+    context.enter_userland(t.context.cr3, t.iret_rsp, @intFromPtr(&t.context.fpu));
 }
 
 /// The context the boot path is running on. `yield` needs somewhere to save
@@ -345,22 +386,6 @@ pub fn run_queued() void {
     boot_context.rip = 0;
 }
 
-/// Make `t` the running thread directly, without the run queue picking it.
-///
-/// `spawn_user` queues the thread it builds, which is what you want when the
-/// scheduler is going to dispatch it. The first process is the exception: the
-/// boot path enters it by hand, so the thread has to come back *off* the
-/// queue and be installed as current. Otherwise the kernel believes nothing
-/// is running — getpid would answer 0, exit would have no thread to end, and
-/// a later yield could hand the CPU to a thread that is already on it.
-pub fn adopt_current(t: *Thread) void {
-    _ = queues[@intFromEnum(t.priority)].remove(t);
-    t.state = .running;
-    current = t;
-    // An interrupt taken in ring 3 lands on the stack the TSS names, so RSP0
-    // has to be this thread's before the CPU is ever in ring 3.
-    if (t.kernel_stack_top != 0) gdt.set_kernel_stack(t.kernel_stack_top);
-}
 
 /// Preempt the running thread. Called from the timer IRQ.
 ///
@@ -476,8 +501,8 @@ pub fn fork() !Pid {
         .name = child.name,
         .priority = .normal,
         .state = .runnable,
-        .cr3 = child_space.pml4_phys,
     };
+    t.context.cr3 = child_space.pml4_phys;
     next_tid += 1;
     child.main_thread_tid = t.tid;
     queues[@intFromEnum(Priority.normal)].enqueue(t);
@@ -498,13 +523,13 @@ pub fn exec(path: []const u8) !void {
 
     // Tear down the old address space; the new one replaces it.
     proc.address_space = loaded.address_space;
-    cur.cr3 = loaded.address_space.pml4_phys;
+    cur.context.cr3 = loaded.address_space.pml4_phys;
     cur.iret_rsp = context.build_iret_frame(cur.kernel_stack_top, loaded.entry_rip, loaded.user_rsp, 0x202, gdt.USER_CODE, gdt.USER_DATA);
     proc.name = path;
 
     // Re-enter user mode with the new image. CR3 goes in with it — see
     // enter_userland for why they cannot be separate statements.
-    context.enter_userland(cur.cr3, cur.iret_rsp, @intFromPtr(&cur.context.fpu));
+    context.enter_userland(cur.context.cr3, cur.iret_rsp, @intFromPtr(&cur.context.fpu));
 }
 
 pub const WaitResult = struct { pid: Pid, exit_code: i32 };

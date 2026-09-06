@@ -16,7 +16,6 @@
 const console = @import("arch/x86_64/console.zig");
 const vfs = @import("fs/vfs.zig");
 const sched = @import("sched/scheduler.zig");
-const context = @import("arch/x86_64/context.zig");
 
 pub const PATH = "/bin/clarity-init";
 
@@ -40,35 +39,22 @@ pub fn install() !void {
     if (n != IMAGE.len) return error.ShortWrite;
 }
 
-/// Load it and run it. This does not return: the process owns the CPU until
-/// it exits, and `sys_exit` halts because there is nothing else to schedule.
-pub fn run() !noreturn {
+/// Install it, hand it to the scheduler, and come back when it has exited.
+///
+/// This used to enter ring 3 by hand: `cli`, take the thread back off the run
+/// queue, make it current, and jump. That was the only way it could work,
+/// because a user thread had no kernel-side context for the scheduler to
+/// switch into — so the entry was a one-way jump off the boot stack, and the
+/// process's exit had nothing to return to. `spawn_user` now gives the thread
+/// an entry trampoline like any other, which is what makes a *second* process
+/// possible.
+pub fn run() !void {
     try install();
 
     const t = try sched.spawn_user(PATH);
-    console.print("  init: loaded, entry frame at ");
+    console.print("  init: queued, entry frame at ");
     console.print_hex(t.iret_rsp);
     console.println("");
 
-    // From here to the `iretq` in enter_userland is one uninterrupted region.
-    // In the middle of it `current` names the init thread while the CPU is
-    // still on the boot stack, and at the end of it CR3 changes out from
-    // under that stack; neither is a state an interrupt should observe.
-    asm volatile ("cli" ::: "memory");
-
-    // spawn_user queues the thread for the scheduler to pick. We are about to
-    // enter it directly instead, so take it back off the queue and make it
-    // current — otherwise the kernel would run a process it does not believe
-    // is running. This also points the TSS at its kernel stack, which has to
-    // happen before the CPU is ever in ring 3.
-    sched.adopt_current(t);
-
-    console.println("  init: entering userspace");
-
-    // Installing the address space and leaving for ring 3 are one step, not
-    // two: this function runs on the boot stack, which is a low
-    // identity-mapped address the process's address space does not map. See
-    // enter_userland — anything at all between the two would fault on a
-    // stack that no longer exists.
-    context.enter_userland(t.cr3, t.iret_rsp, @intFromPtr(&t.context.fpu));
+    sched.run_queued();
 }
