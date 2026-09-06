@@ -71,7 +71,7 @@ jobs:
           qemu-system-x86_64 --version
           zig version
 
-      - name: Cache Zig build outputs
+      - name: Cache Zig build outputs + vendored QuickJS
         uses: actions/cache@v4
         with:
           path: |
@@ -79,9 +79,13 @@ jobs:
             kernel/.zig-cache
             runtime/freestanding/zig-out
             runtime/freestanding/.zig-cache
-          key: os-zig-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld', 'runtime/freestanding/**/*.zig') }}
+            runtime/freestanding/third_party/quickjs
+          key: os-zig-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld', 'runtime/freestanding/**/*.zig', 'runtime/freestanding/**/*.c') }}
           restore-keys: |
             os-zig-${{ runner.os }}-
+
+      - name: Fetch QuickJS (freestanding runtime dependency)
+        run: runtime/freestanding/third_party/fetch_quickjs.sh
 
       - name: Build ClarityOS (kernel + runtime + ISO)
         run: ./native/dist/clarity os build
