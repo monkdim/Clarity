@@ -57,6 +57,9 @@ claim with no marker behind it is in "What does not run yet".
 - **a program at EL0**: it reads its own memory, calls into the kernel and
   gets answers back, is interrupted by the timer and carries on, and when
   it writes to its read-only text page the kernel takes the CPU back
+- kernel threads switching, cooperatively and preemptively — the preemption
+  test's threads never yield, and it checks not only that both ran but that
+  each resumed inside its own code, which counters alone cannot see
 
 ## What does not run yet
 
@@ -70,9 +73,10 @@ Written, compiles, and nothing has ever executed it:
 
 Not written:
 
-- On aarch64: a scheduler, a filesystem, an ELF loader. The EL0 program is
-  assembled into the kernel image, not loaded from anywhere. There is one
-  process and nothing switches away from it.
+- On aarch64: a scheduler, a filesystem, an ELF loader. Threads can be
+  switched, but nothing keeps run queues, priorities or a process table —
+  the boot selftest drives the switching primitive directly. The EL0 program
+  is assembled into the kernel image, not loaded from anywhere.
 - Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired:
   read, write, open, close, mmap, brk, exit, fork, exec, wait, kill,
   getpid, getppid, nanosleep, clock_gettime, ioctl. The rest return
@@ -104,6 +108,7 @@ kernel/
 │   ├── boot.S              Image header, EL2→EL1, MMU on, branch high
 │   ├── vectors.S           the 16 exception vectors
 │   ├── user.S              enter and leave EL0; the EL0 probe
+│   ├── context.zig/.S      kernel thread switch, including the address space
 │   ├── vm.zig              physical ↔ kernel-virtual, in one place
 │   ├── mmu.zig             translation after the boot stub; cache upkeep
 │   ├── paging.zig          per-process TTBR0 page tables
@@ -141,8 +146,8 @@ kernel/
 ```
 
 The `*test.zig` files at the top level (`threadtest`, `preempttest`,
-`fputest`, `fstest`) and `initprog.zig` / `clarityprog.zig` are the boot
-selftests. They are not a test framework: each one is a thing the kernel
+`fputest`, `fstest`, `threadtest_aarch64`) and `initprog.zig` /
+`clarityprog.zig` are the boot selftests. They are not a test framework: each one is a thing the kernel
 does at boot, printing a marker that CI requires. That is deliberate — a
 kernel subsystem that is never executed looks exactly like one that works,
 and most of the bugs found in this kernel were in code that had never run.
