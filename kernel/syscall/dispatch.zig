@@ -12,6 +12,8 @@ const sched = @import("../sched/scheduler.zig");
 const vfs = @import("../fs/vfs.zig");
 const console = @import("../arch/x86_64/console.zig");
 const arch_syscall = @import("../arch/x86_64/syscall.zig");
+const pmm = @import("../mm/pmm.zig");
+const vmm = @import("../mm/vmm.zig");
 
 /// Canonical syscall numbers — must match stdlib/kernel_abi.clarity.
 pub const Nr = enum(u32) {
@@ -114,6 +116,7 @@ pub fn dispatch(nr: u64, args: Args) i64 {
         .open => return sys_open(args),
         .close => return sys_close(args),
         .mmap => return sys_mmap(args),
+        .brk => return sys_brk(args),
         .exit => return sys_exit(args),
         .fork => return sys_fork(),
         .exec => return sys_exec(args),
@@ -179,6 +182,71 @@ fn sys_close(args: Args) i64 {
     const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
     vfs.close(fd) catch return -@as(i64, @intFromEnum(Errno.ebadf));
     return 0;
+}
+
+/// brk(addr) — move the program break, the top of the process's heap.
+///
+/// The loader has always worked out where the heap should start (the page
+/// after the last segment) and `spawn_user` has always thrown that value
+/// away, so there was nowhere for a heap to be. `brk` was likewise in the
+/// syscall table and absent from the switch above, so a program calling it
+/// got ENOSYS. Between them that meant malloc — and therefore any C program —
+/// had nothing to build on.
+///
+/// Linux convention: brk(0) reports the current break, and a request that
+/// cannot be satisfied returns the current break rather than an error, so the
+/// caller compares the result against what it asked for.
+///
+/// Shrinking lowers the break without unmapping: the pages stay with the
+/// process until it exits. That is a limitation rather than a bug — the
+/// memory is still the process's own — and it avoids having to reason about a
+/// page that two successive brks disagree about.
+/// How large a process's heap may grow. Far more than anything here needs,
+/// and far below the user stack, so the two cannot meet.
+const HEAP_MAX: u64 = 256 * 1024 * 1024;
+
+fn sys_brk(args: Args) i64 {
+    const cur = sched.current_thread() orelse return -@as(i64, @intFromEnum(Errno.esrch));
+    const proc = sched.process_table.lookup(cur.pid) orelse return -@as(i64, @intFromEnum(Errno.esrch));
+
+    const requested = args.a0;
+    if (requested == 0) return @intCast(proc.brk);
+    if (requested < proc.brk_start) return @intCast(proc.brk);
+    // A ceiling on the heap. Without one, a single wild request — a garbage
+    // pointer, or a size computed from an unchecked length — walks up through
+    // every physical page the machine has before it can fail, and takes the
+    // whole system with it. Refusing up front costs nothing and the caller
+    // sees the same "you got less than you asked for" it handles anyway.
+    if (requested > proc.brk_start +| HEAP_MAX) return @intCast(proc.brk);
+    if (requested <= proc.brk) {
+        proc.brk = requested;
+        return @intCast(proc.brk);
+    }
+
+    // Grow: map every page that does not already back the heap. If a mapping
+    // fails partway, the break stays where it got to and the caller sees that
+    // it got less than it asked for.
+    const page: u64 = pmm.PAGE_SIZE;
+    var addr = (proc.brk + page - 1) & ~(page - 1);
+    const end = (requested + page - 1) & ~(page - 1);
+    while (addr < end) : (addr += page) {
+        const phys = pmm.alloc_page() orelse return @intCast(proc.brk);
+        zero_user_page(phys);
+        vmm.map_page(proc.address_space, addr, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER | vmm.PAGE_NX) catch {
+            pmm.free_page(phys);
+            return @intCast(proc.brk);
+        };
+        proc.brk = addr + page;
+    }
+    proc.brk = requested;
+    return @intCast(proc.brk);
+}
+
+/// A fresh heap page reads as zero. A process is entitled to assume its heap
+/// does not arrive holding whatever the last owner of that frame left in it.
+fn zero_user_page(phys: u64) void {
+    const ptr: [*]u8 = @ptrFromInt(0xFFFF_8000_0000_0000 + phys);
+    @memset(ptr[0..pmm.PAGE_SIZE], 0);
 }
 
 // ── mmap / ioctl — graphics fast-path ───────────

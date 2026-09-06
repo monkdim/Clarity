@@ -186,6 +186,10 @@ pub fn spawn_user(path: []const u8) !*Thread {
         .address_space = loaded.address_space,
         .state = .runnable,
     };
+    // The loader computed where this image's heap should start and nothing
+    // kept it, so there was nowhere for brk to begin. Keep it.
+    proc.brk_start = loaded.brk_start;
+    proc.brk = loaded.brk_start;
     try process_table.register(proc);
 
     const t = @as(*Thread, @ptrCast(@alignCast(heap.alloc(@sizeOf(Thread)) orelse return error.OutOfMemory)));
@@ -450,6 +454,12 @@ pub fn fork() !Pid {
         .name = parent.name,
         .address_space = child_space,
         .state = .runnable,
+        // The child's heap is where the parent's was: clone_address_space
+        // copies the mappings, so the memory below the break is already
+        // there. Leaving these at zero would let the child's first brk map
+        // over pages it already owns.
+        .brk = parent.brk,
+        .brk_start = parent.brk_start,
     };
     try process_table.register(child);
     try parent.add_child(child.pid, process_table.gpa);

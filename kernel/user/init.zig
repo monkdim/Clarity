@@ -14,6 +14,7 @@
 const std = @import("std");
 
 const NR_WRITE: u64 = 1;
+const NR_BRK: u64 = 9;
 const NR_EXIT: u64 = 12;
 
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
@@ -61,6 +62,32 @@ export fn _start() callconv(.C) noreturn {
         _ = write(1, "  [ok] user .bss zeroed\n");
     } else {
         _ = write(1, "  [FAIL] user .bss held garbage\n");
+    }
+
+    // A heap. brk(0) reports the current break; asking for more maps pages
+    // that were not there before. This is what malloc will sit on.
+    const before = syscall3(NR_BRK, 0, 0, 0);
+    if (before <= 0) {
+        _ = write(1, "  [FAIL] user heap: brk(0) reported no break\n");
+        exit(1);
+    }
+    const want = @as(u64, @intCast(before)) + 8192;
+    const after = syscall3(NR_BRK, want, 0, 0);
+    if (@as(u64, @intCast(after)) != want) {
+        _ = write(1, "  [FAIL] user heap: brk did not grow\n");
+        exit(1);
+    }
+
+    // Checking the return value alone would prove nothing — the kernel could
+    // return the number without mapping anything. Write through the new
+    // break and read it back, volatile so neither end can be folded away. If
+    // the page is not mapped this faults instead, which the boot log shows.
+    const cell: *volatile u64 = @ptrFromInt(@as(usize, @intCast(before)) + 16);
+    cell.* = 0xC0FFEE;
+    if (cell.* == 0xC0FFEE) {
+        _ = write(1, "  [ok] user heap: brk grew and the memory holds\n");
+    } else {
+        _ = write(1, "  [FAIL] user heap: wrote to brk memory, read back wrong\n");
     }
 
     exit(0);
