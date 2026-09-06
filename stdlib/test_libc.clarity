@@ -1,0 +1,196 @@
+-- The freestanding C library in kernel/user/libc, checked against the host's.
+--
+-- A C library is the one thing in this project that cannot be tested by
+-- agreeing with itself: "my printf and my strtod round-trip" would pass with
+-- both of them wrong in the same direction. So every check here compares
+-- against an implementation that was not written here — the host's libc —
+-- with the same source compiled twice: once hosted, once with -nostdinc
+-- -nostdlib against kernel/user/libc.
+--
+-- Three kinds of check, because the three parts have different obligations:
+--
+--   exact     string, ctype, printf's integer conversions, strtol, qsort,
+--             setjmp, malloc, and the float conversions. These implement a
+--             specification, so any difference from the host is a bug and the
+--             outputs must be byte-identical.
+--   bounded   sin/cos/tan/log/exp/pow, which are series approximations. The
+--             measured worst case is asserted, so they can only get better.
+--   end-to-end  a Clarity program compiled with `clarity cc --freestanding`,
+--             linked against this library, run, and required to print what
+--             the interpreter prints.
+--
+-- Skipped anywhere the library does not apply: it is x86-64 assembly and
+-- Linux/ClarityOS syscall numbers, and it needs clang for the resource
+-- directory that supplies stddef.h and stdarg.h.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "c_codegen.clarity" import compile_to_c_freestanding
+
+mut PASSED = 0
+mut FAILED = 0
+fn ok(cond, msg) {
+    if cond { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: {msg}" }
+}
+
+let LIBC = "kernel/user/libc"
+let DIR = "/tmp/_cllibc"
+
+fn have_clang() { return len(trim(exec("clang -print-resource-dir 2>/dev/null"))) > 0 }
+
+fn skip(why) {
+    show "-- libc: {why} — skipped --"
+    show ""
+    show "libc: 0 passed, 0 failed (skipped)"
+}
+
+-- Build the same source twice and return [host_output, freestanding_output].
+fn build_both(name) {
+    let src = LIBC + "/test/" + name + ".c"
+    let r = DIR + "/" + name + "_host"
+    let m = DIR + "/" + name + "_free"
+    let hb = exec_full("clang -O2 -w -fno-builtin " + src + " -o " + r + " -lm")
+    if not exists(r) { throw "host build of " + name + " failed:\n" + hb.stderr }
+    let fb = exec_full(LIBC + "/link.sh " + src + " " + m + " -DCLARITY_LIBC_LINUX")
+    if not exists(m) { throw "freestanding build of " + name + " failed:\n" + fb.stderr }
+    let ro = exec_full(r)
+    let mo = exec_full(m)
+    write(DIR + "/" + name + ".host.txt", ro.stdout)
+    write(DIR + "/" + name + ".free.txt", mo.stdout)
+    return [ro.stdout, mo.stdout]
+}
+
+-- Report the first differing line, not just "they differ": a diff of 8000
+-- lines is only useful if it says which one.
+fn first_diff(a, b) {
+    let la = split(a, "\n")
+    let lb = split(b, "\n")
+    mut i = 0
+    while i < len(la) and i < len(lb) {
+        if la[i] != lb[i] { return "line " + str(i + 1) + "\n    host: " + la[i] + "\n    free: " + lb[i] }
+        i += 1
+    }
+    if len(la) != len(lb) { return "line counts differ: host " + str(len(la)) + ", free " + str(len(lb)) }
+    return null
+}
+
+if contains(exec("uname"), "Linux") == false {
+    skip("not Linux (this library uses Linux/ClarityOS syscall numbers)")
+} elif contains(exec("uname -m"), "x86_64") == false {
+    skip("not x86-64 (setjmp and the entry stub are x86-64 assembly)")
+} elif not have_clang() {
+    skip("no clang (needed for stddef.h and stdarg.h)")
+} elif not exists(LIBC + "/link.sh") {
+    skip("kernel/user/libc not found — run from the repository root")
+} else {
+    exec("rm -rf " + DIR + " && mkdir -p " + DIR)
+
+    -- ── exact: strings, ctype, printf, strtol, qsort, setjmp, malloc ──
+    show "-- libc: string/ctype/printf/strtol/qsort/setjmp/malloc --"
+    let lp = build_both("libc_probe")
+    let d1 = first_diff(lp[0], lp[1])
+    ok(d1 == null, "libc_probe differs from the host libc at " + str(d1))
+
+    -- ── exact: printf %g and strtod ──
+    -- The runtime finds the shortest decimal that reads back to the same
+    -- double, so these two have to agree with each other *and* with everyone
+    -- else's; 8000 values, including random bit patterns and the subnormal
+    -- and overflow edges.
+    show "-- libc: printf %g / strtod against the host, 8000 values --"
+    let fp = build_both("float_probe")
+    let d2 = first_diff(fp[0], fp[1])
+    ok(d2 == null, "float_probe differs from the host libc at " + str(d2))
+
+    -- ── bounded: the transcendentals ──
+    show "-- libc: sin/cos/tan/log/exp/pow within measured bounds --"
+    let mp = build_both("math_probe")
+    let cmpbin = DIR + "/ulp_cmp"
+    exec_full("clang -O2 -w " + LIBC + "/test/ulp_cmp.c -o " + cmpbin)
+    ok(exists(cmpbin), "ulp_cmp built")
+    if exists(cmpbin) {
+        let rep = exec_full(cmpbin + " " + DIR + "/math_probe.host.txt " + DIR + "/math_probe.free.txt")
+        -- Measured worst case, with headroom. sinbig is wide on purpose: past
+        -- about 1e5 the limit is reducing modulo pi/2 in double arithmetic,
+        -- which holds the *absolute* error near 1e-15 and therefore lets the
+        -- relative error grow without bound near a zero of sine. Tightening
+        -- it needs Payne-Hanek reduction, not a longer series.
+        let bound = { "sin": 2, "cos": 2, "tan": 4, "log": 4, "exp": 2,
+                      "pow": 12, "logbig": 2, "sinbig": 8192 }
+        mut seen = 0
+        for line in split(trim(rep.stdout), "\n") {
+            let f = split(trim(line), " ")
+            if len(f) < 3 { continue }
+            let name = f[0]
+            let ulp = int(f[1])
+            let n = int(f[2])
+            seen += 1
+            ok(has(bound, name), "ulp_cmp reported an unexpected function: " + name)
+            if has(bound, name) {
+                ok(ulp <= bound[name], name + ": " + str(ulp) + " ulp exceeds the bound of " + str(bound[name]))
+                ok(n > 100, name + ": only " + str(n) + " samples compared")
+            }
+        }
+        ok(seen == len(keys(bound)), "expected " + str(len(keys(bound))) + " functions, compared " + str(seen))
+    }
+
+    -- ── end to end: a Clarity program with no operating system under it ──
+    show "-- libc: a compiled Clarity program, freestanding --"
+    let SRC = "class Counter {\n" +
+        "    fn init() { this.n = 0 }\n" +
+        "    fn add(k) { this.n = this.n + k\n return this.n }\n" +
+        "}\n" +
+        "fn risky(x) { if x < 0 { throw \"negative: \" + str(x) }\n return x * 3 }\n" +
+        "let c = Counter()\n" +
+        "for i in 1..6 { c.add(i) }\n" +
+        "show \"counter \" + str(c.n)\n" +
+        "try { show str(risky(-2)) } catch e { show \"caught \" + str(e) } finally { show \"finally\" }\n" +
+        "let m = { \"pear\": 2, \"apple\": 1, \"fig\": 3 }\n" +
+        "for k in sort(keys(m)) { show upper(k) + \"=\" + str(m[k]) }\n" +
+        "let l = map(filter([1, 2, 3, 4, 5, 6], fn(v) { return v % 2 == 0 }), fn(v) { return v * v })\n" +
+        "show join(l, \",\")\n" +
+        "show str(17 % 5) + \" \" + str(sqrt(2.0)) + \" \" + str(floor(-2.5)) + \" \" + str(round(2.5))\n" +
+        "show trim(\"  spaced  \") + \"|\" + replace(\"a-b-c\", \"-\", \"+\") + \"|\" + str(index_of(\"hello\", \"llo\"))\n" +
+        "show json_string(m)\n" +
+        "show hash(\"clarity\")\n" +
+        "show str(2.5 ** 2) + \" \" + str(1.0 / 3.0)\n" +
+        "mut acc = []\n" +
+        "for i in 1..200 { push(acc, str(i * i)) }\n" +
+        "show str(len(acc)) + \" \" + acc[198]\n"
+
+    let interp = Interpreter(null, null)
+    interp.run(parse(tokenize(SRC, "<t>"), SRC))
+    let expected = trim(join(interp.output, "\n"))
+
+    let cfile = DIR + "/prog.c"
+    let bin = DIR + "/prog"
+    write(cfile, compile_to_c_freestanding(parse(tokenize(SRC, "<t>"), SRC)))
+    let lr = exec_full(LIBC + "/link.sh " + cfile + " " + bin + " -DCLARITY_LIBC_LINUX")
+    ok(exists(bin), "the freestanding program linked:\n" + lr.stderr)
+    if exists(bin) {
+        let got = trim(exec_full(bin).stdout)
+        ok(got == expected, "freestanding output differs from the interpreter:\n--- interpreter\n" + expected + "\n--- freestanding\n" + got)
+    }
+
+    -- The point of the exercise: nothing from the operating system is left in
+    -- the binary but the three calls the library itself makes.
+    let syms = exec("nm -u " + bin + " 2>/dev/null")
+    ok(len(trim(syms)) == 0, "the linked program still has undefined symbols:\n" + syms)
+
+    -- The default build targets ClarityOS, whose syscall numbers differ from
+    -- Linux's. It cannot be run here, but it can be linked — which is what
+    -- catches a number changing in kernel/syscall/dispatch.zig without
+    -- src/sys.h following, since that is a compile-time constant on both
+    -- sides and the only thing that keeps them in step is this check plus the
+    -- comment naming the file.
+    let osbin = DIR + "/prog_clarityos"
+    let os_link = exec_full(LIBC + "/link.sh " + cfile + " " + osbin)
+    ok(exists(osbin), "the ClarityOS-numbered build linked:\n" + os_link.stderr)
+
+    exec("rm -rf " + DIR)
+}
+
+show ""
+show "libc: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " libc test(s) failed" }
