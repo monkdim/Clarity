@@ -79,6 +79,11 @@ lands with codegen tests that diff native output against the interpreter.
 - **Precise GC.** Replace conservative C-stack scanning with an emitted shadow stack of live
   roots. Removes the optimiser/ABI fragility that keeps mid-run collection opt-in today, and makes
   default-on GC safe on every platform. Prerequisite for long-running native services.
+  That fragility is not theoretical: the `global_gc_rooted` codegen test runs a compiled program
+  under `CLARITY_GC=1`, and on darwin-arm64 the binary dies partway through its allocation loop —
+  with or without the module-globals root table, so it is the scan itself, not the roots. The test
+  therefore asserts on Linux and skips elsewhere. Mid-run collection stays opt-in until this is
+  precise.
 - **GUI, last.** Desktop/GUI needs a graphics stack; it comes after the headless tiers are solid,
   most likely as an FFI binding to an existing toolkit rather than a from-scratch renderer.
 

@@ -106,6 +106,12 @@ jobs:
             exit 1
           fi
 
+      # The disassembler test binds libcapstone at runtime; without it that
+      # native check produces no output and the suite fails for a reason that
+      # has nothing to do with self-hosting.
+      - name: Install libcapstone
+        run: sudo apt-get update && sudo apt-get install -y libcapstone-dev
+
       # A fixpoint on broken output is still broken, so the self-hosted build
       # has to pass everything the reference build does.
       - name: Self-hosted build passes the full suite
