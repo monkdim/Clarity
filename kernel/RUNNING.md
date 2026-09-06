@@ -40,14 +40,27 @@ gate checks pixel by pixel.
 The serial log should report the machine describing itself:
 
 ```
+  [ok] MMU on (39-bit VA, direct map at 0xffffff8000000000) sctlr.M=1 pc=0xffffff8040082eb4
+  [ok] identity map dropped: 0x9000000 no longer translates, 0xffffff8009000000 -> 0x9000000; TTBR0 is free for userland
   [ok] device tree at 0x48000000, 1048576 bytes, #address-cells=2 #size-cells=2
   [ok] fw_cfg from the device tree at 0x9020000
   ram 0x40000000 + 512 MiB
+  [ok] direct map covers all of RAM (0 GiB added beyond the boot stub's block)
   [ok] pmm: 512 MiB managed, 129349 pages free, allocated 0x402bb000 and it holds
 ```
 
 Change `-m 512` and the RAM line follows it — that is the kernel reading the
-device tree rather than assuming a machine.
+device tree rather than assuming a machine. Try `-m 4096` and the direct-map
+line changes too: the boot stub can only map the gigabyte it was loaded into,
+because it runs before anything has read the device tree, and the other three
+are mapped afterwards by code that has.
+
+The `pc=` on the first line and the addresses on the second are the whole of
+the higher-half port in two lines. The kernel is linked at
+`0xFFFF_FF80_0000_0000 + physical` and running there, and the low half is no
+longer translated at all — those addresses are not printed from the linker
+script, they come from the program counter and from asking the MMU to
+translate an address (`at s1e1w`) and reporting what it said.
 
 ### On an Apple Silicon Mac
 
@@ -85,9 +98,11 @@ work, the boot log up to the point it stops is the useful thing to report.
 
 ### What it does not do yet
 
-Prints to the serial line, draws a fixed pattern, and can allocate a physical
-page. No page tables for processes, no text on screen, no keyboard, no
-programs — those are on the x86 side, and are being brought across.
+Prints to the serial line, draws a fixed pattern, allocates physical pages,
+and runs in the high half with TTBR0 empty — which is the register a process's
+address space goes in. Nothing puts one there yet: no per-process page tables,
+no userland, no text on screen, no keyboard, no programs. Those are on the x86
+side, and are being brought across.
 
 ## x86-64 — the one that runs programs
 
@@ -128,4 +143,7 @@ python3 tools/fb_check.py zig-out/bin/clarity-kernel-aarch64.img
 Boots the ARM kernel, takes a screendump through QEMU's monitor, and verifies
 the colours at the coordinates the kernel draws them. The rest of the boot
 assertions live in `.github/workflows/os-boot.yml`, which boots the x86 image
-three times and requires all fifteen markers on every attempt.
+three times and requires all fifteen markers on every attempt, and boots the
+ARM image twice — once with 512 MiB and once with 4 GiB, because a machine
+that fits inside the boot stub's single mapped gigabyte would pass with the
+code that maps the rest of RAM deleted.

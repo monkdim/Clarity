@@ -19,6 +19,7 @@ const ramfb = @import("arch/aarch64/ramfb.zig");
 const fwcfg = @import("arch/aarch64/fwcfg.zig");
 const fdt = @import("boot/fdt.zig");
 const pmm = @import("mm/pmm.zig");
+const vm = @import("arch/aarch64/vm.zig");
 const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
@@ -32,22 +33,30 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     install_vectors();
     console.println("  [ok] exception vectors (VBAR_EL1)");
 
-    // Turning translation on is the riskiest step of ARM bring-up: get the
-    // attributes wrong and the next instruction fetch faults with no
-    // console left to report it. Reaching the line below means the identity
-    // map, the device attributes covering the UART, and the cache settings
-    // are all correct.
-    mmu.init();
+    // Translation was turned on by the boot stub, before this function could
+    // run at all: the kernel is linked for the high half, so there is no
+    // address at which this code could execute untranslated. Reaching this
+    // line at a high program counter is the evidence that the table the stub
+    // built, the device attributes covering the UART, and the branch into the
+    // high mapping are all correct.
     mmu.report();
 
-    // The vectors installed above had never been reached: nothing on this
-    // architecture generated an interrupt, so the entire delivery path — GIC,
-    // DAIF, the vector entry itself — was untested. On x86 the equivalent gap
-    // was hiding a scheduler that picked a thread and never switched to it.
+    // Stop translating the low half. Everything below this line — the device
+    // tree, fw_cfg, the framebuffer, every page the allocator returns — is
+    // reached through the kernel's direct map, and dropping the identity map
+    // here rather than at the end of boot is what makes that a claim the
+    // machine checks instead of one this file asserts. A single missed
+    // conversion is now a translation fault at the point of the mistake.
+    //
+    // It is also the point of the exercise: TTBR0 is the register the
+    // hardware switches per process, and it is now free for userland.
+    mmu.drop_identity();
+    address_space_selftest();
+
     // What kind of machine is this? On x86 the firmware answers with a
-    // multiboot2 block; here the answer is a device tree, and until now the
-    // pointer to it was taken in x0 and thrown away. Everything below needs
-    // it: how much RAM there is, and where the machine put its devices.
+    // multiboot2 block; here the answer is a device tree, whose address the
+    // bootloader left in x0 — a physical one, which is now a number this
+    // kernel cannot dereference until it says where that memory appears.
     const tree = describe_machine(dtb_phys);
 
     timer.init(100);
@@ -68,6 +77,42 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     console.println("ClarityOS aarch64: EL1 boot ok");
 
     hang();
+}
+
+/// Ask the translation hardware what the address space actually looks like.
+///
+/// Setting TCR_EL1.EPD0 and reading it back proves only that the write
+/// landed. `at s1e1w` runs a real stage-1 translation and reports what came
+/// out, so the three claims below are answered by the MMU rather than by this
+/// file: the low half no longer translates, the high half does, and it maps
+/// where the linker script says it maps.
+///
+/// The UART is the address to ask about, because it is the one this kernel is
+/// printing through — if its high mapping were wrong there would be no
+/// message, and if its low mapping still worked the whole exercise would be
+/// pointless.
+fn address_space_selftest() void {
+    const uart_phys: u64 = 0x0900_0000;
+    const low = mmu.translate(uart_phys);
+    const high = mmu.translate(vm.phys_to_virt(uart_phys));
+
+    if (low == null and high != null and high.? == uart_phys) {
+        console.print("  [ok] identity map dropped: ");
+        console.print_hex(uart_phys);
+        console.print(" no longer translates, ");
+        console.print_hex(vm.phys_to_virt(uart_phys));
+        console.print(" -> ");
+        console.print_hex(high.?);
+        console.println("; TTBR0 is free for userland");
+    } else {
+        console.print("  [FAIL] address space: low=");
+        console.print_hex(low orelse 0);
+        console.print(" high=");
+        console.print_hex(high orelse 0);
+        console.print(" tcr.EPD0=");
+        console.print_dec(if (mmu.identity_dropped()) 1 else 0);
+        console.println("");
+    }
 }
 
 /// The vector table lives in vectors.S, 2 KiB-aligned as VBAR_EL1 requires.
@@ -250,7 +295,7 @@ extern const __stack_top: u8;
 /// run. It is worth distinguishing from a tree that parsed and said something
 /// unexpected, because the two have completely different causes.
 fn describe_machine(dtb_phys: u64) ?fdt.Fdt {
-    const tree = fdt.parse(dtb_phys) orelse {
+    const tree = fdt.parse(vm.phys_to_virt(dtb_phys)) orelse {
         console.print("  [--] no device tree at ");
         console.print_hex(dtb_phys);
         console.println("; using built-in machine defaults");
@@ -306,6 +351,35 @@ fn memory_selftest(tree: ?fdt.Fdt, dtb_phys: u64) void {
         console.println(" MiB");
     }
 
+    // The boot stub could only map the gigabyte it found itself running in,
+    // because it ran before anything had read this tree. Now that the extent
+    // of RAM is known, the rest of it gets mapped — otherwise the allocator
+    // would happily hand out pages above the first gigabyte that this kernel
+    // could not touch.
+    var mmu_regions: [8]mmu.Region = undefined;
+    for (regions[0..n], 0..) |r, i| mmu_regions[i] = .{ .base = r.base, .len = r.len };
+    const added = mmu.map_ram(mmu_regions[0..n]);
+
+    // Every gigabyte the allocator is about to hand pages out of has to be
+    // reachable, and the way to know is to ask the MMU rather than to trust
+    // the loop above. The last byte of each region is the interesting one: it
+    // is the address a mapping that stopped one block short would miss, and
+    // it is exactly where the allocator ends up on a machine with more RAM
+    // than the boot stub could map.
+    var reach_ok = true;
+    for (regions[0..n]) |r| {
+        if (r.len == 0) continue;
+        const last = r.base + r.len - 1;
+        if (mmu.translate(vm.phys_to_virt(last)) != last) reach_ok = false;
+    }
+    if (reach_ok) {
+        console.print("  [ok] direct map covers all of RAM (");
+        console.print_dec(added);
+        console.println(" GiB added beyond the boot stub's block)");
+    } else {
+        console.println("  [FAIL] direct map does not reach the end of RAM");
+    }
+
     // Three things already live in that memory and must never be handed out.
     //
     // The kernel image runs from where it was loaded — and the reservation
@@ -317,7 +391,11 @@ fn memory_selftest(tree: ?fdt.Fdt, dtb_phys: u64) void {
     // The device tree is still being read from, wherever the bootloader chose
     // to put it. And the framebuffer is being scanned out by the display
     // right now, so a page handed out of it would appear on screen.
-    const kernel_end: u64 = @intFromPtr(&__stack_top);
+    // `__stack_top` is a link-time address, which is now a *virtual* one; the
+    // allocator deals in physical addresses, so it is converted back. Getting
+    // this wrong would reserve a range starting 0xFFFF_FF80... pages in and
+    // reserve nothing at all.
+    const kernel_end: u64 = vm.virt_to_phys(@intFromPtr(&__stack_top));
     pmm.reserve(regions[0].base, kernel_end - regions[0].base);
     pmm.reserve(dtb_phys, t.total_size);
     pmm.reserve(ramfb.FB_PHYS, @as(u64, SCREEN_W) * SCREEN_H * 4);
@@ -332,7 +410,9 @@ fn memory_selftest(tree: ?fdt.Fdt, dtb_phys: u64) void {
         console.println("  [FAIL] pmm: no page available on a machine with RAM");
         return;
     };
-    const cell: *volatile u64 = @ptrFromInt(p1);
+    // `p1` is physical, and this kernel has no identity map: dereferencing it
+    // directly would fault. Through the direct map it is memory.
+    const cell: *volatile u64 = vm.ptr_to_phys(*volatile u64, p1);
     cell.* = 0xC0FFEE_5EED;
     const held = cell.* == 0xC0FFEE_5EED;
 

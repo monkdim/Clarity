@@ -21,6 +21,7 @@
 //! machine's cache line size.
 
 const fwcfg = @import("fwcfg.zig");
+const vm = @import("vm.zig");
 
 /// DRM_FORMAT_XRGB8888 — one 32-bit pixel, blue in the lowest byte, the top
 /// byte ignored. The same layout the x86 side's framebuffer uses, so the
@@ -29,11 +30,14 @@ const FOURCC_XRGB8888: u32 = 0x3432_5258; // 'X','R','2','4'
 
 /// Where the framebuffer lives.
 ///
-/// A stated reservation, not an allocation: this architecture has no physical
-/// page allocator yet. RAM on `virt` starts at 0x4000_0000 and the kernel is
-/// loaded at +0x80000 and is around a megabyte, so 64 MiB in is far clear of
-/// it and still well inside the Normal-memory block mmu.zig maps. When the
-/// page allocator arrives this becomes a request rather than a constant.
+/// A stated reservation, not an allocation: nothing yet asks the page
+/// allocator for a run of pages this large. RAM on `virt` starts at
+/// 0x4000_0000 and the kernel is loaded at +0x80000 and is around a megabyte,
+/// so 64 MiB in is far clear of it and inside the gigabyte the boot stub maps
+/// before the device tree has been read. The physical page allocator now
+/// exists and reserves this range rather than being told about it, so this
+/// becomes a request rather than a constant once anything else competes for
+/// memory that large.
 pub const FB_PHYS: u64 = 0x4400_0000;
 
 /// The configuration handed to QEMU. Big-endian, packed, 28 bytes — the
@@ -82,5 +86,15 @@ pub fn init(width: u32, height: u32) ?Surface {
 
     if (!fwcfg.write_file(key, &cfg_bytes)) return null;
 
-    return .{ .base = FB_PHYS, .width = width, .height = height, .stride = stride };
+    // Two different addresses for one buffer, and mixing them up gives a
+    // screen of noise rather than an error: QEMU was told the *physical*
+    // address, because that is the only one it can scan out, while the
+    // surface handed back is the *virtual* one, because that is the only one
+    // this kernel can write through.
+    return .{
+        .base = vm.phys_to_virt(FB_PHYS),
+        .width = width,
+        .height = height,
+        .stride = stride,
+    };
 }
