@@ -64,6 +64,12 @@ jobs:
           #
           # Three markers, each proving a further step:
           #   "ClarityOS ready."         -- the kernel finished initialising
+          #   "[ok] context switch"      -- two kernel threads ran, and
+          #   "[A] round 1"                 thread A resumed *inside* the
+          #                                 yield it called rather than at its
+          #                                 entry point, which is the half of
+          #                                 a context switch that is easy to
+          #                                 get wrong
           #   "hello from ring 3"        -- a CPL 3 instruction ran and its
           #                                 `syscall` reached the kernel with
           #                                 the arguments the program passed
@@ -86,6 +92,8 @@ jobs:
             cat "serial-$attempt.log"
             missing=""
             grep -q "ClarityOS ready." "serial-$attempt.log" || missing="$missing ready"
+            grep -q "\[ok\] context switch" "serial-$attempt.log" || missing="$missing ctxswitch"
+            grep -q "\[A\] round 1" "serial-$attempt.log" || missing="$missing thread-resumed"
             grep -q "hello from ring 3" "serial-$attempt.log" || missing="$missing ring3-syscall"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
             if [ -z "$missing" ]; then

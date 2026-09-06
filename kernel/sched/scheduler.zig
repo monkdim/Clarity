@@ -86,6 +86,10 @@ const Queue = struct {
         }
     }
 
+    fn is_empty(self: *const Queue) bool {
+        return self.head == null;
+    }
+
     fn dequeue(self: *Queue) ?*Thread {
         const t = self.head orelse return null;
         self.head = t.next;
@@ -207,6 +211,13 @@ pub fn spawn_user(path: []const u8) !*Thread {
     return t;
 }
 
+/// The context the boot path is running on. `yield` needs somewhere to save
+/// the caller's registers even before any Thread exists, and this is it: the
+/// kernel's initial stack behaves as thread zero.
+var boot_context: context.Context = std.mem.zeroes(context.Context);
+
+/// Pick the next runnable thread without switching to it. Used by the timer
+/// IRQ, which cannot switch stacks from inside an interrupt frame yet.
 pub fn schedule() void {
     if (frozen) return;
     const prev = current;
@@ -221,13 +232,92 @@ pub fn schedule() void {
         if (queues[i].dequeue()) |next| {
             next.state = .running;
             current = next;
-            // arch_switch_to(next, prev);
             return;
         }
     }
-    // Nothing runnable — leave `current` null and the idle loop in
-    // main.zig will just halt.
+    // Nothing runnable — leave `current` null and the caller halts.
     current = null;
+}
+
+/// Give up the CPU: pick the next runnable thread and actually switch to it.
+///
+/// Separate from `schedule` because switching is only safe from a normal call
+/// like this one. Doing it inside the timer's interrupt handler means each
+/// thread resumes inside its *own* handler and returns through its own
+/// `iretq`, which works but has to be got exactly right; until it is, the
+/// timer only picks and this is what moves.
+///
+/// Returns when something switches back to the caller.
+pub fn yield() void {
+    if (frozen) return;
+
+    const prev = current;
+    const prev_ctx: *context.Context = if (prev) |p| &p.context else &boot_context;
+
+    // The caller goes back on the run queue before we look for a successor,
+    // so a lone thread yields to itself rather than finding nothing.
+    if (prev) |p| {
+        if (p.state == .running) {
+            p.state = .runnable;
+            queues[@intFromEnum(p.priority)].enqueue(p);
+        }
+    }
+
+    var i: usize = 0;
+    while (i < Priority.count()) : (i += 1) {
+        if (queues[i].dequeue()) |next| {
+            next.state = .running;
+            current = next;
+            // The CPU takes an interrupt in ring 3 onto the stack named by the
+            // TSS, so RSP0 has to follow whichever thread is running — a stale
+            // one would push the frame onto a stack another thread is using.
+            if (next.kernel_stack_top != 0) gdt.set_kernel_stack(next.kernel_stack_top);
+            context.switch_to(prev_ctx, &next.context);
+            return;
+        }
+    }
+    // Nothing else is runnable.
+    if (prev) |p| {
+        // boot_context.rip is only set once something has switched *away*
+        // from the boot path. Without that check this would jump to address
+        // zero on any path that blocks before the run queue is ever entered.
+        if (p.state != .running and boot_context.rip != 0) {
+            // The caller is finished and there is no successor, so there is
+            // no thread left to return to. Go back to the boot context — the
+            // one that started the run queue — which can carry on without it.
+            current = null;
+            context.switch_to(&p.context, &boot_context);
+            return;
+        }
+    }
+    // The caller is still runnable and simply has the CPU to itself.
+}
+
+/// End the calling thread. It never runs again, so this does not return: the
+/// switch away from it is the last thing that happens on its stack.
+pub fn thread_exit(code: i32) noreturn {
+    if (current) |c| {
+        c.state = .zombie;
+        c.exit_code = code;
+    }
+    yield();
+    // Only reached if there was nowhere to go, which means nothing is left to
+    // run at all.
+    while (true) asm volatile ("cli; hlt");
+}
+
+/// Hand control to the run queue and come back when it drains. Used by the
+/// boot path to run kernel threads to completion before carrying on.
+pub fn run_queued() void {
+    while (true) {
+        var any = false;
+        var i: usize = 0;
+        while (i < Priority.count()) : (i += 1) {
+            if (!queues[i].is_empty()) any = true;
+        }
+        if (!any) return;
+        yield();
+    }
 }
 
 pub fn block(reason: WaitReason) void {
@@ -235,7 +325,11 @@ pub fn block(reason: WaitReason) void {
         c.state = .blocked;
         c.wait = reason;
     }
-    schedule();
+    // yield, not schedule: a blocked thread has to stop running, and until
+    // now this only *chose* a successor without moving to it, so the caller
+    // carried straight on as if it had never blocked. Marking the state
+    // blocked first also keeps it off the run queue.
+    yield();
 }
 
 pub fn wake(t: *Thread) void {

@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
     });
     kernel.setLinkerScript(b.path("boot/linker.ld"));
     kernel.addAssemblyFile(b.path("boot/start.S"));
+    kernel.addAssemblyFile(b.path("arch/x86_64/context.S"));
     kernel.entry = .{ .symbol_name = "_start" };
 
     b.installArtifact(kernel);
