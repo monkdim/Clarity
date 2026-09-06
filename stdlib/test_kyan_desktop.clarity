@@ -9,7 +9,7 @@ from "kyan_desktop.clarity" import kyan_desktop, KyanDesktop
 from "theme_kyan.clarity" import kyan_obsidian
 from "graphics.clarity" import framebuffer
 from "mouse.clarity" import MouseEvent
-from "kyan_apps.clarity" import _calc_layout, _settings_layout, _files_layout
+from "kyan_apps.clarity" import _calc_layout, _settings_layout, _files_layout, _editor_layout
 from "pty.clarity" import pty_supported
 from "kyan_apps.clarity" import new_shell
 
@@ -343,6 +343,29 @@ assert_eq(len(df._app_ui["files"]["path"]), 0, "clicking the Home crumb returns 
 -- closing files frees its navigation state
 df.close("files")
 assert(not has(df._app_ui, "files"), "closing files frees its navigation state")
+
+-- ── Editor: seeds a buffer, typing and clicks drive it ──
+let de = kyan_desktop(1000, 640, theme)
+de.boot(null)
+let ewin = de.open("editor", 100, 80, 520, 360)
+assert(de._app_ui["editor"] != null, "opening the editor seeds its text buffer")
+let ebuf0 = len(de._app_ui["editor"]["lines"])
+-- typed text routes to the focused editor's buffer
+assert(de.editor_input("hi"), "editor_input reports handled when an editor is open")
+assert_eq(de._app_ui["editor"]["cx"], 2, "typed text advances the editor cursor")
+-- Enter (fed as a newline) grows the buffer
+de.editor_input("\n")
+assert_eq(len(de._app_ui["editor"]["lines"]), ebuf0 + 1, "Enter adds a line to the buffer")
+-- a content click repositions the cursor
+let ecr = ewin.content_rect()
+let EL = _editor_layout(de._app_ui["editor"], ewin.x + ecr[0], ewin.y + ecr[1], ecr[2], ecr[3])
+de.handle_mouse(mk_mouse(EL["text_x"] + 1, EL["text_y"] + 1, "press", 1))
+assert_eq(de._app_ui["editor"]["cy"], 0, "clicking the first row moves the cursor there")
+-- closing the editor frees its buffer
+de.close("editor")
+assert(not has(de._app_ui, "editor"), "closing the editor frees its buffer")
+-- editor_input is a no-op when no editor is open
+assert(not de.editor_input("x"), "editor_input reports unhandled with no editor open")
 
 -- ── Terminal echo shell (hosts without a PTY) ──
 -- On a host with no PTY (e.g. the browser build) the Terminal falls back to

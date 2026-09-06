@@ -35,6 +35,17 @@ fn _terminal_focused(desktop) {
     return false
 }
 
+-- Is the KyanOS Editor the focused (top) window? Typed text and editing
+-- keys go to its buffer only when it's the one in front.
+fn _editor_focused(desktop) {
+    let top = desktop.comp.top_window()
+    if top == null { return false }
+    for kv in entries(desktop.windows) {
+        if kv[1] == top and kv[0] == "editor" { return true }
+    }
+    return false
+}
+
 -- Translate one host event into a desktop action. Returns "quit" when the
 -- window should close, otherwise null. Pure enough to test headlessly:
 -- it only calls back into the desktop's public input methods.
@@ -63,6 +74,7 @@ fn route_event(desktop, ev) {
         if desktop.launcher_open { desktop.launcher_type(ev["text"]); return null }
         -- otherwise printable characters go to the focused terminal's shell
         if _terminal_focused(desktop) { desktop.terminal_input(ev["text"]) }
+        elif _editor_focused(desktop) { desktop.editor_input(ev["text"]) }
         return null
     }
     if ty == "key" {
@@ -89,6 +101,16 @@ fn route_event(desktop, ev) {
             elif name == "ArrowDown" { desktop.terminal_input(ESC + "[B") }
             elif name == "ArrowRight" { desktop.terminal_input(ESC + "[C") }
             elif name == "ArrowLeft" { desktop.terminal_input(ESC + "[D") }
+        }
+        -- special keys the editor needs, on key-down, when it's focused
+        if ev["down"] and _editor_focused(desktop) {
+            if name == "Enter" { desktop.editor_input("\n") }
+            elif name == "Backspace" { desktop.editor_input(DEL) }
+            elif name == "Tab" { desktop.editor_input("\t") }
+            elif name == "ArrowUp" { desktop.editor_input(ESC + "[A") }
+            elif name == "ArrowDown" { desktop.editor_input(ESC + "[B") }
+            elif name == "ArrowRight" { desktop.editor_input(ESC + "[C") }
+            elif name == "ArrowLeft" { desktop.editor_input(ESC + "[D") }
         }
         return null
     }
