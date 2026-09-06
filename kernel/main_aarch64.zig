@@ -22,6 +22,7 @@ const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
 const trap = @import("arch/aarch64/trap.zig");
+const threadtest = @import("threadtest_aarch64.zig");
 const fb = @import("graphics/fb.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
@@ -81,6 +82,10 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // port has been walking towards: code executing at EL0, in its own
     // address space, trapping into the kernel and being answered.
     userland_selftest();
+
+    // More than one thread. Cooperatively first, then with the timer taking
+    // the CPU away from a thread that never offers it.
+    threadtest.run();
 
     // A screen. Everything this kernel has said so far went out a serial
     // line; this is the first thing it can show.
@@ -574,13 +579,26 @@ fn timer_selftest() void {
 /// Called from the IRQ vector entry, which saved the caller-saved integer
 /// registers and will `eret` when this returns.
 ///
-/// Condition flags need no saving: `eret` restores PSTATE from SPSR_EL1,
-/// which carries NZCV. FP and SIMD registers are *not* saved, which is fine
-/// while the only interruptible code is kernel code that does not use them,
-/// and is a gap to close before anything with floating point can be
-/// preempted.
+/// Condition flags need no saving: `eret` restores PSTATE from SPSR_EL1 —
+/// which the vector entry now keeps on the stack rather than in the register,
+/// because this handler can switch threads and a single pair of ELR/SPSR
+/// registers cannot serve two of them.
+///
+/// FP and SIMD registers are *not* saved here. That is not the gap it looks
+/// like: `switch_to` saves d8-d15, which is the whole of what AAPCS64 makes
+/// callee-saved, and everything else in the vector file is dead across a call
+/// by the same ABI. It becomes a gap the moment userspace can be preempted
+/// with live floating point, which needs the full register file saved into
+/// the trap frame.
 export fn aarch64_irq() callconv(.C) void {
-    timer.handle_irq();
+    // Acknowledged first, then the scheduling decision — switching away with
+    // the interrupt still active at the GIC would leave that priority pending
+    // on this core and nothing further would ever be delivered.
+    //
+    // And only on a real tick. A time slice expiring and an interrupt
+    // arriving are the same event only on a machine whose only device is the
+    // timer, which this one is and the next one will not be.
+    if (timer.handle_irq()) threadtest.on_tick();
 }
 
 fn install_vectors() void {

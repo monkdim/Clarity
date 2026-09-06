@@ -251,6 +251,14 @@ jobs:
           # time, stored to its read-only text page and had the CPU taken away
           # from it. That last one is the one a kernel that never really left
           # EL1 could not produce.
+          #
+          # The last two markers are about threads rather than processes. The
+          # trace has to be exactly ABABABa: a switch that went nowhere leaves
+          # a letter repeated and a switch that lost a thread leaves it short.
+          # The preemption line is printed only when neither thread ever
+          # yielded, the CPU changed hands at least six times, and — the part
+          # counters alone cannot see — every thread resumed inside its own
+          # code rather than the other's.
           if grep -q "\[ok\] device tree at" serial-arm.log \
              && grep -q "\[ok\] identity map dropped:" serial-arm.log \
              && grep -q "\[ok\] direct map covers all of RAM" serial-arm.log \
@@ -258,6 +266,8 @@ jobs:
              && grep -q "\[ok\] EL0: a program ran" serial-arm.log \
              && grep -q "\[ok\] EL0: the timer interrupted it" serial-arm.log \
              && grep -q "\[ok\] EL0: and when it wrote to its read-only text" serial-arm.log \
+             && grep -q "\[ok\] context switch: ABABABa" serial-arm.log \
+             && grep -q "\[ok\] preemption: B ran" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
@@ -297,6 +307,7 @@ jobs:
              && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
              && grep -q "\[ok\] process address space:" serial-arm-4g.log \
              && grep -q "\[ok\] EL0: a program ran" serial-arm-4g.log \
+             && grep -q "\[ok\] preemption: B ran" serial-arm-4g.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm-4g.log; then
             echo "PASS: the direct map was extended over all 4 GiB and the allocator manages it"
           else

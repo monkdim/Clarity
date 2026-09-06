@@ -172,6 +172,7 @@ pub fn build(b: *std.Build) void {
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/boot.S"));
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/vectors.S"));
     kernel_arm.addAssemblyFile(b.path("arch/aarch64/user.S"));
+    kernel_arm.addAssemblyFile(b.path("arch/aarch64/context.S"));
     kernel_arm.entry = .{ .symbol_name = "_start" };
 
     // The bootable artefact is the flat binary, not the ELF.

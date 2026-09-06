@@ -80,6 +80,14 @@ pub const Error = error{
 /// require flushing every translation the CPU has cached. Zero is reserved
 /// for "no space"; the kernel's own mappings are global (nG clear) and are
 /// not tagged at all, which is why they survive the switch.
+///
+/// Nothing allocates ASIDs yet — the caller picks one, and two live spaces
+/// sharing a number would each see the other's cached translations. With
+/// TCR_EL1.AS clear there are 256 of them, which is fewer than the number of
+/// processes a real system has, so this becomes a recycling problem (bump the
+/// generation, invalidate by ASID, hand it out again) rather than a counter.
+/// That belongs with the process table, which does not exist on this
+/// architecture yet.
 pub const AddressSpace = struct {
     root_phys: u64,
     asid: u16,

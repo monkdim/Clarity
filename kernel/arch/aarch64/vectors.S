@@ -40,6 +40,17 @@
 // An IRQ that is handled rather than reported. x0-x18 are the caller-saved
 // set; x30 is the link register, which `bl` is about to overwrite. Pushed in
 // pairs because stp/ldp need the stack 16-byte aligned, which SP_EL1 is.
+//
+// ELR_EL1 and SPSR_EL1 go on the stack too, and that is not symmetry for its
+// own sake. They are single registers, one pair for the whole CPU, and the
+// handler is allowed to switch threads: the moment it does, another thread
+// resumes inside *its* copy of this entry, takes its own interrupts, and
+// overwrites them. Whichever thread erets last would return to whatever
+// address the most recent exception happened to leave behind.
+//
+// The x86_64 side gets this free, because `iretq` pops its return frame off
+// the stack, so it is per-thread by construction. Here it has to be written
+// down.
 .macro IRQ_ENTRY
 .align 7
     stp     x0, x1, [sp, #-16]!
@@ -52,7 +63,15 @@
     stp     x14, x15, [sp, #-16]!
     stp     x16, x17, [sp, #-16]!
     stp     x18, x30, [sp, #-16]!
+    mrs     x0, elr_el1
+    mrs     x1, spsr_el1
+    stp     x0, x1, [sp, #-16]!
+
     bl      aarch64_irq
+
+    ldp     x0, x1, [sp], #16
+    msr     elr_el1, x0
+    msr     spsr_el1, x1
     ldp     x18, x30, [sp], #16
     ldp     x16, x17, [sp], #16
     ldp     x14, x15, [sp], #16

@@ -66,9 +66,11 @@ The serial log should report the machine describing itself:
   [ok] EL0: a program ran, read 41 from its own memory, called the kernel twice, got 42 back, and wrote it where the kernel could see it
   [ok] EL0: the timer interrupted it 18 times while it ran, and it carried on afterwards
   [ok] EL0: and when it wrote to its read-only text at 0x400000, the kernel took the CPU back
+  [ok] context switch: ABABABa — two threads alternated and handed the CPU back
+  [ok] preemption: B ran (7583766) while A (9416843) never yielded — 6 switches in 7 ticks, each thread resuming in its own code
 ```
 
-The tick count in the middle line varies — it is however many times the 100 Hz
+The spin counts and the tick count vary — it is however many times the 100 Hz
 timer happened to fire during the process's delay loop, and the check is only
 that it fired at all.
 
@@ -125,12 +127,15 @@ It can now do the thing an operating system is for: run a program that is not
 the kernel. Unprivileged code executes at EL0 in its own address space, calls
 into the kernel and gets answers back, is preempted by the timer and carries
 on, and is stopped by the kernel when it does something it is not allowed to.
+Kernel threads switch, cooperatively and preemptively, carrying their address
+space with them.
 
-What is missing is everything above that. There is no scheduler on this
-architecture, so there is one process, and it is a probe assembled into the
-kernel image rather than a file — no ELF loader, no filesystem, no shell. No
-text on screen, no keyboard. Those exist on the x86 side and are being brought
-across.
+What is missing is everything above that. There is no *scheduler* — the
+switching primitive exists and the boot selftest drives it directly, but
+nothing keeps run queues, priorities, or a process table. The one EL0 program
+is assembled into the kernel image rather than loaded from a file: no ELF
+loader, no filesystem, no shell. No text on screen, no keyboard. Those exist
+on the x86 side and are being brought across.
 
 ## x86-64 — the one that runs programs
 

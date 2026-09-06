@@ -77,12 +77,21 @@ pub fn frequency() u64 {
 }
 
 /// Called from the IRQ vector. Re-arms the comparator, because it is one-shot.
-pub fn handle_irq() void {
+///
+/// Returns true when this really was a timer tick. The caller uses that to
+/// decide whether to make a scheduling decision, which should be driven by
+/// the passage of time rather than by any interrupt that happens to arrive —
+/// on a machine with more devices, "an interrupt came in" and "a time slice
+/// expired" stop being the same event.
+pub fn handle_irq() bool {
     const which = gic.acknowledge();
-    if (which == gic.SPURIOUS) return;
+    if (which == gic.SPURIOUS) return false;
+    var was_tick = false;
     if (which == TIMER_INTID) {
         set_tval(interval);
         count_tick();
+        was_tick = true;
     }
     gic.end(which);
+    return was_tick;
 }
