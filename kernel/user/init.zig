@@ -32,6 +32,23 @@ fn write(fd: u64, buf: []const u8) i64 {
     return syscall3(NR_WRITE, fd, @intFromPtr(buf.ptr), buf.len);
 }
 
+/// Minimal hex, because a userspace with no libc still has to be able to say
+/// what a number was. Fixed 16 digits: no allocation, no formatting library,
+/// and nothing that could itself be the thing that is broken.
+fn write_hex(v: u64) void {
+    const digits = "0123456789abcdef";
+    var buf: [19]u8 = undefined;
+    buf[0] = '0';
+    buf[1] = 'x';
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const nib: u8 = @intCast((v >> @intCast(60 - i * 4)) & 0xF);
+        buf[2 + i] = digits[nib];
+    }
+    buf[18] = '\n';
+    _ = write(1, &buf);
+}
+
 fn exit(code: u64) noreturn {
     _ = syscall3(NR_EXIT, code, 0, 0);
     unreachable;
@@ -73,8 +90,14 @@ export fn _start() callconv(.C) noreturn {
     }
     const want = @as(u64, @intCast(before)) + 8192;
     const after = syscall3(NR_BRK, want, 0, 0);
-    if (@as(u64, @intCast(after)) != want) {
+    if (after < 0 or @as(u64, @intCast(after)) != want) {
         _ = write(1, "  [FAIL] user heap: brk did not grow\n");
+        _ = write(1, "    before ");
+        write_hex(@bitCast(before));
+        _ = write(1, "    wanted ");
+        write_hex(want);
+        _ = write(1, "    got    ");
+        write_hex(@bitCast(after));
         exit(1);
     }
 

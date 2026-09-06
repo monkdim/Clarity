@@ -211,6 +211,13 @@ fn sys_brk(args: Args) i64 {
 
     const requested = args.a0;
     if (requested == 0) return @intCast(proc.brk);
+    console.print("  brk: ");
+    console.print_hex(proc.brk);
+    console.print(" -> ");
+    console.print_hex(requested);
+    console.print(" (start ");
+    console.print_hex(proc.brk_start);
+    console.println(")");
     if (requested < proc.brk_start) return @intCast(proc.brk);
     // A ceiling on the heap. Without one, a single wild request — a garbage
     // pointer, or a size computed from an unchecked length — walks up through
@@ -230,9 +237,21 @@ fn sys_brk(args: Args) i64 {
     var addr = (proc.brk + page - 1) & ~(page - 1);
     const end = (requested + page - 1) & ~(page - 1);
     while (addr < end) : (addr += page) {
-        const phys = pmm.alloc_page() orelse return @intCast(proc.brk);
+        const phys = pmm.alloc_page() orelse {
+            // Say why, rather than silently handing back a smaller break. A
+            // caller only sees "you got less than you asked for", which is
+            // the same answer for out of memory as for a broken mapping.
+            console.print("  brk: no physical page for ");
+            console.print_hex(addr);
+            console.println("");
+            return @intCast(proc.brk);
+        };
         zero_user_page(phys);
-        vmm.map_page(proc.address_space, addr, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER | vmm.PAGE_NX) catch {
+        vmm.map_page(proc.address_space, addr, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER | vmm.PAGE_NX) catch |err| {
+            console.print("  brk: cannot map ");
+            console.print_hex(addr);
+            console.print(": ");
+            console.println(@errorName(err));
             pmm.free_page(phys);
             return @intCast(proc.brk);
         };
