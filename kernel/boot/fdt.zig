@@ -255,6 +255,52 @@ fn decode_reg(fdt: *const Fdt, reg: []const u8, out: []Region) usize {
     return written;
 }
 
+/// Every node whose name starts with `prefix`, by its first `reg` region.
+///
+/// Written for the virtio-mmio bus, where QEMU's `virt` puts thirty-two
+/// identical slots and the device in each is only discoverable by reading its
+/// registers. The addresses are 0x200 apart from 0x0a000000, which is exactly
+/// the kind of thing a driver should not know: a machine that laid them out
+/// differently would still describe them here.
+///
+/// Returns how many were written, which may be fewer than there are if `out`
+/// is short — the caller gets the first `out.len` rather than an error,
+/// because a bus with more slots than the caller can hold is not a failure.
+pub fn node_regs(fdt: *const Fdt, prefix: []const u8, out: []Region) usize {
+    var w = Walker.init(fdt);
+    var depth: u32 = 0;
+    var matched_depth: ?u32 = null;
+    var written: usize = 0;
+
+    while (w.next()) |ev| {
+        switch (ev) {
+            .node_start => {
+                depth += 1;
+                if (matched_depth == null and starts_with(ev.node_start, prefix)) matched_depth = depth;
+            },
+            .node_end => {
+                if (matched_depth) |d| if (depth == d) {
+                    matched_depth = null;
+                };
+                if (depth > 0) depth -= 1;
+            },
+            .prop => |pr| {
+                if (matched_depth) |d| {
+                    if (depth == d and str_eq(pr.name, "reg")) {
+                        if (written >= out.len) return written;
+                        var one: [1]Region = undefined;
+                        if (decode_reg(fdt, pr.value, &one) == 1) {
+                            out[written] = one[0];
+                            written += 1;
+                        }
+                    }
+                }
+            },
+        }
+    }
+    return written;
+}
+
 /// The first `reg` region of the first node whose name starts with `prefix`.
 ///
 /// Node names on a real tree carry a unit address — `fw-cfg@9020000` — so the

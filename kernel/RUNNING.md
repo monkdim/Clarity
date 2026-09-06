@@ -147,6 +147,59 @@ suspect.
 command has not, because the machine writing it has no Mac. If it does not
 work, the boot log up to the point it stops is the useful thing to report.
 
+### A keyboard
+
+```sh
+qemu-system-aarch64 \
+  -M virt -cpu cortex-a72 -m 512 \
+  -kernel zig-out/bin/clarity-kernel-aarch64.img \
+  -device ramfb \
+  -device virtio-keyboard-device \
+  -serial stdio
+```
+
+`virt` has no PS/2 controller — neither does the hardware this is aimed at —
+so a key press arrives as a virtio-input event on the MMIO bus, and the extra
+`-device` is what puts one there. The kernel finds it by walking the
+thirty-two bus slots the device tree names and reading each one's registers,
+then spends three seconds reading whatever is typed:
+
+```
+  [ok] keyboard: virtio-input on a bus of 32 slots
+  keyboard: read 7 characters from 7 key presses: "clarity"
+```
+
+Three seconds of nothing ends it, as does two seconds of quiet after the last
+key, so a boot with nobody at the keyboard costs three seconds and no more.
+Shift works; the table is the main key block only, so function keys, the
+keypad and the arrows type nothing.
+
+Drop the `-device` and the kernel says so and carries on. It prints the bus
+rather than a summary of it, because "no keyboard" is also what a driver
+looking at the wrong addresses would say — with one non-keyboard device
+attached, which is what produced this line, it is telling you the slot really
+was read and what was in it:
+
+```
+  [--] 32 virtio slots, none of them a usable keyboard:
+       slot 0xa003e00: transport version 1, device id 4
+```
+
+The `keyboard: read` line cannot be an `[ok]`, and that is the whole
+difficulty with testing an input device: reading nothing is exactly what a
+working driver does when nobody types, so no marker in a log nobody typed
+into can tell that from a queue the device never writes to.
+
+`tools/key_check.py` is what closes it. It boots this same command line with
+QEMU's monitor on a socket and types the alphabet twice through `sendkey` —
+the monitor's own path into the input device, the same one a keypress in the
+QEMU window takes — then requires the kernel to report back exactly those
+fifty-two characters. Fifty-two is not arbitrary: QEMU turns each key into
+four events, so the run puts over two hundred through a queue of sixty-four,
+and it only passes if the driver really gives its buffers back to the device
+rather than draining the ring it filled at start-up. Breaking that one line
+makes it read sixteen characters and stop.
+
 ### What it does not do yet
 
 It can now do the thing an operating system is for: run a program that is not
@@ -186,8 +239,9 @@ nothing keeps run queues, priorities, or a process table, so programs run one
 after another rather than at the same time. They are loaded from ELFs embedded
 in the kernel image rather than read from anywhere: no filesystem, no shell.
 `write` goes straight to the serial console because there is no VFS to route
-it through. No text on screen, no keyboard. Those exist on the x86 side and
-are being brought across.
+it through. There is text on screen and there is a keyboard, but nothing
+joins them: no tty, no line discipline, no `read(2)`, and so no shell. Those
+are the next thing.
 
 ## x86-64 — the one that runs programs
 
@@ -223,6 +277,7 @@ display.
 
 ```sh
 python3 tools/fb_check.py zig-out/bin/clarity-kernel-aarch64.img
+python3 tools/key_check.py zig-out/bin/clarity-kernel-aarch64.img
 python3 tools/make_font.py --png /tmp/font.png   # look at the font
 python3 tools/make_font.py --check               # is the generated .zig stale?
 ```
@@ -232,12 +287,19 @@ and reads the text back out of it — replaying the console's own wrapping and
 scrolling over the serial log to work out what each cell should hold, then
 comparing every pixel.
 
+`key_check.py` boots it with a keyboard attached and a monitor socket, types
+through `sendkey`, and compares what the kernel says it read against what was
+sent. Between them the two scripts check the console in both directions
+without a person looking at anything.
+
 `make_font.py` regenerates `graphics/font8x8.zig` from `tools/font8x8.txt`.
 The `.zig` is checked in, so building needs no Python; `--check` is what stops
 the two drifting, and `--png` draws the font out so it can be looked at, which
 is the only way to proofread eight bytes per glyph. The rest of the boot
 assertions live in `.github/workflows/os-boot.yml`, which boots the x86 image
 three times and requires all fifteen markers on every attempt, and boots the
-ARM image twice — once with 512 MiB and once with 4 GiB, because a machine
-that fits inside the boot stub's single mapped gigabyte would pass with the
-code that maps the rest of RAM deleted.
+ARM image three times — with 512 MiB, with 4 GiB, and on a PAN-capable CPU.
+The 4 GiB one is not repetition: a machine that fits inside the boot stub's
+single mapped gigabyte would pass with the code that maps the rest of RAM
+deleted. All three attach a keyboard and require the kernel to find it, and
+then `key_check.py` boots a fourth time to type at one.
