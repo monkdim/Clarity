@@ -195,10 +195,13 @@ fn alloc_fd(inode: *Inode, flags: u32) !i64 {
 /// doubled one — are skipped rather than treated as a lookup of "".
 fn resolve(path: []const u8) !?*Inode {
     const root = root_dentry orelse return error.NoRoot;
-    if (path.len == 0 or std.mem.eql(u8, path, "/")) return root.inode;
+    // Dentry.inode is optional (a negative dentry caches a name that is known
+    // not to exist); the root's is always present once set_root has run.
+    const root_inode = root.inode orelse return error.NoRoot;
+    if (path.len == 0 or std.mem.eql(u8, path, "/")) return root_inode;
     if (path[0] != '/') return error.NotAbsolute;
 
-    var current = root.inode;
+    var current: *Inode = root_inode;
     var it = std.mem.splitScalar(u8, path[1..], '/');
     while (it.next()) |component| {
         if (component.len == 0) continue;
