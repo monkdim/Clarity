@@ -367,6 +367,7 @@ jobs:
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm.log \
              && grep -q "\[ok\] console input:" serial-arm.log \
              && grep -q "init: nothing typed, end of input" serial-arm.log \
+             && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \
              && grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
@@ -411,6 +412,7 @@ jobs:
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-pan.log \
              && grep -q "\[ok\] console input:" serial-arm-pan.log \
              && grep -q "init: nothing typed, end of input" serial-arm-pan.log \
+             && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm-pan.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-pan.log \
              && grep -q "\[ok\] preemption: B ran" serial-arm-pan.log \
              && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm-pan.log \
@@ -452,6 +454,7 @@ jobs:
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-4g.log \
              && grep -q "\[ok\] console input:" serial-arm-4g.log \
              && grep -q "init: nothing typed, end of input" serial-arm-4g.log \
+             && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm-4g.log \
              && grep -q "\[ok\] pmm: 4096 MiB managed" serial-arm-4g.log \
              && grep -q "\[ok\] process address space:" serial-arm-4g.log \
              && grep -q "\[ok\] EL0: a program wrote" serial-arm-4g.log \
@@ -502,6 +505,13 @@ jobs:
       # erasing anything satisfies the first and not the second. So this step
       # also screenshots the display and checks every character cell against a
       # replay of the serial log, using fb_check's own model of the console.
+      #
+      # The shell marker is deliberately either-or. These three boots attach a
+      # keyboard but nobody types, so the shell starts, reads end of input
+      # after three seconds and exits — that is the "[ok] shell" branch. A
+      # boot with no keyboard at all says so instead and skips it. What is
+      # being asserted is that one of the two happened rather than the shell
+      # silently not running, which is what a missing embed would look like.
       #
       # It also types a line at the *program*: after the boot selftest, the
       # compiled ELF at EL0 calls read(2) twice — once with a pointer into its

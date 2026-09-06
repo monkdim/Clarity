@@ -25,8 +25,24 @@ typedef struct {
     size_t fd_len;
 } Sink;
 
+/* Write all of it, however many calls that takes.
+ *
+ * write(2) may accept less than it is offered and say so, and ClarityOS's
+ * does: a single call is capped at 256 bytes. This buffer is also 256 bytes,
+ * so today the cap is never reached — which means the loop below has never
+ * gone round twice, and also that this code was correct only because two
+ * unrelated constants happened to be equal. Grow fd_buf, or shrink the
+ * kernel's cap, and without this loop every long line would be silently
+ * truncated. */
 static void sink_flush(Sink* s) {
-    if (!s->buf && s->fd_len) { cl_sys_write(1, s->fd_buf, s->fd_len); s->fd_len = 0; }
+    if (s->buf || !s->fd_len) return;
+    unsigned long done = 0;
+    while (done < s->fd_len) {
+        long n = cl_sys_write(1, s->fd_buf + done, s->fd_len - done);
+        if (n <= 0) break;   /* nowhere left to write; dropping is all that is left */
+        done += (unsigned long)n;
+    }
+    s->fd_len = 0;
 }
 
 static void sink_putc(Sink* s, char c) {

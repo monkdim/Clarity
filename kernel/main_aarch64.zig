@@ -120,6 +120,12 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // And then a Clarity program, through the same path.
     demo_program();
 
+    // And last, a shell — the first program on this machine that is told what
+    // to do rather than deciding for itself. It runs after everything else
+    // because it is the thing a person would still be sitting in front of;
+    // the boot has nothing left to say by then.
+    shell_program();
+
     console.println("ClarityOS aarch64: EL1 boot ok");
 
     hang();
@@ -475,6 +481,7 @@ const INIT_ELF = @embedFile("init_elf_aarch64");
 /// generated C the x86_64 side runs — nothing in it knows which machine it is
 /// for.
 const DEMO_ELF = @embedFile("demo_elf_aarch64");
+const SH_ELF = @embedFile("sh_elf_aarch64");
 
 /// Load that ELF into a fresh address space and run it.
 ///
@@ -552,6 +559,64 @@ fn init_program() void {
 /// and floating-point code are the same source the x86_64 side runs — and
 /// whose three architecture-specific pieces, the system call stubs, the entry
 /// point and setjmp, now have an AArch64 half.
+/// Run the shell.
+///
+/// Nothing here is different from loading any other program — same loader,
+/// same address space, same four system calls. What is different is that it
+/// does not finish on its own: it reads until its input ends, which on a
+/// machine with nobody at the keyboard is a few seconds and then a clean
+/// exit. That is what a shell does when its input closes, and it is also
+/// what keeps a boot nobody is watching from stopping here forever.
+///
+/// Its own output is the evidence. The kernel checks only that it started,
+/// ended by choice, and wrote something; what it *said* is between it and
+/// whoever typed, and tools/key_check.py is what reads that back.
+fn shell_program() void {
+    if (pmm.stats().total_pages == 0) return;
+    if (!stdin.present()) {
+        console.println("  [--] shell: no keyboard, so nothing could be typed at it");
+        return;
+    }
+
+    console.print("  shell: ");
+    console.print_dec(SH_ELF.len);
+    console.println(" bytes; it ends when the input does");
+
+    var proc = loader.load(SH_ELF, 7, heap.allocator()) catch |e| {
+        console.print("  [FAIL] shell: could not load: ");
+        console.println(@errorName(e));
+        return;
+    };
+
+    paging.activate(&proc.space);
+    trap.reset();
+    trap.set_heap(&proc.space, proc.brk_start);
+    const status = trap.enter_user(proc.entry, proc.user_sp);
+    const code = trap.exit_status;
+    const wrote = trap.bytes_written;
+    const heap_end = trap.heap_end();
+    trap.clear_heap();
+    paging.deactivate();
+    loader.release(&proc, heap_end);
+
+    if (status == trap.EXIT_DONE and wrote > 0) {
+        console.print("  [ok] shell: ran at EL0, read its own input, wrote ");
+        console.print_dec(wrote);
+        console.print(" bytes and exited ");
+        console.print_dec(code);
+        console.println("");
+    } else {
+        console.print("  [FAIL] shell: status=");
+        console.print_dec(status);
+        console.print(" code=");
+        console.print_dec(code);
+        console.print(" wrote=");
+        console.print_dec(wrote);
+        console.println("");
+        if (trap.last_fault) |f| trap.report_fault(f);
+    }
+}
+
 ///
 /// It checks itself and says so. The kernel checks that it said so by its
 /// exit status, and CI checks the line where it reports the doubles it

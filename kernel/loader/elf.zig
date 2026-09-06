@@ -115,11 +115,33 @@ pub const ParseError = error{
     Overflow,
 };
 
+/// One fixed-size structure out of a byte slice, at any alignment.
+///
+/// The caller has already checked that `off + @sizeOf(T)` is within `bytes`.
+fn read_struct(comptime T: type, bytes: []const u8, off: u64) T {
+    var out: T = undefined;
+    @memcpy(std.mem.asBytes(&out), bytes[@intCast(off)..][0..@sizeOf(T)]);
+    return out;
+}
+
 /// Parse `bytes` as an ELF64 image. Allocates the segment slice
 /// from `gpa`; caller frees with `release(gpa, exe)`.
 pub fn parse(bytes: []const u8, gpa: std.mem.Allocator) ParseError!LoadedExecutable {
     if (bytes.len < @sizeOf(Header)) return error.Truncated;
-    const hdr = @as(*const Header, @ptrCast(@alignCast(bytes.ptr))).*;
+
+    // Copied out of the bytes rather than read through a pointer into them.
+    //
+    // An ELF header is eight-byte aligned inside the file, but the *file* is
+    // wherever it happens to be — and these arrive from @embedFile, which
+    // makes no alignment promise at all. Casting the byte pointer to
+    // *const Header therefore worked for two embedded programs and panicked
+    // the kernel on the third, with "incorrect alignment", before it had
+    // parsed a single field. Nothing about the ELF changed; only where the
+    // linker put it.
+    //
+    // A copy has no such dependency, and costs sixty-four bytes once per
+    // program load.
+    const hdr = read_struct(Header, bytes, 0);
     if (!std.mem.eql(u8, hdr.e_ident[0..4], &ELFMAG)) return error.BadMagic;
     if (hdr.e_ident[4] != ELFCLASS64) return error.Not64Bit;
     if (hdr.e_ident[5] != ELFDATA2LSB) return error.NotLittleEndian;
@@ -138,7 +160,7 @@ pub fn parse(bytes: []const u8, gpa: std.mem.Allocator) ParseError!LoadedExecuta
     var i: u64 = 0;
     while (i < phnum) : (i += 1) {
         const off = phoff + i * @sizeOf(ProgramHeader);
-        const ph = @as(*const ProgramHeader, @ptrCast(@alignCast(&bytes[off]))).*;
+        const ph = read_struct(ProgramHeader, bytes, off);
         if (ph.p_type != PT_LOAD) continue;
         if (ph.p_filesz > ph.p_memsz) return error.BadPhdrTable;
         if (ph.p_offset + ph.p_filesz > bytes.len) return error.Truncated;

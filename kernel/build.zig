@@ -196,6 +196,22 @@ pub fn build(b: *std.Build) void {
         .root_source_file = init_prog_arm.getEmittedBin(),
     });
 
+    // /bin/clarity-sh for aarch64: a shell. Same shape as the program above —
+    // a compiler and a linker produce it, and the kernel embeds the result —
+    // but it is the first one that reads.
+    const sh_prog_arm = b.addExecutable(.{
+        .name = "clarity-sh-aarch64",
+        .root_source_file = b.path("user/sh_aarch64.zig"),
+        .target = user_arm_target,
+        .optimize = .ReleaseSmall,
+    });
+    sh_prog_arm.setLinkerScript(b.path("user/user.ld"));
+    sh_prog_arm.entry = .{ .symbol_name = "_start" };
+    sh_prog_arm.pie = false;
+    kernel_arm.root_module.addAnonymousImport("sh_elf_aarch64", .{
+        .root_source_file = sh_prog_arm.getEmittedBin(),
+    });
+
     // /bin/clarity-demo for aarch64: the same generated C as the x86_64 one,
     // linked against the same C library. Nothing in user/clarity_demo.c knows
     // which machine it is for — `clarity cc --freestanding` emits portable C
