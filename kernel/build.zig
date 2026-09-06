@@ -195,6 +195,41 @@ pub fn build(b: *std.Build) void {
     kernel_arm.root_module.addAnonymousImport("init_elf_aarch64", .{
         .root_source_file = init_prog_arm.getEmittedBin(),
     });
+
+    // /bin/clarity-demo for aarch64: the same generated C as the x86_64 one,
+    // linked against the same C library. Nothing in user/clarity_demo.c knows
+    // which machine it is for — `clarity cc --freestanding` emits portable C
+    // — and the library's three architecture-specific pieces (the system call
+    // stubs, the entry point, setjmp) now have an AArch64 half.
+    //
+    // Which is the point of building it here rather than porting a smaller
+    // program: if this runs, a Clarity program runs on Apple-Silicon-class
+    // hardware, through the same path it takes on x86_64.
+    const demo_prog_arm = b.addExecutable(.{
+        .name = "clarity-demo-aarch64",
+        .root_source_file = null,
+        .target = user_arm_target,
+        .optimize = .ReleaseSmall,
+    });
+    demo_prog_arm.addIncludePath(b.path("user/libc/include"));
+    demo_prog_arm.addCSourceFile(.{ .file = b.path("user/clarity_demo.c"), .flags = &c_flags });
+    demo_prog_arm.addCSourceFiles(.{
+        .root = b.path("user/libc/src"),
+        .files = &.{
+            "bignum.c", "ctype.c",  "dtoa.c",   "malloc.c", "math.c",
+            "printf.c", "qsort.c",  "stdlib.c", "string.c", "strtod.c",
+            "sys.c",
+        },
+        .flags = &c_flags,
+    });
+    demo_prog_arm.addAssemblyFile(b.path("user/libc/src/setjmp.S"));
+    demo_prog_arm.addAssemblyFile(b.path("user/libc/src/start.S"));
+    demo_prog_arm.setLinkerScript(b.path("user/user.ld"));
+    demo_prog_arm.entry = .{ .symbol_name = "_start" };
+    demo_prog_arm.pie = false;
+    kernel_arm.root_module.addAnonymousImport("demo_elf_aarch64", .{
+        .root_source_file = demo_prog_arm.getEmittedBin(),
+    });
     kernel_arm.entry = .{ .symbol_name = "_start" };
 
     // The bootable artefact is the flat binary, not the ELF.

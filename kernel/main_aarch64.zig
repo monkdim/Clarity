@@ -97,6 +97,9 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // assembled into this image.
     init_program();
 
+    // And then a Clarity program, through the same path.
+    demo_program();
+
     // A screen. Everything this kernel has said so far went out a serial
     // line; this is the first thing it can show.
     screen_selftest();
@@ -451,6 +454,12 @@ fn process_space_selftest() void {
 /// compiler and a linker.
 const INIT_ELF = @embedFile("init_elf_aarch64");
 
+/// /bin/clarity-demo: a Clarity program, compiled to C by
+/// `clarity cc --freestanding` and linked against kernel/user/libc. The same
+/// generated C the x86_64 side runs — nothing in it knows which machine it is
+/// for.
+const DEMO_ELF = @embedFile("demo_elf_aarch64");
+
 /// Load that ELF into a fresh address space and run it.
 ///
 /// Everything the probe above proves, this proves again without the kernel
@@ -514,6 +523,62 @@ fn init_program() void {
         console.print_dec(before.free_pages);
         console.print("->");
         console.print_dec(after.free_pages);
+        console.println("");
+        if (trap.last_fault) |f| trap.report_fault(f);
+    }
+}
+
+/// Run the compiled Clarity program.
+///
+/// Everything under it is what makes this the interesting one: a Clarity
+/// source file, through `clarity cc --freestanding` to C, through clang to
+/// aarch64, linked against a C library whose printf, malloc, qsort, strtod
+/// and floating-point code are the same source the x86_64 side runs — and
+/// whose three architecture-specific pieces, the system call stubs, the entry
+/// point and setjmp, now have an AArch64 half.
+///
+/// It checks itself and says so. The kernel checks that it said so by its
+/// exit status, and CI checks the line where it reports the doubles it
+/// computed, because that is the part that would still print something
+/// plausible if the floating-point path were subtly wrong.
+fn demo_program() void {
+    if (pmm.stats().total_pages == 0) return;
+
+    console.print("  demo: ");
+    console.print_dec(DEMO_ELF.len);
+    console.println(" bytes of Clarity, compiled to C and then to this machine");
+
+    var proc = loader.load(DEMO_ELF, 5, heap.allocator()) catch |e| {
+        console.print("  [FAIL] demo: could not load: ");
+        console.println(@errorName(e));
+        return;
+    };
+
+    paging.activate(&proc.space);
+    trap.reset();
+    trap.set_heap(&proc.space, proc.brk_start);
+    const status = trap.enter_user(proc.entry, proc.user_sp);
+    const code = trap.exit_status;
+    const wrote = trap.bytes_written;
+    const heap_used = trap.heap_end() - proc.brk_start;
+    const heap_end = trap.heap_end();
+    trap.clear_heap();
+    paging.deactivate();
+    loader.release(&proc, heap_end);
+
+    if (status == trap.EXIT_DONE and code == 0 and wrote > 0) {
+        console.print("  [ok] demo: a Clarity program ran on aarch64, printed ");
+        console.print_dec(wrote);
+        console.print(" bytes and used ");
+        console.print_dec(heap_used >> 10);
+        console.println(" KiB of heap");
+    } else {
+        console.print("  [FAIL] demo: status=");
+        console.print_dec(status);
+        console.print(" code=");
+        console.print_dec(code);
+        console.print(" wrote=");
+        console.print_dec(wrote);
         console.println("");
         if (trap.last_fault) |f| trap.report_fault(f);
     }

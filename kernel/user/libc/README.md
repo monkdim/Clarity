@@ -1,7 +1,7 @@
 # A C library for freestanding Clarity programs
 
 `clarity cc --freestanding` compiles a Clarity program to C that needs a C
-library and no operating system. This is that C library: 1,509 lines of C and
+library and no operating system. This is that C library: 1,695 lines of C and
 assembly with the comments counted, enough that a compiled Clarity program
 using classes, closures, exceptions, maps, sorting, string handling and
 floating point runs with nothing underneath it but three kernel calls.
@@ -11,6 +11,27 @@ Those three are all of it — `write`, `brk`, `exit`. Their numbers live in
 ClarityOS or for a Linux host. The Linux build is not a mock-up for testing:
 it is the same source, the same objects, running under a different set of
 syscall numbers, so what the tests exercise is what ships.
+
+It builds for **x86-64 and AArch64**. Almost all of it is portable C that
+never learns which; the parts that cannot be are three files and one function,
+each with the two versions side by side and a `#error` for any third
+architecture:
+
+| | what differs |
+|---|---|
+| `src/sys.c` | `syscall` with the number in `%rax`, or `svc #0` with it in `x8` |
+| `src/start.S` | which register argc arrives in, and the stack alignment rule |
+| `src/setjmp.S` | which registers are callee-saved — AArch64 adds `d8`-`d15`, which the x86-64 ABI has no equivalent of |
+| `sqrt` in `src/math.c` | `sqrtsd` or `fsqrt` |
+
+A compiled Clarity program produces byte-identical output on both, floating
+point included — checked by diffing the two boot logs, not by reading them:
+
+```
+$ diff <(sed -n '/^tally 55/,/^clarity-demo/p' x86.log) \
+       <(sed -n '/^tally 55/,/^clarity-demo/p' arm.log)
+$
+```
 
 ## What is here
 
@@ -26,6 +47,7 @@ syscall numbers, so what the tests exercise is what ships.
 | `src/stdlib.c` | `exit`, `abort`, `getenv`, `strtol`, `rand` |
 | `src/setjmp.S` | `setjmp` / `longjmp` — what Clarity's `try` compiles to |
 | `src/start.S` | `_start`, the entry the kernel's ELF loader jumps to |
+| `src/sys.c` | the three system calls, on either architecture |
 | `link.sh` | the one place the build flags are written down |
 
 There is no `FILE`, no `stderr`, no `fopen`, no locale, and no `errno`. The
@@ -68,7 +90,9 @@ asserted in `stdlib/test_libc.clarity`):
 
 `fabs`, `floor`, `ceil`, `round`, `trunc`, `fmod` and `sqrt` are exact, not
 approximate — they are bit manipulation, a Sterbenz-exact subtraction loop,
-and the hardware instruction respectively.
+and the hardware instruction respectively. The instruction differs by machine
+(`sqrtsd`, `fsqrt`) and the guarantee does not: IEEE 754 requires a correctly
+rounded square root, so both give the same bits.
 
 That last row is the honest one. Past about 1e5 the limit is not the series
 but reducing the argument modulo π/2 in double arithmetic, which holds the
@@ -96,9 +120,12 @@ They are part of the ordinary suite:
 clarity test stdlib/test_libc.clarity
 ```
 
-Skipped anywhere the library does not apply — it is x86-64 assembly with
-Linux/ClarityOS syscall numbers, and it needs clang for the `stddef.h` and
-`stdarg.h` that belong to the compiler rather than to a C library.
+Skipped anywhere the library does not apply — the host test builds for the
+host's own architecture with Linux syscall numbers, and it needs clang for the
+`stddef.h` and `stdarg.h` that belong to the compiler rather than to a C
+library. The AArch64 build is exercised by the OS boot gate rather than here:
+`kernel/build.zig` compiles this library for aarch64 and the kernel runs the
+result, so a break in the AArch64 half fails that gate.
 
 ## What it is not
 

@@ -1,9 +1,10 @@
 # The ClarityOS kernel
 
-The only part of ClarityOS that is not written in Clarity. About 8 000
+The only part of ClarityOS that is not written in Clarity. About 9 000
 lines of Zig across two architectures, plus 2 000 lines of C that are not
 kernel at all — a freestanding libc, so that a program compiled by
-`clarity cc` has something to link against.
+`clarity cc` has something to link against. That library now builds for
+both, which is what lets the same Clarity program run on both.
 
 Two kernels share most of that Zig. The **x86-64** side is the mature one:
 it boots, schedules, and runs real user processes, one of which is a
@@ -78,6 +79,12 @@ claim with no marker behind it is in "What does not run yet".
 - a heap: `brk` moves a process's break and maps the pages behind it, and the
   program writes through the new break and reads it back — because a kernel
   returning the number it was asked for proves nothing about what is mapped
+- **a Clarity program**: `/bin/clarity-demo` is the same generated C the
+  x86_64 side runs, linked against the same `kernel/user/libc`, and its
+  output is byte for byte identical — `float 3.1415929203539825
+  1.4142135623730951 6.25`, checked literally, because those come out of
+  strtod, the library's arithmetic, a hardware square root and dtoa, and a
+  subtly wrong one still prints a plausible number
 
 ## What does not run yet
 
@@ -159,8 +166,10 @@ kernel/
 │   ├── init.zig            /bin/clarity-init (x86_64)
 │   ├── init_aarch64.zig    /bin/clarity-init (aarch64)
 │   ├── clarity_demo.clarity → clarity_demo.c, the compiled Clarity program
-│   ├── libc/               a freestanding libc: stdio, string, math, malloc
-│   └── user.ld             static user link layout
+│   ├── libc/               a freestanding libc: stdio, string, math, malloc.
+│   │                       Portable C, plus three files with an #ifdef in
+│   │                       them: sys.c, start.S, setjmp.S
+│   └── user.ld             static user link layout, both architectures
 ├── tools/
 │   ├── fb_check.py         boots ARM, screenshots it, checks the pixels
 │   └── run_x86.sh          builds the GRUB ISO `zig build run` boots

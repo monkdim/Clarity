@@ -80,6 +80,11 @@ hello from /bin/clarity-init on aarch64
   [ok] user heap: brk grew and the memory holds
   ... the same five lines again, from the second run ...
   [ok] init: a compiled, linked ELF ran at EL0 twice, printed 216 bytes, exited 42 each time, and every page came back
+  demo: 123232 bytes of Clarity, compiled to C and then to this machine
+  ... the demo program's own output ...
+  float 3.1415929203539825 1.4142135623730951 6.25
+  clarity-demo: all checks passed
+  [ok] demo: a Clarity program ran on aarch64, printed 209 bytes and used 192 KiB of heap
 ```
 
 The spin counts and the tick count vary — it is however many times the 100 Hz
@@ -142,7 +147,13 @@ on, and is stopped by the kernel when it does something it is not allowed to.
 Kernel threads switch, cooperatively and preemptively, carrying their address
 space with them.
 
-Two of those lines came from user programs rather than from the kernel:
+The last block is the one the rest of it was for: a Clarity program, compiled
+to C by `clarity cc --freestanding`, linked against `kernel/user/libc`, and
+running on an Apple-Silicon-class machine. Its output is byte for byte the
+same as on x86-64, floating-point digits included — the same generated C, the
+same library, only the three architecture-specific pieces differ.
+
+Two other lines came from user programs rather than from the kernel:
 `hello from EL0 on aarch64`, from a probe assembled into the kernel image, and
 `hello from /bin/clarity-init on aarch64`, from an ELF that a compiler built
 and a linker laid out into three segments.
@@ -162,11 +173,12 @@ both.
 
 What is missing is everything above that. There is no *scheduler* — the
 switching primitive exists and the boot selftest drives it directly, but
-nothing keeps run queues, priorities, or a process table. Programs are loaded
-from an ELF embedded in the kernel image rather than read from anywhere: no
-filesystem, no shell. `write` goes straight to the serial console because
-there is no VFS to route it through. No text on screen, no keyboard. Those
-exist on the x86 side and are being brought across.
+nothing keeps run queues, priorities, or a process table, so programs run one
+after another rather than at the same time. They are loaded from ELFs embedded
+in the kernel image rather than read from anywhere: no filesystem, no shell.
+`write` goes straight to the serial console because there is no VFS to route
+it through. No text on screen, no keyboard. Those exist on the x86 side and
+are being brought across.
 
 ## x86-64 — the one that runs programs
 

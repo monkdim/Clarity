@@ -58,10 +58,22 @@ double round(double x) {
 }
 
 /* The hardware instruction, which IEEE 754 requires to be correctly rounded.
- * Writing a software square root here would be strictly worse. */
+ * Writing a software square root here would be strictly worse — and both of
+ * these architectures have one, so there is no case where it would be needed.
+ *
+ * Named explicitly rather than left to __builtin_sqrt, because this library
+ * is built with -fno-builtin: the compiler is told not to recognise the
+ * library's own functions, which stops it turning printf into puts, and the
+ * same flag would stop it turning a call here into the instruction. */
 double sqrt(double x) {
     double r;
+#if defined(__x86_64__)
     __asm__("sqrtsd %1, %0" : "=x"(r) : "x"(x));
+#elif defined(__aarch64__)
+    __asm__("fsqrt %d0, %d1" : "=w"(r) : "w"(x));
+#else
+#error "no square root instruction for this architecture"
+#endif
     return r;
 }
 
