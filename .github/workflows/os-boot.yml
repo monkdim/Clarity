@@ -41,6 +41,23 @@ jobs:
           zig build
           test -f zig-out/bin/clarity-kernel
 
+      # The modules no kernel imports.
+      #
+      # Zig never parses a file nothing reaches, so `zig build` above says
+      # nothing at all about drivers/tty.zig, fs/devfs.zig, fs/procfs.zig or
+      # boot/uefi.zig — a line of deliberate nonsense in any of them builds
+      # clean. That was measured on all four, against both `zig build` and
+      # `zig build aarch64`, and it is why this step exists rather than being
+      # assumed unnecessary.
+      #
+      # It does not claim any of them works; nothing in them has ever run, and
+      # kernel/README.md says so. It claims they are still valid Zig against
+      # the code they refer to, which is what stops them rotting in silence.
+      - name: Compile the modules no kernel imports
+        run: |
+          cd kernel
+          zig build check
+
       - name: Assemble a minimal GRUB rescue ISO (kernel only)
         run: |
           mkdir -p isodir/boot/grub

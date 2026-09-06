@@ -245,6 +245,29 @@ pub fn build(b: *std.Build) void {
         "clarity-kernel-aarch64.img",
     );
 
+    // `zig build check` — compile the modules no kernel imports.
+    //
+    // Zig never parses a file nothing reaches, so a module outside every
+    // build is not "written and compiling": it is written and unread. That
+    // was measured, not supposed — a line of deliberate nonsense appended to
+    // drivers/tty.zig, fs/devfs.zig, fs/procfs.zig or boot/uefi.zig used to
+    // produce zero errors from `zig build` and `zig build aarch64` alike.
+    //
+    // checkonly.zig imports them, so they are at least valid Zig against the
+    // code they refer to. Its first run found boot/uefi.zig discarding a
+    // parameter it goes on to use.
+    //
+    // An object file rather than an executable: none of these has an entry
+    // point, and none is meant to be linked into anything yet.
+    const checkonly = b.addObject(.{
+        .name = "clarity-checkonly",
+        .root_source_file = b.path("checkonly.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const check_step = b.step("check", "Compile the modules no kernel imports");
+    check_step.dependOn(&checkonly.step);
+
     const aarch64_step = b.step("aarch64", "Build the AArch64 kernel");
     aarch64_step.dependOn(&b.addInstallArtifact(kernel_arm, .{}).step);
     aarch64_step.dependOn(&install_arm_bin.step);
