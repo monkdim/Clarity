@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const console = @import("arch/aarch64/console.zig");
+const timer = @import("arch/aarch64/timer.zig");
 const mmu = @import("arch/aarch64/mmu.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
@@ -36,6 +37,17 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     mmu.init();
     mmu.report();
 
+    // The vectors installed above had never been reached: nothing on this
+    // architecture generated an interrupt, so the entire delivery path — GIC,
+    // DAIF, the vector entry itself — was untested. On x86 the equivalent gap
+    // was hiding a scheduler that picked a thread and never switched to it.
+    timer.init(100);
+    console.print("  [ok] generic timer armed at 100 Hz, cntfrq=");
+    console.print_dec(timer.frequency());
+    console.println("");
+
+    timer_selftest();
+
     console.println("ClarityOS aarch64: EL1 boot ok");
 
     hang();
@@ -43,6 +55,47 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
 
 /// The vector table lives in vectors.S, 2 KiB-aligned as VBAR_EL1 requires.
 extern const aarch64_vectors: u8;
+
+/// Prove an interrupt actually arrives.
+///
+/// The counter is incremented only by the IRQ handler, so reaching WANT is
+/// impossible without one really being delivered — the same principle as the
+/// x86 preemption test, which two threads could not pass by cooperating.
+///
+/// Bounded in spins rather than in time, because a deadline measured in timer
+/// ticks would wait forever for exactly the thing whose absence it is meant to
+/// report. Three ticks rather than one, because the comparator is one-shot: a
+/// handler that fires but forgets to re-arm would pass a test that asked for
+/// one and fail this.
+fn timer_selftest() void {
+    const WANT: u64 = 3;
+    const SPIN_LIMIT: u64 = 100_000_000;
+    var spins: u64 = 0;
+    while (timer.ticks() < WANT and spins < SPIN_LIMIT) : (spins += 1) {
+        asm volatile ("nop");
+    }
+    if (timer.ticks() >= WANT) {
+        console.print("  [ok] aarch64 timer: interrupts delivered, ticks=");
+        console.print_dec(timer.ticks());
+        console.println("");
+    } else {
+        console.print("  [FAIL] aarch64 timer: no interrupt arrived, ticks=");
+        console.print_dec(timer.ticks());
+        console.println("");
+    }
+}
+
+/// Called from the IRQ vector entry, which saved the caller-saved integer
+/// registers and will `eret` when this returns.
+///
+/// Condition flags need no saving: `eret` restores PSTATE from SPSR_EL1,
+/// which carries NZCV. FP and SIMD registers are *not* saved, which is fine
+/// while the only interruptible code is kernel code that does not use them,
+/// and is a gap to close before anything with floating point can be
+/// preempted.
+export fn aarch64_irq() callconv(.C) void {
+    timer.handle_irq();
+}
 
 fn install_vectors() void {
     asm volatile (
