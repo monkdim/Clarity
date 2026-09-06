@@ -1,0 +1,264 @@
+-- HTTP/1.1 over the native TCP builtins.
+--
+-- Native-only: `tcp_*` exist in the compiled runtime, not in the interpreter,
+-- whose I/O is Bun's and has no synchronous socket call. So this module is
+-- exercised by compiling a program that imports it, not by `clarity run`.
+--
+-- Bodies are byte lists, not strings. A compiled Clarity string is a
+-- NUL-terminated char*, so an image, a gzip stream or anything else with a
+-- zero byte in it would be truncated the moment it became one. `text()`
+-- converts when the caller knows the body is text; headers, which are ASCII
+-- by definition, are handled as strings throughout.
+--
+-- Scope: enough to talk to a real server and to be one. Keep-alive, chunked
+-- transfer-encoding, redirects and TLS are not here — each is a separate
+-- piece of work and pretending otherwise in a helper would hide it.
+--
+-- The server side hands the caller the connection and the parsed request
+-- rather than taking a handler function. That is a better API — the caller
+-- decides how to respond, with whatever state it has — and it also avoids a
+-- gap in the C backend, which cannot yet pass a named function as a value.
+
+from "bytes.clarity" import slice
+
+fn _bytes_to_text(bytes) {
+    mut s = ""
+    for b in bytes { s = s + from_char_code(b) }
+    return s
+}
+
+fn _text_to_bytes(s) {
+    mut out = []
+    for ch in s { push(out, char_code(ch)) }
+    return out
+}
+
+-- Decode a byte list as text. Byte-wise, so it is exact for ASCII and for
+-- anything already Latin-1; a UTF-8 body needs decoding the caller controls.
+fn text(bytes) { return _bytes_to_text(bytes) }
+
+fn _find_header_end(bytes) {
+    -- The blank line separating headers from body: CRLF CRLF.
+    mut i = 3
+    while i < len(bytes) {
+        if bytes[i - 3] == 13 and bytes[i - 2] == 10 and bytes[i - 1] == 13 and bytes[i] == 10 {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _parse_headers(head) {
+    -- `head` is the status line plus header lines, already text.
+    let lines = split(head, "\r\n")
+    mut status = 0
+    mut reason = ""
+    mut headers = {}
+    mut i = 0
+    for line in lines {
+        if i == 0 {
+            -- "HTTP/1.1 200 OK"
+            let sp1 = index_of(line, " ")
+            if sp1 > 0 {
+                let rest = substring(line, sp1 + 1, len(line))
+                let sp2 = index_of(rest, " ")
+                if sp2 > 0 {
+                    status = int(substring(rest, 0, sp2))
+                    reason = substring(rest, sp2 + 1, len(rest))
+                } else {
+                    status = int(rest)
+                }
+            }
+        } else {
+            let colon = index_of(line, ":")
+            if colon > 0 {
+                -- Header names are case-insensitive; lowercase them so a
+                -- caller never has to guess how the server spelled it.
+                let name = lower(trim(substring(line, 0, colon)))
+                headers[name] = trim(substring(line, colon + 1, len(line)))
+            }
+        }
+        i = i + 1
+    }
+    return {"status": status, "reason": reason, "headers": headers}
+}
+
+-- Read from `fd` until the header block is complete, then until the body is,
+-- and return {status, reason, headers, body}. `body` is a byte list.
+--
+-- Body length comes from Content-Length when present; otherwise the body runs
+-- to end of connection, which is what HTTP/1.0-style `Connection: close`
+-- responses do. A response with neither is treated as having no body.
+fn read_response(fd) {
+    mut buf = []
+    mut head_end = -1
+    while head_end < 0 {
+        let chunk = tcp_recv(fd, 4096)
+        if len(chunk) == 0 { break }
+        for b in chunk { push(buf, b) }
+        head_end = _find_header_end(buf)
+    }
+    if head_end < 0 {
+        return {"status": 0, "reason": "no response", "headers": {}, "body": []}
+    }
+
+    let head = _bytes_to_text(slice(buf, 0, head_end - 4))
+    mut parsed = _parse_headers(head)
+    let headers = parsed["headers"]
+
+    mut body = slice(buf, head_end, len(buf) - head_end)
+    if has(headers, "content-length") {
+        let want = int(headers["content-length"])
+        while len(body) < want {
+            let chunk = tcp_recv(fd, 4096)
+            if len(chunk) == 0 { break }
+            for b in chunk { push(body, b) }
+        }
+        if len(body) > want { body = slice(body, 0, want) }
+    } elif _wants_eof_body(headers) {
+        while true {
+            let chunk = tcp_recv(fd, 4096)
+            if len(chunk) == 0 { break }
+            for b in chunk { push(body, b) }
+        }
+    }
+
+    parsed["body"] = body
+    return parsed
+}
+
+fn _wants_eof_body(headers) {
+    -- Without Content-Length, a body only makes sense if the server is going
+    -- to close. Anything else (a keep-alive response with no length) would
+    -- block forever, so treat it as bodyless rather than hang.
+    if not has(headers, "connection") { return false }
+    return lower(headers["connection"]) == "close"
+}
+
+-- Write a request onto an already-connected socket. Split out from
+-- `request` so the two halves can be driven separately: a single process
+-- acting as both client and server has to send before it accepts, and
+-- `request` — which connects, sends and then blocks reading — would
+-- deadlock against its own listener.
+fn send_request(fd, host, method, path, headers, body) {
+    let body_bytes = if type(body) == "string" { _text_to_bytes(body) } else { body ?? [] }
+
+    mut req = method + " " + path + " HTTP/1.1\r\n"
+    req = req + "Host: " + host + "\r\n"
+    req = req + "Connection: close\r\n"
+    if len(body_bytes) > 0 { req = req + "Content-Length: " + str(len(body_bytes)) + "\r\n" }
+    if headers != null {
+        for k in headers { req = req + k + ": " + headers[k] + "\r\n" }
+    }
+    req = req + "\r\n"
+
+    if tcp_send(fd, req) < 0 { return false }
+    if len(body_bytes) > 0 { tcp_send(fd, body_bytes) }
+    return true
+}
+
+-- Connect, send, read, close. `headers` is a map of extra header lines;
+-- `body` is a byte list or "" for none.
+fn request(host, port, method, path, headers, body) {
+    let fd = tcp_connect(host, port)
+    if fd < 0 { return {"status": 0, "reason": "connect failed", "headers": {}, "body": []} }
+    if not send_request(fd, host, method, path, headers, body) {
+        tcp_close(fd)
+        return {"status": 0, "reason": "send failed", "headers": {}, "body": []}
+    }
+    let resp = read_response(fd)
+    tcp_close(fd)
+    return resp
+}
+
+fn get(host, port, path) { return request(host, port, "GET", path, null, "") }
+fn post(host, port, path, body) { return request(host, port, "POST", path, null, body) }
+
+-- ── the server side ─────────────────────────────────────
+
+fn _read_request(fd) {
+    mut buf = []
+    mut head_end = -1
+    while head_end < 0 {
+        let chunk = tcp_recv(fd, 4096)
+        if len(chunk) == 0 { break }
+        for b in chunk { push(buf, b) }
+        head_end = _find_header_end(buf)
+    }
+    if head_end < 0 { return null }
+
+    let head = _bytes_to_text(slice(buf, 0, head_end - 4))
+    let lines = split(head, "\r\n")
+    let parts = split(lines[0], " ")
+    mut headers = {}
+    mut i = 1
+    while i < len(lines) {
+        let colon = index_of(lines[i], ":")
+        if colon > 0 {
+            headers[lower(trim(substring(lines[i], 0, colon)))] = trim(substring(lines[i], colon + 1, len(lines[i])))
+        }
+        i = i + 1
+    }
+
+    mut body = slice(buf, head_end, len(buf) - head_end)
+    if has(headers, "content-length") {
+        let want = int(headers["content-length"])
+        while len(body) < want {
+            let chunk = tcp_recv(fd, 4096)
+            if len(chunk) == 0 { break }
+            for b in chunk { push(body, b) }
+        }
+    }
+
+    return {
+        "method": if len(parts) > 0 { parts[0] } else { "" },
+        "path": if len(parts) > 1 { parts[1] } else { "/" },
+        "headers": headers,
+        "body": body
+    }
+}
+
+fn _status_text(code) {
+    if code == 200 { return "OK" }
+    if code == 201 { return "Created" }
+    if code == 204 { return "No Content" }
+    if code == 400 { return "Bad Request" }
+    if code == 404 { return "Not Found" }
+    if code == 500 { return "Internal Server Error" }
+    return "Status"
+}
+
+fn send_response(fd, status, content_type, body) {
+    let body_bytes = if type(body) == "string" { _text_to_bytes(body) } else { body ?? [] }
+    mut head = "HTTP/1.1 " + str(status) + " " + _status_text(status) + "\r\n"
+    head = head + "Content-Type: " + content_type + "\r\n"
+    head = head + "Content-Length: " + str(len(body_bytes)) + "\r\n"
+    head = head + "Connection: close\r\n\r\n"
+    tcp_send(fd, head)
+    if len(body_bytes) > 0 { tcp_send(fd, body_bytes) }
+    return null
+}
+
+-- Accept one connection and return {fd, request}, or null if the connection
+-- produced no usable request. The caller owns `fd` from here: respond with
+-- send_response, then close_connection.
+--
+-- One connection at a time, because there are no threads yet — a loop around
+-- this is a server, and a slow client blocks the next one. That is a real
+-- limitation, not an oversight to find later.
+fn accept_request(listen_fd) {
+    let fd = tcp_accept(listen_fd)
+    if fd < 0 { return null }
+    let req = _read_request(fd)
+    if req == null {
+        tcp_close(fd)
+        return null
+    }
+    return {"fd": fd, "request": req}
+}
+
+fn close_connection(fd) {
+    tcp_close(fd)
+    return null
+}

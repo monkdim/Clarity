@@ -723,6 +723,22 @@ static Value cl_write_bytes(Value pv, Value lv){
   if(lv.t==T_LIST){ List* l=(List*)lv.o; for(long j=0;j<l->len;j++){ unsigned char c=(unsigned char)(l->items[j].i & 0xFF); fwrite(&c, 1, 1, f); } }
   fclose(f); return cl_bool(1);
 }
+/* type(v): the same names the interpreter reports, including the class name
+   for an instance — code that branches on type() has to agree across the two
+   backends or the same program means different things compiled. */
+static Value cl_type_of(Value v){
+  if(v.t==T_NULL) return cl_str("null");
+  if(v.t==T_BOOL) return cl_str("bool");
+  if(v.t==T_INT) return cl_str("int");
+  if(v.t==T_FLOAT) return cl_str("float");
+  if(v.t==T_STR) return cl_str("string");
+  if(v.t==T_LIST) return cl_str("list");
+  if(v.t==T_MAP) return cl_str("map");
+  if(v.t==T_CLOSURE) return cl_str("function");
+  if(v.t==T_OBJECT) return cl_str(((Obj*)v.o)->cls);
+  return cl_str("null");
+}
+
 /* ── TCP sockets ──
    Blocking IPv4 TCP, thin enough to read in one sitting and enough to build an
    HTTP client and server on top of. Every call reports failure as -1 (or an
@@ -1143,7 +1159,7 @@ let _NATIVE_BUILTINS = {
     "exec": 1, "exec_full": 1, "sleep": 1, "time": 1,
     "abs": 1, "floor": 1, "ceil": 1, "round": 1, "sqrt": 1, "sin": 1,
     "cos": 1, "tan": 1, "log": 1, "sum": 1, "min": 1, "max": 1,
-    "json_parse": 1, "json_string": 1,
+    "json_parse": 1, "json_string": 1, "type": 1,
     "ffi_open": 1, "ffi_buffer": 1, "ffi_read": 1, "ffi_write": 1, "ffi_free": 1, "ffi_sym": 1, "ffi_call": 1,
     "tcp_listen": 1, "tcp_port": 1, "tcp_accept": 1, "tcp_connect": 1,
     "tcp_send": 1, "tcp_recv": 1, "tcp_close": 1
@@ -1159,6 +1175,7 @@ class CCodegen {
         this.class_defs = {}    -- name → ClassStatement node (for inheritance)
         this.fn_names = []      -- top-level function names (call → f_name)
         this.closure_id = 0     -- next hoisted-closure id
+        this.tmp_id = 0         -- next generated C temporary name
         this.closure_defs = []  -- emitted closure function bodies (line lists)
     }
 
@@ -1198,6 +1215,17 @@ class CCodegen {
             return
         }
         if nt == "UnaryOp" { this._free_expr(node.operand, bound, acc); return }
+        if nt == "NullCoalesce" {
+            this._free_expr(node.left, bound, acc)
+            this._free_expr(node.right, bound, acc)
+            return
+        }
+        if nt == "IfExpression" {
+            this._free_expr(node.condition, bound, acc)
+            this._free_expr(node.true_expr, bound, acc)
+            this._free_expr(node.false_expr, bound, acc)
+            return
+        }
         if nt == "BinaryOp" { this._free_expr(node.left, bound, acc); this._free_expr(node.right, bound, acc); return }
         if nt == "CallExpression" {
             this._free_expr(node.callee, bound, acc)
@@ -1395,6 +1423,7 @@ class CCodegen {
         if name == "exit" and n == 1 { return "(exit((int)(" + args[0] + ").i), cl_null())" }
         if name == "exec" and n == 1 { return "cl_exec(" + args[0] + ")" }
         if name == "exec_full" and n == 1 { return "cl_exec_full(" + args[0] + ")" }
+        if name == "type" and n == 1 { return "cl_type_of(" + args[0] + ")" }
         -- sockets
         if name == "tcp_listen" and n == 1 { return "cl_tcp_listen(" + args[0] + ")" }
         if name == "tcp_port" and n == 1 { return "cl_tcp_port(" + args[0] + ")" }
@@ -1529,6 +1558,26 @@ class CCodegen {
             }
             this.unsupported("indirect call", node.line)
             return "cl_null()"
+        }
+        if nt == "NullCoalesce" {
+            -- `a ?? b`: evaluate a once, and b only if a is null. A plain
+            -- ternary would have to name `a` twice and would run its side
+            -- effects twice, so bind it to a temporary first. This is a
+            -- statement expression, a GCC/Clang extension — the backend
+            -- already requires cc, gcc or clang.
+            let id = this.tmp_id
+            this.tmp_id += 1
+            let t = "__nc" + str(id)
+            return "({ Value " + t + " = (" + this.expr(node.left) + "); " + t +
+                ".t == T_NULL ? (" + this.expr(node.right) + ") : " + t + "; })"
+        }
+        if nt == "IfExpression" {
+            -- `if c { a } else { b }` in expression position is a ternary.
+            -- Both arms are evaluated lazily by C's ?:, which matches the
+            -- interpreter — an arm with a side effect must not run when the
+            -- other branch is taken.
+            return "(cl_truthy(" + this.expr(node.condition) + ") ? " +
+                this.expr(node.true_expr) + " : " + this.expr(node.false_expr) + ")"
         }
         this.unsupported("expression " + nt, node.line)
         return "cl_null()"

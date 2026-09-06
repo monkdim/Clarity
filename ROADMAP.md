@@ -75,6 +75,14 @@ lands with codegen tests that diff native output against the interpreter.
   itself imports `bits.clarity`) compiles and produces the published FIPS 180-4 digests.
   **Remaining:** a selective import still pulls in the whole module, since taking only the named
   symbols would break the module's internal references.
+- **Expression forms the C backend rejected (done).** Compiling a real stdlib module for the first
+  time found three pieces of core language surface missing from `clarity cc`: `if`/`else` in
+  expression position, `??`, and `type()`. All three now compile and are diffed against the
+  interpreter, including the two cases a careless implementation gets wrong — the untaken `if` arm
+  must not run, and `??` must evaluate its left side exactly once.
+  **Still open:** a named top-level function used as a *value* (`apply(twice, 5)`) does not
+  compile — the reference emits `f_twice`, which is the C function, not a Value. Closures assigned
+  to variables do work, so the fix is to emit a closure wrapper for the name.
 - **Sockets (done).** `tcp_listen` / `tcp_port` / `tcp_accept` / `tcp_connect` / `tcp_send` /
   `tcp_recv` / `tcp_close` — blocking IPv4 TCP straight onto the C runtime, with failures reported
   as `-1` rather than aborting, because a compiled tool that dies on a refused connection is much
@@ -83,8 +91,16 @@ lands with codegen tests that diff native output against the interpreter.
   by nature (the interpreter's I/O is Bun's, which has no synchronous socket call to diff
   against), so the tests assert the compiled binary's output the way the FFI ones do — a full
   round trip on loopback in a single process, including a payload with an embedded NUL.
-- **Networking (next on the trunk).** An HTTP client that isn't a `curl` shell-out → an HTTP
-  server → TLS, on top of the sockets above. Unlocks web/API backends as native binaries.
+- **HTTP (done).** `stdlib/http.clarity` — request building, response parsing, and the server
+  side, on top of the sockets above. The first stdlib module that exists *because* native imports
+  do: it is built on the `tcp_*` builtins, which the interpreter does not have, so it can only be
+  reached by compiling. Bodies are byte lists for the same reason sockets return them. The server
+  hands the caller the connection and the parsed request rather than taking a handler function —
+  a better API, and it sidesteps the backend's inability to pass a named function as a value. One
+  connection at a time; there are no threads yet. **Remaining:** keep-alive, chunked
+  transfer-encoding, redirects, TLS.
+- **Networking (next on the trunk).** TLS, then keep-alive and chunked encoding, so the HTTP
+  client can talk to real services rather than only to plaintext ones.
 - **Stage 12+ — services stdlib.** Real crypto (not the toy cipher), a real embedded key/value or
   SQLite binding, CSV/YAML/TOML parsers. The "boring but load-bearing" tier for backends and data
   tools.

@@ -161,6 +161,35 @@ if CC == null {
         exec_full(CC + " -O2 -w " + DIR + "/b.c -o " + DIR + "/b -lm")
         check_eq("compiled program importing bytes.clarity scans correctly",
             trim(exec_full(DIR + "/b").stdout), "0\n[0]")
+
+        -- http.clarity is the first stdlib module that only exists because
+        -- native imports do: it is built on the tcp_* builtins, which the
+        -- interpreter does not have, so it can only be reached by compiling.
+        --
+        -- Client and server in one process. The connect completes against the
+        -- listen backlog, so the request can be written before anything
+        -- accepts; only then does the server side run, and only then does the
+        -- client read. Calling `request()` here instead would deadlock the
+        -- process against its own listener, which is why the client half is
+        -- split into send_request/read_response.
+        let hprog = "from \"http.clarity\" import send_request, read_response, accept_request, send_response, close_connection, text\n" +
+            "let srv = tcp_listen(0)\nlet port = tcp_port(srv)\n" +
+            "let cli = tcp_connect(\"127.0.0.1\", port)\n" +
+            "show send_request(cli, \"127.0.0.1\", \"POST\", \"/echo\", {\"X-Test\": \"yes\"}, \"ping\")\n" +
+            "let conn = accept_request(srv)\nlet req = conn[\"request\"]\n" +
+            "show req[\"method\"]\nshow req[\"path\"]\nshow req[\"headers\"][\"x-test\"]\nshow text(req[\"body\"])\n" +
+            "send_response(conn[\"fd\"], 200, \"text/plain\", \"pong-\" + text(req[\"body\"]))\n" +
+            "close_connection(conn[\"fd\"])\n" +
+            "let resp = read_response(cli)\n" +
+            "show resp[\"status\"]\nshow resp[\"reason\"]\nshow resp[\"headers\"][\"content-type\"]\nshow text(resp[\"body\"])\n" +
+            "tcp_close(cli)\ntcp_close(srv)\n"
+        write(DIR + "/h.clarity", hprog)
+        let htree = resolve_native_imports(parse(tokenize(hprog, "<t>"), hprog), DIR, stdlib_dir, DIR + "/h.clarity")
+        write(DIR + "/h.c", compile_to_c(htree))
+        exec_full(CC + " -O2 -w " + DIR + "/h.c -o " + DIR + "/h -lm")
+        check_eq("compiled HTTP client and server complete a round trip",
+            trim(exec_full(DIR + "/h").stdout),
+            "true\nPOST\n/echo\nyes\nping\n200\nOK\ntext/plain\npong-ping")
     }
 }
 
