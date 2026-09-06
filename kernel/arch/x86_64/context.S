@@ -13,6 +13,7 @@
  *
  *   offset 0   rsp
  *   offset 56  rip
+ *   offset 64  the 512-byte FXSAVE area
  *
  * Switching away pushes RFLAGS and the callee-saved registers, records %rsp
  * and the address of the resume label, then loads the next thread's %rsp,
@@ -29,6 +30,13 @@
  * preempted again, and one preempted by the timer would come back with them
  * on, midway through its own interrupt handler. Each thread now restores the
  * interrupt state it was switched away with.
+ *
+ * The x87/SSE state is saved and restored here too, for the same reason and
+ * with the same lifetime: userspace is C, and C on x86-64 keeps every double
+ * in an xmm register. The kernel itself is built with SSE subtracted from the
+ * feature set, so it can never be the one to clobber them — but two user
+ * threads doing arithmetic certainly can. FXSAVE and FXRSTOR need a 16-byte
+ * aligned operand, which is why the Context struct asserts its own alignment.
  */
 
         .text
@@ -45,6 +53,10 @@ clarity_switch_to:
         movq  %rsp, 0(%rdi)             /* prev->rsp = current stack */
         leaq  1f(%rip), %rax
         movq  %rax, 56(%rdi)            /* prev->rip = resume label */
+        fxsave 64(%rdi)                 /* prev's x87 + SSE registers */
+        fxrstor 64(%rsi)                /* next's; a brand-new thread's area
+                                           holds the clean image Context's
+                                           default put there */
         movq  0(%rsi), %rsp             /* switch to next's stack */
         movq  56(%rsi), %rax            /* resume address, read before popfq
                                            so no memory access depends on the

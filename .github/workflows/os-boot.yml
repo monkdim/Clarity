@@ -74,12 +74,24 @@ jobs:
           #                                 thread that never yielded, and gave
           #                                 it back; cooperative scheduling
           #                                 cannot produce this line
+          #   "[ok] fpu switch"          -- the x87/SSE state travels with the
+          #                                 thread: two threads each kept a
+          #                                 live floating-point register across
+          #                                 200 switches to the other. Before
+          #                                 FXSAVE was in the switch path they
+          #                                 shared one set of registers
           #   "[ok] vfs"                 -- a path resolved: a file was created,
           #                                 written, and read back by name
           #   "[ok] user .bss zeroed"    -- the loader zero-filled the part of
           #                                 the last page that has no file
           #                                 behind it, which one hand-made
           #                                 segment could never have shown
+          #   "[ok] user sse"            -- SSE is enabled for ring 3: the user
+          #                                 program divided two doubles and got
+          #                                 the exact bit pattern. Without
+          #                                 CR4.OSFXSR that instruction is #UD,
+          #                                 which is where every compiled
+          #                                 Clarity program would have died
           #   "[ok] user heap"           -- brk grew the process's heap and
           #                                 the pages it mapped are really
           #                                 there: the program writes through
@@ -112,10 +124,12 @@ jobs:
             grep -q "\[ok\] context switch" "serial-$attempt.log" || missing="$missing ctxswitch"
             grep -q "\[A\] round 1" "serial-$attempt.log" || missing="$missing thread-resumed"
             grep -q "\[ok\] preemption" "serial-$attempt.log" || missing="$missing preemption"
+            grep -q "\[ok\] fpu switch" "serial-$attempt.log" || missing="$missing fpu-switch"
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"
             grep -q "hello from /bin/clarity-init" "serial-$attempt.log" || missing="$missing init-process"
             grep -q "\[ok\] user .bss zeroed" "serial-$attempt.log" || missing="$missing user-bss"
             grep -q "\[ok\] user heap" "serial-$attempt.log" || missing="$missing user-heap"
+            grep -q "\[ok\] user sse" "serial-$attempt.log" || missing="$missing user-sse"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
             if [ -z "$missing" ]; then
               echo "--> attempt $attempt: PASS"

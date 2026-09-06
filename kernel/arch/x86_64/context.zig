@@ -5,16 +5,27 @@
 //! threads add the full IRET frame on entry.
 
 const std = @import("std");
+const fpu_mod = @import("fpu.zig");
 
 pub const Context = extern struct {
-    rsp: u64,
-    rbp: u64,
-    rbx: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    rip: u64,
+    rsp: u64 = 0,
+    rbp: u64 = 0,
+    rbx: u64 = 0,
+    r12: u64 = 0,
+    r13: u64 = 0,
+    r14: u64 = 0,
+    r15: u64 = 0,
+    rip: u64 = 0,
+    /// x87 + SSE state, saved by FXSAVE in context.S. The alignment lives on
+    /// the field, which is what makes `context + 64` a legal FXSAVE operand.
+    ///
+    /// Held inline rather than behind a pointer, and given a default rather
+    /// than left to be filled in, because every way of doing it otherwise has
+    /// a call site that can be forgotten — and a forgotten one is not a
+    /// compile error, it is an FXRSTOR of zeroes at run time, which unmasks
+    /// every SSE exception and turns the next division into a #XM. Every
+    /// Context that exists is therefore born with a valid image.
+    fpu: [fpu_mod.AREA_SIZE]u8 align(16) = fpu_mod.CLEAN,
 };
 
 /// Switch from `prev` to `next`. Saves the callee-saved state onto `prev`'s
@@ -31,9 +42,14 @@ pub extern fn clarity_switch_to(prev: *Context, next: *const Context) callconv(.
 pub const switch_to = clarity_switch_to;
 
 comptime {
-    // context.S hardcodes these two offsets.
+    // context.S hardcodes these three offsets.
     std.debug.assert(@offsetOf(Context, "rsp") == 0);
     std.debug.assert(@offsetOf(Context, "rip") == 56);
+    std.debug.assert(@offsetOf(Context, "fpu") == 64);
+    // FXSAVE and FXRSTOR fault unless the address is 16-byte aligned, and the
+    // address is `context + 64` — so the Context itself has to be aligned,
+    // wherever it is embedded and however it is allocated.
+    std.debug.assert(@alignOf(Context) == 16);
 }
 
 /// Initialise a brand-new kernel thread's context so that the
@@ -118,9 +134,19 @@ pub const IretFrame = extern struct {
 /// The kernel stack `frame_rsp` points into is an HHDM address in the upper
 /// half, which every address space shares (see vmm.share_kernel_half), so it
 /// survives the switch.
-pub fn enter_userland(cr3: u64, frame_rsp: u64) noreturn {
+///
+/// `fpu_area` is the thread's FXSAVE image, restored here for the same reason
+/// clarity_switch_to restores one: this is the other way into a thread, and a
+/// process must not start with whatever floating-point state the last thread
+/// to run happened to leave in the registers. For a fresh process that image
+/// is the clean one Context is born with, which is exactly the state the ABI
+/// says a program starts in. It goes before the CR3 load only because it is
+/// tidier to read that way — the area is an HHDM address, which every address
+/// space maps, so either side would work.
+pub fn enter_userland(cr3: u64, frame_rsp: u64, fpu_area: u64) noreturn {
     asm volatile (
         \\ cli
+        \\ fxrstor (%[fpu])
         \\ movq %[cr3], %%cr3
         \\ movq %[frame], %%rsp
         \\ swapgs
@@ -128,6 +154,7 @@ pub fn enter_userland(cr3: u64, frame_rsp: u64) noreturn {
         :
         : [cr3] "r" (cr3),
           [frame] "r" (frame_rsp),
+          [fpu] "r" (fpu_area),
         : "memory"
     );
     unreachable;

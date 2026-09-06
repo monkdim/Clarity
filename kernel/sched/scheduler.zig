@@ -56,7 +56,9 @@ pub const Thread = struct {
     priority: Priority,
     state: State,
     wait: WaitReason = .none,
-    context: context.Context = std.mem.zeroes(context.Context),
+    // `.{}` rather than zeroes: Context's FXSAVE area has a default that is a
+    // valid FPU image, and zeroing it would unmask every SSE exception.
+    context: context.Context = .{},
     kernel_stack_top: u64 = 0,
     iret_rsp: u64 = 0,                      // for first entry to userspace
     cr3: u64 = 0,                            // address space root
@@ -226,7 +228,7 @@ pub fn spawn_user(path: []const u8) !*Thread {
 /// The context the boot path is running on. `yield` needs somewhere to save
 /// the caller's registers even before any Thread exists, and this is it: the
 /// kernel's initial stack behaves as thread zero.
-var boot_context: context.Context = std.mem.zeroes(context.Context);
+var boot_context: context.Context = .{};
 
 /// Pick the next runnable thread without switching to it.
 ///
@@ -502,7 +504,7 @@ pub fn exec(path: []const u8) !void {
 
     // Re-enter user mode with the new image. CR3 goes in with it — see
     // enter_userland for why they cannot be separate statements.
-    context.enter_userland(cur.cr3, cur.iret_rsp);
+    context.enter_userland(cur.cr3, cur.iret_rsp, @intFromPtr(&cur.context.fpu));
 }
 
 pub const WaitResult = struct { pid: Pid, exit_code: i32 };

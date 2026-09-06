@@ -54,16 +54,19 @@ pub fn build(b: *std.Build) void {
     // It rides in the kernel image because the physical memory allocator
     // already reserves that; a GRUB module would land somewhere pmm is free
     // to hand out, which is a separate problem to solve properly.
+    //
+    // Unlike the kernel, this target keeps SSE and does not use soft_float.
+    // The kernel gives them up on purpose — an interrupt handler that never
+    // touches a vector register can never be the thing that clobbers one —
+    // but userspace is where floating point actually happens: a compiled
+    // Clarity program is C, and C on x86-64 passes and returns every double
+    // in xmm0. The kernel enables SSE for ring 3 (arch/x86_64/fpu.zig) and
+    // carries the state across a context switch (arch/x86_64/context.S), so
+    // there is nothing left for this target to work around.
     const user_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
-        .cpu_features_sub = std.Target.x86.featureSet(&.{
-            .mmx, .sse, .sse2, .avx, .avx2,
-        }),
-        .cpu_features_add = std.Target.x86.featureSet(&.{
-            .soft_float,
-        }),
     });
     const init_prog = b.addExecutable(.{
         .name = "clarity-init",
