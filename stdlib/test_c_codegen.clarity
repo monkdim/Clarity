@@ -173,6 +173,18 @@ if CC == null {
     -- than matching the interpreter's.
     nat_eq("exc_uncaught_stdout", "show \"before\"\nthrow \"boom\"\nshow \"after\"", "before")
 
+    -- The last builtins with no native implementation. base64 is checked at
+    -- all three padding lengths, and the digests are the published FIPS 180-4
+    -- vectors — matching the interpreter here also means matching everyone
+    -- else's sha256, which is the point of a hash.
+    same("bi_base64", "show encode64(\"hi\")\nshow encode64(\"a\")\nshow encode64(\"abc\")\nshow encode64(\"hello world!\")\nshow decode64(encode64(\"round trip with padding\"))\nshow decode64(\"aGVsbG8=\")")
+    same("bi_hash", "show hash(\"\")\nshow hash(\"abc\")\nshow hash(\"The quick brown fox jumps over the lazy dog\")")
+    -- cwd and random cannot be compared value-for-value — one depends on where
+    -- the test runs and the other is meant to differ every time — so this
+    -- asserts the type, which is the part that must agree.
+    same("bi_cwd_random_types", "show type(cwd())\nshow type(random())\nshow type(random(10))\nshow type(random(5, 9))")
+    nat_eq("bi_random_range", "mut ok = true\nmut i = 0\nwhile i < 500 { let r = random(5, 9)\nif r < 5 or r >= 9 { ok = false }\ni = i + 1 }\nshow ok", "true")
+
     -- ── stage 3: classes ──
     same("class_counter", "class Counter { fn init(start) { this.n = start }\nfn inc() { this.n = this.n + 1 }\nfn get() { return this.n } }\nlet c = Counter(5)\nc.inc()\nc.inc()\nshow c.get()")
     same("class_to_string", "class Point { fn init(x, y) { this.x = x\nthis.y = y }\nfn to_string() { return \"(\" + str(this.x) + \", \" + str(this.y) + \")\" } }\nshow Point(3, 4)")
