@@ -15,6 +15,7 @@
 
 const std = @import("std");
 
+const NR_READ: u64 = 0;
 const NR_WRITE: u64 = 1;
 const NR_BRK: u64 = 9;
 const NR_EXIT: u64 = 12;
@@ -32,6 +33,10 @@ fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
 
 fn write(fd: u64, buf: []const u8) i64 {
     return syscall3(NR_WRITE, fd, @intFromPtr(buf.ptr), buf.len);
+}
+
+fn read(fd: u64, buf: []u8) i64 {
+    return syscall3(NR_READ, fd, @intFromPtr(buf.ptr), buf.len);
 }
 
 fn exit(code: u64) noreturn {
@@ -85,6 +90,14 @@ fn check(passed: bool, ok_msg: []const u8, fail_msg: []const u8) void {
         _ = write(1, fail_msg);
     }
 }
+
+/// Something in this program's *text*, to aim a deliberately bad read at.
+///
+/// Taking the address of `_start` would do as well; a function of its own
+/// says why the address is being taken. The loader maps this segment
+/// read-and-execute for EL0, so it is a legal pointer that is not a legal
+/// place to put data — which is exactly the case a kernel has to get right.
+fn greeting_is_here() callconv(.C) void {}
 
 export fn _start() callconv(.C) noreturn {
     // The greeting starts lowercase in the file, and this program makes it
@@ -180,6 +193,60 @@ export fn _start() callconv(.C) noreturn {
                 "  [ok] user heap: brk grew and the memory holds\n",
                 "  [FAIL] user heap: wrote to brk memory, read back wrong\n",
             );
+        }
+    }
+
+    // And a line from the console, read by *this program* rather than by the
+    // kernel on its behalf. Everything above reads memory the loader put
+    // there; this is the first thing the program asks the outside world for.
+    //
+    // The first read deliberately points somewhere this process may execute
+    // and read but not write: its own text. A kernel that translates the
+    // buffer for writing, as it must, cannot deliver there and says EFAULT.
+    // One that translates it for reading — the same call sys_write makes, and
+    // the easy mistake — finds the page perfectly readable and writes through
+    // its own map into this program's instructions. That would corrupt the
+    // process silently and in the process's favour, so it is worth a check
+    // rather than a comment.
+    //
+    // A refused read must also not eat the line. So the second read asks
+    // again, with a buffer that works, and must get the same line back — if
+    // the kernel dropped it, a program with a bad pointer would cost the next
+    // reader its input for reasons nothing in that reader could explain.
+    //
+    // Nobody may be typing, and that is not a failure: a boot with no one at
+    // the keyboard reports end of input, which is what a closed stdin does.
+    // The read that reports it is the first one, so an untyped boot waits
+    // once rather than twice.
+    _ = write(1, "  init: type a line: ");
+    const text: [*]u8 = @ptrFromInt(@intFromPtr(&greeting_is_here));
+    const refused = read(0, text[0..16]);
+
+    if (refused == 0) {
+        _ = write(1, "\n  init: nothing typed, end of input\n");
+    } else if (refused > 0) {
+        failures += 1;
+        _ = write(1, "\n  [FAIL] user read: the kernel wrote into read-only text\n");
+    } else {
+        var typed: [128]u8 = undefined;
+        const got = read(0, &typed);
+        if (got <= 0) {
+            failures += 1;
+            _ = write(1, "\n  [FAIL] user read: the refused read ate the line ");
+            write_hex(@bitCast(got));
+        } else {
+            const n: usize = @intCast(got);
+            // read(2) hands back the newline that ended the line. A reader
+            // that did not get one was given something that is not a line,
+            // and every caller splitting input on newlines would be wrong.
+            if (typed[n - 1] != '\n') {
+                failures += 1;
+                _ = write(1, "\n  [FAIL] user read: no newline ends the line\n");
+            }
+            _ = write(1, "\n  [ok] user read: a bad buffer was refused and kept the line\n");
+            _ = write(1, "  init: read \"");
+            _ = write(1, typed[0 .. n - 1]);
+            _ = write(1, "\"\n");
         }
     }
 

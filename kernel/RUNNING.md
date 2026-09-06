@@ -201,6 +201,33 @@ testing an input device: reading nothing is exactly what a working driver
 does when nobody types, so no marker in a log nobody typed into can tell that
 from a queue the device never writes to.
 
+### A program reading it
+
+The lines above are read by the kernel. This one is read by a *program*:
+
+```
+  init: type a line: hello
+  [ok] user read: a bad buffer was refused and kept the line
+  init: read "hello"
+```
+
+`/bin/clarity-init` — the compiled, linked ELF running at EL0 — calls
+`read(0, ...)` twice. The first time it deliberately points at its own
+read-only text. The kernel translates a read buffer through the process's own
+page tables **for writing**, so that address is refused with `EFAULT`; a
+kernel that translated it for reading, which is what `write` does and is the
+easy mistake, would find the page perfectly readable and write through its own
+map into the program's instructions. The second call passes a real buffer and
+must get back the same line — a refused read that ate the line would cost the
+next reader its input for a reason nothing in that reader could explain.
+
+With nobody typing it says `init: nothing typed, end of input` and carries on.
+That is not blocking: there is no scheduler to block a thread on yet, so a
+read spins and gives up after three seconds, which is what a closed stdin
+looks like to a caller. It is a stand-in, and the boot gate asserts it on all
+three of its ARM boots precisely because that is the path a shell will meet
+first.
+
 `tools/key_check.py` is what closes it. It boots this same command line with
 QEMU's monitor on a socket and types two lines, then checks two different
 things about them:
@@ -260,9 +287,10 @@ after another rather than at the same time. They are loaded from ELFs embedded
 in the kernel image rather than read from anywhere: no filesystem, no shell.
 `write` goes straight to the serial console because there is no VFS to route
 it through. Text on screen and the keyboard are joined now — typing echoes,
-backspace erases, Enter hands over a line — but only as far as a boot
-selftest that prints the line back. There is no `read(2)`, no process holding
-a terminal, and so no shell. That is the next thing.
+backspace erases, Enter hands over a line, and `read(2)` delivers that line to
+a program at EL0. What is missing above it is a shell: nothing keeps a
+terminal, a session or a process table, and a read does not really block. That
+is the next thing.
 
 ## x86-64 — the one that runs programs
 

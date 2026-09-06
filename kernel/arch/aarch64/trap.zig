@@ -28,6 +28,8 @@ const mmu = @import("mmu.zig");
 const vm = @import("vm.zig");
 const paging = @import("paging.zig");
 const pmm = @import("../../mm/pmm.zig");
+const line = @import("../../drivers/line.zig");
+const stdin = @import("../../drivers/stdin.zig");
 
 /// The interrupted process's state, as the vector entry laid it out.
 /// `extern` because the offsets are shared with assembly and must not be
@@ -54,6 +56,7 @@ pub const EXIT_FAULT: u64 = 1;
 /// table. Deliberately the same numbers as the x86_64 side rather than a
 /// convenient local set: a program that runs on one should make the same
 /// call on the other.
+const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_BRK: u64 = 9;
 const SYS_EXIT: u64 = 12;
@@ -185,6 +188,9 @@ fn dispatch(frame: *Frame) void {
     calls += 1;
     const number = frame.x[8];
     switch (number) {
+        SYS_READ => {
+            frame.x[0] = @bitCast(sys_read(frame.x[0], frame.x[1], frame.x[2]));
+        },
         SYS_WRITE => {
             if (calls == 1) ticks_entering = timer.ticks();
             // The result goes back the way the arguments came: into the saved
@@ -215,6 +221,60 @@ fn dispatch(frame: *Frame) void {
 /// write(fd, buf, len) — the console, and nothing else yet.
 ///
 /// `buf` is a user virtual address. It is not dereferenced: `mmu.translate_
+/// Read a line from the console into the process's memory.
+///
+/// The mirror image of sys_write, and the difference is the whole point: this
+/// asks the MMU to translate the user's buffer *for writing*. A page the
+/// process may read but not write translates for sys_write and faults here,
+/// which is the hardware refusing to let the kernel put data somewhere the
+/// process itself could not — the case a kernel that dereferenced the pointer
+/// directly would get wrong in the process's favour.
+///
+/// Returns 0 for end of input, which on a machine with no scheduler means
+/// nobody typed anything for a few seconds. See drivers/stdin.zig.
+fn sys_read(fd: u64, buf: u64, len: u64) i64 {
+    if (fd != 0) return EBADF;
+    if (len == 0) return 0;
+
+    var staging: [line.MAX_LINE + 1]u8 = undefined;
+    const want = @min(len, staging.len);
+    const n = stdin.read(staging[0..want], READ_IDLE_TICKS);
+    if (n == 0) return 0;
+
+    // Page by page, for the reason sys_write is: two consecutive pages of the
+    // process's buffer are two unrelated physical frames.
+    var done: usize = 0;
+    while (done < n) {
+        const va = buf + done;
+        const phys = mmu.translate_user_write(va) orelse {
+            // Give back everything not yet delivered. A program that passes a
+            // bad pointer should cost itself its input and nothing else; if
+            // this line were dropped, the next program to read would find it
+            // missing for a reason nothing in its own behaviour explains.
+            stdin.unread(n);
+            return EFAULT;
+        };
+
+        const page_left = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        const m = @min(n - done, page_left);
+        const dst: [*]u8 = @ptrFromInt(vm.phys_to_virt(phys));
+        @memcpy(dst[0..m], staging[done..][0..m]);
+        done += m;
+    }
+    bytes_read += done;
+    return @intCast(done);
+}
+
+/// How long a read waits with nothing typed before reporting end of input.
+/// Three seconds at the 100 Hz the timer runs at — long enough that a person
+/// who has started typing is not cut off, short enough that a boot with
+/// nobody at the keyboard is not held up by it.
+const READ_IDLE_TICKS: u64 = 300;
+
+/// Counted for the same reason bytes_written is: so the boot log can say the
+/// path was used rather than merely present.
+pub var bytes_read: u64 = 0;
+
 /// user_read` runs a stage-1 translation with EL0 permissions and reports the
 /// physical address, which the kernel then reads through its own direct map.
 /// A page the process cannot read is a fault the hardware reports here, as
