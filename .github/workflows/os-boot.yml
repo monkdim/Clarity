@@ -35,16 +35,6 @@ jobs:
           qemu-system-x86_64 --version | head -1
           zig version
 
-      - name: Cache kernel Zig build outputs
-        uses: actions/cache@v4
-        with:
-          path: |
-            kernel/zig-out
-            kernel/.zig-cache
-          key: os-kernel-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld') }}
-          restore-keys: |
-            os-kernel-${{ runner.os }}-
-
       - name: Build the kernel
         run: |
           cd kernel
@@ -68,26 +58,35 @@ jobs:
 
       - name: Boot the kernel under QEMU and assert the ready marker
         run: |
-          echo "Booting ClarityOS kernel (TCG); expecting 'ClarityOS ready.' on serial..."
+          # Boot the SAME image three times. A kernel that only sometimes
+          # reaches userspace is a real defect, so the gate requires every
+          # attempt to succeed rather than just one.
           # -no-reboot: halt instead of looping if the kernel faults after the
           # marker (it will try to spawn a runtime that isn't in this ISO).
-          timeout 180 qemu-system-x86_64 \
-            -cdrom clarity-kernel.iso \
-            -boot d \
-            -m 512 \
-            -serial stdio \
-            -display none \
-            -no-reboot \
-            > serial.log 2>&1 || true
-          echo "----- serial output -----"
-          cat serial.log
-          echo "-------------------------"
-          if grep -q "ClarityOS ready." serial.log; then
-            echo "PASS: kernel reached the ready marker"
-          else
-            echo "FAIL: 'ClarityOS ready.' never appeared on serial"
+          fails=0
+          for attempt in 1 2 3; do
+            echo "=== boot attempt $attempt ==="
+            timeout 180 qemu-system-x86_64 \
+              -cdrom clarity-kernel.iso \
+              -boot d \
+              -m 512 \
+              -serial stdio \
+              -display none \
+              -no-reboot \
+              > "serial-$attempt.log" 2>&1 || true
+            cat "serial-$attempt.log"
+            if grep -q "ClarityOS ready." "serial-$attempt.log"; then
+              echo "--> attempt $attempt: PASS"
+            else
+              echo "--> attempt $attempt: FAIL (never reached the ready marker)"
+              fails=$((fails + 1))
+            fi
+          done
+          if [ "$fails" -ne 0 ]; then
+            echo "FAIL: $fails of 3 boots did not reach 'ClarityOS ready.'"
             exit 1
           fi
+          echo "PASS: kernel reached the ready marker on all 3 boots"
 
   os-boot-aarch64:
     runs-on: ubuntu-latest
@@ -107,16 +106,6 @@ jobs:
           sudo apt-get install -y qemu-system-arm
           qemu-system-aarch64 --version | head -1
           zig version
-
-      - name: Cache aarch64 Zig build outputs
-        uses: actions/cache@v4
-        with:
-          path: |
-            kernel/zig-out
-            kernel/.zig-cache
-          key: os-kernel-arm-${{ runner.os }}-${{ hashFiles('kernel/**/*.zig', 'kernel/**/*.S', 'kernel/**/*.ld') }}
-          restore-keys: |
-            os-kernel-arm-${{ runner.os }}-
 
       - name: Build the aarch64 kernel
         run: |

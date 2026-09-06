@@ -23,6 +23,8 @@ const tmpfs = @import("fs/tmpfs.zig");
 const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
 
+extern const __kernel_phys_end: u8;
+
 /// Boot info handed up from the loader: memory map, framebuffer, ACPI RSDP.
 pub const BootInfo = struct {
     memory_map: []const multiboot.MemoryMapEntry,
@@ -57,6 +59,19 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         .rsdp = parsed.rsdp_v2 orelse parsed.rsdp_v1,
         .cmdline = parsed.cmdline,
     };
+
+    // Boot-layout diagnostics. The multiboot info blob is handed to us by
+    // the loader, which reserves the kernel's file image but not its .bss;
+    // if the blob lands inside .bss, pmm's bitmap memset would shred the
+    // memory map we are about to read. Report the geometry so the boot log
+    // proves whether they overlap.
+    console.print("  mbi=");
+    console.print_hex(mb_info_phys);
+    console.print(" kernel_end=");
+    console.print_hex(@intFromPtr(&__kernel_phys_end));
+    console.print(" mmap_entries=");
+    console.print_dec(boot_info.memory_map.len);
+    console.println("");
 
     // 2. Memory: physical page allocator over the boot memory map,
     //    then a clean page-table tree owned by the kernel, then a
