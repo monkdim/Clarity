@@ -47,7 +47,6 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     // Parse the multiboot2 info blob into a BootInfo. Allocator-free, so
     // the memory map aliases the firmware-supplied table — it must be
     // consumed by pmm before we repurpose low memory.
-    console.println("  .. parsing multiboot2 info");
     const parsed = multiboot.ParsedBootInfo.parse(@ptrFromInt(mb_info_phys), null) catch {
         console.println("PANIC: multiboot2 info parse failed");
         hang();
@@ -58,7 +57,6 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
         .rsdp = parsed.rsdp_v2 orelse parsed.rsdp_v1,
         .cmdline = parsed.cmdline,
     };
-    console.println("  .. multiboot2 parsed");
 
     // 2. Memory: physical page allocator over the boot memory map,
     //    then a clean page-table tree owned by the kernel, then a
@@ -80,9 +78,7 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     console.println("  [ok] syscalls");
 
     // 5. VFS + tmpfs as the root filesystem.
-    console.println("  .. vfs.init");
     vfs.init();
-    console.println("  .. tmpfs.mount_root");
     tmpfs.mount_root() catch |err| {
         console.print("PANIC: tmpfs mount failed: ");
         console.println(@errorName(err));
@@ -91,7 +87,6 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     console.println("  [ok] vfs + rootfs");
 
     // 6. Drivers: console, framebuffer, PS/2 keyboard + mouse, storage.
-    console.println("  .. drivers.init");
     drivers.init(&boot_info) catch |err| {
         console.print("PANIC: driver init failed: ");
         console.println(@errorName(err));
