@@ -417,6 +417,38 @@ for rapp in ["editor", "files", "calc", "settings", "terminal"] {
     assert(not dr.wm.is_dragging(), rapp + ": release ends the resize")
 }
 
+-- ── Dock: drag to reorder ──────────────────────────
+show "-- KyanDesktop: dock reorder --"
+let dd = kyan_desktop(1000, 640, theme)
+dd.boot(null)
+let dd_before = str(dd.pinned)
+let dd_lay = dd._dock_layout()
+let dd_first = dd_lay["icons"][0]
+let dd_third = dd_lay["icons"][2]
+let dd_app = dd_first["app"]
+-- press starts both the activation and a potential drag
+dd.handle_mouse(mk_mouse(dd_first["x"] + 22, dd_first["y"] + 22, "press", 1))
+assert_eq(dd._dock_drag, dd_app, "pressing a dock icon arms a drag for that app")
+-- moving onto the third slot moves the icon there
+dd.handle_mouse(mk_mouse(dd_third["x"] + 22, dd_third["y"] + 22, "motion", 0))
+assert_eq(dd.pinned[2], dd_app, "dragging moves the icon to the slot under the pointer")
+assert_eq(len(dd.pinned), 7, "reordering neither adds nor drops icons")
+assert(str(dd.pinned) != dd_before, "the dock order actually changed")
+-- release ends the drag
+dd.handle_mouse(mk_mouse(dd_third["x"] + 22, dd_third["y"] + 22, "release", 0))
+assert(dd._dock_drag == null, "releasing ends the dock drag")
+
+-- a click with no motion must not reorder anything
+let dc2 = kyan_desktop(1000, 640, theme)
+dc2.boot(null)
+let dc2_before = str(dc2.pinned)
+let dc2_lay = dc2._dock_layout()
+dc2.handle_mouse(mk_mouse(dc2_lay["icons"][1]["x"] + 22, dc2_lay["icons"][1]["y"] + 22, "press", 1))
+dc2.handle_mouse(mk_mouse(dc2_lay["icons"][1]["x"] + 22, dc2_lay["icons"][1]["y"] + 22, "release", 0))
+assert_eq(str(dc2.pinned), dc2_before, "a plain dock click leaves the order untouched")
+-- and it still launches the app it was pointed at
+assert(contains(dc2.running(), dc2_lay["icons"][1]["app"]), "a dock click still launches its app")
+
 -- ── close ────────────────────────────────────────
 
 assert(d.close("terminal"), "close terminal")

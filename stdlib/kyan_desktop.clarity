@@ -83,6 +83,7 @@ class KyanDesktop {
         this.font = builtin_font()
         this._atlas = shared_atlas()   -- anti-aliased UI type (shared decode cache)
         this.pinned = DEFAULT_PINNED
+        this._dock_drag = null     -- app id being dragged along the dock, or null
         this.windows = {}          -- app_id -> Window
         this.painters = app_painters()   -- app_id -> content painter
         this.launcher_open = false
@@ -287,9 +288,21 @@ class KyanDesktop {
             if me.is_press { return this._launcher_click(me.x, me.y) }
             return true
         }
+        -- A dock icon being dragged owns motion until the button comes up,
+        -- so the window manager never sees it as a window drag.
+        if this._dock_drag != null {
+            if me.is_motion { this._dock_drag_to(me.x); return true }
+            if me.is_release { this._dock_drag = null; return true }
+        }
         if me.is_press {
             let hit = this._dock_hit(me.x, me.y)
-            if hit != null { this._activate(hit); return true }
+            if hit != null {
+                -- Activating on press keeps launching responsive; the drag
+                -- only reorders if the pointer actually moves.
+                this._dock_drag = hit
+                this._activate(hit)
+                return true
+            }
             if this._titlebar_click(me.x, me.y) { return true }
             if this._content_click(me.x, me.y) { return true }
         }
@@ -576,6 +589,46 @@ class KyanDesktop {
             ix = ix + DOCK_ICON + DOCK_GAP
         }
         return {"x": dx, "y": dy, "w": dw, "h": dh, "icons": icons}
+    }
+
+    -- Drag-to-reorder: move the dragged icon to whichever slot the pointer
+    -- is over. Slots are fixed-width, so the target index is just the
+    -- pointer's offset from the first icon divided by the icon pitch.
+    -- Returns true when the order actually changed.
+    fn _dock_drag_to(px) {
+        let app = this._dock_drag
+        if app == null { return false }
+        let layout = this._dock_layout()
+        if layout == null { return false }
+        mut idx = -1
+        mut i = 0
+        while i < len(this.pinned) {
+            if this.pinned[i] == app { idx = i }
+            i = i + 1
+        }
+        if idx < 0 { return false }
+
+        let step = DOCK_ICON + DOCK_GAP
+        let first_x = layout["icons"][0]["x"]
+        mut target = int((px - first_x + int(DOCK_ICON / 2)) / step)
+        if target < 0 { target = 0 }
+        if target > len(this.pinned) - 1 { target = len(this.pinned) - 1 }
+        if target == idx { return false }
+
+        -- Pull the icon out, then splice it back in at the target slot.
+        mut rest = []
+        for a in this.pinned { if a != app { push(rest, a) } }
+        mut out = []
+        mut j = 0
+        while j < len(rest) {
+            if j == target { push(out, app) }
+            push(out, rest[j])
+            j = j + 1
+        }
+        if target >= len(rest) { push(out, app) }
+        this.pinned = out
+        this._dirty = true
+        return true
     }
 
     fn _dock_hit(px, py) {
