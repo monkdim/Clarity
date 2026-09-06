@@ -21,6 +21,7 @@ const fdt = @import("boot/fdt.zig");
 const virtio_mmio = @import("arch/aarch64/virtio_mmio.zig");
 const virtio_input = @import("arch/aarch64/virtio_input.zig");
 const keyboard = @import("arch/aarch64/keyboard.zig");
+const line = @import("drivers/line.zig");
 const pmm = @import("mm/pmm.zig");
 const vm = @import("arch/aarch64/vm.zig");
 const paging = @import("arch/aarch64/paging.zig");
@@ -109,7 +110,7 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // A keyboard. Nothing on this architecture could read one: QEMU's `virt`
     // has no PS/2 controller, which is also true of the hardware this is
     // aimed at, so the way in is the virtio bus rather than a port.
-    keyboard_selftest(tree);
+    input_selftest(tree);
 
     // And finally a program that was compiled and linked rather than
     // assembled into this image.
@@ -772,7 +773,7 @@ fn screen_selftest() void {
     }
 }
 
-/// Find the keyboard and read what it says.
+/// Find the keyboard and read what is typed on it, a line at a time.
 ///
 /// The bus slots come from the device tree — thirty-two of them on `virt`,
 /// identical, with whatever is in each discoverable only by reading its
@@ -780,10 +781,11 @@ fn screen_selftest() void {
 /// machine and nowhere else.
 ///
 /// Reading is checked by making QEMU type: tools/key_check.py sends keys
-/// through the monitor and requires the kernel to report exactly them. A
-/// driver that came up and delivered nothing would otherwise look identical
-/// to one that came up and nobody pressed anything.
-fn keyboard_selftest(tree: ?fdt.Fdt) void {
+/// through the monitor and requires the kernel to report exactly the lines
+/// they spell, and the screen to show them. A driver that came up and
+/// delivered nothing would otherwise look identical to one that came up and
+/// nobody pressed anything.
+fn input_selftest(tree: ?fdt.Fdt) void {
     const t = tree orelse {
         console.println("  [--] no device tree; no virtio bus to look on");
         return;
@@ -831,41 +833,78 @@ fn keyboard_selftest(tree: ?fdt.Fdt) void {
     console.print_dec(n);
     console.println(" slots");
 
-    // Read whatever gets typed, bounded by the timer rather than by a spin
-    // count: how many times this loop goes round in a second depends on the
-    // machine, and the window the keys have to arrive in should not. The
-    // timer is known to be delivering interrupts by here — timer_selftest ran
-    // several screens ago and would have said so if it were not.
+    // Read what gets typed, a line at a time, bounded by the timer rather
+    // than by a spin count: how many times this loop goes round in a second
+    // depends on the machine, and the window the keys have to arrive in
+    // should not. The timer is known to be delivering interrupts by here —
+    // timer_selftest ran several screens ago and would have said so if it
+    // were not.
     //
     // Two bounds, because there are two things being waited for. FIRST_WAIT
-    // is how long a boot with nobody at the keyboard costs; QUIET_WAIT is how
-    // long after the last key this decides the typing has stopped, and it is
-    // reset by every character so a long string is not cut off halfway.
+    // is what a boot with nobody at the keyboard costs; QUIET_WAIT is how
+    // long after the last key this decides the typing has stopped, and every
+    // character resets it so a long line is not cut off halfway.
     //
     // Nothing may be typed at all, which is why this reports what it saw
     // rather than passing or failing. The checking is tools/key_check.py's
     // job, because only something outside the kernel can make keys happen.
     const FIRST_WAIT: u64 = 300; // 3 s at the 100 Hz the timer is set to
     const QUIET_WAIT: u64 = 200; // 2 s of silence ends the read
+    const MAX_LINES: usize = 4;
 
-    var typed: [96]u8 = undefined;
-    var count: usize = 0;
+    var editor = line.Editor.init(console.putc);
+    var lines: usize = 0;
+    var characters: usize = 0;
+
+    console.println("  type at it; two seconds of quiet ends the read");
+    console.print("  > ");
+
     var deadline = timer.ticks() + FIRST_WAIT;
-    while (timer.ticks() < deadline and count < typed.len) {
-        if (keyboard.poll()) |c| {
-            typed[count] = c;
-            count += 1;
-            deadline = timer.ticks() + QUIET_WAIT;
-        }
+    while (timer.ticks() < deadline and lines < MAX_LINES) {
+        const c = keyboard.poll() orelse continue;
+        deadline = timer.ticks() + QUIET_WAIT;
+        const done = editor.feed(c) orelse continue;
+
+        // Printed on its own line rather than left on screen, because the
+        // echo shows what was typed and this shows what the kernel *has* —
+        // and the whole point of a line discipline is that those two differ
+        // wherever something was corrected.
+        lines += 1;
+        characters += done.len;
+        console.print("  line ");
+        console.print_dec(lines);
+        console.print(": \"");
+        console.print(done);
+        console.println("\"");
+        if (lines < MAX_LINES) console.print("  > ");
     }
 
-    console.print("  keyboard: read ");
-    console.print_dec(count);
-    console.print(" characters from ");
+    // A line still being typed when the time ran out is reported too. Left
+    // out, a test that lost the Enter would look exactly like one that lost
+    // the whole line.
+    if (editor.len > 0) {
+        // On its own row: the echo of what was typed is still on the current
+        // one, and running this into the end of it makes a log line that
+        // reads as neither.
+        console.println("");
+        console.print("  unfinished: \"");
+        console.print(editor.buf[0..editor.len]);
+        console.println("\"");
+    } else if (lines < MAX_LINES) {
+        console.println("");
+    }
+
+    console.print("  [ok] console input: ");
+    console.print_dec(lines);
+    console.print(if (lines == 1) " line, " else " lines, ");
+    console.print_dec(characters);
+    console.print(if (characters == 1) " character, from " else " characters, from ");
     console.print_dec(keyboard.presses);
-    console.print(" key presses: \"");
-    console.print(typed[0..count]);
-    console.println("\"");
+    console.print(if (keyboard.presses == 1) " key press (" else " key presses (");
+    console.print_dec(editor.ignored);
+    console.print(" ignored, ");
+    console.print_dec(editor.dropped);
+    console.println(" dropped)");
 }
 
 /// The console's screen half, once there is a screen.
