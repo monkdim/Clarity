@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Boot the aarch64 kernel, screenshot the display, and check the pixels.
+"""Boot the aarch64 kernel, screenshot the display, and read the text back.
 
-The kernel already reads its own framebuffer back and reports whether the
-pattern is there. That proves the memory is writable and holds what was
-written; it does not prove the memory is *the screen*. Only asking the
-machine for a picture proves that QEMU accepted the ramfb configuration and
-is scanning out that region — so this checks the half the kernel cannot.
+The kernel already reads its own framebuffer back and reports whether what it
+drew is there. That proves the memory is writable and holds what was written;
+it does not prove the memory is *the screen*. Only asking the machine for a
+picture proves that QEMU accepted the ramfb configuration and is scanning out
+that region — so this checks the half the kernel cannot.
 
-The expected coordinates and colours are the ones main_aarch64.zig draws.
-They are repeated here on purpose: a check that read its expectations from
-the thing under test would agree with any picture at all.
+What it checks is the boot log itself. The kernel mirrors its console to the
+display, so the screen holds text, and this replays the same wrapping and
+scrolling over the serial log to work out which character should be in which
+cell — then compares every cell against the glyph, pixel by pixel.
+
+That is deliberately not the same code. The kernel draws from
+graphics/font8x8.zig; this draws from tools/font8x8.txt, which the generator
+turns into it. A generator that dropped a row, a console that wrapped at the
+wrong column, a scroll that sheared by a pixel, a stride the drawing code got
+wrong — each of those makes the two disagree, and none of them is visible in
+a check that looks at four solid rectangles.
 """
 
 import os
@@ -21,17 +29,108 @@ import tempfile
 import time
 
 WIDTH, HEIGHT = 1024, 768
-SLATE = (0x11, 0x1A, 0x20)
-SIGNAL = (0x0E, 0x6F, 0x9E)
-PATCH, PATCH_Y = 120, 240
-PATCHES = [
-    (112, (0xFF, 0x00, 0x00)),
-    (288, (0x00, 0xFF, 0x00)),
-    (464, (0x00, 0x00, 0xFF)),
-    (640, (0xFF, 0xFF, 0xFF)),
-]
 
-BOOT_MARKER = "ClarityOS aarch64: EL1 boot ok"
+# What graphics/console.zig is told to use in main_aarch64.zig. Repeated here
+# on purpose: a check that read its expectations from the thing under test
+# would agree with any picture at all.
+SLATE = (0x11, 0x1A, 0x20)
+WHITE = (0xFF, 0xFF, 0xFF)
+SCALE = 2
+GLYPH_W, GLYPH_H = 8, 8
+CELL_W, CELL_H = GLYPH_W * SCALE, GLYPH_H * SCALE
+COLS, ROWS = WIDTH // CELL_W, HEIGHT // CELL_H
+
+BOOT_MARKER = b"ClarityOS aarch64: EL1 boot ok"
+
+# The first thing printed after the console starts mirroring to the screen.
+# Everything from here on is on the display as well as the serial line, so it
+# is where the replay begins.
+MIRROR_MARKER = b"  [ok] console on screen:"
+
+FONT_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font8x8.txt")
+
+
+def load_font():
+    """Read tools/font8x8.txt into {char: [8 rows of 8 bools]}.
+
+    The same file make_font.py reads, parsed again here rather than imported,
+    so that a bug in the generator shows up as a disagreement instead of being
+    shared by both sides.
+    """
+    glyphs = {}
+    code, rows = None, []
+    with open(FONT_SRC) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if code is None and line.startswith("#"):
+                continue
+            if code is None:
+                m = re.match(r"^(\d+) ", line)
+                if m:
+                    code, rows = int(m.group(1)), []
+                continue
+            if not line.strip():
+                continue
+            rows.append([c == "#" for c in line])
+            if len(rows) == GLYPH_H:
+                glyphs[chr(code)] = rows
+                code = None
+    if len(glyphs) != 95:
+        raise SystemExit("fb_check: %s has %d glyphs, expected 95"
+                         % (FONT_SRC, len(glyphs)))
+    return glyphs
+
+
+def expected_screen(log_bytes):
+    """Replay the console over the mirrored part of the log.
+
+    Returns (grid, scrolls), or None if the log never got as far as turning
+    the screen console on. Mirrors graphics/console.zig: wrap at the right
+    edge, tab to the next multiple of eight, scroll at the bottom.
+
+    Bytes, not text. The kernel's messages contain em dashes, and the console
+    draws one cell per *byte* — so a three-byte character occupies three
+    cells, each showing the glyph for '?'. Decoding the log first made this
+    check disagree with the screen from the first such message onward, which
+    is how that was found.
+    """
+    start = log_bytes.find(MIRROR_MARKER)
+    if start < 0:
+        return None
+    grid = [[b" "[0]] * COLS for _ in range(ROWS)]
+    col = row = 0
+    scrolls = 0
+
+    def next_row():
+        nonlocal row, grid, scrolls
+        row += 1
+        if row >= ROWS:
+            grid.pop(0)
+            grid.append([b" "[0]] * COLS)
+            row = ROWS - 1
+            scrolls += 1
+
+    for ch in log_bytes[start:]:
+        if ch == 0x0A:
+            col = 0
+            next_row()
+        elif ch == 0x0D:
+            col = 0
+        elif ch == 0x09:
+            stop = min((col + 8) & ~7, COLS)
+            while col < stop:
+                grid[row][col] = b" "[0]
+                col += 1
+            if col >= COLS:
+                col = 0
+                next_row()
+        else:
+            if col >= COLS:
+                col = 0
+                next_row()
+            grid[row][col] = ch
+            col += 1
+    return grid, scrolls
 
 
 def read_ppm(path):
@@ -52,16 +151,67 @@ def pixel(px, w, x, y):
     return tuple(px[off:off + 3])
 
 
+def compare_cell(px, w, col, row, glyph):
+    """Check one character cell against a glyph. Returns a complaint or None.
+
+    Every pixel, not a sample: the whole point is that a cell drawn with the
+    wrong glyph, or the right glyph one row out, differs somewhere.
+    """
+    ox, oy = col * CELL_W, row * CELL_H
+    for gy in range(GLYPH_H):
+        for gx in range(GLYPH_W):
+            want = WHITE if glyph[gy][gx] else SLATE
+            for sy in range(SCALE):
+                for sx in range(SCALE):
+                    got = pixel(px, w, ox + gx * SCALE + sx, oy + gy * SCALE + sy)
+                    if got != want:
+                        return ("pixel (%d,%d) is #%02X%02X%02X, want "
+                                "#%02X%02X%02X" %
+                                ((ox + gx * SCALE + sx, oy + gy * SCALE + sy)
+                                 + got + want))
+    return None
+
+
 def wait_for_marker(log_path, deadline):
     while time.time() < deadline:
         try:
-            with open(log_path, "r", errors="replace") as f:
+            with open(log_path, "rb") as f:
                 if BOOT_MARKER in f.read():
                     return True
         except FileNotFoundError:
             pass
         time.sleep(0.25)
     return False
+
+
+def settled_screendump(sock_path, out_path, deadline):
+    """Dump the screen until two dumps in a row are identical.
+
+    ramfb hands QEMU a region of guest memory, and with `-display none` there
+    is no user interface driving the refresh that copies that memory into the
+    surface `screendump` writes out. So a single dump can be a frame or two
+    behind what the kernel actually drew — which looks exactly like a console
+    that scrolled the wrong number of times, and made this check fail on
+    three runs out of three against a kernel that was drawing correctly.
+
+    The kernel has halted by the time this runs, so the framebuffer is not
+    changing: once two consecutive dumps agree, the surface has caught up.
+    """
+    previous = None
+    for attempt in range(8):
+        screendump(sock_path, out_path, deadline)
+        if not os.path.exists(out_path):
+            return False
+        with open(out_path, "rb") as f:
+            current = f.read()
+        if previous is not None and current == previous:
+            return True
+        previous = current
+        time.sleep(1.0)
+    # Say so rather than checking a frame that is still moving: a flaky check
+    # is worse than none.
+    raise SystemExit("fb_check: the display never settled — eight dumps and "
+                     "no two alike, with the kernel halted")
 
 
 def screendump(sock_path, out_path, deadline):
@@ -113,29 +263,68 @@ def main():
     ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
     failures = []
+    scrolls = 0
     try:
         deadline = time.time() + 120
         if not wait_for_marker(log, deadline):
             raise SystemExit("fb_check: kernel never reached the boot marker")
-        screendump(sock, shot, deadline)
+        deadline = time.time() + 120
+        settled_screendump(sock, shot, deadline)
         if not os.path.exists(shot):
             raise SystemExit(
                 "fb_check: QEMU produced no screenshot — it has no display "
                 "surface, which means the ramfb configuration was rejected")
 
         w, h, px = read_ppm(shot)
+        cells = lit = 0
         if (w, h) != (WIDTH, HEIGHT):
             failures.append("screen is %dx%d, expected %dx%d" % (w, h, WIDTH, HEIGHT))
         else:
-            checks = [("border", 4, 4, SIGNAL),
-                      ("background", WIDTH // 2, HEIGHT - 64, SLATE)]
-            for x, colour in PATCHES:
-                checks.append(("patch@%d" % x, x + PATCH // 2, PATCH_Y + PATCH // 2, colour))
-            for name, x, y, want in checks:
-                got = pixel(px, w, x, y)
-                if got != want:
-                    failures.append("%s at (%d,%d): got #%02X%02X%02X, want #%02X%02X%02X"
-                                    % ((name, x, y) + got + want))
+            font = load_font()
+            with open(log, "rb") as f:
+                replayed = expected_screen(f.read())
+            if replayed is None:
+                failures.append("the kernel never turned on the screen console")
+                grid = None
+            else:
+                grid, scrolls = replayed
+                # A log that fits on the screen never exercises scrolling, and
+                # a check that does not notice would pass a console whose
+                # scroll is broken. It did, once: the boot log filled 33 rows
+                # of 48 and this said PASS with the scroll deliberately
+                # sheared by a pixel.
+                if scrolls < 1:
+                    failures.append(
+                        "the log never filled the screen, so scrolling was "
+                        "not exercised at all")
+            if grid is not None:
+                for row in range(ROWS):
+                    for col in range(COLS):
+                        byte = grid[row][col]
+                        # The kernel draws '?' for anything outside the font's
+                        # range, so a multi-byte character shows as one '?'
+                        # per byte. Matching that is what makes the two agree.
+                        ch = chr(byte) if 32 <= byte <= 126 else "?"
+                        bad = compare_cell(px, w, col, row, font[ch])
+                        cells += 1
+                        if any(font[ch][y][x] for y in range(GLYPH_H)
+                               for x in range(GLYPH_W)):
+                            lit += 1
+                        if bad:
+                            failures.append(
+                                "cell (%d,%d) should be %r (byte %d): %s"
+                                % (col, row, ch, byte, bad))
+                            if len(failures) >= 8:
+                                failures.append("... and more")
+                                break
+                    if len(failures) >= 8:
+                        break
+                # A screen of nothing but spaces would match a blank display
+                # perfectly, so require that some of it is actually text.
+                if lit < 100:
+                    failures.append(
+                        "only %d cells hold a visible character; the log did "
+                        "not reach the screen" % lit)
     finally:
         qemu.terminate()
         try:
@@ -148,7 +337,9 @@ def main():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: %dx%d, border, background and four colour patches all correct" % (WIDTH, HEIGHT))
+    print("PASS: %dx%d, %d character cells match the boot log after %d "
+          "scrolls, %d of them with visible text"
+          % (WIDTH, HEIGHT, cells, scrolls, lit))
     return 0
 
 

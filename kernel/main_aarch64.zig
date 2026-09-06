@@ -26,6 +26,7 @@ const threadtest = @import("threadtest_aarch64.zig");
 const heap = @import("mm/heap.zig");
 const loader = @import("loader/load_aarch64.zig");
 const fb = @import("graphics/fb.zig");
+const text = @import("graphics/console.zig");
 
 /// Entry point called by the boot stub (arch/aarch64/boot.S) once the CPU
 /// is at EL1 with a stack and a zeroed .bss. `dtb_phys` is the device tree
@@ -93,16 +94,21 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // the CPU away from a thread that never offers it.
     threadtest.run();
 
+    // A screen, and then a console on it.
+    //
+    // Before this everything the kernel said went out a serial line. From the
+    // next line on it also appears on the display — which is why this happens
+    // here and not at the end: a boot log that is only shown after the boot
+    // has finished is a screenshot, not a console.
+    screen_selftest();
+    open_screen_console();
+
     // And finally a program that was compiled and linked rather than
     // assembled into this image.
     init_program();
 
     // And then a Clarity program, through the same path.
     demo_program();
-
-    // A screen. Everything this kernel has said so far went out a serial
-    // line; this is the first thing it can show.
-    screen_selftest();
 
     console.println("ClarityOS aarch64: EL1 boot ok");
 
@@ -745,6 +751,7 @@ fn screen_selftest() void {
     if (s.get(SCREEN_W / 2, SCREEN_H - 64) != fb.SLATE) ok = false;
 
     if (ok) {
+        live_surface = s;
         console.print("  [ok] framebuffer: ");
         console.print_dec(SCREEN_W);
         console.print("x");
@@ -756,6 +763,88 @@ fn screen_selftest() void {
         console.println("  [FAIL] framebuffer: wrote a pattern, read back something else");
     }
 }
+
+/// The console's screen half, once there is a screen.
+///
+/// Kept here rather than inside screen_selftest because the two are different
+/// claims: that one is about whether the display works, and is checked by
+/// reading pixels back and by a screenshot. This is about whether the kernel
+/// can write text, and is checked by the same screenshot reading the glyphs.
+var screen_console: text.Console = undefined;
+
+fn open_screen_console() void {
+    const s = live_surface orelse return;
+    screen_console = text.Console.init(s, 2, fb.WHITE, fb.SLATE);
+    screen_console.clear();
+    console.set_mirror(&screen_console);
+    console.print("  [ok] console on screen: ");
+    console.print_dec(screen_console.cols);
+    console.print("x");
+    console.print_dec(screen_console.rows);
+    console.println(" characters");
+
+    console_selftest();
+}
+
+/// Every printable character, in order. Written out rather than generated so
+/// that what the screenshot check compares against is a literal, and so a
+/// glyph nothing else prints still gets drawn once.
+const PRINTABLE =
+    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`" ++
+    "abcdefghijklmnopqrstuvwxyz{|}~";
+
+/// Draw every glyph, and make the screen scroll.
+///
+/// Both halves are here because neither happens on its own. The boot log uses
+/// perhaps forty distinct characters, so a wrong byte in a glyph nothing
+/// prints would sit there indefinitely; and it fills thirty-three rows of
+/// forty-eight, so the code that moves the picture up had never once run —
+/// the same shape of gap as an exception vector nothing reaches, which is
+/// where most of this kernel's real bugs have been.
+///
+/// Deliberately noisy on the serial line. The alternative is a console whose
+/// scrolling is untested, and forty lines of boot log is a cheaper price than
+/// that.
+fn console_selftest() void {
+    console.print("  console: ");
+    console.println(PRINTABLE);
+
+    // As many lines as it takes, rather than a number chosen once and left
+    // to rot. Forty was the first guess and it was wrong — the screen holds
+    // forty-eight rows and forty-three were already spoken for, so nothing
+    // scrolled and the test passed anyway by asking the wrong question.
+    // Asking for three scrolls instead of a line count cannot go stale when
+    // the boot log or the screen changes size.
+    const before = screen_console.scrolls;
+    const WANT_SCROLLS: u64 = 3;
+    var i: u32 = 0;
+    while (screen_console.scrolls - before < WANT_SCROLLS and i < 500) : (i += 1) {
+        console.print("  console: filling the screen, line ");
+        console.print_dec(i);
+        console.println("");
+    }
+    const scrolled = screen_console.scrolls - before;
+
+    if (scrolled >= WANT_SCROLLS) {
+        console.print("  [ok] console: ");
+        console.print_dec(PRINTABLE.len);
+        console.print(" glyphs drawn, screen scrolled ");
+        console.print_dec(scrolled);
+        console.print(" times over ");
+        console.print_dec(i);
+        console.println(" lines");
+    } else {
+        console.print("  [FAIL] console: ");
+        console.print_dec(i);
+        console.print(" lines produced only ");
+        console.print_dec(scrolled);
+        console.println(" scrolls");
+    }
+}
+
+/// The surface the display is actually scanning out, or null if there is
+/// none. Set by screen_selftest once it has proved the surface works.
+var live_surface: ?fb.Surface = null;
 
 /// Prove an interrupt actually arrives.
 ///
