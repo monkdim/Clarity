@@ -1203,12 +1203,17 @@ fn main() {
 
     -- Bench
     if command == "bench" {
-        let stdlib_dir = _dirname(_abspath("lexer.clarity"))
-        let bench_path = stdlib_dir + "/benchmark.clarity"
-        if exists(bench_path) {
+        -- _find_stdlib_dir, not _dirname(_abspath("lexer.clarity")): the
+        -- latter resolves against the working directory, so `clarity bench`
+        -- only found the file when run from inside stdlib/ and reported it as
+        -- missing everywhere else. The same helper every other command uses
+        -- also looks in ./stdlib and ../stdlib.
+        let stdlib_dir = _find_stdlib_dir()
+        let bench_path = if stdlib_dir == null { null } else { stdlib_dir + "/benchmark.clarity" }
+        if bench_path != null and exists(bench_path) {
             run_file(bench_path)
         } else {
-            show red("  >> benchmark.clarity not found at: {bench_path}")
+            show red("  >> cannot find benchmark.clarity (looked next to the working directory, ./stdlib and ../stdlib)")
             exit(1)
         }
         return null
