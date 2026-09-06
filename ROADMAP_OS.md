@@ -81,27 +81,49 @@ none of it had. That was correctly described as "the bulk of the work". It is
 also unnecessary: `clarity cc` compiles Clarity to C to a native binary, with
 no JavaScript engine anywhere.
 
-**Measured, not estimated.** Compiling a small Clarity program — strings, a
-list, a loop, a function, `show` — and linking the generated C freestanding
-leaves exactly fifteen undefined symbols:
+**Measured, not estimated.** `clarity cc --freestanding` compiles the C
+prelude without its POSIX half — no files, sockets, process control, dynamic
+loading or `/proc` — and reports what the object still needs. Two programs
+bracket the range.
+
+A small one (strings, a list, a loop, a function, `show`) needs sixteen:
 
 ```
-_setjmp free getenv malloc memcpy printf qsort realloc
-snprintf sprintf strcat strcmp strcpy strlen strtod
+fmod free getenv malloc memcpy printf qsort realloc
+setjmp snprintf sprintf strcat strcmp strcpy strlen strtod
 ```
 
-and the whole printf surface it uses is four specifiers: `%ld`, `%s`, `%08lx`,
-`%.*g`. `qsort` appears only in the collector's index sort, `strtod` only in
-float round-tripping, `getenv` only to read `CLARITY_GC`.
+One exercising nearly all of what the profile keeps — classes and methods,
+`try`/`catch`/`finally`, sorting, `hash`, `json_string`, the ctype and math
+builtins — needs twenty-nine, adding:
+
+```
+ceil exit floor isdigit isspace longjmp memset
+rand sqrt srand strstr strtol tolower toupper
+```
+
+So the number is a property of the program, not a fixed floor; thirty is the
+honest ceiling for the profile as it stands. The printf surface across both is
+five specifiers: `%ld`, `%s`, `%g`, `%.*g`, `%08lx`. `qsort` appears only in the
+collector's index sort, `strtod` only in float round-tripping, `getenv` only
+to read `CLARITY_GC`. A program using more float math would add the libm
+functions it calls, and nothing else.
+
+The check behind those numbers is a test, not a note: `test_c_codegen`
+compiles the freestanding C with `-nostdinc` against a stub C library that
+declares only these headers — `stdio.h`, `stdlib.h`, `string.h`, `math.h`,
+`ctype.h`, `setjmp.h` — so the host's POSIX headers are unreachable. If the
+profile ever reaches back for one, that test fails.
 
 That is a few hundred lines, not a libc port, and `malloc` now has something
 to sit on: the kernel grows a process heap through `brk`.
 
 **The remaining pieces, in order:**
 
-1. **The libc subset itself.** String and memory primitives; `malloc`/`free`/
-   `realloc` over `brk`; `setjmp`/`longjmp` (thirty lines of x86-64); `qsort`;
-   `printf`/`snprintf`/`sprintf` for those four specifiers. `%.*g` and
+1. **The libc subset itself.** String, memory and ctype primitives;
+   `malloc`/`free`/`realloc` over `brk`; `setjmp`/`longjmp` (thirty lines of
+   x86-64); `qsort`; `printf`/`snprintf`/`sprintf` for those five specifiers;
+   the handful of libm entries above. `%.*g` and
    `strtod` are the only awkward pair, and they are needed together: the
    runtime finds the shortest round-tripping float by printing at increasing
    precision and parsing back.
@@ -117,7 +139,7 @@ to sit on: the kernel grows a process heap through `brk`.
 **Not pursued, and why.** `runtime/native_vm` (a pure-Zig bytecode VM) is a
 484-line skeleton; taking it to "runs the stdlib" means reimplementing
 strings, maps, lists, classes, closures and GC in Zig, which is larger than
-the fifteen symbols above, not smaller. Building against static musl trades
+the thirty symbols above, not smaller. Building against static musl trades
 "write a libc" for "implement the Linux syscall subset musl needs", which is
 a bigger surface than the one measured here and pins the ABI to Linux's.
 

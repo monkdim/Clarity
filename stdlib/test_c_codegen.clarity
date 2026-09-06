@@ -10,7 +10,7 @@
 from "lexer.clarity" import tokenize
 from "parser.clarity" import parse
 from "interpreter.clarity" import Interpreter
-from "c_codegen.clarity" import compile_to_c
+from "c_codegen.clarity" import compile_to_c, compile_to_c_freestanding
 
 mut PASSED = 0
 mut FAILED = 0
@@ -501,6 +501,97 @@ if CC == null {
         "mut i = 0\nwhile i < 8 { tcp_send(cli, \"data after close\")\ni = i + 1 }\n" +
         "show \"survived\"\ntcp_close(cli)\ntcp_close(srv)",
         "survived")
+
+    -- ── the freestanding profile ──────────────────────────
+    -- `clarity cc --freestanding` is for a target with no operating system
+    -- underneath. What it has to guarantee is narrow and checkable: the
+    -- emitted C must compile with nothing but the C library's own headers,
+    -- and any builtin it dropped must be refused in Clarity rather than
+    -- failing later inside the C compiler.
+
+    let FS_SRC = "class Shape {\n" +
+        "    fn init(n) { this.n = n }\n" +
+        "    fn area() { return sqrt(float(this.n)) * 3.0 }\n" +
+        "}\n" +
+        "fn risky(x) { if x < 0 { throw \"negative\" }\n return x * 2 }\n" +
+        "mut acc = []\n" +
+        "for s in [Shape(4), Shape(9)] { push(acc, str(round(s.area()))) }\n" +
+        "show join(acc, \",\")\n" +
+        "try { show str(risky(-1)) } catch e { show \"caught \" + str(e) } finally { show \"done\" }\n" +
+        "let m = { \"b\": 2, \"a\": 1 }\n" +
+        "for k in sort(keys(m)) { show upper(k) + \":\" + str(m[k]) }\n" +
+        "show str(17 % 5) + \" \" + trim(\"  p  \") + \" \" + json_string(m) + \" \" + hash(\"abc\")\n"
+
+    let fs_c = compile_to_c_freestanding(parse(tokenize(FS_SRC, "<t>"), FS_SRC))
+
+    -- The define has to precede the prelude, or the prelude's #ifndefs never
+    -- see it and the POSIX half comes back.
+    assert_eq(starts(fs_c, "#define CLARITY_FREESTANDING 1"), true, "freestanding_define_first")
+
+    -- It still has to be a whole program.
+    assert_eq(contains(fs_c, "int main("), true, "freestanding_has_main")
+
+    -- Excluded builtins are refused in Clarity, naming the builtin, rather
+    -- than reaching the C compiler as an undeclared function.
+    let BAD_CALLS = {
+        "read": "read(\"f\")", "write": "write(\"f\", \"x\")", "exists": "exists(\"f\")",
+        "exec": "exec(\"true\")", "time": "time()", "sleep": "sleep(0)",
+        "tcp_listen": "tcp_listen(0)", "ffi_sym": "ffi_sym(\"strlen\")", "read_mem": "read_mem(0, 0, 1)"
+    }
+    for bad in sort(keys(BAD_CALLS)) {
+        let prog = BAD_CALLS[bad]
+        mut msg = ""
+        try { compile_to_c_freestanding(parse(tokenize(prog, "<t>"), prog)) }
+        catch e { msg = str(e) }
+        assert_eq(contains(msg, bad + "()") and contains(msg, "--freestanding"), true, "freestanding_refuses_" + bad)
+    }
+
+    -- And the same builtins must still work in the hosted profile: the flag
+    -- adds a mode, it does not remove one.
+    assert_eq(contains(compile_to_c(parse(tokenize("show exists(\"/\")", "<t>"), "show exists(\"/\")")), "cl_exists("), true, "hosted_keeps_exists")
+
+    -- The real check: compile the emitted C against a C library that has
+    -- *only* the freestanding headers, with -nostdinc so the host's POSIX
+    -- headers are unreachable. If this builds, the profile's claim — "this
+    -- needs a C library, not an operating system" — is true rather than
+    -- asserted. Needs clang for its resource directory (stddef.h/stdarg.h are
+    -- the compiler's, not the library's); skipped where clang is absent.
+    let res_dir = trim(exec("clang -print-resource-dir 2>/dev/null"))
+    if len(res_dir) == 0 {
+        show "  (no clang — freestanding stub-libc link check skipped)"
+    } else {
+        let dir = "/tmp/_clc_fslibc"
+        exec("rm -rf " + dir + " && mkdir -p " + dir)
+        write(dir + "/stdio.h", "#pragma once\n#include <stddef.h>\n#include <stdarg.h>\n" +
+            "int printf(const char*, ...);\nint snprintf(char*, size_t, const char*, ...);\nint sprintf(char*, const char*, ...);\n")
+        write(dir + "/stdlib.h", "#pragma once\n#include <stddef.h>\n" +
+            "void* malloc(size_t);\nvoid* calloc(size_t, size_t);\nvoid* realloc(void*, size_t);\nvoid free(void*);\n" +
+            "void exit(int);\nvoid abort(void);\nlong strtol(const char*, char**, int);\ndouble strtod(const char*, char**);\n" +
+            "char* getenv(const char*);\nint rand(void);\nvoid srand(unsigned);\n" +
+            "void qsort(void*, size_t, size_t, int (*)(const void*, const void*));\n#define RAND_MAX 2147483647\n")
+        write(dir + "/string.h", "#pragma once\n#include <stddef.h>\n" +
+            "size_t strlen(const char*);\nchar* strcpy(char*, const char*);\nchar* strcat(char*, const char*);\n" +
+            "int strcmp(const char*, const char*);\nint strncmp(const char*, const char*, size_t);\n" +
+            "char* strstr(const char*, const char*);\nvoid* memcpy(void*, const void*, size_t);\nvoid* memset(void*, int, size_t);\n")
+        write(dir + "/math.h", "#pragma once\ndouble fabs(double);\ndouble floor(double);\ndouble ceil(double);\ndouble round(double);\n" +
+            "double sqrt(double);\ndouble sin(double);\ndouble cos(double);\ndouble tan(double);\n" +
+            "double log(double);\ndouble pow(double, double);\ndouble fmod(double, double);\n")
+        write(dir + "/ctype.h", "#pragma once\nint isdigit(int);\nint isalpha(int);\nint isalnum(int);\nint isspace(int);\nint toupper(int);\nint tolower(int);\n")
+        write(dir + "/setjmp.h", "#pragma once\ntypedef long jmp_buf[32];\nint setjmp(jmp_buf);\nvoid longjmp(jmp_buf, int);\n")
+
+        let fs_cfile = "/tmp/_clc_freestanding.c"
+        let fs_obj = "/tmp/_clc_freestanding.o"
+        write(fs_cfile, fs_c)
+        exec("rm -f " + fs_obj)
+        let r = exec_full("clang -O2 -ffreestanding -nostdinc -I " + dir + " -I " + res_dir + "/include -c " + fs_cfile + " -o " + fs_obj)
+        if not exists(fs_obj) {
+            FAILED += 1
+            show "  FAIL: freestanding_stub_libc\n" + r.stderr
+        } else {
+            PASSED += 1
+        }
+        exec("rm -rf " + dir)
+    }
 
     exec("rm -f /tmp/_clc_*")
 }
