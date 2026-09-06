@@ -80,7 +80,9 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     console.println("  [ok] syscalls");
 
     // 5. VFS + tmpfs as the root filesystem.
+    console.println("  .. vfs.init");
     vfs.init();
+    console.println("  .. tmpfs.mount_root");
     tmpfs.mount_root() catch |err| {
         console.print("PANIC: tmpfs mount failed: ");
         console.println(@errorName(err));
@@ -89,6 +91,7 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     console.println("  [ok] vfs + rootfs");
 
     // 6. Drivers: console, framebuffer, PS/2 keyboard + mouse, storage.
+    console.println("  .. drivers.init");
     drivers.init(&boot_info) catch |err| {
         console.print("PANIC: driver init failed: ");
         console.println(@errorName(err));
