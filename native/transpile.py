@@ -756,7 +756,7 @@ def bundle(compile_native=False):
     stdlib_files = [
         'tokens.clarity', 'lexer.clarity', 'ast_nodes.clarity',
         'parser.clarity', 'interpreter.clarity', 'terminal.clarity',
-        'errors.clarity', 'c_codegen.clarity', 'c_modules.clarity', 'http.clarity',
+        'errors.clarity', 'c_codegen.clarity', 'c_scope.clarity', 'c_modules.clarity', 'http.clarity',
         'terminal_emulator.clarity',
         'process.clarity', 'pty.clarity', 'shell.clarity', 'repl.clarity',
         'package.clarity', 'lsp.clarity', 'bytecode.clarity',

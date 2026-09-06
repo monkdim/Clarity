@@ -8,9 +8,11 @@
 --
 -- Consequences worth stating, because they are visible to anyone compiling:
 --
---   * Names become global. Two modules that both define `fn helper` collide,
---     and that is reported by name and file rather than silently resolved in
---     favour of whichever was spliced last.
+--   * Top-level names are module-scoped. Two modules that both define
+--     `fn helper` each get their own, renamed to `<module>__helper`, and
+--     every reference that resolves to one follows it — see c_scope.clarity
+--     for how a reference is resolved. Names unique across the whole graph
+--     are left exactly as written.
 --   * A module is included once however many times it is imported, and a
 --     cycle terminates instead of recursing.
 --   * `from "x.clarity" import a` still pulls in all of x. C has nothing
@@ -24,6 +26,7 @@
 from "lexer.clarity" import tokenize
 from "parser.clarity" import parse
 from "ast_nodes.clarity" import Program
+from "c_scope.clarity" import scope_modules
 
 -- Directory part of a path, without shelling out to dirname.
 fn _dir_of(path) {
@@ -43,15 +46,6 @@ fn _join_path(dir, rel) {
     return dir + "/" + rel
 }
 
--- The name a top-level statement introduces, or null if it introduces none.
-fn _declared_name(stmt) {
-    let nt = stmt.node_type
-    if nt == "FnStatement" or nt == "ClassStatement" or nt == "LetStatement" {
-        return stmt.name
-    }
-    return null
-}
-
 fn _locate(rel, base_dir, extra_dir) {
     let here = _join_path(base_dir, rel)
     if exists(here) { return here }
@@ -62,9 +56,19 @@ fn _locate(rel, base_dir, extra_dir) {
     return null
 }
 
-fn _splice(tree, base_dir, extra_dir, label, seen, owner, out) {
-    -- Dependencies first, so a module's declarations are already present by
-    -- the time the importer's own code refers to them.
+-- Walk the import graph, collecting one record per module in dependency
+-- order. Each record is
+--
+--   { "key": the resolved path, which is the module's identity
+--     "label": what to call it in a message
+--     "body": its top-level statements, imports removed
+--     "imports": { name -> key of the module it came from } }
+--
+-- Dependencies are collected first, so a module's declarations are already
+-- present by the time the importer's own code refers to them.
+fn _collect(tree, base_dir, extra_dir, label, key, seen, mods) {
+    mut imports = {}
+
     for stmt in tree.body {
         if stmt.node_type != "ImportStatement" { continue }
         if stmt.path == null { continue }
@@ -72,25 +76,25 @@ fn _splice(tree, base_dir, extra_dir, label, seen, owner, out) {
         if full == null {
             throw "native compile: cannot find module '" + stmt.path + "' imported by " + label
         }
+        -- `from "p" import a, b` makes exactly a and b visible here, and they
+        -- resolve to p's declarations. `import "p"` binds the module as an
+        -- object instead, so it makes no unqualified name visible — nothing
+        -- to record, and the module is still spliced for its side effects.
+        if stmt.names != null {
+            for n in stmt.names { imports[n] = full }
+        }
         if has(seen, full) { continue }
         seen[full] = true
         let src = read(full)
-        _splice(parse(tokenize(src, full), src), _dir_of(full), extra_dir, stmt.path, seen, owner, out)
+        _collect(parse(tokenize(src, full), src), _dir_of(full), extra_dir, stmt.path, full, seen, mods)
     }
 
+    mut body = []
     for stmt in tree.body {
         if stmt.node_type == "ImportStatement" { continue }
-        let name = _declared_name(stmt)
-        if name != null {
-            if has(owner, name) and owner[name] != label {
-                throw "native compile: '" + name + "' is defined in both " + owner[name] +
-                    " and " + label + " — a native build is one C translation unit, so " +
-                    "top-level names have to be unique across every module it pulls in"
-            }
-            owner[name] = label
-        }
-        push(out, stmt)
+        push(body, stmt)
     }
+    push(mods, { "key": key, "label": label, "body": body, "imports": imports })
     return null
 }
 
@@ -107,9 +111,20 @@ fn _splice(tree, base_dir, extra_dir, label, seen, owner, out) {
 -- only when the tree did not come from a file.
 fn resolve_native_imports(tree, base_dir, extra_dir, root_path) {
     mut seen = {}
-    mut owner = {}
-    mut body = []
+    mut mods = []
+    let root_key = root_path ?? "<main>"
     if root_path != null { seen[root_path] = true }
-    _splice(tree, base_dir, extra_dir, "<main>", seen, owner, body)
+    _collect(tree, base_dir, extra_dir, "<main>", root_key, seen, mods)
+
+    -- Names declared in more than one module are given module-scoped ones,
+    -- and every reference that resolves to them follows. This used to be an
+    -- error naming both files, which made a native build impossible for any
+    -- program importing more than a handful of stdlib modules.
+    scope_modules(mods)
+
+    mut body = []
+    for m in mods {
+        for stmt in m["body"] { push(body, stmt) }
+    }
     return Program(body)
 }

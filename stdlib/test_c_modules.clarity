@@ -51,6 +51,27 @@ fn names_of(tree) {
     return out
 }
 
+fn _find_cc() {
+    for cc in ["cc", "gcc", "clang"] {
+        let r = exec_full(cc + " --version")
+        if len(trim(r.stdout)) > 0 { return cc }
+    }
+    return null
+}
+let CC = _find_cc()
+
+-- Compile a scratch program natively and return its trimmed output. Used by
+-- the scoping checks below, where what matters is not the shape of the
+-- flattened AST but that the binary computes the right thing.
+fn run_native(name) {
+    let path = DIR + "/" + name
+    let src = read(path)
+    let tree = resolve_native_imports(parse(tokenize(src, name), src), DIR, null, path)
+    write(DIR + "/_run.c", compile_to_c(tree))
+    exec_full(CC + " -O2 -w " + DIR + "/_run.c -o " + DIR + "/_run -lm")
+    return trim(exec_full(DIR + "/_run").stdout)
+}
+
 show "-- native imports: flattening --"
 
 -- A dependency's declarations must land before the importer's, so that the
@@ -78,16 +99,69 @@ try {
 } catch e { cyc_ok = false }
 check("import cycle terminates", cyc_ok)
 
--- Two modules defining the same top-level name collide in C, and that has to
--- be reported: silently keeping one would miscompile the other's callers.
+-- Two modules defining the same top-level name each get their own, so the
+-- one C translation unit has one symbol per declaration. This used to be a
+-- hard error, which made a native build impossible for any program importing
+-- more than a handful of stdlib modules.
 put("dup1.clarity", "fn helper() { return 1 }\n")
-put("dup2.clarity", "fn helper() { return 2 }\n")
-put("collide.clarity", "from \"dup1.clarity\" import helper\nfrom \"dup2.clarity\" import helper\nshow helper()\n")
-mut collide_msg = ""
-try { flatten("collide.clarity") } catch e { collide_msg = str(e) }
-check("duplicate top-level name is reported", contains(collide_msg, "helper"))
-check("duplicate error names both modules",
-    contains(collide_msg, "dup1.clarity") and contains(collide_msg, "dup2.clarity"))
+put("dup2.clarity", "fn helper() { return 2 }\nfn other() { return helper() }\n")
+put("collide.clarity", "from \"dup1.clarity\" import helper\nfrom \"dup2.clarity\" import other\nshow helper()\nshow other()\n")
+let collided = names_of(flatten("collide.clarity"))
+check("colliding names are made module-scoped",
+    contains(collided, "dup1__helper") and contains(collided, "dup2__helper"))
+check("and the plain name is gone", not contains(collided, "helper"))
+if CC != null {
+    -- Each module's own `helper` is the one its code calls.
+    check_eq("each module keeps its own", run_native("collide.clarity"), "1\n2")
+}
+
+-- A name declared in only one module keeps it, so the generated C stays
+-- readable and a program that never had a collision compiles to what it
+-- always did.
+put("uniq1.clarity", "fn only_here() { return 7 }\n")
+put("uniq2.clarity", "from \"uniq1.clarity\" import only_here\nshow only_here()\n")
+check("a name nothing else declares is left alone",
+    contains(names_of(flatten("uniq2.clarity")), "only_here"))
+
+if CC != null {
+    -- The importer's reference follows the rename to the module it named,
+    -- not to whichever declaration happened to be spliced last. Both modules
+    -- declare `pick`; the program imports one of them and must get that one.
+    put("pick1.clarity", "fn pick() { return 11 }\nfn from_one() { return pick() }\n")
+    put("pick2.clarity", "fn pick() { return 22 }\n")
+    put("picker.clarity",
+        "from \"pick2.clarity\" import pick\n" +
+        "from \"pick1.clarity\" import from_one\n" +
+        "show pick()\n" +
+        "show from_one()\n")
+    check_eq("an import resolves to the module it names", run_native("picker.clarity"), "22\n11")
+
+    -- A local binding shadows the module's declaration and must not be
+    -- renamed with it. Without that rule the parameter below would be
+    -- rewritten into a reference to the module-scoped function.
+    put("shadow_dep.clarity", "fn shadowed() { return 1 }\n")
+    put("shadow.clarity",
+        "from \"shadow_dep.clarity\" import shadowed\n" +
+        "fn use_it(shadowed) { return shadowed + 1 }\n" +
+        "fn ours() { return shadowed() }\n" +
+        "show use_it(40)\n" +
+        "show ours()\n")
+    check_eq("a parameter shadows a colliding module name", run_native("shadow.clarity"), "41\n1")
+
+    -- A class whose base class is renamed has to follow it, or it inherits
+    -- from something that no longer exists.
+    put("base1.clarity", "class Shape {\n    fn kind() { return \"one\" }\n}\n")
+    put("base2.clarity",
+        "from \"base1.clarity\" import Shape\n" +
+        "class Square impl Shape {\n    fn kind() { return \"square of \" + Shape().kind() }\n}\n")
+    put("inherit.clarity",
+        "from \"base2.clarity\" import Square\n" +
+        "class Shape {\n    fn kind() { return \"local\" }\n}\n" +
+        "show Square().kind()\n" +
+        "show Shape().kind()\n")
+    check_eq("a renamed class is followed by its subclass and its callers",
+        run_native("inherit.clarity"), "square of one\nlocal")
+}
 
 -- A missing module names itself and its importer rather than failing later
 -- with an undefined C symbol.
@@ -110,14 +184,6 @@ check_eq("module constants are spliced", names_of(flatten("use_consts.clarity"))
 
 show "-- native imports: end to end --"
 
-fn _find_cc() {
-    for cc in ["cc", "gcc", "clang"] {
-        let r = exec_full(cc + " --version")
-        if len(trim(r.stdout)) > 0 { return cc }
-    }
-    return null
-}
-let CC = _find_cc()
 
 if CC == null {
     show "  (no C compiler on PATH — native import check skipped)"
@@ -161,6 +227,25 @@ if CC == null {
         exec_full(CC + " -O2 -w " + DIR + "/b.c -o " + DIR + "/b -lm")
         check_eq("compiled program importing bytes.clarity scans correctly",
             trim(exec_full(DIR + "/b").stdout), "0\n[0]")
+
+        -- Two *real* stdlib modules that collide. bits.clarity and
+        -- bytes.clarity both declare to_hex, with different arities and
+        -- different meanings — before module scoping this pair could not be
+        -- imported into one program at all, and it is the case the whole
+        -- pass exists for.
+        let cprog = "from \"bits.clarity\" import to_hex\n" +
+            "from \"bytes.clarity\" import scan\n" +
+            "show to_hex(48879, 4)\n" +
+            "show scan([0x48, 0x8B, 0x05], \"48 8B\")\n"
+        write(DIR + "/coll.clarity", cprog)
+        let ctree = resolve_native_imports(parse(tokenize(cprog, "<t>"), cprog), DIR, stdlib_dir, DIR + "/coll.clarity")
+        let ccsrc = compile_to_c(ctree)
+        write(DIR + "/coll.c", ccsrc)
+        check("each colliding stdlib module gets its own to_hex",
+            contains(ccsrc, "f_bits__to_hex") and contains(ccsrc, "f_bytes__to_hex"))
+        exec_full(CC + " -O2 -w " + DIR + "/coll.c -o " + DIR + "/coll -lm")
+        check_eq("and the program calls the one it imported",
+            trim(exec_full(DIR + "/coll").stdout), "beef\n0")
 
         -- http.clarity is the first stdlib module that only exists because
         -- native imports do: it is built on the tcp_* builtins, which the
