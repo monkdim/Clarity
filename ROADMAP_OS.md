@@ -118,20 +118,32 @@ profile ever reaches back for one, that test fails.
 That is a few hundred lines, not a libc port, and `malloc` now has something
 to sit on: the kernel grows a process heap through `brk`.
 
+**The libc subset exists.** `kernel/user/libc` — 1,509 lines of C and x86-64
+assembly — is that library, and a compiled Clarity program using classes,
+closures, exceptions, maps, sorting, strings and floating point links against
+it and runs with nothing underneath it but `write`, `brk` and `exit`. The
+syscall numbers are in one header, so the same objects build for ClarityOS or
+for a Linux host, and `stdlib/test_libc.clarity` builds each of its test
+programs twice — once against the host's C library, once against this one —
+and requires the outputs to match.
+
+`printf("%g")` and `strtod` were the pair to get right, and they agree with
+glibc exactly across 8,090 comparisons including 8,000 random bit patterns:
+both are done on exact integers rather than on floating-point powers of ten,
+because the runtime finds the shortest round-tripping float by printing at
+increasing precision and parsing back, and that loop is only meaningful if
+neither direction approximates. The transcendentals are series
+approximations, bounded and measured — 1-2 ulp for sin, cos, exp and log,
+6 for pow, with one honest gap for sine of a large angle, recorded in
+`kernel/user/libc/README.md`.
+
 **The remaining pieces, in order:**
 
-1. **The libc subset itself.** String, memory and ctype primitives;
-   `malloc`/`free`/`realloc` over `brk`; `setjmp`/`longjmp` (thirty lines of
-   x86-64); `qsort`; `printf`/`snprintf`/`sprintf` for those five specifiers;
-   the handful of libm entries above. `%.*g` and
-   `strtod` are the only awkward pair, and they are needed together: the
-   runtime finds the shortest round-tripping float by printing at increasing
-   precision and parsing back.
-2. **A build path that reaches the ISO.** The OS-boot job installs zig and
+1. **A build path that reaches the ISO.** The OS-boot job installs zig and
    qemu, not bun, so the C for a test program is generated ahead of time and
    checked in as a build artifact, with the command that regenerates it
    recorded next to it.
-3. **The gate.** A compiled Clarity program written to the filesystem, loaded
+2. **The gate.** A compiled Clarity program written to the filesystem, loaded
    by `spawn_user`, and printing from ring 3 — the same shape as the existing
    `/bin/clarity-init` marker, but for a program the Clarity compiler
    produced.
