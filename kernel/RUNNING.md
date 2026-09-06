@@ -46,7 +46,8 @@ The serial log should report the machine describing itself:
   [ok] fw_cfg from the device tree at 0x9020000
   ram 0x40000000 + 512 MiB
   [ok] direct map covers all of RAM (0 GiB added beyond the boot stub's block)
-  [ok] pmm: 512 MiB managed, 129349 pages free, allocated 0x402bb000 and it holds
+  [ok] pmm: 512 MiB managed, 129347 pages free, allocated 0x402bd000 and it holds
+  [ok] process address space: 0x10000000 -> 0x402be000 for EL0 read and write, 0x400000 read-only (a write there faults), kernel unaffected, unmapped and torn down with every page returned
 ```
 
 Change `-m 512` and the RAM line follows it — that is the kernel reading the
@@ -99,10 +100,13 @@ work, the boot log up to the point it stops is the useful thing to report.
 ### What it does not do yet
 
 Prints to the serial line, draws a fixed pattern, allocates physical pages,
-and runs in the high half with TTBR0 empty — which is the register a process's
-address space goes in. Nothing puts one there yet: no per-process page tables,
-no userland, no text on screen, no keyboard, no programs. Those are on the x86
-side, and are being brought across.
+runs in the high half, and can build, install and tear down a process's
+address space in TTBR0 — with the permissions checked by asking the MMU to
+translate as EL0 would, so a read-only page really does refuse a write.
+
+Nothing runs in one of those spaces yet. No EL0, no system calls, no context
+switch, no userland, no text on screen, no keyboard, no programs. Those are on
+the x86 side, and are being brought across.
 
 ## x86-64 — the one that runs programs
 

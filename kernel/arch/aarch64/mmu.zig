@@ -149,6 +149,41 @@ pub fn translate(virt: u64) ?u64 {
     return (par & 0x000F_FFFF_FFFF_F000) | (virt & 0xFFF);
 }
 
+/// The same question, asked as EL0 would ask it: `at s1e0r` and `at s1e0w`
+/// run a stage-1 translation with unprivileged read and write permissions.
+///
+/// This is how a kernel checks a process's address space without running the
+/// process, and without dereferencing the address itself — which it must not
+/// do anyway, because PSTATE.PAN makes an EL1 access to EL0-accessible memory
+/// fault on any core that implements it. A page mapped read-only for
+/// userland translates under `user_read` and faults under `user_write`, which
+/// is the difference no amount of reading the descriptor back can prove.
+pub fn translate_user_read(virt: u64) ?u64 {
+    const par = asm volatile (
+        \\at s1e0r, %[va]
+        \\isb
+        \\mrs %[out], par_el1
+        : [out] "=r" (-> u64),
+        : [va] "r" (virt),
+        : "memory"
+    );
+    if (par & 1 != 0) return null;
+    return (par & 0x000F_FFFF_FFFF_F000) | (virt & 0xFFF);
+}
+
+pub fn translate_user_write(virt: u64) ?u64 {
+    const par = asm volatile (
+        \\at s1e0w, %[va]
+        \\isb
+        \\mrs %[out], par_el1
+        : [out] "=r" (-> u64),
+        : [va] "r" (virt),
+        : "memory"
+    );
+    if (par & 1 != 0) return null;
+    return (par & 0x000F_FFFF_FFFF_F000) | (virt & 0xFFF);
+}
+
 /// True once the low half is no longer translated — read back from TCR_EL1
 /// rather than assumed, so the boot log reports what the hardware did.
 pub fn identity_dropped() bool {
