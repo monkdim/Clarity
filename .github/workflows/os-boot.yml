@@ -70,6 +70,13 @@ jobs:
           #                                 entry point, which is the half of
           #                                 a context switch that is easy to
           #                                 get wrong
+          #   "[B] round 1"              -- and the two threads really are two
+          #                                 threads. They are one function told
+          #                                 which one it is, so both letters
+          #                                 appear only if each received its
+          #                                 argument. That never worked until
+          #                                 recently, and could not be seen
+          #                                 while every caller passed zero
           #   "[ok] preemption"          -- the timer took the CPU away from a
           #                                 thread that never yielded, and gave
           #                                 it back; cooperative scheduling
@@ -143,6 +150,12 @@ jobs:
             grep -q "ClarityOS ready." "serial-$attempt.log" || missing="$missing ready"
             grep -q "\[ok\] context switch" "serial-$attempt.log" || missing="$missing ctxswitch"
             grep -q "\[A\] round 1" "serial-$attempt.log" || missing="$missing thread-resumed"
+            # Both letters, because both threads are the same function told
+            # which one it is. A kernel thread that did not receive its
+            # argument prints whatever garbage arrived in its place — which
+            # is what happened for as long as this test existed, and was
+            # invisible while the two threads were two separate functions.
+            grep -q "\[B\] round 1" "serial-$attempt.log" || missing="$missing thread-argument"
             grep -q "\[ok\] preemption" "serial-$attempt.log" || missing="$missing preemption"
             grep -q "\[ok\] fpu switch" "serial-$attempt.log" || missing="$missing fpu-switch"
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"

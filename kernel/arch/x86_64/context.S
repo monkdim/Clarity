@@ -98,5 +98,37 @@ clarity_switch_to:
         ret
         .size clarity_switch_to, . - clarity_switch_to
 
+/* Where a brand-new kernel thread starts.
+ *
+ *   void clarity_thread_trampoline(void)   -- never returns
+ *
+ * init_kernel_thread lays out the new thread's stack so that the pops above
+ * leave the entry point in %rbx and its argument in %rbp, and records this
+ * address as the thread's resume point.
+ *
+ * The trampoline exists because a thread cannot be jumped to directly and
+ * still be given an argument. %rdi is not in the popped set — it still holds
+ * `prev`, clarity_switch_to's own first parameter — so a new thread entered by
+ * jumping straight at its entry point receives a pointer to some other
+ * thread's context where its argument should be. The comment here used to say
+ * the entry's first instruction would move the value out of %rbp, which is
+ * not something a compiler does; scheduler.zig recorded, correctly, that the
+ * path had never been exercised.
+ *
+ * The pushed zero is not padding. System V requires %rsp ≡ 8 (mod 16) at a
+ * function's first instruction, because a `call` has just pushed a return
+ * address; arriving by `jmp` leaves it ≡ 0, and a callee that spills an xmm
+ * register to an aligned stack slot faults. It also gives a stack walk a null
+ * return address to stop at instead of whatever the stack was last used for.
+ */
+        .globl clarity_thread_trampoline
+        .type clarity_thread_trampoline, @function
+clarity_thread_trampoline:
+        movq  %rbp, %rdi                /* the argument, parked by init */
+        xorq  %rbp, %rbp                /* end of the frame chain */
+        pushq $0                        /* ABI stack alignment; see above */
+        jmp   *%rbx                     /* the thread's entry point */
+        .size clarity_thread_trampoline, . - clarity_thread_trampoline
+
 /* No executable stack. */
         .section .note.GNU-stack,"",@progbits

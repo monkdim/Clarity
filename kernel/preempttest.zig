@@ -30,7 +30,7 @@ var b_ran: bool = false;
 /// a wide margin and still bounds the failure case to a couple of seconds.
 const SPIN_LIMIT: u64 = 100_000_000;
 
-fn thread_a() noreturn {
+fn thread_a(_: u64) callconv(.C) noreturn {
     var spins: u64 = 0;
     while (!@atomicLoad(bool, &b_ran, .seq_cst) and spins < SPIN_LIMIT) : (spins += 1) {
         asm volatile ("pause");
@@ -48,14 +48,14 @@ fn thread_a() noreturn {
     sched.thread_exit(0);
 }
 
-fn thread_b() noreturn {
+fn thread_b(_: u64) callconv(.C) noreturn {
     @atomicStore(bool, &b_ran, true, .seq_cst);
     sched.thread_exit(0);
 }
 
 pub fn run() !void {
-    _ = try sched.spawn_kthread(thread_a, "[preempt-a]", .normal);
-    _ = try sched.spawn_kthread(thread_b, "[preempt-b]", .normal);
+    _ = try sched.spawn_kthread(thread_a, 0, "[preempt-a]", .normal);
+    _ = try sched.spawn_kthread(thread_b, 0, "[preempt-b]", .normal);
     console.println("  preempt: two threads queued, neither yields");
 
     // A is queued first, so A gets the CPU and holds it. Everything after

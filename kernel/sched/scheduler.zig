@@ -153,7 +153,20 @@ pub fn freeze() void {
     frozen = true;
 }
 
-pub fn spawn_kthread(entry: *const fn () noreturn, name: []const u8, priority: Priority) !*Thread {
+/// Start a kernel thread at `entry`, which receives `arg`.
+///
+/// The entry takes its argument and uses the C calling convention, rather
+/// than being a bare `fn () noreturn` cast into shape at the call below. The
+/// cast was not free: it told the compiler a lie that happened to be
+/// harmless only because the argument never arrived anywhere the callee
+/// looked. Two threads that differ only in which one they are no longer need
+/// to be two functions.
+pub fn spawn_kthread(
+    entry: *const fn (u64) callconv(.C) noreturn,
+    arg: u64,
+    name: []const u8,
+    priority: Priority,
+) !*Thread {
     const t = @as(*Thread, @ptrCast(@alignCast(heap.alloc(@sizeOf(Thread)) orelse return error.OutOfMemory)));
     t.* = .{
         .tid = next_tid,
@@ -168,7 +181,7 @@ pub fn spawn_kthread(entry: *const fn () noreturn, name: []const u8, priority: P
     const stack_pages = 4;
     const stack_phys = pmm.alloc_pages(stack_pages) orelse return error.OutOfMemory;
     const stack_top = 0xFFFF_8000_0000_0000 + stack_phys + stack_pages * pmm.PAGE_SIZE;
-    context.init_kernel_thread(&t.context, stack_top, @ptrCast(entry), 0);
+    context.init_kernel_thread(&t.context, stack_top, entry, arg);
     // Kernel threads run in the kernel's address space, and say so rather than
     // inheriting whichever one happened to be loaded: with a user process in
     // the picture, "whatever CR3 was current" is sometimes a process's.
