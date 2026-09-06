@@ -288,6 +288,12 @@ jobs:
           # The program's exit status carries its own verdict, so a check it
           # reports as failed fails this gate rather than merely printing.
           #
+          # The heap marker is the one a C library will sit on. brk(0) reports
+          # the break, asking for more maps pages that were not there, and the
+          # program writes through the new break and reads it back — because
+          # the kernel returning the number it was asked for proves nothing
+          # about whether anything was mapped.
+          #
           # The last two markers are about threads rather than processes. The
           # trace has to be exactly ABABABa: a switch that went nowhere leaves
           # a letter repeated and a switch that lost a thread leaves it short.
@@ -309,6 +315,7 @@ jobs:
              && grep -q "\[ok\] user .bss zeroed" serial-arm.log \
              && grep -q "\[ok\] user .data came from the file" serial-arm.log \
              && grep -q "\[ok\] user fp: 355/113" serial-arm.log \
+             && grep -q "\[ok\] user heap: brk grew" serial-arm.log \
              && grep -q "\[ok\] init: a compiled, linked ELF ran at EL0 twice" serial-arm.log \
              && grep -q "\[ok\] pmm:" serial-arm.log \
              && grep -q "\[ok\] framebuffer:" serial-arm.log \

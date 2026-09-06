@@ -75,6 +75,9 @@ claim with no marker behind it is in "What does not run yet".
   twice, in two address spaces, over frames the first run returned — so its
   own checks that `.bss` reads zero and `.data` came from the file are checks
   on the loader, and its exit status carries the verdict
+- a heap: `brk` moves a process's break and maps the pages behind it, and the
+  program writes through the new break and reads it back — because a kernel
+  returning the number it was asked for proves nothing about what is mapped
 
 ## What does not run yet
 
@@ -92,7 +95,10 @@ Not written:
   nothing keeps run queues, priorities or a process table — the boot selftest
   drives the switching primitive directly. Programs are loaded from an ELF
   embedded in the kernel image, because there is nowhere to read one from.
-- Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired:
+- On aarch64, three system calls exist — `write`, `brk`, `exit` — and every
+  other number returns `ENOSYS`. They are the three a freestanding C library
+  needs, and the rest wait on a VFS and a process table.
+- Of the 41 syscall numbers in `syscall/dispatch.zig`, 16 are wired on x86_64:
   read, write, open, close, mmap, brk, exit, fork, exec, wait, kill,
   getpid, getppid, nanosleep, clock_gettime, ioctl. The rest return
   `ENOSYS` — sockets, pipes, dup, and most of the directory calls among

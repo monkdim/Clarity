@@ -542,16 +542,21 @@ fn run_init(asid: u16, announce: bool) InitRun {
         console.print_hex(proc.user_sp);
         console.print(", ");
         console.print_dec(proc.range_count);
-        console.println(" mapped ranges");
+        console.print(" mapped ranges, heap from ");
+        console.print_hex(proc.brk_start);
+        console.println("");
     }
 
     paging.activate(&proc.space);
     trap.reset();
+    trap.set_heap(&proc.space, proc.brk_start);
     const status = trap.enter_user(proc.entry, proc.user_sp);
     const wrote = trap.bytes_written;
     const code = trap.exit_status;
+    const heap_end = trap.heap_end();
+    trap.clear_heap();
     paging.deactivate();
-    loader.release(&proc);
+    loader.release(&proc, heap_end);
 
     // 42 is what init_aarch64.zig exits with, and it only reaches that line
     // after its own .bss, .data and floating-point checks. Those print their
