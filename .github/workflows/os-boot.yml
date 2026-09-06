@@ -170,9 +170,14 @@ jobs:
           echo "----- serial output -----"
           cat serial-arm.log
           echo "-------------------------"
-          if grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log; then
-            echo "PASS: aarch64 kernel reached EL1 and brought up the UART"
+          # Two markers. The boot marker says the kernel reached EL1 with the
+          # MMU on; the timer one says an interrupt was actually delivered —
+          # the vectors had been installed since the ARM kernel first booted
+          # and nothing had ever reached them.
+          if grep -q "ClarityOS aarch64: EL1 boot ok" serial-arm.log \
+             && grep -q "\[ok\] aarch64 timer: interrupts delivered" serial-arm.log; then
+            echo "PASS: aarch64 reached EL1, MMU on, and took a timer interrupt"
           else
-            echo "FAIL: aarch64 boot marker never appeared on serial"
+            echo "FAIL: aarch64 did not reach EL1, or no timer interrupt arrived"
             exit 1
           fi
