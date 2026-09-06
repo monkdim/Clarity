@@ -1376,6 +1376,16 @@ class CCodegen {
             }
             return
         }
+        if nt == "RangeExpression" {
+            this._free_expr(node.start, bound, acc)
+            if node.end != null { this._free_expr(node.end, bound, acc) }
+            return
+        }
+        if nt == "PipeExpression" {
+            this._free_expr(node.value, bound, acc)
+            this._free_expr(node.function, bound, acc)
+            return
+        }
         if nt == "SpreadExpression" { this._free_expr(node.value, bound, acc); return }
         if nt == "FnExpression" {
             mut inner = bound
@@ -1414,6 +1424,15 @@ class CCodegen {
                 }
             }
             if node.else_body != null { this._free_stmts(_block_stmts(node.else_body), bound, acc) }
+            return
+        }
+        if nt == "MatchStatement" {
+            this._free_expr(node.subject, bound, acc)
+            for arm in node.arms {
+                this._free_expr(arm[0], bound, acc)
+                this._free_stmts(_block_stmts(arm[1]), bound, acc)
+            }
+            if node.default != null { this._free_stmts(_block_stmts(node.default), bound, acc) }
             return
         }
         if nt == "WhileStatement" {
@@ -1485,6 +1504,34 @@ class CCodegen {
     fn _argv(arg_exprs) {
         if len(arg_exprs) == 0 { return "0" }
         return "(Value[]){" + join(arg_exprs, ", ") + "}"
+    }
+
+    -- Emit a call, given the callee node and its arguments already generated
+    -- as C expressions. Shared by CallExpression and PipeExpression so that
+    -- `v |> f(a)` resolves builtins, constructors and named top-level
+    -- functions exactly as `f(v, a)` does, instead of through a second call
+    -- site that would drift from this one.
+    fn _emit_call(callee, args, line) {
+        -- obj.method(args) → dynamic dispatch on the instance's class
+        if callee.node_type == "MemberExpression" {
+            return "cl_dispatch(" + this.expr(callee.object) + ", \"" + callee.property + "\", " + this._argv(args) + ")"
+        }
+        if callee.node_type == "Identifier" {
+            -- ClassName(args) → construct an instance
+            if contains(this.classes, callee.name) {
+                return "cl_ctor_" + callee.name + "(" + this._argv(args) + ")"
+            }
+            let builtin = this._builtin_call(callee.name, args)
+            if builtin != "" { return builtin }
+            -- A known top-level function calls directly; anything else is a
+            -- local holding a closure value, called through cl_call.
+            if contains(this.fn_names, callee.name) {
+                return "f_" + callee.name + "(" + join(args, ", ") + ")"
+            }
+            return "cl_call(v_" + callee.name + ", " + this._argv(args) + ")"
+        }
+        this.unsupported("indirect call", line)
+        return "cl_null()"
     }
 
     fn unsupported(what, line) {
@@ -1698,31 +1745,9 @@ class CCodegen {
             return "cl_get_field(" + this.expr(node.object) + ", \"" + node.property + "\")"
         }
         if nt == "CallExpression" {
-            let callee = node.callee
-            -- obj.method(args) → dynamic dispatch on the instance's class
-            if callee.node_type == "MemberExpression" {
-                mut margs = []
-                for a in node.arguments { push(margs, this.expr(a)) }
-                return "cl_dispatch(" + this.expr(callee.object) + ", \"" + callee.property + "\", " + this._argv(margs) + ")"
-            }
-            if callee.node_type == "Identifier" {
-                mut args = []
-                for a in node.arguments { push(args, this.expr(a)) }
-                -- ClassName(args) → construct an instance
-                if contains(this.classes, callee.name) {
-                    return "cl_ctor_" + callee.name + "(" + this._argv(args) + ")"
-                }
-                let builtin = this._builtin_call(callee.name, args)
-                if builtin != "" { return builtin }
-                -- A known top-level function calls directly; anything else is a
-                -- local holding a closure value, called through cl_call.
-                if contains(this.fn_names, callee.name) {
-                    return "f_" + callee.name + "(" + join(args, ", ") + ")"
-                }
-                return "cl_call(v_" + callee.name + ", " + this._argv(args) + ")"
-            }
-            this.unsupported("indirect call", node.line)
-            return "cl_null()"
+            mut cargs = []
+            for a in node.arguments { push(cargs, this.expr(a)) }
+            return this._emit_call(node.callee, cargs, node.line)
         }
         if nt == "NullCoalesce" {
             -- `a ?? b`: evaluate a once, and b only if a is null. A plain
@@ -1743,6 +1768,27 @@ class CCodegen {
             -- other branch is taken.
             return "(cl_truthy(" + this.expr(node.condition) + ") ? " +
                 this.expr(node.true_expr) + " : " + this.expr(node.false_expr) + ")"
+        }
+        if nt == "RangeExpression" {
+            -- `a..b` is exactly range(a, b); an open-ended range is only legal
+            -- in a slice, which the interpreter also rejects here.
+            if node.end == null {
+                this.unsupported("open-ended range outside a slice", node.line)
+                return "cl_null()"
+            }
+            return "cl_range2(" + this.expr(node.start) + ", " + this.expr(node.end) + ")"
+        }
+        if nt == "PipeExpression" {
+            -- `v |> f` is f(v); `v |> f(a, b)` is f(v, a, b). The piped value
+            -- becomes the first argument, and the rest of the call is emitted
+            -- through the ordinary call path.
+            mut pargs = [this.expr(node.value)]
+            mut target = node.function
+            if target.node_type == "CallExpression" {
+                for a in target.arguments { push(pargs, this.expr(a)) }
+                target = target.callee
+            }
+            return this._emit_call(target, pargs, node.line)
         }
         this.unsupported("expression " + nt, node.line)
         return "cl_null()"
@@ -1841,6 +1887,42 @@ class CCodegen {
         }
         if nt == "BreakStatement" { return [pad + "break;"] }
         if nt == "ContinueStatement" { return [pad + "continue;"] }
+        if nt == "MatchStatement" {
+            -- The interpreter matches by `==` against each arm's evaluated
+            -- pattern — there is no destructuring — so this is an if/else
+            -- chain over cl_equal. The subject is bound to a temporary first
+            -- because it must be evaluated exactly once, however many arms
+            -- are tested.
+            let id = this.tmp_id
+            this.tmp_id += 1
+            let t = "__match" + str(id)
+            mut lines = [pad + "{ Value " + t + " = " + this.expr(node.subject) + ";"]
+            mut first = true
+            for arm in node.arms {
+                let head = if first { pad + "  if(cl_truthy(cl_eq(" } else { pad + "  } else if(cl_truthy(cl_eq(" }
+                push(lines, head + t + ", " + this.expr(arm[0]) + "))) {")
+                for st in _block_stmts(arm[1]) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+                first = false
+            }
+            if node.default != null {
+                if first { push(lines, pad + "  {") } else { push(lines, pad + "  } else {") }
+                for st in _block_stmts(node.default) { for l in this.stmt(st, indent + 2) { push(lines, l) } }
+                push(lines, pad + "  }")
+            } elif not first {
+                push(lines, pad + "  }")
+            }
+            push(lines, pad + "}")
+            return lines
+        }
+        if nt == "InterfaceStatement" {
+            -- An interface is a compile-time contract: the interpreter uses it
+            -- to check that a class declaring it defines the right methods,
+            -- and it has no effect on what a valid program does at runtime.
+            -- So it emits nothing. A program that *violates* an interface is
+            -- rejected by the interpreter and accepted here — stated in
+            -- ROADMAP, not silently different.
+            return []
+        }
         if nt == "FnStatement" { return [] }   -- hoisted separately
         this.unsupported("statement " + nt, node.line)
         return []
