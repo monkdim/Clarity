@@ -188,6 +188,37 @@ if contains(exec("uname"), "Linux") == false {
     let os_link = exec_full(LIBC + "/link.sh " + cfile + " " + osbin)
     ok(exists(osbin), "the ClarityOS-numbered build linked:\n" + os_link.stderr)
 
+    -- ── the checked-in C for /bin/clarity-demo ────────────
+    -- kernel/user/clarity_demo.c is generated from clarity_demo.clarity and
+    -- committed, because the OS-boot job has only Zig and QEMU: making a
+    -- kernel build fetch a Clarity compiler would tie booting the operating
+    -- system to a network. The cost of that choice is a file that can drift
+    -- away from its source without anything noticing, so this is the check
+    -- that notices — here, where the compiler does exist.
+    let DEMO_SRC = "kernel/user/clarity_demo.clarity"
+    let DEMO_C = "kernel/user/clarity_demo.c"
+    if not exists(DEMO_SRC) or not exists(DEMO_C) {
+        show "  (kernel/user/clarity_demo not found — generated-C check skipped)"
+    } else {
+        let src = read(DEMO_SRC)
+        let regenerated = compile_to_c_freestanding(parse(tokenize(src, DEMO_SRC), src))
+        ok(regenerated == read(DEMO_C),
+           DEMO_C + " is stale. Regenerate it with:\n" +
+           "    clarity cc " + DEMO_SRC + " -o /tmp/demo --freestanding && cp /tmp/demo.c " + DEMO_C)
+
+        -- And it has to still build and run, not merely match: the same
+        -- program that boots in ring 3, linked here against the same library.
+        let dbin = DIR + "/demo"
+        let dr = exec_full(LIBC + "/link.sh " + DEMO_C + " " + dbin + " -DCLARITY_LIBC_LINUX")
+        ok(exists(dbin), "clarity_demo.c did not link:\n" + dr.stderr)
+        if exists(dbin) {
+            let di = Interpreter(null, null)
+            di.run(parse(tokenize(src, DEMO_SRC), src))
+            ok(trim(exec_full(dbin).stdout) == trim(join(di.output, "\n")),
+               "clarity_demo compiled output differs from the interpreter")
+        }
+    }
+
     exec("rm -rf " + DIR)
 }
 

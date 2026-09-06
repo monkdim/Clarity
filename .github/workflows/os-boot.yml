@@ -106,6 +106,26 @@ jobs:
           #                                 *second* syscall arrived, which is
           #                                 the only evidence that the return
           #                                 path works at all
+          #   "demo: wrote"              -- a *second* process: the first one
+          #                                 exited and the kernel carried on,
+          #                                 which it could not do while the
+          #                                 boot path entered ring 3 by hand
+          #                                 and never came back
+          #   "clarity-demo: all ..."    -- and that second process is a
+          #                                 Clarity program: compiled by
+          #                                 `clarity cc --freestanding`,
+          #                                 linked against kernel/user/libc,
+          #                                 loaded out of the filesystem and
+          #                                 run at CPL 3. The line is last in
+          #                                 the program, so reaching it means
+          #                                 the class, the try/catch/finally,
+          #                                 the sorted map, the float
+          #                                 formatting and 400 allocations all
+          #                                 came out right
+          #   "float 3.14159292..."      -- printf %g and strtod agreeing in
+          #                                 ring 3, on SSE the kernel had to
+          #                                 enable, over a heap brk had to grow
+          #   "ClarityOS: userspace ..."  -- and the kernel outlived both
           # -no-reboot: halt instead of looping if the kernel faults.
           fails=0
           for attempt in 1 2 3; do
@@ -131,6 +151,10 @@ jobs:
             grep -q "\[ok\] user heap" "serial-$attempt.log" || missing="$missing user-heap"
             grep -q "\[ok\] user sse" "serial-$attempt.log" || missing="$missing user-sse"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
+            grep -q "demo: wrote" "serial-$attempt.log" || missing="$missing second-process"
+            grep -q "clarity-demo: all checks passed" "serial-$attempt.log" || missing="$missing clarity-program"
+            grep -q "float 3.1415929203539825 1.4142135623730951 6.25" "serial-$attempt.log" || missing="$missing clarity-floats"
+            grep -q "ClarityOS: userspace complete." "serial-$attempt.log" || missing="$missing kernel-outlived"
             if [ -z "$missing" ]; then
               echo "--> attempt $attempt: PASS"
             else
@@ -142,7 +166,7 @@ jobs:
             echo "FAIL: $fails of 3 boots did not reach userspace and back"
             exit 1
           fi
-          echo "PASS: all 3 boots entered ring 3, took a syscall, and returned"
+          echo "PASS: all 3 boots ran two processes, the second a compiled Clarity program"
 
   os-boot-aarch64:
     runs-on: ubuntu-latest

@@ -26,6 +26,18 @@ pub const Context = extern struct {
     /// every SSE exception and turns the next division into a #XM. Every
     /// Context that exists is therefore born with a valid image.
     fpu: [fpu_mod.AREA_SIZE]u8 align(16) = fpu_mod.CLEAN,
+    /// The address space this context runs in, as a CR3 value.
+    ///
+    /// A context switch has to switch address spaces, or a thread resumed
+    /// after a preemption comes back with someone else's page tables. It was
+    /// possible to do without while exactly one process existed and the only
+    /// way into it was `enter_userland`, which loads CR3 itself — a second
+    /// process makes it structural.
+    ///
+    /// Zero means "leave CR3 alone", which is what a context that has never
+    /// been given an address space wants; every context the scheduler creates
+    /// is given one.
+    cr3: u64 = 0,
 };
 
 /// Switch from `prev` to `next`. Saves the callee-saved state onto `prev`'s
@@ -42,10 +54,13 @@ pub extern fn clarity_switch_to(prev: *Context, next: *const Context) callconv(.
 pub const switch_to = clarity_switch_to;
 
 comptime {
+    std.debug.assert(IRET_FRAME_RESERVE >= @sizeOf(IretFrame));
+    std.debug.assert(IRET_FRAME_RESERVE % 16 == 0);
     // context.S hardcodes these three offsets.
     std.debug.assert(@offsetOf(Context, "rsp") == 0);
     std.debug.assert(@offsetOf(Context, "rip") == 56);
     std.debug.assert(@offsetOf(Context, "fpu") == 64);
+    std.debug.assert(@offsetOf(Context, "cr3") == 576);
     // FXSAVE and FXRSTOR fault unless the address is 16-byte aligned, and the
     // address is `context + 64` — so the Context itself has to be aligned,
     // wherever it is embedded and however it is allocated.
@@ -96,6 +111,16 @@ pub fn build_iret_frame(kstack_top: u64, user_rip: u64, user_rsp: u64, user_rfla
     };
     return rsp;
 }
+
+/// Bytes at the top of a kernel stack that belong to the IRET frame
+/// build_iret_frame writes there.
+///
+/// A user thread's kernel stack carries two things before it first runs: the
+/// IRET frame at the very top, and the scheduler's entry context below it. If
+/// the second is laid out at the top as well, it writes straight through the
+/// first, and the process enters ring 3 at whatever the pushed registers
+/// happened to spell. Reserving the top explicitly is what keeps them apart.
+pub const IRET_FRAME_RESERVE: u64 = 64;
 
 pub const IretFrame = extern struct {
     rip: u64,

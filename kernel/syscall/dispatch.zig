@@ -211,13 +211,11 @@ fn sys_brk(args: Args) i64 {
 
     const requested = args.a0;
     if (requested == 0) return @intCast(proc.brk);
-    console.print("  brk: ");
-    console.print_hex(proc.brk);
-    console.print(" -> ");
-    console.print_hex(requested);
-    console.print(" (start ");
-    console.print_hex(proc.brk_start);
-    console.println(")");
+    // The successful case says nothing. It was traced while brk was being
+    // brought up and one program called it twice; a compiled Clarity program's
+    // allocator calls it every 64 KiB, and a kernel that narrates each one
+    // buries the output of the program it is running. The refusals below still
+    // report, because a refused brk is a failure the log has to explain.
     if (requested < proc.brk_start) return @intCast(proc.brk);
     // A ceiling on the heap. Without one, a single wild request — a garbage
     // pointer, or a size computed from an unchecked length — walks up through

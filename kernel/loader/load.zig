@@ -50,6 +50,14 @@ pub fn load_into_new_space(exe: elf.LoadedExecutable, image: []const u8, gpa: st
     var p: u64 = 0;
     while (p < USER_STACK_PAGES) : (p += 1) {
         const phys = pmm.alloc_page() orelse return error.OutOfMemory;
+        // Zeroed for two reasons. The first is that pmm hands back whatever
+        // was last in the frame, so an unzeroed stack lets a new process read
+        // pages a previous one wrote — which is an information leak, not a
+        // tidiness question. The second is that it is what builds the initial
+        // stack frame below: argc, the argv terminator, the envp terminator
+        // and the AT_NULL auxiliary entry are all zero, so zeroing the page
+        // *is* writing them.
+        zero_phys(phys);
         const virt = stack_bottom + p * pmm.PAGE_SIZE;
         vmm.map_page(space, virt, phys, vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER | vmm.PAGE_NX) catch return error.OutOfMemory;
     }
@@ -57,7 +65,15 @@ pub fn load_into_new_space(exe: elf.LoadedExecutable, image: []const u8, gpa: st
     return .{
         .address_space = space,
         .entry_rip = exe.entry,
-        .user_rsp = USER_STACK_TOP - 16,           // 16-byte aligned, room for argc/argv slot
+        // System V, §3.4.1: at entry %rsp points at argc, followed by argv's
+        // pointers and a NULL, then envp and a NULL, then the auxiliary
+        // vector ending in AT_NULL. A C runtime's entry stub reads argc from
+        // (%rsp) and takes argv as %rsp+8, so it has to be a real frame and
+        // not merely a valid address. The pages are zeroed above, which makes
+        // this the empty case: no arguments, no environment. 64 bytes of
+        // headroom keeps %rsp 16-byte aligned with room for all four
+        // terminators.
+        .user_rsp = USER_STACK_TOP - 64,
         .brk_start = brk_start,
     };
 }

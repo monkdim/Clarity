@@ -68,10 +68,12 @@ every pull request; anything not gated is called out as unverified.
 
 ---
 
-## Userspace runtime — the critical path
+## Userspace runtime — no longer the blocker
 
-This is still the blocker between a booting kernel and a usable OS, but it is
-now much smaller than the section it replaces, and the route has changed.
+A Clarity program compiled by the Clarity compiler now runs on ClarityOS in
+ring 3, and the boot gate requires it. What follows is how that was reached
+and what it rests on, kept because the reasoning is what makes the next
+decision easier — not because it is still outstanding.
 
 **The QuickJS route is not needed.** `runtime/freestanding` was built to embed
 QuickJS and have it evaluate the transpiled Clarity bundle, which meant
@@ -137,16 +139,27 @@ approximations, bounded and measured — 1-2 ulp for sin, cos, exp and log,
 6 for pow, with one honest gap for sine of a large angle, recorded in
 `kernel/user/libc/README.md`.
 
-**The remaining pieces, in order:**
+**And it runs.** `/bin/clarity-demo` is a Clarity program — a class and its
+methods, `try`/`catch`/`finally`, a sorted map, higher-order functions over a
+list, floating-point formatting, and four hundred allocations — compiled by
+`clarity cc --freestanding`, linked against `kernel/user/libc`, written to the
+filesystem, loaded by `spawn_user`, and printing from ring 3. Its output is
+byte-identical to the interpreter's, and the boot gate requires it on all
+three boots.
 
-1. **A build path that reaches the ISO.** The OS-boot job installs zig and
-   qemu, not bun, so the C for a test program is generated ahead of time and
-   checked in as a build artifact, with the command that regenerates it
-   recorded next to it.
-2. **The gate.** A compiled Clarity program written to the filesystem, loaded
-   by `spawn_user`, and printing from ring 3 — the same shape as the existing
-   `/bin/clarity-init` marker, but for a program the Clarity compiler
-   produced.
+It is the *second* process, which is a claim of its own: the first one exits
+and the kernel carries on. That needed two things the kernel did not have. A
+user thread now gets a kernel-side entry context, so the scheduler dispatches
+it like any other thread instead of the boot path entering ring 3 by hand and
+never coming back. And the context switch now switches address spaces, which
+it had never needed to do while exactly one process existed.
+
+The generated C is checked in as `kernel/user/clarity_demo.c`, because the
+OS-boot job installs Zig and QEMU and nothing else — a kernel build that had
+to fetch a Clarity compiler would tie booting the OS to a network.
+`stdlib/test_libc.clarity` regenerates it and fails if it has drifted, which
+is the check that keeps that artifact honest and runs where the compiler does
+exist.
 
 **Not pursued, and why.** `runtime/native_vm` (a pure-Zig bytecode VM) is a
 484-line skeleton; taking it to "runs the stdlib" means reimplementing
