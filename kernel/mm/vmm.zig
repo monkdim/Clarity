@@ -38,10 +38,25 @@ pub const AddressSpace = struct {
     };
 };
 
+/// The kernel's own address space. The boot stub built the page tables
+/// (identity + HHDM + kernel window) and loaded them into CR3; init()
+/// adopts that tree so later kernel mappings — the framebuffer, MMIO —
+/// target the live tables instead of an undefined address space.
+var kernel_space: AddressSpace = .{ .pml4_phys = 0, .regions = .{} };
+
+fn read_cr3() u64 {
+    return asm volatile ("mov %%cr3, %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+}
+
 pub fn init() void {
-    // Kernel address space's PML4 was set up by the boot stub; we
-    // adopt it here and keep its phys addr for cloning into new
-    // processes.
+    kernel_space.pml4_phys = read_cr3() & ADDR_MASK;
+}
+
+/// The kernel address space. Valid after init().
+pub fn kernel() *AddressSpace {
+    return &kernel_space;
 }
 
 pub fn map_page(space: *AddressSpace, virt: u64, phys: u64, flags: u64) !void {

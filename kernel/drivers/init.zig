@@ -19,15 +19,31 @@ pub fn init(boot_info: *const main.BootInfo) !void {
 
     // Framebuffer if the bootloader handed one up.
     if (boot_info.framebuffer) |fb| {
-        try framebuffer.init(fb);
+        framebuffer.init(fb) catch |err| {
+            console.print("  [warn] framebuffer init failed: ");
+            console.println(@errorName(err));
+        };
     }
 
+    // Peripherals below are best-effort: a machine with no PS/2 controller,
+    // no AHCI port, or no virtio NIC is a normal machine, not a boot
+    // failure. Report and continue rather than aborting the boot.
+
     // PS/2 keyboard + mouse via the legacy 8042 controller.
-    try ps2.init();
+    ps2.init() catch |err| {
+        console.print("  [warn] PS/2 controller unavailable: ");
+        console.println(@errorName(err));
+    };
 
     // Block devices.
-    try ahci.scan();
+    ahci.scan() catch |err| {
+        console.print("  [warn] AHCI scan failed: ");
+        console.println(@errorName(err));
+    };
 
     // NIC — virtio-net for VMs, real Intel NICs deferred.
-    try virtio_net.scan();
+    virtio_net.scan() catch |err| {
+        console.print("  [warn] virtio-net scan failed: ");
+        console.println(@errorName(err));
+    };
 }

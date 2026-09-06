@@ -27,25 +27,69 @@ var mouse_buf: [MOUSE_BUF_SIZE]u8 = undefined;
 var mouse_head: usize = 0;
 var mouse_tail: usize = 0;
 
+/// Upper bound on any 8042 status poll. Every wait here is bounded: a
+/// controller that never clears (or never sets) a status bit must not be
+/// able to wedge the boot. Sized generously — the 8042 answers in
+/// microseconds, so this only trips on genuinely broken/absent hardware.
+const WAIT_SPINS: usize = 100_000;
+
+/// Wait until the input buffer is empty, i.e. it is safe to write a byte.
+fn wait_write_ready() bool {
+    var spins: usize = 0;
+    while (spins < WAIT_SPINS) : (spins += 1) {
+        if ((port.in8(PS2_STATUS) & 0x02) == 0) return true;
+    }
+    return false;
+}
+
+/// Wait until the output buffer is full, i.e. a response byte is available.
+/// The controller does not answer instantly, so reading PS2_DATA without
+/// this first returns stale/garbage data.
+fn wait_read_ready() bool {
+    var spins: usize = 0;
+    while (spins < WAIT_SPINS) : (spins += 1) {
+        if ((port.in8(PS2_STATUS) & 0x01) != 0) return true;
+    }
+    return false;
+}
+
+fn write_data(byte: u8) void {
+    _ = wait_write_ready();
+    port.out8(PS2_DATA, byte);
+}
+
+/// Read a response byte, or null if the controller never produced one.
+fn read_data() ?u8 {
+    if (!wait_read_ready()) return null;
+    return port.in8(PS2_DATA);
+}
+
 pub fn init() !void {
     // Disable both ports during reconfig.
     cmd(0xAD); // disable port 1
     cmd(0xA7); // disable port 2
 
-    // Drain.
-    while ((port.in8(PS2_STATUS) & 0x01) != 0) _ = port.in8(PS2_DATA);
+    // Drain any bytes the firmware left pending. Bounded: an emulated
+    // controller that keeps asserting output-buffer-full would otherwise
+    // spin here forever.
+    var drained: usize = 0;
+    while (drained < 64) : (drained += 1) {
+        if ((port.in8(PS2_STATUS) & 0x01) == 0) break;
+        _ = port.in8(PS2_DATA);
+    }
 
     // Configure controller: enable IRQs on both ports, scancode translation off.
     cmd(0x20);
-    var cfg = port.in8(PS2_DATA);
+    var cfg = read_data() orelse return error.ControllerUnresponsive;
     cfg |= 0b0000_0011; // IRQ1 + IRQ12
     cfg &= 0b1011_1110; // clear translation bit
     cmd(0x60);
-    port.out8(PS2_DATA, cfg);
+    write_data(cfg);
 
     // Self test.
     cmd(0xAA);
-    if (port.in8(PS2_DATA) != 0x55) return error.ControllerSelfTest;
+    const self_test = read_data() orelse return error.ControllerUnresponsive;
+    if (self_test != 0x55) return error.ControllerSelfTest;
 
     cmd(0xAE); // enable port 1
     cmd(0xA8); // enable port 2
@@ -55,7 +99,7 @@ pub fn init() !void {
 }
 
 fn cmd(byte: u8) void {
-    while ((port.in8(PS2_STATUS) & 0x02) != 0) {}
+    _ = wait_write_ready();
     port.out8(PS2_CMD, byte);
 }
 

@@ -66,7 +66,7 @@ jobs:
           fails=0
           for attempt in 1 2 3; do
             echo "=== boot attempt $attempt ==="
-            timeout 180 qemu-system-x86_64 \
+            timeout 45 qemu-system-x86_64 \
               -cdrom clarity-kernel.iso \
               -boot d \
               -m 512 \
