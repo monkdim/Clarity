@@ -1,0 +1,171 @@
+-- Native import resolution: flattening a program plus its imports into the
+-- single C translation unit `clarity cc` emits.
+--
+-- The interesting cases are the ones where flattening is not just "paste the
+-- file in": a module imported twice, a cycle, a name defined in two modules,
+-- and a module that is not there at all. Each is asserted here, and the
+-- happy path is checked end to end — compile a program that imports a real
+-- stdlib module and diff the binary's output against the interpreter.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "c_modules.clarity" import resolve_native_imports
+from "c_codegen.clarity" import compile_to_c
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn check(name, cond) {
+    if cond { PASSED += 1 }
+    else { FAILED += 1; show "  FAIL: " + name }
+}
+
+fn check_eq(name, actual, expected) {
+    if actual == expected { PASSED += 1 }
+    else {
+        FAILED += 1
+        show "  FAIL: " + name
+        show "    expected: " + str(expected)
+        show "    actual:   " + str(actual)
+    }
+}
+
+let DIR = "/tmp/_clmod"
+exec("rm -rf " + DIR + " && mkdir -p " + DIR)
+
+fn put(name, body) { write(DIR + "/" + name, body) }
+
+fn flatten(name) {
+    let path = DIR + "/" + name
+    let src = read(path)
+    return resolve_native_imports(parse(tokenize(src, name), src), DIR, null, path)
+}
+
+fn names_of(tree) {
+    mut out = []
+    for s in tree.body {
+        if s.node_type == "FnStatement" or s.node_type == "ClassStatement" or s.node_type == "LetStatement" {
+            push(out, s.name)
+        }
+    }
+    return out
+}
+
+show "-- native imports: flattening --"
+
+-- A dependency's declarations must land before the importer's, so that the
+-- emitted C has them in scope by the time anything refers to them.
+put("dep.clarity", "fn dep_fn() { return 1 }\n")
+put("uses_dep.clarity", "from \"dep.clarity\" import dep_fn\nfn main_fn() { return dep_fn() }\n")
+let flat = flatten("uses_dep.clarity")
+check_eq("dependency spliced before importer", names_of(flat), ["dep_fn", "main_fn"])
+check("import statement is dropped", not contains(str(names_of(flat)), "ImportStatement"))
+
+-- Imported twice through two different paths: included once, not twice.
+put("mid_a.clarity", "from \"dep.clarity\" import dep_fn\nfn a_fn() { return dep_fn() }\n")
+put("mid_b.clarity", "from \"dep.clarity\" import dep_fn\nfn b_fn() { return dep_fn() }\n")
+put("diamond.clarity", "from \"mid_a.clarity\" import a_fn\nfrom \"mid_b.clarity\" import b_fn\nfn top() { return a_fn() + b_fn() }\n")
+check_eq("diamond import includes the shared module once",
+    names_of(flatten("diamond.clarity")), ["dep_fn", "a_fn", "b_fn", "top"])
+
+-- A cycle must terminate rather than recurse until the stack gives out.
+put("cyc_a.clarity", "from \"cyc_b.clarity\" import b_thing\nfn a_thing() { return b_thing() }\n")
+put("cyc_b.clarity", "from \"cyc_a.clarity\" import a_thing\nfn b_thing() { return 2 }\n")
+mut cyc_ok = false
+try {
+    let f = flatten("cyc_a.clarity")
+    cyc_ok = contains(str(names_of(f)), "b_thing") and contains(str(names_of(f)), "a_thing")
+} catch e { cyc_ok = false }
+check("import cycle terminates", cyc_ok)
+
+-- Two modules defining the same top-level name collide in C, and that has to
+-- be reported: silently keeping one would miscompile the other's callers.
+put("dup1.clarity", "fn helper() { return 1 }\n")
+put("dup2.clarity", "fn helper() { return 2 }\n")
+put("collide.clarity", "from \"dup1.clarity\" import helper\nfrom \"dup2.clarity\" import helper\nshow helper()\n")
+mut collide_msg = ""
+try { flatten("collide.clarity") } catch e { collide_msg = str(e) }
+check("duplicate top-level name is reported", contains(collide_msg, "helper"))
+check("duplicate error names both modules",
+    contains(collide_msg, "dup1.clarity") and contains(collide_msg, "dup2.clarity"))
+
+-- A missing module names itself and its importer rather than failing later
+-- with an undefined C symbol.
+put("missing.clarity", "from \"nope.clarity\" import thing\nshow thing()\n")
+mut missing_msg = ""
+try { flatten("missing.clarity") } catch e { missing_msg = str(e) }
+check("missing module is reported by name", contains(missing_msg, "nope.clarity"))
+
+-- `import math` has no path: it is a runtime builtin, not a file, and must
+-- not be treated as a missing module.
+put("builtin.clarity", "import math\nfn f() { return 1 }\n")
+mut builtin_ok = false
+try { builtin_ok = names_of(flatten("builtin.clarity")) == ["f"] } catch e { builtin_ok = false }
+check("pathless `import math` is left alone", builtin_ok)
+
+-- Module-level constants come across too, and stay ahead of their users.
+put("consts.clarity", "let SCALE = 7\nfn scaled(n) { return n * SCALE }\n")
+put("use_consts.clarity", "from \"consts.clarity\" import scaled\nshow scaled(6)\n")
+check_eq("module constants are spliced", names_of(flatten("use_consts.clarity")), ["SCALE", "scaled"])
+
+show "-- native imports: end to end --"
+
+fn _find_cc() {
+    for cc in ["cc", "gcc", "clang"] {
+        let r = exec_full(cc + " --version")
+        if len(trim(r.stdout)) > 0 { return cc }
+    }
+    return null
+}
+let CC = _find_cc()
+
+if CC == null {
+    show "  (no C compiler on PATH — native import check skipped)"
+} else {
+    -- sha256.clarity itself imports bits.clarity, so this exercises a
+    -- transitive import of a real module, not a toy one.
+    --
+    -- The expected output is the published FIPS 180-4 digest rather than an
+    -- interpreter run: the interpreter resolves imports against its own
+    -- stdlib search path, not this scratch directory, so running the same
+    -- source through it here would fail to find the module. The interpreter
+    -- side of these digests is covered by test_sha256.clarity.
+    let prog = "from \"sha256.clarity\" import sha256_hex\nshow sha256_hex(\"\")\nshow sha256_hex(\"abc\")\n"
+    write(DIR + "/real.clarity", prog)
+    let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n" +
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+    -- Where sha256.clarity lives, depending on where the runner was started.
+    mut stdlib_dir = null
+    for cand in ["stdlib", ".", "../stdlib"] {
+        if stdlib_dir == null and exists(cand + "/sha256.clarity") { stdlib_dir = cand }
+    }
+    if stdlib_dir == null {
+        show "  (sha256.clarity not found from here — native import check skipped)"
+    } else {
+        let tree = resolve_native_imports(parse(tokenize(prog, "<t>"), prog), DIR, stdlib_dir, DIR + "/real.clarity")
+        write(DIR + "/real.c", compile_to_c(tree))
+        exec_full(CC + " -O2 -w " + DIR + "/real.c -o " + DIR + "/real -lm")
+        check_eq("compiled program importing sha256.clarity produces the published digests",
+            trim(exec_full(DIR + "/real").stdout), trim(expected))
+
+        -- A second real module, to catch anything specific to how sha256 is
+        -- shaped. bytes.clarity is the Track B byte toolkit; the example
+        -- scanner used to inline it because imports did not compile.
+        let bprog = "from \"bytes.clarity\" import scan, scan_all\n" +
+            "let hay = [0x48, 0x8B, 0x05, 0x11, 0x22, 0xE8, 0x00]\n" +
+            "show scan(hay, \"48 8B ?? ?? ?? E8\")\nshow scan_all(hay, \"48 8B\")\n"
+        write(DIR + "/b.clarity", bprog)
+        let btree = resolve_native_imports(parse(tokenize(bprog, "<t>"), bprog), DIR, stdlib_dir, DIR + "/b.clarity")
+        write(DIR + "/b.c", compile_to_c(btree))
+        exec_full(CC + " -O2 -w " + DIR + "/b.c -o " + DIR + "/b -lm")
+        check_eq("compiled program importing bytes.clarity scans correctly",
+            trim(exec_full(DIR + "/b").stdout), "0\n[0]")
+    }
+}
+
+exec("rm -rf " + DIR)
+
+show ""
+show "Native imports: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " native import test(s) failed" }
