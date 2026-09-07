@@ -6,7 +6,7 @@
 --   - Blank lines between definitions
 --   - Clean spacing around operators
 
-from "lexer.clarity" import tokenize
+from "lexer.clarity" import tokenize, tokenize_with_comments
 from "parser.clarity" import parse
 
 -- ── Formatter ─────────────────────────────────────────────
@@ -16,9 +16,54 @@ class Formatter {
         this.indent_size = indent_size
         this.max_width = max_width
         this.indent_level = 0
+        -- The source's comments in line order, and how many have been
+        -- placed. The formatter walks statements in source order, so the
+        -- comments can be handed out from the front as their lines pass.
+        this.comments = []
+        this.next_comment = 0
     }
 
-    fn format(tree) {
+    -- ── Comments ──────────────────────────────────────────
+    --
+    -- The parser never sees a comment, so the tree cannot carry one; the
+    -- lexer records them with their lines, and they are put back by line:
+    -- a comment on its own line goes above the first statement that starts
+    -- after it, at that statement's indent; a comment that trails code
+    -- stays on the statement that begins on its line; a comment after the
+    -- last statement of a block stays inside the block's braces. A comment
+    -- inside a multi-line expression comes out after the statement, which
+    -- keeps it rather than dropping it.
+
+    fn comments_before(line) {
+        mut out = []
+        while this.next_comment < len(this.comments) and this.comments[this.next_comment]["line"] < line {
+            push(out, this.indent() + this.comments[this.next_comment]["text"])
+            this.next_comment += 1
+        }
+        return out
+    }
+
+    fn trailing_comment(line) {
+        if this.next_comment < len(this.comments) {
+            let c = this.comments[this.next_comment]
+            if c["line"] == line and not c["own_line"] {
+                this.next_comment += 1
+                return c["text"]
+            }
+        }
+        return null
+    }
+
+    fn with_trailing(text, comment) {
+        if comment == null { return text }
+        let nl = index_of(text, "\n")
+        if nl < 0 { return text + "  " + comment }
+        return substring(text, 0, nl) + "  " + comment + substring(text, nl, len(text))
+    }
+
+    fn format(tree, comments) {
+        this.comments = comments ?? []
+        this.next_comment = 0
         mut parts = []
         mut prev_kind = null
         for stmt in tree.body {
@@ -29,6 +74,7 @@ class Formatter {
             push(parts, this.fmt_stmt(stmt))
             prev_kind = kind
         }
+        for c in this.comments_before(1000000000) { push(parts, c) }
         mut result = join(parts, "\n")
         if len(result) > 0 and not ends(result, "\n") {
             result = result + "\n"
@@ -59,6 +105,18 @@ class Formatter {
     -- ── Statements ────────────────────────────────────────
 
     fn fmt_stmt(node) {
+        mut line = 0
+        try { line = node.line ?? 0 } catch e { line = 0 }
+        mut before = []
+        if line > 0 { before = this.comments_before(line) }
+        mut text = this.fmt_stmt_bare(node)
+        if line > 0 { text = this.with_trailing(text, this.trailing_comment(line)) }
+        if len(before) == 0 { return text }
+        push(before, text)
+        return join(before, "\n")
+    }
+
+    fn fmt_stmt_bare(node) {
         let nt = node.node_type
 
         if nt == "LetStatement" { return this.fmt_let(node) }
@@ -226,9 +284,15 @@ class Formatter {
     }
 
     fn fmt_class(node) {
-        mut parent = ""
-        if node.parent != null { parent = " : " + node.parent }
-        mut lines_list = [this.indent() + "class " + node.name + parent + " {"]
+        -- Inheritance is `class B < A`, interfaces are `impl I, J`. This
+        -- wrote `class B : A`, which the parser has never read, so every
+        -- file with a subclass came out of fmt unparseable.
+        mut header = this.indent() + "class " + node.name
+        if node.parent != null { header = header + " < " + node.parent }
+        mut interfaces = []
+        try { if node.interfaces != null { interfaces = node.interfaces } } catch e { interfaces = [] }
+        if len(interfaces) > 0 { header = header + " impl " + join(interfaces, ", ") }
+        mut lines_list = [header + " {"]
         this.indent_level += 1
         mut i = 0
         for method in node.methods {
@@ -328,7 +392,14 @@ class Formatter {
         try { nt = node.node_type } catch e { return str(node) }
         if nt == null { return str(node) }
 
-        if nt == "NumberLiteral" { return str(node.value) }
+        if nt == "NumberLiteral" {
+            -- As written, when known: str(0.0000005) is "5e-7", which the
+            -- lexer does not read, and 0xFF or 1_000_000 would lose their form.
+            mut raw = null
+            try { raw = node.raw } catch e { raw = null }
+            if raw != null { return raw }
+            return str(node.value)
+        }
         if nt == "StringLiteral" {
             -- Re-encode every escape the lexer decodes, or the output is a
             -- broken string: a decoded newline/tab written raw produces an
@@ -415,11 +486,13 @@ class Formatter {
         }
 
         if nt == "SliceExpression" {
+            -- The language writes a slice as a range, xs[a..b], with either
+            -- end open. This wrote xs[a:b], which the parser has never read.
             mut s = ""
             mut e = ""
             if node.start != null { s = this.fmt_expr(node.start) }
             if node.end != null { e = this.fmt_expr(node.end) }
-            return this.fmt_expr(node.object) + "[" + s + ":" + e + "]"
+            return this.fmt_expr(node.object) + "[" + s + ".." + e + "]"
         }
 
         if nt == "FnExpression" {
@@ -523,6 +596,13 @@ class Formatter {
                 push(lines_list, formatted)
             }
         }
+        -- Comments between the last statement and the closing brace stay
+        -- inside the block; the parser recorded where it closes.
+        mut end_line = 0
+        try { end_line = block.end_line ?? 0 } catch e { end_line = 0 }
+        if end_line > 0 {
+            for c in this.comments_before(end_line) { push(lines_list, c) }
+        }
         this.indent_level -= 1
         return join(lines_list, "\n")
     }
@@ -544,13 +624,13 @@ class Formatter {
 -- ── Public API ────────────────────────────────────────────
 
 fn format_source(source, filename) {
-    let tokens = tokenize(source, filename)
-    let tree = parse(tokens, source)
+    let lexed = tokenize_with_comments(source, filename)
+    let tree = parse(lexed["tokens"], source)
     let formatter = Formatter(4, 100)
-    return formatter.format(tree)
+    return formatter.format(tree, lexed["comments"])
 }
 
 fn format_tree(tree) {
     let formatter = Formatter(4, 100)
-    return formatter.format(tree)
+    return formatter.format(tree, [])
 }

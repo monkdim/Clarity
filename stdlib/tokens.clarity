@@ -145,11 +145,15 @@ let KEYWORDS = {
 
 -- Token class
 class Token {
-    fn init(type, value, line, column) {
+    fn init(type, value, line, column, raw) {
         this.type = type
         this.value = value
         this.line = line
         this.column = column
+        -- For numbers, the literal as written (0xFF, 1_000_000, 0.0000005),
+        -- so the formatter can write it back the same way. str(value) would
+        -- turn 0.0000005 into 5e-7, which the lexer does not read.
+        this.raw = raw
     }
 
     fn to_string() {

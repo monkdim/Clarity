@@ -241,17 +241,23 @@ class Block {
         this.statements = statements
         this.line = line
         this.column = column
+        -- The line of the closing brace, set by the parser; the formatter
+        -- uses it to keep a trailing comment inside the block it was in.
+        this.end_line = null
     }
 }
 
 -- ── Expressions ──────────────────────────────────────────
 
 class NumberLiteral {
-    fn init(value, line, column) {
+    fn init(value, line, column, raw) {
         this.node_type = "NumberLiteral"
         this.value = value
         this.line = line
         this.column = column
+        -- The literal as written, when it came from source; null when a
+        -- tool built the node itself.
+        this.raw = raw
     }
 }
 

@@ -52,6 +52,50 @@ let once = format_source("let s = \"a\\nb\\tc\"\nshow s\n", "<t>")
 let twice = format_source(once, "<t>")
 assert_eq(twice, once, "formatting is idempotent over escaped strings")
 
+show "-- Formatter: output the parser reads --"
+
+-- Three things the formatter wrote in a syntax the parser has never read,
+-- found by formatting every standard library file: a subclass header, a
+-- slice, and a small float. Sixteen files came out of fmt unparseable.
+assert_eq(format_source("class B < A {\n    fn init() { this.x = 1 }\n}\n", "<t>"), "class B < A {\n    fn init() {\n        this.x = 1\n    }\n}\n", "a subclass header is written with <")
+assert(reparses("class B < A impl I, J {\n    fn f() { return 1 }\n}\n"), "a class with interfaces re-parses after format")
+assert(contains(format_source("class B < A impl I, J {\n    fn f() { return 1 }\n}\n", "<t>"), "class B < A impl I, J {"), "interfaces are written with impl")
+assert_eq(format_source("let a = xs[..2]\nlet b = xs[1..]\nlet c = xs[1..3]\n", "<t>"), "let a = xs[..2]\nlet b = xs[1..]\nlet c = xs[1..3]\n", "slices are written as ranges")
+assert_eq(format_source("let t = 0.0000005\nlet h = 0xFF\nlet m = 1_000_000\n", "<t>"), "let t = 0.0000005\nlet h = 0xFF\nlet m = 1_000_000\n", "numbers are written as they were written")
+assert(reparses("let t = 0.0000005\n"), "a small float re-parses after format")
+
+show "-- Formatter: comments survive --"
+
+-- The lexer dropped comments and the formatter only saw the tree, so
+-- `fmt --write` deleted every comment in a file. Each shape a comment can
+-- take in a file must come back where it was.
+assert_eq(format_source("-- above\nlet x = 1\n", "<t>"), "-- above\nlet x = 1\n", "a comment above a statement stays above it")
+assert_eq(format_source("let x = 1 -- trailing\n", "<t>"), "let x = 1  -- trailing\n", "a trailing comment stays on its line")
+assert_eq(format_source("fn f() {\n    -- inside\n    return 1\n    -- after the last statement\n}\n", "<t>"),
+          "fn f() {\n    -- inside\n    return 1\n    -- after the last statement\n}\n", "comments inside a body keep their place and indent")
+assert_eq(format_source("// slash style\nlet a = 1\n/* block\n   comment */\nlet b = 2\n", "<t>"),
+          "// slash style\nlet a = 1\n/* block\n   comment */\nlet b = 2\n", "slash and block comments come back verbatim")
+assert_eq(format_source("let a = 1\n-- at the end of the file\n", "<t>"), "let a = 1\n-- at the end of the file\n", "a comment after the last statement is kept")
+assert_eq(format_source("class C {\n    -- about init\n    fn init() { this.x = 1 }\n\n    -- about get\n    fn get() { return this.x }\n}\n", "<t>"),
+          "class C {\n    -- about init\n    fn init() {\n        this.x = 1\n    }\n\n    -- about get\n    fn get() {\n        return this.x\n    }\n}\n", "comments between methods stay with their method")
+let commented = "-- head\nfn f(a) {\n    -- body\n    let y = a * 2  -- doubled\n    return y\n}\n"
+assert_eq(format_source(format_source(commented, "<t>"), "<t>"), format_source(commented, "<t>"), "formatting with comments is idempotent")
+
+-- And on real files: every comment the lexer finds in a standard library
+-- module is found again in the formatted output, and the output re-parses.
+from "lexer.clarity" import tokenize_with_comments
+for name in ["formatter.clarity", "test_formatter.clarity", "collections.clarity"] {
+    let path = "stdlib/" + name
+    if exists(path) {
+        let src = read(path)
+        let before_n = len(tokenize_with_comments(src, path)["comments"])
+        let out = format_source(src, path)
+        let after_n = len(tokenize_with_comments(out, path)["comments"])
+        assert_eq(after_n, before_n, name + ": every comment survives fmt")
+        assert(reparses(out), name + ": formatted output re-parses")
+    }
+}
+
 show ""
 show "Formatter: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
 if FAILED > 0 { throw str(FAILED) + " formatter test(s) failed" }
