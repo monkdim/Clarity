@@ -742,6 +742,31 @@ def main():
         ap.print_help()
 
 
+def bundle_module_list(stdlib_dir):
+    """The modules a bundle ships: every non-test file under stdlib/, plus
+    any test_ module a non-test module imports (the CLI imports test_smoke).
+
+    Derived from the directory rather than listed by hand. Two hand-kept
+    lists, this one and STDLIB_FILES in stdlib/transpile.clarity, disagreed
+    for months: twelve modules the CLI imports were only in one, the whole
+    RE toolkit was in neither, and a bundle produced by the self-hosted
+    compiler could not start. The same rule, implemented in both places, is
+    what keeps them equal; CI checks that the two emitted sets match.
+    """
+    import re as _re
+    names = sorted(f for f in os.listdir(stdlib_dir) if f.endswith('.clarity'))
+    mods = [n for n in names if not n.startswith('test_')]
+    imp = _re.compile(r'from\s+"([^"]+)"\s+import')
+    extra = set()
+    for n in mods:
+        with open(os.path.join(stdlib_dir, n), encoding='utf-8') as f:
+            for target in imp.findall(f.read()):
+                base = os.path.basename(target)
+                if base.startswith('test_') and base in names:
+                    extra.add(base)
+    return mods + sorted(extra)
+
+
 def bundle(compile_native=False):
     """Bundle the entire Clarity CLI + stdlib into a single JS program."""
     import subprocess
@@ -752,64 +777,7 @@ def bundle(compile_native=False):
     dist_dir = os.path.join(native_dir, 'dist')
     os.makedirs(dist_dir, exist_ok=True)
 
-    # Transpile all stdlib files
-    stdlib_files = [
-        'tokens.clarity', 'lexer.clarity', 'ast_nodes.clarity',
-        'parser.clarity', 'interpreter.clarity', 'terminal.clarity',
-        'errors.clarity', 'c_codegen.clarity', 'c_scope.clarity', 'c_modules.clarity', 'http.clarity',
-        'terminal_emulator.clarity',
-        'process.clarity', 'pty.clarity', 'shell.clarity', 'repl.clarity',
-        'package.clarity', 'lsp.clarity', 'bytecode.clarity',
-        'runtime.clarity',
-        'linter.clarity', 'formatter.clarity', 'type_checker.clarity',
-        'docgen.clarity', 'debugger.clarity', 'profiler.clarity',
-        'collections.clarity', 'datetime.clarity', 'path.clarity',
-        'net.clarity', 'db.clarity', 'crypto.clarity',
-        'semver.clarity', 'registry.clarity',
-        'highlight.clarity', 'completer.clarity', 'pretty.clarity', 'claude.clarity',
-        'channel.clarity', 'task.clarity', 'mutex.clarity', 'worker.clarity',
-        'transpile.clarity',
-        'graphics.clarity', 'draw.clarity', 'font.clarity', 'image.clarity',
-        'input.clarity', 'keymap.clarity', 'mouse.clarity', 'touch.clarity', 'event_bus.clarity',
-        'window.clarity', 'compositor.clarity', 'chrome.clarity',
-        'window_manager.clarity', 'workspace.clarity',
-        'theme.clarity', 'ui.clarity', 'layout.clarity', 'widgets.clarity',
-        'ipc.clarity', 'init.clarity', 'storage.clarity', 'network.clarity',
-        'audio.clarity', 'notify.clarity',
-        'wallpaper.clarity', 'statusbar.clarity', 'dock.clarity', 'launcher.clarity',
-        'lockscreen.clarity', 'settings.clarity',
-        'app_calc.clarity', 'app_viewer.clarity', 'app_monitor.clarity',
-        'app_editor.clarity', 'app_files.clarity', 'app_terminal.clarity',
-        'app_manifest.clarity', 'app_sandbox.clarity', 'app_store.clarity',
-        'app_scaffold.clarity', 'hot_reload.clarity',
-        'kernel_abi.clarity', 'syscall.clarity', 'scheduler.clarity', 'vfs.clarity',
-        'elf.clarity', 'process_model.clarity',
-        'tty.clarity',
-        'init_app.clarity', 'procfs.clarity', 'input_pipeline.clarity',
-        'display_server.clarity', 'desktop_session.clarity', 'host.clarity',
-        'iso9660.clarity', 'qemu_macos.clarity', 'qemu.clarity', 'os_build.clarity',
-        'theme_aurora.clarity', 'wallpapers.clarity', 'animations.clarity', 'boot_splash.clarity',
-        'theme_meadow.clarity', 'wallpapers_spring.clarity', 'branding_modern.clarity',
-        'boot_splash_modern.clarity', 'theme_registry.clarity', 'theme_picker.clarity',
-        'perf_profiler.clarity', 'crash_recovery.clarity', 'branding.clarity',
-        'website_gen.clarity', 'release.clarity',
-        'platform.clarity',
-        'mkiso.clarity', 'live_usb.clarity', 'run_vm.clarity',
-        'installer.clarity', 'hardware.clarity',
-        'html_parser.clarity', 'css_layout.clarity', 'browser.clarity',
-        'imap.clarity', 'smtp.clarity', 'mail.clarity',
-        'websocket.clarity', 'chat.clarity',
-        'store_app.clarity',
-        'ide.clarity', 'ui_builder.clarity', 'docs_app.clarity', 'playground_app.clarity',
-        'ffi.clarity',
-        'build.clarity', 'test_smoke.clarity',
-        'runtime_spec.clarity', 'runtime_gen.clarity',
-        'install.clarity',
-        'font_atlas.clarity', 'atlas_font.clarity',
-        'theme_kyan.clarity', 'branding_kyan.clarity', 'boot_splash_kyan.clarity',
-        'kyan_apps.clarity', 'kyan_game.clarity', 'kyan_desktop.clarity',
-        'cli.clarity',
-    ]
+    stdlib_files = bundle_module_list(stdlib_dir)
 
     # De-collision: a Clarity `fn max` transpiles to `export function $max`
     # while the header also imports `$max` from the runtime — a redeclaration
@@ -839,15 +807,17 @@ def bundle(compile_native=False):
     print('  Transpiling stdlib...')
     for fname in stdlib_files:
         src = os.path.join(stdlib_dir, fname)
-        if os.path.exists(src):
-            try:
-                js = _decollide(transpile_with_runtime(src))
-                out = os.path.join(dist_dir, fname.replace('.clarity', '.js'))
-                with open(out, 'w') as f:
-                    f.write(js)
-                print(f'    {fname} → {os.path.basename(out)}')
-            except Exception as e:
-                print(f'    {fname} — SKIP ({e})')
+        # A module that fails to transpile used to be printed as SKIP and the
+        # bundle declared ready. That is a hole in the binary nothing reports
+        # until an import fails at runtime, so it is fatal now.
+        try:
+            js = _decollide(transpile_with_runtime(src))
+        except Exception as e:
+            raise SystemExit(f'transpile --bundle: {fname} failed to transpile: {e}')
+        out = os.path.join(dist_dir, fname.replace('.clarity', '.js'))
+        with open(out, 'w') as f:
+            f.write(js)
+        print(f'    {fname} -> {os.path.basename(out)}')
 
     # Copy runtime
     import shutil

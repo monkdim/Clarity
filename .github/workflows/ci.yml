@@ -87,18 +87,29 @@ jobs:
           python native/transpile.py --bundle
           (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
 
-      - name: Stage 2 — the compiler regenerates its own bundle
+      # Into an empty directory, on purpose. This stage used to write over
+      # native/dist, and the Python bundler's files filled every hole in the
+      # self-hosted one: a bundle it could not have produced alone passed
+      # here for months, while `clarity transpile --bundle` into a fresh
+      # directory produced a binary that could not start.
+      - name: Stage 2 — the compiler regenerates its own bundle, from nothing
         run: |
-          ./native/dist/clarity transpile --bundle
-          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
-          cp -r native/dist /tmp/stage2
-          ./native/dist/clarity --version
+          ./native/dist/clarity transpile --bundle -o /tmp/stage2
+          (cd /tmp/stage2 && bun build --compile clarity-entry.js --outfile clarity)
+          /tmp/stage2/clarity --version
+
+      # Both bundlers derive the module set from the directory by the same
+      # rule; this is what says they still agree.
+      - name: The self-hosted bundle ships the same modules as the reference one
+        run: |
+          diff <(cd native/dist && ls *.js | sort) <(cd /tmp/stage2 && ls *.js | sort) \
+            && echo "PASS: identical module sets" \
+            || { echo "FAIL: the two bundlers emitted different module sets"; exit 1; }
 
       - name: Stage 3 — and again, then require a fixpoint
         run: |
-          ./native/dist/clarity transpile --bundle
-          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
-          cp -r native/dist /tmp/stage3
+          /tmp/stage2/clarity transpile --bundle -o /tmp/stage3
+          (cd /tmp/stage3 && bun build --compile clarity-entry.js --outfile clarity)
           if diff -rq --exclude=clarity /tmp/stage2 /tmp/stage3; then
             echo "PASS: the compiler reproduces itself byte for byte"
           else
@@ -115,7 +126,7 @@ jobs:
       # A fixpoint on broken output is still broken, so the self-hosted build
       # has to pass everything the reference build does.
       - name: Self-hosted build passes the full suite
-        run: ./native/dist/clarity test stdlib/
+        run: /tmp/stage3/clarity test stdlib/
 
       - name: Self-hosted build passes the smoke tests
-        run: ./native/dist/clarity smoke ./native/dist/clarity
+        run: /tmp/stage3/clarity smoke /tmp/stage3/clarity

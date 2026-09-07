@@ -9,10 +9,11 @@ the way a hand-written listing does. Run it from the repository root:
 
 What it records, and why each column exists:
 
-  stdlib modules   which bundler ships each one (there are two lists and they
-                   differ), whether the CLI reaches it, who imports it, and
-                   whether any test does. A module no test imports and no
-                   code imports is the first place to look for dead code.
+  stdlib modules   whether the bundle ships it (every non-test module, plus
+                   any test module a non-test module imports: the same rule
+                   both bundlers use), whether the CLI reaches it, who imports
+                   it, and whether any test does. A module no test imports and
+                   no code imports is the first place to look for dead code.
   kernel files     architecture, size, the file's own one-line purpose, and
                    which of the four build roots reaches it.
   tests            what each test file exercises.
@@ -97,12 +98,13 @@ def stdlib_index():
 
     live = reach("cli.clarity")
 
-    py = read("native/transpile.py")
-    m = re.search(r"stdlib_files = \[(.*?)\]", py, re.S)
-    py_list = set(re.findall(r"'([^']+\.clarity)'", m.group(1))) if m else set()
-    cl = read("stdlib/transpile.clarity")
-    m2 = re.search(r"STDLIB_FILES\s*=\s*\[(.*?)\]", cl, re.S)
-    self_list = set(re.findall(r'"([^"]+)"', m2.group(1))) if m2 else set()
+    # The bundle rule, as both bundlers implement it: every non-test module,
+    # plus any test module a non-test module imports.
+    bundled = set(m for m in mods if not m.startswith("test_"))
+    for m in list(bundled):
+        for d in graph[m]:
+            if d.startswith("test_") and d in mods:
+                bundled.add(d)
 
     rows = []
     for name, text in mods.items():
@@ -125,8 +127,7 @@ def stdlib_index():
             "name": name,
             "lines": text.count("\n"),
             "purpose": first_comment(text, "--"),
-            "py": name in py_list,
-            "self": name in self_list,
+            "bundled": name in bundled,
             "live": name in live,
             "code": code,
             "tests": len(tests),
@@ -144,8 +145,7 @@ def stdlib_index():
     return rows, test_rows, {
         "modules": len(rows),
         "tests": len(test_rows),
-        "py_list": len(py_list),
-        "self_list": len(self_list),
+        "bundled": len(bundled),
         "live": len([r for r in rows if r["live"]]),
         "only_tests": len([r for r in rows if r["status"] == "only tests import it"]),
         "nothing": len([r for r in rows if r["status"] == "nothing imports it"]),
@@ -283,17 +283,17 @@ def build():
 
     parts.append("\n## Standard library (`stdlib/`)\n")
     parts.append(
-        "%d modules and %d test files. The Python bundler (`native/transpile.py`) lists %d modules; "
-        "the self-hosted bundler (`stdlib/transpile.clarity`, `STDLIB_FILES`) lists %d. %d modules are "
+        "%d modules and %d test files. The bundle ships %d files: every non-test module plus any test "
+        "module a non-test module imports, the rule both bundlers derive from the directory. %d modules are "
         "reached from `cli.clarity`, %d are imported only by tests, %d are imported by nothing, and %d have "
         "no test that imports them.\n"
-        % (s["modules"], s["tests"], s["py_list"], s["self_list"], s["live"], s["only_tests"], s["nothing"], s["untested"]))
+        % (s["modules"], s["tests"], s["bundled"], s["live"], s["only_tests"], s["nothing"], s["untested"]))
     parts.append(
         "Status: `entry point`, `reached from the CLI` (in the shipped binary's import closure), `library` "
         "(imported by other non-test code but not from the CLI), `only tests import it`, `nothing imports it`.\n")
     parts.append(md_table(
-        ["module", "lines", "purpose", "py bundle", "self bundle", "status", "imported by (code)", "tests"],
-        [[r["name"], r["lines"], r["purpose"][:90], yn(r["py"]), yn(r["self"]), r["status"],
+        ["module", "lines", "purpose", "bundled", "status", "imported by (code)", "tests"],
+        [[r["name"], r["lines"], r["purpose"][:90], yn(r["bundled"]), r["status"],
           ", ".join(r["code"])[:80] or "-", r["tests"]] for r in mods]))
 
     parts.append("\n## Tests (`stdlib/test_*.clarity`)\n")
