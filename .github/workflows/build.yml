@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'
       - 'V*'
+  # A change to this file builds all five targets on the pull request, so the
+  # pipeline is exercised before a tag depends on it. The release job below
+  # still runs only for a tag.
+  pull_request:
+    paths:
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
