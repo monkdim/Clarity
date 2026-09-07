@@ -19,6 +19,7 @@ const mmu = @import("arch/aarch64/mmu.zig");
 const ramfb = @import("arch/aarch64/ramfb.zig");
 const fwcfg = @import("arch/aarch64/fwcfg.zig");
 const fdt = @import("boot/fdt.zig");
+const cmdline = @import("boot/cmdline.zig");
 const virtio_mmio = @import("arch/aarch64/virtio_mmio.zig");
 const virtio_input = @import("arch/aarch64/virtio_input.zig");
 const keyboard = @import("arch/aarch64/keyboard.zig");
@@ -73,6 +74,11 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // bootloader left in x0 — a physical one, which is now a number this
     // kernel cannot dereference until it says where that memory appears.
     const tree = describe_machine(dtb_phys);
+
+    // And what was it told to do? Everything above this line the kernel
+    // worked out for itself; this is the one thing it can only be handed.
+    cmdline.init(tree);
+    report_command_line();
 
     timer.init(100);
     console.print("  [ok] generic timer armed at 100 Hz, cntfrq=");
@@ -977,14 +983,20 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     // Nothing may be typed at all, which is why this reports what it saw
     // rather than passing or failing. The checking is tools/key_check.py's
     // job, because only something outside the kernel can make keys happen.
-    const WAIT: u64 = 300; // 3 s at the 100 Hz the timer is set to
+    // The same wait `read(2)` uses, from the same place: this prompt and a
+    // program's are the same prompt as far as whoever is sitting there is
+    // concerned, and two different timeouts would mean the kernel's own
+    // prompt gave up while a program's was still listening.
+    const WAIT: u64 = cmdline.idle_ticks();
     const MAX_LINES: usize = 4;
 
     var buf: [line.MAX_LINE + 1]u8 = undefined;
     var lines: usize = 0;
     var characters: usize = 0;
 
-    console.println("  type at it; three seconds of quiet ends the read");
+    console.print("  type at it; ");
+    console.print_dec(cmdline.idle());
+    console.println(cmdline.idle_unit_plain());
 
     while (lines < MAX_LINES) {
         console.print("  > ");
@@ -1035,6 +1047,26 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     console.print(" ignored, ");
     console.print_dec(stdin.dropped());
     console.println(" dropped)");
+}
+
+/// What the machine was told at boot, and whether it was told anything.
+///
+/// Printed even when there was no command line, and saying which of the two
+/// it was. A kernel whose parser silently failed and one that was never given
+/// an `-append` would otherwise produce the same boot log, and the first is a
+/// bug while the second is Tuesday.
+fn report_command_line() void {
+    console.print("  [ok] command line: read ");
+    console.print_dec(cmdline.idle());
+    console.print(cmdline.idle_unit());
+    console.println(if (cmdline.was_given()) " (asked for)" else " (default)");
+    if (cmdline.ignored() > 0 or cmdline.rejected() > 0) {
+        console.print("       ");
+        console.print_dec(cmdline.ignored());
+        console.print(" options not understood, ");
+        console.print_dec(cmdline.rejected());
+        console.println(" values refused");
+    }
 }
 
 /// Where the key events came from, and whether any were lost.

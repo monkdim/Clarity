@@ -122,37 +122,52 @@ translate an address (`at s1e1w`) and reporting what it said.
 
 ### On an Apple Silicon Mac
 
-This is the reason the aarch64 side exists. `-accel hvf` runs the kernel on
-the M-series CPU itself rather than emulating an ARM chip on top of another
-one — the same instruction set, at native speed.
+This is the reason the aarch64 side exists — and, as of now, the reason there
+is more work to do.
+
+**`-accel hvf` does not work with this kernel, and cannot until it speaks
+GICv3.** Run on an M5:
+
+```
+$ qemu-system-aarch64 -M virt,gic-version=2 -accel hvf -cpu host ...
+qemu-system-aarch64: HVF does not support GICv2 emulation
+```
+
+That is not a configuration mistake. Apple Silicon has no GIC at all — the
+real interrupt controller is Apple's own AIC — so QEMU emulates one, and under
+HVF it will only emulate a GICv3. `arch/aarch64/gic.zig` speaks GICv2 and
+nothing else. There is no combination of flags that gets around it: dropping
+`gic-version=2` lets QEMU pick GICv3, which QEMU accepts and this kernel then
+hangs on, waiting for a timer interrupt it never sees. Native speed on Apple
+hardware needs a GICv3 driver, and that is now the next piece of the ARM track
+rather than a footnote.
+
+Until then, the emulated path works on a Mac and is the one to use:
 
 ```sh
 brew install qemu
 
 qemu-system-aarch64 \
   -M virt,gic-version=2 \
-  -accel hvf -cpu host \
+  -cpu cortex-a72 \
   -m 512 \
   -kernel zig-out/bin/clarity-kernel-aarch64.img \
   -device ramfb \
+  -device virtio-keyboard-device \
   -serial stdio
 ```
 
-Two flags need explaining, because both are places this can fail:
+**Use the native Homebrew.** A Mac can have two: `/opt/homebrew` (arm64) and
+`/usr/local` (Intel, under Rosetta). If `/usr/local/bin` comes first in
+`PATH`, `brew install qemu` builds an x86-64 QEMU from source — twenty minutes
+of compiling for a binary that runs under translation and could never use HVF
+even once the GICv3 work lands. Check with `file $(which qemu-system-aarch64)`;
+it must say `arm64`.
 
-**`-cpu host`** is required with `-accel hvf`. The hypervisor runs on the real
-CPU, so it cannot pretend to be a cortex-a72.
-
-**`gic-version=2`** pins the interrupt controller. `arch/aarch64/gic.zig`
-speaks GICv2 and nothing else; QEMU chooses a version based on the machine and
-accelerator, and if it picks GICv3 the kernel will come up, print its first
-few lines, and then hang waiting for a timer interrupt that never arrives.
-If it hangs after `[ok] generic timer armed`, that is the first thing to
-suspect.
-
-**This path is untested.** Everything else in this file has been run; the HVF
-command has not, because the machine writing it has no Mac. If it does not
-work, the boot log up to the point it stops is the useful thing to report.
+**`gic-version=2`** pins the interrupt controller, for the reason above. Recent
+QEMU defaults this to `max` on `virt`, which selects GICv3, so it is worth
+stating rather than leaving to the default. If the kernel stops after
+`[ok] generic timer armed`, that is the first thing to suspect.
 
 ### A keyboard, and typing
 
@@ -173,7 +188,7 @@ then asks for input:
 
 ```
   [ok] keyboard: virtio-input on a bus of 32 slots
-  type at it; two seconds of quiet ends the read
+  type at it; 120 seconds of quiet ends the read
   > hello
   line 1: "hello"
   > 
@@ -186,8 +201,30 @@ and the kernel prints back what it has — which is the point of the two lines
 being separate: the echo shows what was *typed* and the `line` shows what the
 kernel *holds*, and wherever something was corrected those differ.
 
-Three seconds of nothing ends it, as does two seconds of quiet after the last
-key, so a boot with nobody at the keyboard costs three seconds and no more.
+Quiet ends it, and how much quiet is the one thing this machine can be told:
+
+```sh
+  -append "clarity.idle=3"
+```
+
+Two minutes by default, because that is what a person needs — long enough to
+find the window, click it, and start typing. It was three seconds until an M5
+Mac ran this and the shell had exited before a single key could reach it: the
+number had been chosen so that a boot gate with nobody at the keyboard would
+finish quickly, which is the test suite's convenience charged to whoever is
+actually using the machine. The boot gate and `tools/key_check.py` now pass
+`clarity.idle=3` themselves, and the default is the one that works by hand.
+
+The boot log says which it got, and whether it was asked for:
+
+```
+  [ok] command line: read 120 seconds idle (default)
+  [ok] command line: read 3 seconds idle (asked for)
+```
+
+Those have to differ. A parser that silently failed to read `-append` would
+otherwise look exactly like a boot that was never given one.
+
 Four lines at most, then it moves on. Shift works; the table is the main key
 block only, so function keys, the keypad and the arrows type nothing — and
 are counted as `ignored` rather than silently dropped.

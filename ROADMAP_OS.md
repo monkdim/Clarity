@@ -270,11 +270,19 @@ What is left, in rough order:
   There is no `exec`, so the shell cannot start a program, and no `getdents`,
   so it has `cat` and no `ls`.
 - **Real blocking.** `read(2)` cannot block: there is no scheduler to block a
-  thread on, so it spins and reports end of input after three seconds. That
-  is a stand-in, and it is documented as one in `drivers/stdin.zig`.
-- **Bare metal.** Everything above is QEMU `virt`. Apple hardware needs
-  m1n1, and the `-accel hvf` path in `kernel/RUNNING.md` is written but
-  **untested** — nobody with a Mac has run it yet.
+  thread on, so it spins and gives up after a while. How long is now the
+  kernel command line's business — `clarity.idle=<seconds>`, two minutes by
+  default — but a timeout is still a stand-in for blocking, and it is
+  documented as one in `drivers/stdin.zig`.
+- **GICv3, so Apple hardware can run this at native speed.** Measured on an
+  M5 Mac: `qemu-system-aarch64 -accel hvf` answers
+  `HVF does not support GICv2 emulation` and refuses to start.
+  `arch/aarch64/gic.zig` speaks GICv2 and nothing else, and Apple Silicon has
+  no GIC at all — the real controller is Apple's AIC — so QEMU emulates one,
+  and under HVF it emulates only a GICv3. There is no flag that avoids this.
+  The emulated `cortex-a72` path works on a Mac and is what to use meanwhile.
+- **Bare metal.** Everything above is QEMU `virt`. Apple hardware needs m1n1,
+  and then AIC rather than any GIC at all.
 
 The shared subsystems (pmm, heap, VFS, scheduler) are mostly
 architecture-neutral Zig already, but they reach into port I/O, GDT/IDT and

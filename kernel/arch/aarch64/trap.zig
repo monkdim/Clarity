@@ -30,6 +30,7 @@ const paging = @import("paging.zig");
 const pmm = @import("../../mm/pmm.zig");
 const line = @import("../../drivers/line.zig");
 const stdin = @import("../../drivers/stdin.zig");
+const cmdline = @import("../../boot/cmdline.zig");
 const vfs = @import("../../fs/vfs.zig");
 
 /// The interrupted process's state, as the vector entry laid it out.
@@ -369,7 +370,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) i64 {
     // from and in nothing else — both end up copied out below, through the
     // process's own page tables, translated for writing.
     const n = switch (fd) {
-        0 => stdin.read(staging[0..want], READ_IDLE_TICKS),
+        0 => stdin.read(staging[0..want], cmdline.idle_ticks()),
         1, 2 => return EBADF, // stdout and stderr are not for reading
         else => vfs.read(@intCast(fd), staging[0..want]) catch return EBADF,
     };
@@ -398,12 +399,6 @@ fn sys_read(fd: u64, buf: u64, len: u64) i64 {
     bytes_read += done;
     return @intCast(done);
 }
-
-/// How long a read waits with nothing typed before reporting end of input.
-/// Three seconds at the 100 Hz the timer runs at — long enough that a person
-/// who has started typing is not cut off, short enough that a boot with
-/// nobody at the keyboard is not held up by it.
-const READ_IDLE_TICKS: u64 = 300;
 
 /// Counted for the same reason bytes_written is: so the boot log can say the
 /// path was used rather than merely present.

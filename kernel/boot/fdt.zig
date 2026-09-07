@@ -255,6 +255,56 @@ fn decode_reg(fdt: *const Fdt, reg: []const u8, out: []Region) usize {
     return written;
 }
 
+/// A property of a named top-level node, as raw bytes.
+///
+/// The node name is matched whole rather than by prefix, unlike the bus walk
+/// below: `/chosen` and `/cpus` have no unit address, and a prefix match
+/// would also accept a `chosen-something` that meant something else.
+pub fn node_prop(fdt: *const Fdt, node: []const u8, prop: []const u8) ?[]const u8 {
+    var w = Walker.init(fdt);
+    var depth: u32 = 0;
+    var matched_depth: ?u32 = null;
+
+    while (w.next()) |ev| {
+        switch (ev) {
+            .node_start => {
+                depth += 1;
+                if (matched_depth == null and str_eq(ev.node_start, node)) matched_depth = depth;
+            },
+            .node_end => {
+                if (matched_depth) |d| if (depth == d) {
+                    matched_depth = null;
+                };
+                if (depth > 0) depth -= 1;
+            },
+            .prop => |pr| {
+                if (matched_depth) |d| {
+                    if (depth == d and str_eq(pr.name, prop)) return pr.value;
+                }
+            },
+        }
+    }
+    return null;
+}
+
+/// The kernel command line: `bootargs` from `/chosen`.
+///
+/// This is where `-append` on a QEMU command line ends up, and where a real
+/// bootloader puts what it was told to pass on. The trailing NUL the property
+/// carries is stripped, because it is part of how a device tree stores a
+/// string and not part of the string.
+///
+/// Null rather than empty when there is nothing: "the machine said nothing"
+/// and "the machine said nothing *in particular*" are the same thing here,
+/// but a caller reading a zero-length slice would have to know that.
+pub fn bootargs(fdt: *const Fdt) ?[]const u8 {
+    const raw = node_prop(fdt, "chosen", "bootargs") orelse return null;
+    var end = raw.len;
+    while (end > 0 and raw[end - 1] == 0) end -= 1;
+    if (end == 0) return null;
+    return raw[0..end];
+}
+
 /// A device on a bus: where its registers are, and which interrupt it raises.
 pub const Slot = struct {
     base: u64,
