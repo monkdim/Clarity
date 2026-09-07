@@ -1,6 +1,6 @@
 """Clarity parser — turns tokens into an AST."""
 
-from tokens import Token, TokenType
+from tokens import Token, TokenType, KEYWORDS
 from errors import ParseError
 import ast_nodes as ast
 
@@ -52,8 +52,14 @@ class Parser:
         if tok.type == TokenType.IDENTIFIER:
             self.advance()
             return tok.value
-        # Allow keywords as property names (e.g., obj.match, obj.is, obj.type)
-        from .tokens import KEYWORDS
+        # Allow keywords as property names (e.g., obj.match, obj.is, obj.type).
+        #
+        # This import used to be `from .tokens import KEYWORDS`, done lazily
+        # here. Relative imports only resolve inside a package, and
+        # transpile.py runs as a script, so the first `obj.from` in any module
+        # raised ImportError; the bundler printed SKIP for that module and
+        # declared the bundle ready. animations.clarity was that module, and
+        # the binary carried a stale animations.js from an earlier run.
         if tok.value in KEYWORDS:
             self.advance()
             return tok.value

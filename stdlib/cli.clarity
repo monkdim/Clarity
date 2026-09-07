@@ -11,7 +11,7 @@ from "type_checker.clarity" import TypeChecker, check_types_source
 from "docgen.clarity" import generate_docs
 from "debugger.clarity" import debug_file
 from "profiler.clarity" import profile_file
-from "transpile.clarity" import transpile_with_runtime, transpile_bundle, STDLIB_FILES
+from "transpile.clarity" import transpile_with_runtime, transpile_bundle
 from "build.clarity" import build
 from "runtime_gen.clarity" import gen_runtime
 from "install.clarity" import install_self

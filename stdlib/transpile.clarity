@@ -85,59 +85,60 @@ import { show as $show, ask as $ask, read, write, append, exists, lines, read_by
 
 -- ── Stdlib Bundle File List ─────────────────────────────
 
-let STDLIB_FILES = [
-    "tokens.clarity", "lexer.clarity", "ast_nodes.clarity",
-    "parser.clarity", "interpreter.clarity", "terminal.clarity",
-    "errors.clarity", "c_codegen.clarity", "c_scope.clarity", "c_modules.clarity", "http.clarity",
-    "process.clarity", "shell.clarity", "repl.clarity",
-    "package.clarity", "lsp.clarity", "bytecode.clarity",
-    "runtime.clarity",
-    "linter.clarity", "formatter.clarity", "type_checker.clarity",
-    "docgen.clarity", "debugger.clarity", "profiler.clarity",
-    "collections.clarity", "datetime.clarity", "path.clarity",
-    "net.clarity", "db.clarity", "crypto.clarity",
-    "semver.clarity", "registry.clarity",
-    "highlight.clarity", "completer.clarity", "pretty.clarity",
-    "channel.clarity", "task.clarity", "mutex.clarity", "worker.clarity",
-    "transpile.clarity",
-    "graphics.clarity", "draw.clarity", "font.clarity", "image.clarity",
-    "input.clarity", "keymap.clarity", "mouse.clarity", "touch.clarity", "event_bus.clarity",
-    "window.clarity", "compositor.clarity", "chrome.clarity",
-    "window_manager.clarity", "workspace.clarity",
-    "theme.clarity", "ui.clarity", "layout.clarity", "widgets.clarity",
-    "ipc.clarity", "init.clarity", "storage.clarity", "network.clarity",
-    "audio.clarity", "notify.clarity",
-    "wallpaper.clarity", "statusbar.clarity", "dock.clarity", "launcher.clarity",
-    "lockscreen.clarity", "settings.clarity",
-    "app_calc.clarity", "app_viewer.clarity", "app_monitor.clarity",
-    "app_editor.clarity", "app_files.clarity", "app_terminal.clarity",
-    "app_manifest.clarity", "app_sandbox.clarity", "app_store.clarity",
-    "app_scaffold.clarity", "hot_reload.clarity",
-    "kernel_abi.clarity", "syscall.clarity", "scheduler.clarity", "vfs.clarity",
-    "elf.clarity", "process_model.clarity",
-    "tty.clarity",
-    "init_app.clarity", "procfs.clarity", "input_pipeline.clarity",
-    "display_server.clarity", "desktop_session.clarity",
-    "iso9660.clarity", "qemu_macos.clarity", "qemu.clarity", "os_build.clarity",
-    "theme_aurora.clarity", "wallpapers.clarity", "animations.clarity", "boot_splash.clarity",
-    "theme_meadow.clarity", "wallpapers_spring.clarity", "branding_modern.clarity",
-    "boot_splash_modern.clarity", "theme_registry.clarity", "theme_picker.clarity",
-    "perf_profiler.clarity", "crash_recovery.clarity", "branding.clarity",
-    "website_gen.clarity", "release.clarity",
-    "platform.clarity",
-    "mkiso.clarity", "live_usb.clarity", "run_vm.clarity",
-    "installer.clarity", "hardware.clarity",
-    "html_parser.clarity", "css_layout.clarity", "browser.clarity",
-    "imap.clarity", "smtp.clarity", "mail.clarity",
-    "websocket.clarity", "chat.clarity",
-    "store_app.clarity",
-    "ide.clarity", "ui_builder.clarity", "docs_app.clarity", "playground_app.clarity",
-    "ffi.clarity",
-    "build.clarity", "test_smoke.clarity",
-    "runtime_spec.clarity", "runtime_gen.clarity",
-    "install.clarity",
-    "cli.clarity"
-]
+-- The modules a bundle ships: every non-test file under stdlib/, plus any
+-- test_ module a non-test module imports (the CLI imports test_smoke).
+--
+-- Derived from the directory rather than listed by hand. This used to be a
+-- hand-kept list, and so was the one in native/transpile.py, and the two
+-- disagreed for months: twelve modules the CLI imports were only in the
+-- Python list, the whole RE toolkit was in neither, and a bundle produced by
+-- this compiler could not start ("Cannot find module './kyan_desktop.js'").
+-- The same rule lives in both bundlers now, and CI checks that the two
+-- emitted sets are equal.
+fn bundle_module_list(stdlib_dir) {
+    let listing = exec_full("ls " + stdlib_dir)
+    mut names = []
+    for line in split(trim(listing.stdout), "\n") {
+        let n = trim(line)
+        if ends(n, ".clarity") { push(names, n) }
+    }
+    names = sort(names)
+
+    mut mods = []
+    for n in names {
+        if not starts(n, "test_") { push(mods, n) }
+    }
+
+    mut extra = []
+    for n in mods {
+        let src = read(stdlib_dir + "/" + n)
+        for raw in split(src, "\n") {
+            let t = trim(raw)
+            if not starts(t, "from \"") { continue }
+            let rest = substring(t, 6, len(t))
+            let close = index_of(rest, "\"")
+            if close < 0 { continue }
+            let target = substring(rest, 0, close)
+            let slash = _last_index_of(target, "/")
+            let base = if slash < 0 { target } else { substring(target, slash + 1, len(target)) }
+            if starts(base, "test_") and contains(names, base) and not contains(extra, base) {
+                push(extra, base)
+            }
+        }
+    }
+    extra = sort(extra)
+    for e in extra { push(mods, e) }
+    return mods
+}
+
+fn _last_index_of(s, ch) {
+    mut i = len(s) - 1
+    while i >= 0 {
+        if char_at(s, i) == ch { return i }
+        i -= 1
+    }
+    return -1
+}
 
 -- ── JSEmitter ───────────────────────────────────────────
 
@@ -979,19 +980,21 @@ fn transpile_bundle(stdlib_dir, dist_dir) {
 
     show "  Transpiling stdlib..."
     mut emitted = 0
-    for fname in STDLIB_FILES {
+    for fname in bundle_module_list(stdlib_dir) {
         let src = stdlib_dir + "/" + fname
-        if exists(src) {
-            try {
-                let js = transpile_with_runtime(src)
-                let out = dist_dir + "/" + replace(fname, ".clarity", ".js")
-                write(out, js)
-                emitted += 1
-                show "    " + fname + " -> " + replace(fname, ".clarity", ".js")
-            } catch e {
-                show "    " + fname + " -- SKIP (" + str(e) + ")"
-            }
+        -- A module that fails to transpile used to be printed as SKIP and the
+        -- bundle declared ready. That is a hole in the binary nothing reports
+        -- until an import fails at runtime, so it is fatal now.
+        mut js = null
+        try {
+            js = transpile_with_runtime(src)
+        } catch e {
+            throw "transpile --bundle: " + fname + " failed to transpile: " + str(e)
         }
+        let out = dist_dir + "/" + replace(fname, ".clarity", ".js")
+        write(out, js)
+        emitted += 1
+        show "    " + fname + " -> " + replace(fname, ".clarity", ".js")
     }
     -- An empty bundle is never what the caller wanted: it means the sources
     -- were not where we looked. Say so instead of writing an entry point that
