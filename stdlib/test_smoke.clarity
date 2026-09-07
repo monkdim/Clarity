@@ -71,6 +71,25 @@ fn check(name, clarity_code, expected) {
     }
 }
 
+-- The same program through the bytecode VM.
+fn check_fast(name, clarity_code, expected) {
+    let tmp = "/tmp/smoke_fast_" + str(time()) + ".clarity"
+    write(tmp, clarity_code)
+    let clarity_cmd = _get_clarity_cmd()
+    let result = exec_full(clarity_cmd + " run " + _quote(tmp) + " --fast 2>&1")
+    exec("rm -f " + _quote(tmp))
+    let actual = trim(result.stdout)
+    if actual == expected {
+        PASSED += 1
+        show "  " + _green("PASS") + "  " + name
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  " + name
+        show "    " + _dim("Expected: " + expected)
+        show "    " + _dim("Got:      " + substring(actual, 0, min([200, len(actual)])))
+    }
+}
+
 fn check_cmd(name, cmd, expect_pattern) {
     let result = exec_full(cmd + " 2>&1")
     if contains(result.stdout, expect_pattern) {
@@ -116,6 +135,20 @@ fn run_smoke_tests() {
     -- that copy existed, this printed "Cannot find module: collections.clarity"
     -- and an installed binary could run the toolchain and nothing else.
     check("import from the embedded stdlib", "from \"collections.clarity\" import Set\nlet s = Set()\ns.add(1)\ns.add(1)\nshow s.size()", "1")
+    -- The same import through the bytecode VM. Until the VM resolved
+    -- imports, `run --fast` failed on the first imported name, which made
+    -- it unusable for any program that used the library.
+    -- Displaying a function under --fast recursed forever in the shipped
+    -- binary: the bundle's type() saw a VM function as a map and walked
+    -- into its closure. The interpreter prints <fn f>; so does the VM now.
+    check_fast("show a function under --fast", "fn f() { return 1 }\nshow f", "<fn f>")
+    -- A method call under --fast crashed every binary the Python bootstrap
+    -- transpiler produced (v1.0.1 included): the VM constructs its bound
+    -- method class above that class's declaration, and the bootstrap only
+    -- learned a name was a class when it reached the declaration, so the
+    -- construction was a plain call and JavaScript refused it.
+    check_fast("class method under --fast", "class A {\n    fn init() { this.x = 1 }\n    fn get() { return this.x }\n}\nshow A().get()", "1")
+    check_fast("import from the embedded stdlib under --fast", "from \"collections.clarity\" import Set\nlet s = Set()\ns.add(1)\ns.add(1)\nshow s.size()", "1")
 
     -- ── Functions ───────────────────────────────────────
     show "  " + _bold("-- functions --")

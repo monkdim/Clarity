@@ -395,6 +395,11 @@ class Interpreter {
         this.global_env.set("exec", fn(cmd) { return exec(cmd) }, true)
         this.global_env.set("exec_full", fn(cmd) { return exec_full(cmd) }, true)
         this.global_env.set("exec_tty", fn(cmd) { return exec_tty(cmd) }, true)
+        -- The bundle's copy of the standard library, and the running
+        -- executable. Interpreted code that resolves imports itself (the
+        -- bytecode VM, when the test suite interprets it) needs them too.
+        this.global_env.set("_embedded_source", fn(name) { return _embedded_source(name) }, true)
+        this.global_env.set("_host_exe", fn() { return _host_exe() }, true)
         this.global_env.set("_ffi_open", fn(lib, spec) { return _ffi_open(lib, spec) }, true)
         this.global_env.set("_ffi_bind", fn(lib, sym, args, ret) { return _ffi_bind(lib, sym, args, ret) }, true)
         this.global_env.set("_ffi_close", fn(h) { return _ffi_close(h) }, true)
