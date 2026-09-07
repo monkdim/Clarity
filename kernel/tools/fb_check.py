@@ -314,6 +314,11 @@ def main():
         "-m", "512",
         "-kernel", kernel,
         "-device", "ramfb",
+        # No keyboard is attached here, but the serial line is readable now,
+        # so the console opens for reading either way and every prompt on the
+        # way to the marker below would otherwise wait out the default two
+        # minutes. This test never types; it says so.
+        "-append", "clarity.idle=3",
         "-serial", "file:" + log,
         "-display", "none",
         "-monitor", "unix:%s,server,nowait" % sock,

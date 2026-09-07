@@ -142,7 +142,9 @@ hangs on, waiting for a timer interrupt it never sees. Native speed on Apple
 hardware needs a GICv3 driver, and that is now the next piece of the ARM track
 rather than a footnote.
 
-Until then, the emulated path works on a Mac and is the one to use:
+Until then, the emulated path works on a Mac and is the one to use. On a Mac
+in particular, prefer the headless form — the graphical window is awkward to
+type into and the terminal is not:
 
 ```sh
 brew install qemu
@@ -152,10 +154,12 @@ qemu-system-aarch64 \
   -cpu cortex-a72 \
   -m 512 \
   -kernel zig-out/bin/clarity-kernel-aarch64.img \
-  -device ramfb \
-  -device virtio-keyboard-device \
+  -display none \
   -serial stdio
 ```
+
+Add `-device ramfb -device virtio-keyboard-device -display default` when the
+point is to see the framebuffer console rather than to use the machine.
 
 **Use the native Homebrew.** A Mac can have two: `/opt/homebrew` (arm64) and
 `/usr/local` (Intel, under Rosetta). If `/usr/local/bin` comes first in
@@ -168,6 +172,35 @@ it must say `arm64`.
 QEMU defaults this to `max` on `virt`, which selects GICv3, so it is worth
 stating rather than leaving to the default. If the kernel stops after
 `[ok] generic timer armed`, that is the first thing to suspect.
+
+### Typing at it with no window at all
+
+The simplest way to use this, and the one to reach for first:
+
+```sh
+qemu-system-aarch64 \
+  -M virt -cpu cortex-a72 -m 512 \
+  -kernel zig-out/bin/clarity-kernel-aarch64.img \
+  -display none \
+  -serial stdio
+```
+
+No display, no keyboard device, nothing to click. The boot log comes out in
+the terminal that started QEMU and what is typed there goes back in. Ctrl-A
+then X quits.
+
+The PL011 was write-only until recently, which meant the only way into this
+machine was the graphical window below — find it, focus it, let it capture the
+pointer, and only then type at a text prompt. On a Mac that is enough friction
+to make the difference between an operating system somebody can use and one
+they can only watch; it was reported from an M5 as "I can't type in there at
+all", and that was a fair description. A serial console needs no display
+backend and no focus, which is why every other kernel is driven this way.
+
+`tools/serial_check.py` is the gate for it: it boots with no keyboard and no
+display, types down a Unix-socket serial line, and fails if a keyboard turns
+out to be attached — because with one, every assertion in it would pass
+without the serial line ever being read.
 
 ### A keyboard, and typing
 

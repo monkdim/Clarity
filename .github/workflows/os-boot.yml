@@ -537,3 +537,19 @@ jobs:
       # back the line the refusal did not eat.
       - name: Type at the keyboard and check what it read and drew
         run: python3 kernel/tools/key_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img
+
+      # And the same machine with no keyboard and no display at all, typed at
+      # down its serial line.
+      #
+      # This is the path a person actually uses. The PL011 was write-only
+      # until recently, so the only way into this kernel was a virtio keyboard
+      # — which means a graphical window, which means finding it, focusing it,
+      # and letting it capture the pointer before a text prompt would listen.
+      # Reported from an M5 Mac as "I can't type in there at all", which was
+      # accurate and which every test here passed straight through.
+      #
+      # It attaches no keyboard on purpose, and fails if it finds one: with a
+      # keyboard present every assertion in it would pass without the serial
+      # line ever being read.
+      - name: Type down the serial line with no keyboard attached
+        run: python3 kernel/tools/serial_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img
