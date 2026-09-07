@@ -1,17 +1,14 @@
 # Clarity freestanding runtime
 
 The Clarity runtime that ships in `/bin/clarity-init` on ClarityOS.
-Two build paths share this directory:
+One build path: embed QuickJS and run the same JS bundle the dev runtime
+executes, with only the I/O surface different. It links against
+`host_shim.zig`, the kernel-syscall bridge.
 
-1. **QuickJS path** (default). Embeds QuickJS, runs the same JS
-   bundle the dev runtime executes — only the I/O surface is
-   different. Good first target while we still need a JS engine for
-   the transpiled stdlib.
-2. **Native bytecode VM path** (stretch goal). Skips JS entirely;
-   `runtime/native_vm/vm.zig` interprets Clarity bytecode directly.
-   Massive footprint + perf win. Lives behind `zig build vm`.
-
-Both paths link against `host_shim.zig`, the kernel-syscall bridge.
+A second path, a pure-Zig bytecode VM under `runtime/native_vm/`, was a
+484-line skeleton with 20 of 54 opcodes and no bundle loader. It was removed
+in September 2026; the `clarity cc` C path superseded it (see
+ROADMAP_OS.md).
 
 ## Layout
 
@@ -24,12 +21,6 @@ runtime/
 │   ├── quickjs_main.c        # QuickJS-backed entry point
 │   ├── build.zig             # Zig build script
 │   └── README.md
-└── native_vm/
-    ├── main.zig              # _start; loads bundle, runs VM
-    ├── opcode.zig            # Opcode enum (mirrors stdlib/bytecode.clarity)
-    ├── value.zig             # tagged Value union + helpers
-    ├── vm.zig                # interpreter loop
-    └── gc.zig                # mark-and-sweep heap
 ```
 
 ## Build (when zig is available)
@@ -37,7 +28,6 @@ runtime/
 ```sh
 cd runtime/freestanding
 zig build              # → zig-out/bin/clarity-runtime  (QuickJS path)
-zig build vm           # → zig-out/bin/clarity-vm       (native bytecode VM)
 ```
 
 The kernel's `kernel/main.zig` `spawn_user("/bin/clarity-init")`
@@ -69,15 +59,11 @@ accordingly.
 - `quickjs_main.c`    — done. Tiny C shim — registers `print` +
                         `__claritos_syscall`, evaluates the bundled
                         JS, exits.
-- `native_vm/`        — done as a skeleton. Opcodes mirror the full
-                        58-opcode set from `stdlib/bytecode.clarity`;
-                        Vm.dispatch handles ~10 of them today, the
-                        rest return `error.NotImplemented`.
 - `platform.clarity`  — done. Detection + override hooks + I/O
                         branches + audit (37 stdlib modules
                         classified as bare-metal-safe, 22 as
                         host-only).
 
-`zig build`/`zig build run` / `zig build vm` only run in environments
+`zig build` / `zig build run` only run in environments
 that ship a Zig toolchain. None of the binaries here are produced in
 this dev sandbox.

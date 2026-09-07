@@ -196,8 +196,8 @@ to fetch a Clarity compiler would tie booting the OS to a network.
 is the check that keeps that artifact honest and runs where the compiler does
 exist.
 
-**Not pursued, and why.** `runtime/native_vm` (a pure-Zig bytecode VM) is a
-484-line skeleton; taking it to "runs the stdlib" means reimplementing
+**Not pursued, and why.** `runtime/native_vm` (a pure-Zig bytecode VM) was a
+484-line skeleton, removed in September 2026; taking it to "runs the stdlib" means reimplementing
 strings, maps, lists, classes, closures and GC in Zig, which is larger than
 the thirty symbols above, not smaller. Building against static musl trades
 "write a libc" for "implement the Linux syscall subset musl needs", which is
@@ -406,10 +406,11 @@ The toolkit ships the widgets needed to build the eleven default apps. Filling o
 - **Hot reload.** The app framework supports module reload at the protocol
   level; the runtime hook that actually swaps modules in a live process is the
   gap.
-- **Native bytecode VM.** `runtime/native_vm/` is a Zig implementation of the
-  Clarity bytecode VM that would let the runtime ditch QuickJS. Measured
-  state: 54 opcodes defined, **20 implemented** (not half), `load_bundle`
-  still returns `error.NotImplemented`, 484 lines in total. Note the real
+- **Native bytecode VM.** `runtime/native_vm/` was a Zig implementation of
+  the Clarity bytecode VM that would have let the runtime ditch QuickJS.
+  Measured state when it was removed (September 2026): 54 opcodes defined,
+  **20 implemented** (not half), `load_bundle` still returned
+  `error.NotImplemented`, 484 lines in total. Note the real
   cost: finishing it means reimplementing Clarity's runtime semantics —
   strings, maps, lists, classes, closures, GC — in Zig, which is a *larger*
   job than porting a freestanding libc, since the JavaScript runtime already

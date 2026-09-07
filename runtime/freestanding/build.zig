@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // ── clarity-shim — linkable .a for tests + native_vm ─
+    // ── clarity-shim — linkable .a for tests ─
 
     const shim_lib = b.addStaticLibrary(.{
         .name = "claritos-shim",
@@ -109,20 +109,4 @@ pub fn build(b: *std.Build) void {
         });
         b.getInstallStep().dependOn(&skip.step);
     }
-
-    // ── clarity-vm — native bytecode VM (stretch) ─
-
-    const vm = b.addExecutable(.{
-        .name = "clarity-vm",
-        .root_source_file = b.path("../native_vm/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    vm.addObject(shim);
-    vm.addObject(libc);
-    vm.entry = .{ .symbol_name = "_start" };
-    vm.linkage = .static;
-
-    const vm_step = b.step("vm", "Build the native bytecode VM");
-    vm_step.dependOn(&b.addInstallArtifact(vm, .{}).step);
 }

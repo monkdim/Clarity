@@ -1,16 +1,9 @@
 //! host_shim — bridges the freestanding JS engine to ClarityOS
 //! kernel syscalls (Phase 66 task 2).
 //!
-//! The freestanding runtime ships as one of two shapes:
-//!
-//!   QuickJS    — link this object against libquickjs.a, register
-//!                __claritos_syscall, evaluate the bundled JS.
-//!   Native VM  — link this object against runtime/native_vm/vm.zig
-//!                (Phase 66 task 3) when we skip the JS engine
-//!                entirely.
-//!
-//! Both shapes call the same syscall surface; the only thing that
-//! changes is which runtime evaluates the user code on top.
+//! The freestanding runtime links this object against libquickjs.a,
+//! registers __claritos_syscall, and evaluates the bundled JS. (A second
+//! shape, a native bytecode VM, was removed in September 2026.)
 //!
 //! This file is the kernel-facing edge: it knows about the syscall
 //! ABI, the memory layout of struct stat, and how to safely move
