@@ -34,10 +34,20 @@ fn _get_clarity_cmd() {
         if len(abs) > 0 { return abs }
         return bin
     }
+    -- No path given: the binary these tests are compiled into. An installed
+    -- `clarity smoke` used to fall through to a path inside the source tree
+    -- and fail every case from any other directory. Under a bare `bun` run
+    -- the executable is bun itself, which is no use, so keep the old search.
+    let exe = _host_exe()
+    if not ends(exe, "/bun") and not ends(exe, "\\bun.exe") { return exe }
     let which_result = exec_full("command -v clarity 2>/dev/null")
     if len(trim(which_result.stdout)) > 0 {
         return "clarity"
     }
+    -- Absolute, like the other branches: the "init package" case runs from
+    -- a temporary directory, where a relative path finds nothing.
+    let entry = trim(exec_full("readlink -f native/dist/clarity-entry.js 2>/dev/null").stdout)
+    if len(entry) > 0 { return "bun " + entry }
     return "bun native/dist/clarity-entry.js"
 }
 

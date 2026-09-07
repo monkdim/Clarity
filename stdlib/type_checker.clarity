@@ -310,7 +310,7 @@ class TypeChecker {
         if this.scope.get_function(name) != null { return true }
         if this.scope.get_class(name) != null { return true }
         if starts(name, "_ffi_") or starts(name, "_host_") or starts(name, "_pty_") { return true }
-        if name == "_embedded_source" { return true }
+        if name == "_embedded_source" or name == "_host_exe" { return true }
         return false
     }
 

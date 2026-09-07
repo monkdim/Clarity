@@ -20,8 +20,23 @@ This is the practical reference: how to install, write your first program, learn
 
 ## Install Clarity
 
-> Clarity is early — a pre-built download for each platform is on the roadmap,
-> but not ready yet. For now, build from source; it's a few commands.
+### Prebuilt binary
+
+One line on macOS or Linux (x64 or ARM64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash
+```
+
+With Homebrew, from the formula in this repository:
+
+```bash
+brew tap monkdim/clarity https://github.com/monkdim/Clarity
+brew install monkdim/clarity/clarity
+```
+
+Or pick a binary from the [latest release](https://github.com/monkdim/Clarity/releases/latest);
+Windows x64 is there as a zip. Check it with `clarity version` and `clarity smoke`.
 
 ### Build from source
 

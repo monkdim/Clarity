@@ -726,6 +726,10 @@ export function _register_embedded_stdlib(map) { _embedded_stdlib = map || {}; }
 export function _embedded_source(name) {
   return Object.prototype.hasOwnProperty.call(_embedded_stdlib, name) ? _embedded_stdlib[name] : null;
 }
+// The executable running this program: the compiled binary's own path, or
+// bun's when the sources run uncompiled. The smoke runner uses it to test
+// the binary it is part of, from any directory, with no argument.
+export function _host_exe() { return process.execPath; }
 
 export function clarityMain(fn) {
   try {
