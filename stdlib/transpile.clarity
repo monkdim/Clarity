@@ -174,13 +174,21 @@ class JSEmitter {
     -- call site alone. Collect the names up front: classes declared in this
     -- module (so a call *above* the declaration still works) plus classes the
     -- module imports by name from a sibling file, resolved and parsed.
+    -- Anywhere in the module, not only at the top level: an import inside
+    -- a function body is hoisted to the top of the output, so a class it
+    -- names is constructed by name from that function, and a call to it
+    -- needs `new` just the same. The CLI's `run --fast` imported the VM
+    -- class that way, and the binary this transpiler produced called it
+    -- without `new` and died on every `--fast` run.
     fn _seed_classes(program) {
-        for stmt in program.body {
-            if stmt.node_type == "ClassStatement" { push(this.classes, stmt.name) }
+        mut classes = []
+        mut imports = []
+        _collect_declarations(program.body, classes, imports)
+        for name in classes {
+            if not contains(this.classes, name) { push(this.classes, name) }
         }
         if this.base_dir == null { return null }
-        for stmt in program.body {
-            if stmt.node_type != "ImportStatement" { continue }
+        for stmt in imports {
             if stmt.path == null or stmt.names == null or len(stmt.names) == 0 { continue }
             let exported = _module_class_names(this.base_dir + "/" + stmt.path)
             for n in stmt.names {
@@ -892,6 +900,32 @@ class JSEmitter {
 -- across every module that imports it, so the bundle parses each file once
 -- more than before rather than once per importer.
 mut _CLASS_NAME_CACHE = {}
+
+-- Walk a subtree of the AST and collect every ClassStatement name and
+-- every ImportStatement, wherever they sit. Nodes are walked by their
+-- fields, so a new statement kind with a body is covered without a case
+-- being added here.
+fn _collect_declarations(value, classes, imports) {
+    if value == null { return null }
+    let t = type(value)
+    -- Scalars end the walk. The runtime reports numbers as int or float and
+    -- the interpreter as number; both are listed, because a number reaching
+    -- `has()` below is a runtime error, not a miss.
+    if t == "string" or t == "number" or t == "int" or t == "float" or t == "bool" or t == "function" or t == "enum" { return null }
+    if t == "list" {
+        for item in value { _collect_declarations(item, classes, imports) }
+        return null
+    }
+    if has(value, "node_type") {
+        if value["node_type"] == "ClassStatement" { push(classes, value["name"]) }
+        if value["node_type"] == "ImportStatement" { push(imports, value); return null }
+    }
+    for k in keys(value) {
+        if k == "node_type" or k == "line" or k == "column" { continue }
+        _collect_declarations(value[k], classes, imports)
+    }
+    return null
+}
 
 fn _module_class_names(path) {
     if has(_CLASS_NAME_CACHE, path) { return _CLASS_NAME_CACHE[path] }

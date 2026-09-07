@@ -95,17 +95,45 @@ class JSEmitter:
         'WorkerPool', 'Pipeline',
     }
 
-    def __init__(self, module_name="<main>"):
+    def __init__(self, module_name="<main>", base_dir=None):
         self.indent = 0
         self.module_name = module_name
+        self.base_dir = base_dir  # where the module's own imports are resolved
         self.imports = set()  # Track Clarity imports to resolve
         self.classes = set(self.KNOWN_CLASSES)  # Seed with all known classes
         self.source_map = []  # (js_line, clarity_file, clarity_line) entries
         self.hoisted_imports = []  # Imports found inside blocks, hoisted to top
 
+    def _seed_classes(self, program):
+        """`Foo(1)` must become `new Foo(1)` when Foo is a class, and the
+        emitter cannot tell from the call site. Until this existed the
+        class set grew as declarations were met, so a class constructed
+        above its own declaration was emitted as a plain call: the
+        bytecode VM's VMInstance built a VMBoundMethod that way, and
+        every method call under `run --fast` in a binary this transpiler
+        produced died with "Cannot call a class constructor without
+        new". The self-hosted transpiler seeds the set up front; this is
+        the same rule: classes declared anywhere in this module, plus
+        classes this module imports by name from a sibling file."""
+        classes, imports = [], []
+        _collect_declarations(program.body, classes, imports)
+        self.classes.update(classes)
+        if self.base_dir is None:
+            return
+        for stmt in imports:
+            path = getattr(stmt, 'path', None)
+            names = getattr(stmt, 'names', None)
+            if not path or not names:
+                continue
+            exported = _module_class_names(os.path.join(self.base_dir, path))
+            for n in names:
+                if n in exported:
+                    self.classes.add(n)
+
     def emit(self, program):
         """Emit a full program."""
         self.top_level = True
+        self._seed_classes(program)
         lines = []
         for stmt in program.body:
             lines.append(self.emit_stmt(stmt))
@@ -660,11 +688,54 @@ class JSEmitter:
 
 # ── Public API ────────────────────────────────────────────
 
-def transpile_source(source, filename="<input>"):
+_CLASS_NAME_CACHE = {}
+
+
+def _collect_declarations(value, classes, imports):
+    """Every ClassStatement name and every ImportStatement in a subtree,
+    wherever they sit: an import inside a function body is hoisted to the
+    top of the output, so a class it names needs `new` from that function
+    just as from the top level. Nodes are walked by their fields."""
+    if isinstance(value, list):
+        for item in value:
+            _collect_declarations(item, classes, imports)
+        return
+    if not isinstance(value, ast.Node):
+        return
+    if isinstance(value, ast.ClassStatement):
+        classes.append(value.name)
+    if isinstance(value, ast.ImportStatement):
+        imports.append(value)
+        return
+    for field in getattr(value, '_fields', ()):
+        _collect_declarations(getattr(value, field, None), classes, imports)
+
+
+def _module_class_names(path):
+    """The classes a sibling module declares at top level. A missing or
+    unparseable module is not fatal here: the worst case is that a call
+    keeps its plain-call form, which is what always happened before."""
+    if path in _CLASS_NAME_CACHE:
+        return _CLASS_NAME_CACHE[path]
+    names = set()
+    try:
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as f:
+                src = f.read()
+            for stmt in parse(tokenize(src, path), src).body:
+                if isinstance(stmt, ast.ClassStatement):
+                    names.add(stmt.name)
+    except Exception:
+        names = set()
+    _CLASS_NAME_CACHE[path] = names
+    return names
+
+
+def transpile_source(source, filename="<input>", base_dir=None):
     """Transpile Clarity source code to JavaScript."""
     tokens = tokenize(source, filename)
     tree = parse(tokens, source)
-    emitter = JSEmitter(module_name=filename)
+    emitter = JSEmitter(module_name=filename, base_dir=base_dir)
     js_code = emitter.emit(tree)
     return js_code, emitter.imports
 
@@ -673,7 +744,7 @@ def transpile_file(path):
     """Transpile a .clarity file to .js."""
     with open(path, encoding='utf-8') as f:
         source = f.read()
-    js_code, imports = transpile_source(source, os.path.basename(path))
+    js_code, imports = transpile_source(source, os.path.basename(path), os.path.dirname(os.path.abspath(path)))
     return js_code, imports
 
 

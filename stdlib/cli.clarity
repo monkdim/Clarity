@@ -204,6 +204,7 @@ fn run_file_fast(path) {
         let code = compile_to_bytecode(tree)
         optimize(code)
         let vm = VM()
+        vm.source_dir = _dirname(_abspath(path))
         vm.run(code)
     } catch e {
         show red("\n" + format_error(e, source, path))

@@ -263,6 +263,72 @@ assert_neutral("comprehension leaves no stack residue", "let xs = [x * x for x i
 
 -- ── Summary ──────────────────────────────────────────────
 
+
+-- ── Imports ────────────────────────────────────────────
+-- Until the VM resolved imports, an ImportStatement compiled to nothing and
+-- the first imported name was an undefined variable. These run a module
+-- from disk, by absolute path and relative to the running file, and check
+-- that a module function still sees its own module's names when called
+-- from the importer.
+
+show "-- rest parameters and display --"
+assert_single("rest parameter in a function", "fn count(...xs) { return len(xs) }\nshow count(1, 2, 3)", "3")
+assert_single("rest parameter after fixed ones", "fn tail(first, ...rest) { return rest }\nshow tail(1, 2, 3)", "[2, 3]")
+assert_single("rest parameter in a method", "class Bag {\n    fn init(...items) { this.n = len(items) }\n}\nshow Bag(1, 2, 3, 4).n", "4")
+assert_single("rest parameter with no extra arguments", "fn count(...xs) { return len(xs) }\nshow count()", "0")
+assert_single("a function displays as the interpreter displays it", "fn f() { return 1 }\nshow f", "<fn f>")
+
+show "-- imports --"
+let mod_dir = "/tmp/_clarity_bc_imports"
+exec_full("rm -rf " + mod_dir + " && mkdir -p " + mod_dir + "/sub")
+write(mod_dir + "/answers.clarity", "let answer = 42\nfn twice(x) { return x * 2 }\nfn get_answer() { return answer }\nclass Counter {\n    fn init() { this.n = 0 }\n    fn bump() { this.n += 1; return this.n }\n}\nshow \"answers loaded\"\n")
+write(mod_dir + "/sub/inner.clarity", "from \"../answers.clarity\" import answer\nlet doubled = answer * 2\n")
+
+fn run_bc_from(source, dir) {
+    let tokens = tokenize(source, "<test>")
+    let tree = parse(tokens, source)
+    let code = compile_to_bytecode(tree)
+    optimize(code)
+    let vm = VM()
+    vm.source_dir = dir
+    vm.run(code)
+    return vm.output
+}
+
+fn assert_from(name, source, dir, expected) {
+    try {
+        let output = run_bc_from(source, dir)
+        if output == expected {
+            passed += 1
+        } else {
+            show "  FAIL: {name}"
+            show "    expected: {expected}"
+            show "    got:      {output}"
+            failed += 1
+        }
+    } catch e {
+        show "  ERROR: {name}: {e}"
+        failed += 1
+    }
+}
+
+assert_output("import names by absolute path", "from \"" + mod_dir + "/answers.clarity\" import answer, twice\nshow twice(answer)", ["answers loaded", "84"])
+assert_output("import a module as a namespace", "import \"" + mod_dir + "/answers.clarity\" as m\nshow m.twice(3)\nshow m.answer", ["answers loaded", "6", "42"])
+assert_output("a module function sees its module's names", "from \"" + mod_dir + "/answers.clarity\" import get_answer\nshow get_answer()", ["answers loaded", "42"])
+assert_output("a class from a module", "from \"" + mod_dir + "/answers.clarity\" import Counter\nlet c = Counter()\nc.bump()\nshow c.bump()", ["answers loaded", "2"])
+assert_output("a module runs once however often it is imported", "from \"" + mod_dir + "/answers.clarity\" import answer\nfrom \"" + mod_dir + "/answers.clarity\" import twice\nshow twice(answer)", ["answers loaded", "84"])
+assert_from("import relative to the running file", "from \"answers.clarity\" import answer\nshow answer", mod_dir, ["answers loaded", "42"])
+assert_from("a module's own imports resolve relative to it", "from \"sub/inner.clarity\" import doubled\nshow doubled", mod_dir, ["answers loaded", "84"])
+
+-- The errors are the interpreter's, word for word, so a program sees the
+-- same message from both engines.
+mut missing_name_msg = ""
+try { run_bc("from \"" + mod_dir + "/answers.clarity\" import nothing") } catch e { missing_name_msg = str(e) }
+if contains(missing_name_msg, "'nothing' not found in") { passed += 1 } else { failed += 1; show "  FAIL: missing name error: {missing_name_msg}" }
+mut missing_mod_msg = ""
+try { run_bc("from \"" + mod_dir + "/absent.clarity\" import x") } catch e { missing_mod_msg = str(e) }
+if contains(missing_mod_msg, "Cannot find module") { passed += 1 } else { failed += 1; show "  FAIL: missing module error: {missing_mod_msg}" }
+
 show ""
 show "Bytecode VM: {passed} passed, {failed} failed"
 if failed > 0 { throw "Bytecode tests failed" }
