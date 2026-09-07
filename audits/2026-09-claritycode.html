@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClarityCode Audit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;650&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F4F6FB;--surface:#FFFFFF;--raised:#FFFFFF;--hair:#E2E7F2;--text:#0C1018;--muted:#5B6478;
+  --accent:#7C3AED;--cyan:#0891B2;--sig:linear-gradient(90deg,#7C3AED,#4F46E5,#22D3EE);
+  --ok:#0F9F6E;--warn:#B45309;--danger:#BE123C;--code-bg:#EEF1F8;
+  --sans:"Geist",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#05060A;--surface:#0D111A;--raised:#151B29;--hair:#242D42;--text:#E9EDF6;--muted:#8C96AC;
+  --accent:#8B5CF6;--cyan:#2AD8F0;--ok:#34D399;--warn:#FBBF24;--danger:#FB7185;--code-bg:#0A0E17;}}
+:root[data-theme="dark"]{
+  --bg:#05060A;--surface:#0D111A;--raised:#151B29;--hair:#242D42;--text:#E9EDF6;--muted:#8C96AC;
+  --accent:#8B5CF6;--cyan:#2AD8F0;--ok:#34D399;--warn:#FBBF24;--danger:#FB7185;--code-bg:#0A0E17;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+.wrap{display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;max-width:1180px;margin:0 auto;padding:40px 28px 96px}
+@media (max-width:860px){.wrap{grid-template-columns:1fr;gap:24px}nav.toc{position:static}}
+nav.toc{position:sticky;top:24px;align-self:start;font-size:13px}
+nav.toc .eyebrow{margin-bottom:10px}
+nav.toc a{display:block;color:var(--muted);text-decoration:none;padding:4px 0;border-left:2px solid var(--hair);padding-left:12px}
+nav.toc a:hover,nav.toc a:focus-visible{color:var(--text);border-left-color:var(--accent);outline:none}
+main{max-width:72ch}
+main>section{margin-top:56px}
+.eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}
+h1{font-size:40px;line-height:1.05;letter-spacing:-.02em;font-weight:650;margin:8px 0 12px;text-wrap:balance}
+h1::after{content:"";display:block;height:3px;width:120px;margin-top:18px;background:var(--sig);border-radius:2px}
+h2{font-size:24px;letter-spacing:-.015em;font-weight:650;margin:0 0 6px;text-wrap:balance}
+h3{font-size:16px;font-weight:650;margin:28px 0 8px}
+p{margin:0 0 14px}
+.lede{font-size:17px;color:var(--muted);max-width:60ch}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px 24px;margin:26px 0 0;padding:18px 0;border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);font-size:13px}
+.meta b{display:block;font-weight:500;color:var(--muted);font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:2px}
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--hair);border:1px solid var(--hair);border-radius:8px;overflow:hidden;margin:18px 0 22px}
+.figs div{background:var(--surface);padding:14px 16px}
+.figs .n{font:500 26px/1 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.figs .l{font-size:12px;color:var(--muted);margin-top:6px}
+code{font:13px var(--mono);background:var(--code-bg);padding:1px 5px;border-radius:4px}
+pre{font:12.5px/1.55 var(--mono);background:var(--code-bg);border:1px solid var(--hair);border-radius:6px;padding:12px 14px;overflow-x:auto;margin:10px 0 14px}
+pre code{background:none;padding:0}
+.tier{border-left:3px solid var(--hair);padding-left:18px;margin:22px 0}
+.tier.immediate{border-left-color:var(--danger)}.tier.huge{border-left-color:var(--warn)}.tier.medium{border-left-color:var(--accent)}.tier.low{border-left-color:var(--muted)}
+.tier h3{margin-top:0}
+.item{margin:0 0 18px}
+.item .t{font-weight:650;margin-bottom:4px}
+.item .fix{color:var(--muted);font-size:14px}
+.item .fix b{color:var(--text);font-weight:500}
+.pill{display:inline-block;font:500 11px/1 var(--mono);letter-spacing:.04em;padding:4px 7px;border-radius:999px;border:1px solid var(--hair);color:var(--muted);vertical-align:middle;margin-left:6px}
+.pill.ok{color:var(--ok);border-color:var(--ok)}.pill.bad{color:var(--danger);border-color:var(--danger)}.pill.part{color:var(--warn);border-color:var(--warn)}
+.tbl{overflow-x:auto;border:1px solid var(--hair);border-radius:6px;margin:10px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--hair)}
+th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:500;background:var(--surface)}
+tr:last-child td{border-bottom:none}
+td.mono,th.mono{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+ul{padding-left:20px;margin:0 0 14px}li{margin:4px 0}
+ol{padding-left:22px}ol li{margin:8px 0}
+.strong li b{font-weight:650}
+@media (prefers-reduced-motion:no-preference){nav.toc a{transition:color .15s,border-color .15s}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <div class="eyebrow">Contents</div>
+  <a href="#floor">The floor, verified</a>
+  <a href="#gaps">Gaps by tier</a>
+  <a href="#strong">What is strong</a>
+  <a href="#holding">What is holding us back</a>
+  <a href="#dead">Dead code</a>
+  <a href="#challenge">Code challenged</a>
+  <a href="#readme">README against the tree</a>
+  <a href="#assets">Not gaps, but assets</a>
+  <a href="#todo">What needs doing, in order</a>
+</nav>
+
+<main>
+<header>
+  <div class="eyebrow">Audit, September 2026</div>
+  <h1>ClarityCode Audit</h1>
+  <p class="lede">The language, its compilers, the standard library, the toolchain and everything that ships it. Every claim below was checked by building the toolchain from source the way CI does and running it, at the commit named.</p>
+  <div class="meta">
+    <div><b>Commit</b>main at <code>9f535dd</code>, branch <code>claude/clarityos-audit-o85aim</code></div>
+    <div><b>Scope</b><code>stdlib/</code> except the 51 OS-only modules, <code>native/</code>, <code>web/</code>, <code>playground/</code>, <code>docs/</code>, <code>editors/</code>, <code>registry/</code>, <code>examples/</code>, releases and CI</div>
+    <div><b>Method</b><code>python3 native/transpile.py --bundle</code>, <code>bun build --compile</code>, <code>clarity test stdlib/</code>, <code>clarity smoke</code>; the self-hosted <code>clarity transpile --bundle</code> run into a clean directory and started; each example checked; probes for every finding of the July audit; import and reference graphs over every module</div>
+    <div><b>Companion</b><code>REPO_INDEX.md</code> in the repo, generated by <code>tools/repo_index.py</code>, lists every module with its bundle membership, importers and tests</div>
+  </div>
+</header>
+
+<section id="floor">
+  <div class="eyebrow">Section 1</div>
+  <h2>The floor, verified</h2>
+  <div class="figs">
+    <div><div class="n">64 / 64</div><div class="l">test files pass here, and on three CI targets; 27 of 27 smoke tests</div></div>
+    <div><div class="n">68,004</div><div class="l">lines of Clarity in stdlib, 52,489 of them not tests; 157 modules</div></div>
+    <div><div class="n">17 / 17</div><div class="l">examples pass <code>clarity check</code></div></div>
+    <div><div class="n">0</div><div class="l">binary assets on the only release, V1.0.0 (16 February)</div></div>
+  </div>
+  <ul>
+    <li>The everyday loop works from a source checkout: <code>run</code>, <code>check</code> (with types), <code>lint</code>, <code>doc</code>, <code>test</code>, <code>transpile</code> of one file, <code>smoke</code>, <code>cc</code>. The REPL executes code now (<code>show x + 1</code> prints <code>6</code>). Map iteration yields keys in both engines. <code>fmt</code> no longer corrupts escapes.</li>
+    <li><code>clarity cc</code> compiles Clarity to C to a native binary with no Bun and no VM: scalars, collections, classes, closures, a conservative GC, strings, files, processes, math, JSON, bytes and bitwise, FFI with buffers, live-process memory, hooking, a binary-format DSL, disassembly through libcapstone. Every stage is pinned by compiling the C and diffing native output against the interpreter.</li>
+    <li>The same compiler has a freestanding profile that produces the program both kernels run.</li>
+    <li>CI: the test matrix (darwin-arm64, linux-x64, linux-arm64) and a three-stage self-hosting job are green on every commit this month.</li>
+  </ul>
+</section>
+
+<section id="gaps">
+  <div class="eyebrow">Section 2</div>
+  <h2>Gaps by tier</h2>
+
+  <div class="tier immediate"><h3>Immediate</h3>
+    <div class="item"><div class="t">Nobody can install Clarity.</div>
+      <pre><code>GET /repos/monkdim/Clarity/releases/latest  ->  tag V1.0.0, "assets": []</code></pre>
+      <div class="fix">The README's "Try Clarity in 60 seconds" pipes <code>install.sh</code>, which downloads <code>clarity-linux-x64.tar.gz</code> from the latest release and gets a 404. <code>Formula/clarity.rb</code> has four <code>sha256 "PLACEHOLDER"</code> and lowercase <code>v#{version}</code> URLs against a capital-V tag. <code>registry/Dockerfile</code> bootstraps the same way and cannot build. CI's "bootstrap from latest release" step fails every run and silently falls through to Python (<code>continue-on-error</code>). All four were reported in July and none has changed. <b>Fix:</b> tag <code>v1.0.1</code>, let <code>build.yml</code> attach the five archives, fill the Formula hashes, delete <code>releases/</code>.</div></div>
+    <div class="item"><div class="t">The single binary cannot import its own standard library.</div>
+      <pre><code>$ clarity run u.clarity        # u.clarity: from "collections.clarity" import Set
+RuntimeError: Cannot find module: collections.clarity (line 1)</code></pre>
+      <div class="fix">Imports resolve to files on disk. Without a repo checkout beside the program, "batteries included" and "ships as a single binary" are true of the toolchain and false of every library. <b>Fix:</b> embed the transpiled stdlib in the binary and resolve <code>from "x.clarity"</code> against it before the filesystem.</div></div>
+    <div class="item"><div class="t">The self-hosted compiler cannot rebuild the toolchain on its own.</div>
+      <pre><code>$ ./clarity transpile --bundle -o /tmp/selfdist      # 138 modules emitted
+$ bun /tmp/selfdist/clarity-entry.js version
+error: Cannot find module './kyan_desktop.js' from '/tmp/selfdist/cli.js'</code></pre>
+      <div class="fix"><code>transpile.clarity</code> carries a hard-coded <code>STDLIB_FILES</code> of 138 names; <code>native/transpile.py</code> carries its own list of 150. Twelve modules the CLI statically imports (<code>kyan_desktop</code>, <code>host</code>, <code>theme_kyan</code>, <code>pty</code>, <code>terminal_emulator</code>, <code>claude</code>, the fonts) are only in the Python list. The self-hosting CI job passes because stage 2 writes over the stage 1 directory, so the Python-emitted files fill the holes and the "fixpoint" compares two hybrids. Eight more modules, the entire RE toolkit (<code>bytes</code>, <code>bits</code>, <code>binformat</code>, <code>capstone</code>, <code>hook</code>, <code>procmem</code>, <code>sha256</code>, <code>benchmark</code>), are in neither list. <b>Fix:</b> one bundler, driven by a glob of <code>stdlib/</code> plus the import graph, and a CI stage that bundles into an empty directory.</div></div>
+  </div>
+
+  <div class="tier huge"><h3>Huge</h3>
+    <div class="item"><div class="t"><code>clarity cc</code> compiles one file.</div><div class="fix">It does not resolve imports, so native programs inline what they use; every RE example does. Track B's ergonomics and the "any Clarity program compiles" goal both wait on import flattening. Thirteen constructs still raise <code>native compile: unsupported</code> (indirect calls, spread, some unary and binary operators, open-ended ranges, break or continue inside a try with a finally, and whole statement and expression kinds). Enums and generators are open.</div></div>
+    <div class="item"><div class="t">The bytecode VM ignores imports.</div>
+      <pre><code>$ clarity run imp.clarity --fast
+RuntimeError: Undefined variable: Set</code></pre>
+      <div class="fix">Reported in July; still true. <code>--fast</code> is unusable for any program with an import, which is any program using the library.</div></div>
+    <div class="item"><div class="t">29 modules, 10,274 lines, have no test that imports them.</div><div class="fix">Among them <code>cli.clarity</code> (1,545 lines, the entry point), <code>package.clarity</code>, <code>install.clarity</code>, <code>net.clarity</code>, <code>path.clarity</code>, <code>datetime.clarity</code>, <code>semver.clarity</code>, <code>runtime_spec.clarity</code>. Ten of them (3,087 lines: <code>benchmark</code>, <code>channel</code>, <code>collections</code>, <code>crypto</code>, <code>db</code>, <code>http</code>, <code>mutex</code>, <code>registry</code>, <code>runtime</code>, <code>worker</code>) are imported by nothing at all, tests included, and most are headline features in the V1.0.0 release notes.</div></div>
+    <div class="item"><div class="t"><code>native/runtime.js</code> cannot be regenerated.</div><div class="fix">GAPS.md records it: <code>gen-runtime</code> produces a large diff, and regenerating would revert fixes that exist only in the committed file. Every builtin change is a hand edit in two places. This is the language's runtime, and its spec is decorative.</div></div>
+    <div class="item"><div class="t">The playground runs a second interpreter.</div><div class="fix"><code>playground/index.html</code> line 322: "Minimal Clarity interpreter in JS for the playground", hand-written, last touched 14 February. It cannot agree with the real language for long. The browser build in <code>web/</code> already proves the real runtime runs in a page.</div></div>
+  </div>
+
+  <div class="tier medium"><h3>Medium</h3>
+    <div class="item"><div class="t"><code>fmt</code> still drops comments.</div><pre><code>-- a comment that must survive      (input)
+let s = "a\nb"                      (output: the comment is gone)</code></pre><div class="fix">The lexer discards comments and the formatter is AST-only. <code>fmt --write</code> on the stdlib would delete every comment in it. The escape bug is fixed; this one is not.</div></div>
+    <div class="item"><div class="t"><code>args()</code> under <code>clarity run</code> includes the command and the script.</div><pre><code>$ clarity run a.clarity one two    ->    ["run", "a.clarity", "one", "two"]</code></pre><div class="fix">Native binaries get it right. Known in ROADMAP.md; still open. Every script that reads arguments differs between the two engines.</div></div>
+    <div class="item"><div class="t">The transpiler and formatter emit TODO comments instead of failing.</div><div class="fix"><code>transpile.clarity</code> lines 231 and 523 write <code>/* TODO: &lt;node&gt; */</code> into output for unknown AST nodes; <code>formatter.clarity</code> line 87 writes <code>-- TODO:</code>. A new syntax node silently becomes a comment in generated JavaScript.</div></div>
+    <div class="item"><div class="t">The shipped bundle and the deployed site are two months old.</div><div class="fix"><code>web/kyanos.bundle.js</code> (July 12) is tracked in git and copied by <code>pages.yml</code> without rebuilding; its sources changed September 5. <code>docs/*.html</code> date from July 11. The REPL banner says <code>Clarity Shell v0.5</code> in a 1.0 binary.</div></div>
+    <div class="item"><div class="t">The VS Code extension cannot be packaged as written.</div><div class="fix"><code>vscode-languageclient</code> is a runtime import declared under <code>devDependencies</code>; the extension calls <code>clarity fmt --stdout</code>, a flag the CLI does not have (it prints to stdout by default and takes <code>--write</code>); no icon is declared.</div></div>
+    <div class="item"><div class="t">Bitwise operators are 32-bit signed.</div><div class="fix"><code>&amp; | ^ &lt;&lt; &gt;&gt;</code> truncate to int32 in the interpreter, the VM and native. <code>bits.clarity</code> works around it to 2^53. Making the operators 64-bit is a semantics change across three engines and is the right change for an RE toolkit.</div></div>
+    <div class="item"><div class="t">Optional features are startup dependencies.</div><div class="fix">Both transpilers hoist function-scoped <code>from ... import</code> to static top-level imports, so <code>cli.js</code> imports <code>host.js</code> (SDL2) and <code>kyan_desktop.js</code> whether or not <code>desktop</code> is ever invoked. It is why the self-hosted bundle fails at <code>version</code>, not at <code>desktop</code>.</div></div>
+  </div>
+
+  <div class="tier low"><h3>Low</h3>
+    <ul>
+      <li><code>releases/</code> holds three Mach-O binaries, about 180 MB, tracked in git, referenced by nothing, named unlike anything <code>build.yml</code> produces.</li>
+      <li><code>test_smoke.clarity</code> is in both bundle lists; a test module ships inside the binary.</li>
+      <li><code>website_gen.clarity</code> bakes in <code>clarityos.dev</code>, a domain the project does not own; <code>test_polish.clarity</code> asserts it.</li>
+      <li><code>build.yml</code> only runs on tags and no tag has been pushed since February, so no artifact of the current code has ever been built by CI.</li>
+      <li>README numbers: "~2,750 assertions across 50 test files" (64 files, about 3,500 assert calls), "56 opcodes" (57), "eight tours" (17 examples), "~58,000 lines of Clarity" (68,004).</li>
+    </ul>
+  </div>
+</section>
+
+<section id="strong" class="strong">
+  <div class="eyebrow">Section 3</div>
+  <h2>What is strong</h2>
+  <ul>
+    <li><b>The suite is real and it is green.</b> 64 files, three targets, every commit. It caught nothing in this audit because nothing it covers is broken; what is broken is outside it.</li>
+    <li><b>The native compiler is the best-engineered thing in the tree.</b> Twenty stages, each landed with a test that compiles the generated C and diffs it against the interpreter. A conservative GC with a measured cost model. A freestanding profile that the kernel runs. This is the language's future and it is being built carefully.</li>
+    <li><b>Track B is not a slide.</b> Signature scanning, live-process read and write, function hooking, a binary-format DSL and a Capstone binding all compile to standalone binaries and all have runnable examples. The pure-Clarity-over-primitives thesis is demonstrated, not asserted.</li>
+    <li><b>Self-hosting is nearly true.</b> Lexer, parser, interpreter, VM, checker, linter, formatter, debugger, profiler, docgen, LSP, package manager, transpiler: all Clarity. The one gap is the bundle list, and it is a list.</li>
+    <li><b>Errors point at the column.</b> Parse errors show the source line and a caret; the type checker flags arity and undefined names with no false positives across the stdlib.</li>
+    <li><b>The July audit was acted on.</b> REPL execution, profile and debug, map iteration, fmt escapes, cwd-independent lsp: fixed. What remains open is listed above with the evidence that it is still open.</li>
+  </ul>
+</section>
+
+<section id="holding">
+  <div class="eyebrow">Section 4</div>
+  <h2>What is holding us back</h2>
+  <ol>
+    <li><b>Distribution has been broken since February.</b> Every path to a user (install script, Homebrew, Docker, CI bootstrap) fails on the same missing assets. One correctly-cased release with binaries attached fixes all four. Nothing else on this page matters to a stranger until this does.</li>
+    <li><b>Two hand-maintained lists decide what the language is.</b> The bundle lists are the real definition of "the standard library", they disagree with each other and with the directory, and the RE toolkit the roadmap is proudest of is in neither.</li>
+    <li><b>Three engines, one semantics, no parity suite.</b> Interpreter, bytecode VM and native disagree on imports and on <code>args()</code>. The native path has a diff-against-interpreter harness; the VM has nothing equivalent. Parity should be a test, not a hope.</li>
+    <li><b>The runtime's source of truth is a generated file that cannot be generated.</b> Until <code>runtime_spec</code> and <code>runtime.js</code> are reconciled, every builtin is two edits and a prayer.</li>
+    <li><b>Stale artifacts are tracked in git and deployed as-is.</b> The web bundle, the docs, the playground's private interpreter and the release binaries all describe an older language.</li>
+  </ol>
+</section>
+
+<section id="dead">
+  <div class="eyebrow">Section 5</div>
+  <h2>Dead code</h2>
+  <h3>Removed in this pass <span class="pill ok">committed</span></h3>
+  <ul>
+    <li><code>website/serve.clarity</code>: 271 lines. A hand-written 0.4.0-era site (<code>pip install clarity-lang</code>, <code>version: "0.4.0"</code>) referenced by nothing; the deployed site comes from <code>docs/</code> and the generator is <code>website_gen.clarity</code>.</li>
+  </ul>
+  <h3>Dead or unowned, and left for a decision</h3>
+  <div class="tbl"><table>
+    <tr><th>What</th><th>Evidence</th><th>Why not removed here</th></tr>
+    <tr><td>Ten modules nothing imports: <code>benchmark</code>, <code>channel</code>, <code>collections</code>, <code>crypto</code>, <code>db</code>, <code>http</code>, <code>mutex</code>, <code>registry</code>, <code>runtime</code>, <code>worker</code> (3,087 lines)</td><td>no importer in code or tests; five are in the Python bundle only</td><td>they are advertised features; the right move is tests and a bundle entry, or removal, per module</td></tr>
+    <tr><td><code>playground/index.html</code> interpreter (about 900 lines of JS)</td><td>a second implementation of the language, February vintage</td><td>replace with the real bundle rather than delete the page</td></tr>
+    <tr><td><code>releases/</code> (three binaries, about 180 MB)</td><td>unreferenced, wrong names, tracked</td><td>removing history-bloat is a force-push decision</td></tr>
+    <tr><td><code>STDLIB_FILES</code> and the Python <code>stdlib_files</code> list</td><td>diverge; both hand-maintained</td><td>replacing them is the fix for an Immediate gap, not a deletion</td></tr>
+    <tr><td><code>stdlib/runtime.clarity</code> (71 lines, "self-hosting implementation")</td><td>imported by nothing; in the Python bundle</td><td>unclear intent; ask</td></tr>
+  </table></div>
+</section>
+
+<section id="challenge">
+  <div class="eyebrow">Section 6</div>
+  <h2>Code challenged</h2>
+  <ul>
+    <li><b>A list of filenames is not a module system.</b> Two lists, two languages, both wrong. The transpiler already resolves imports to build the graph; the bundle should be that graph's closure from <code>cli.clarity</code> plus everything under <code>stdlib/</code> a user could import.</li>
+    <li><b>Hoisting scoped imports to static ones changes the program's meaning.</b> A lazy import inside <code>if command == "desktop"</code> becomes a hard dependency at load. Either the transpiler emits a dynamic <code>import()</code> for scoped imports, or the CLI should not pretend they are optional.</li>
+    <li><b>Emitting <code>/* TODO */</code> into generated code is a silent failure.</b> An unknown node should stop the build with a line number. The same applies to the formatter's <code>-- TODO:</code>.</li>
+    <li><b>"Assertions" is counted loosely.</b> The README's figure is a grep of <code>assert</code> calls; test files also use <code>ok(...)</code>. Either count both consistently or report files and pass counts, which the runner already prints.</li>
+    <li><b>The self-hosting job proves reproducibility, not self-sufficiency.</b> It should bundle into an empty directory, compile, and run the suite from that. Today it cannot, and the job does not know.</li>
+    <li><b><code>host_supported()</code> answers the wrong question.</b> It reports the platform; the failure is a missing library. Check for SDL2 and print the sentence that already exists in the code.</li>
+    <li><b>Generated files in git without a check.</b> <code>native/runtime.js</code>, <code>web/kyanos.bundle.js</code>, and now <code>REPO_INDEX.md</code>. The index ships with <code>--check</code> so CI can fail when it is stale; the other two should get the same.</li>
+  </ul>
+</section>
+
+<section id="readme">
+  <div class="eyebrow">Section 7</div>
+  <h2>README against the tree</h2>
+  <p>Only the language claims; the OS claims are in the KyanOS report. README.md was not edited; each row is the fix.</p>
+  <div class="tbl"><table>
+    <tr><th>Claim</th><th>Status</th><th>What is true, and the fix</th></tr>
+    <tr><td>"Try Clarity in 60 seconds: <code>curl ... install.sh | bash</code>"</td><td><span class="pill bad">fails</span></td><td>404 on the download. Publish a release with assets, then keep the line.</td></tr>
+    <tr><td>"Ships as a single binary ... no runtime to install"</td><td><span class="pill part">partly</span></td><td>True for the toolchain; user programs cannot import the library without the sources on disk. Embed the stdlib.</td></tr>
+    <tr><td>"Self-hosted, end to end"</td><td><span class="pill part">partly</span></td><td>Every component is Clarity; the rebuild depends on the Python transpiler's output for twelve modules. Fix the bundle list.</td></tr>
+    <tr><td>"v1.0.0, runs today"</td><td><span class="pill part">partly</span></td><td>From source, yes. As a release, no binaries exist.</td></tr>
+    <tr><td>"~2,750 assertions across 50 test files"</td><td><span class="pill bad">stale</span></td><td>64 files; about 3,500 assert calls. Use the runner's own count.</td></tr>
+    <tr><td>"stack-based bytecode VM (56 opcodes)"</td><td><span class="pill part">off by one</span></td><td>57 distinct opcodes. And the VM cannot run a program with imports.</td></tr>
+    <tr><td>"<code>examples/</code> has eight tours"</td><td><span class="pill bad">stale</span></td><td>Seventeen, all passing <code>check</code>.</td></tr>
+    <tr><td>"~58,000 lines of Clarity"</td><td><span class="pill bad">stale</span></td><td>68,004 in stdlib. Use the index.</td></tr>
+    <tr><td>"`clarity install &lt;pkg&gt;` ... package manager"</td><td><span class="pill part">unverified</span></td><td>The registry cannot deploy and <code>package.clarity</code> has no test. Not exercised here.</td></tr>
+    <tr><td>Style: 39 em dashes</td><td><span class="pill part">style</span></td><td>House style avoids them; the index counts them per document.</td></tr>
+  </table></div>
+  <p>Also checked: <code>BEGINNERS_GUIDE.md</code> no longer carries the pip-era text the July audit flagged. <code>GETTING_STARTED.md</code> still describes "the freestanding userspace runtime (QuickJS host)" (line 577), which does not build. <code>docs/index.html</code> repeats the broken install one-liner.</p>
+</section>
+
+<section id="assets">
+  <div class="eyebrow">Section 8</div>
+  <h2>Not gaps, but assets for the goal</h2>
+  <ul>
+    <li><b>One compiler serves both products.</b> <code>clarity cc</code> with <code>--freestanding</code> is how a Clarity program reaches the kernel. Every Track A stage is also a KyanOS userspace capability.</li>
+    <li><b>The RE toolkit is a wedge into games.</b> Scanning, live memory, hooking and disassembly are the primitives a mod loader and a trainer are built from; they exist and they compile natively.</li>
+    <li><b>The LSP and the VS Code extension are substantial.</b> Hover types and go-to-definition work; the extension is a real client. Packaging is the only thing between it and a marketplace listing.</li>
+    <li><b>The browser runtime exists.</b> <code>web/runtime_browser.js</code> stubs Bun and keeps all builtins; it is the basis for a playground that runs the real language.</li>
+    <li><b>The test runner prints exactly the numbers the README should quote.</b> <code>64 passed, 0 failed / 64 total</code>, per-module counts included. The documentation only has to copy them.</li>
+  </ul>
+</section>
+
+<section id="todo">
+  <div class="eyebrow">Section 9</div>
+  <h2>What needs doing, in order</h2>
+  <ol>
+    <li>Publish <code>v1.0.1</code> with the five archives attached; fill the Formula hashes; remove <code>releases/</code>. This unbreaks install, Homebrew, Docker and the CI bootstrap in one action.</li>
+    <li>Replace both bundle lists with one graph-driven bundler; make the self-hosting job bundle into an empty directory and run the suite from it; add the RE toolkit and the Kyan modules by construction.</li>
+    <li>Embed the transpiled stdlib in the binary so <code>from "collections.clarity"</code> works anywhere.</li>
+    <li>Make the VM resolve imports, and add an interpreter-versus-VM parity suite modeled on the native one. Fix <code>args()</code>.</li>
+    <li>Reconcile <code>runtime_spec</code> with <code>runtime.js</code> so <code>gen-runtime</code> is safe, and gate it in CI.</li>
+    <li>Give the 29 untested modules tests or a decision; start with <code>cli.clarity</code> and <code>package.clarity</code>.</li>
+    <li>Import flattening in <code>clarity cc</code>; then enums and generators; then 64-bit bitwise operators.</li>
+    <li>Rebuild the web bundle in Pages, replace the playground interpreter with the real runtime, regenerate the docs, fix the extension's packaging, and let the README quote the runner and the index.</li>
+  </ol>
+</section>
+</main>
+</div>
+</body>
+</html>

@@ -1,5 +1,7 @@
 # Clarity & ClarityOS — Full Audit (July 2026)
 
+> Superseded by the September 2026 audits: [audits/2026-09-claritycode.html](audits/2026-09-claritycode.html) and [audits/2026-09-kyanos.html](audits/2026-09-kyanos.html). Kept as the record of what was found and fixed between the two.
+
 This is a complete, adversarial audit of the repository: language toolchain, OS userspace, kernel and boot path, distribution, docs, and CI. It was produced by bootstrapping the toolchain from a fresh clone, running the entire test suite, and then deep-reading every subsystem looking specifically for things that are broken, simulated, drifted, or dead.
 
 **How to read this:** the point is not that the project is bad — the architecture is coherent, the test discipline is real, and several subsystems (rendering, parsing, the widget toolkit, the protocol state machines) are genuinely well built. The point is to know *exactly* where the floor is real and where it's painted, so the roadmap in [REBRAND.md](REBRAND.md) stands on facts.
