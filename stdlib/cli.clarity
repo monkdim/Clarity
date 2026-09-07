@@ -25,7 +25,7 @@ from "path.clarity" import stem
 
 -- ── Version ─────────────────────────────────────────────
 
-let VERSION = "1.0.0"
+let VERSION = "1.0.1"
 
 -- ── Banner ──────────────────────────────────────────────
 

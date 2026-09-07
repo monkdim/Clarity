@@ -1,7 +1,7 @@
 class Clarity < Formula
   desc "Simple code. Real power. A modern programming language."
   homepage "https://github.com/monkdim/Clarity"
-  version "1.0.0"
+  version "1.0.1"
   license "GPL-3.0-only"
 
   on_macos do
@@ -29,6 +29,6 @@ class Clarity < Formula
   end
 
   test do
-    assert_match "1.0.0", shell_output("#{bin}/clarity version")
+    assert_match "1.0.1", shell_output("#{bin}/clarity version")
   end
 end

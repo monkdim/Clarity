@@ -60,26 +60,44 @@ jobs:
         with:
           bun-version: latest
 
+      # The previous release's binary rebuilds the toolchain. Windows releases
+      # are a .zip holding clarity.exe; the others are a .tar.gz holding
+      # clarity. A release with no assets (or no release at all) makes this
+      # step fail, and the Python bundler below takes over.
       - name: Bootstrap from latest release
         id: bootstrap
         run: |
-          curl -fsSL https://github.com/monkdim/Clarity/releases/latest/download/clarity-${{ matrix.bootstrap_target }}.tar.gz -o clarity-bootstrap.tar.gz
-          tar xzf clarity-bootstrap.tar.gz
-          chmod +x clarity
-          mv clarity clarity-bootstrap
-          ./clarity-bootstrap transpile --bundle
+          set -euo pipefail
+          BASE=https://github.com/monkdim/Clarity/releases/latest/download
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            curl -fsSL "$BASE/clarity-${{ matrix.bootstrap_target }}.zip" -o clarity-bootstrap.zip
+            7z x -y clarity-bootstrap.zip
+          else
+            curl -fsSL "$BASE/clarity-${{ matrix.bootstrap_target }}.tar.gz" -o clarity-bootstrap.tar.gz
+            tar xzf clarity-bootstrap.tar.gz
+          fi
+          chmod +x ${{ matrix.binary }}
+          mv ${{ matrix.binary }} clarity-bootstrap-${{ matrix.binary }}
+          rm -rf native/dist
+          ./clarity-bootstrap-${{ matrix.binary }} transpile --bundle
+          test -f native/dist/clarity-entry.js
         shell: bash
         continue-on-error: true
 
-      - name: Bootstrap fallback (first release only)
+      - name: Bootstrap fallback (no usable previous release)
         if: steps.bootstrap.outcome != 'success'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      # Start from an empty directory: a bundle the bootstrap half wrote must
+      # not fill in for a module this bundler forgot.
       - name: Transpile via Python fallback
         if: steps.bootstrap.outcome != 'success'
-        run: python native/transpile.py --bundle
+        run: |
+          rm -rf native/dist
+          python native/transpile.py --bundle
+        shell: bash
 
       - name: Compile native binary
         run: |
@@ -111,7 +129,12 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # The changelog is the log between the previous tag and this one, so
+      # the whole history and every tag have to be present.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
