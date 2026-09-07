@@ -130,3 +130,56 @@ jobs:
 
       - name: Self-hosted build passes the smoke tests
         run: /tmp/stage3/clarity smoke /tmp/stage3/clarity
+
+  # The editor extension is a shipping artifact, and it was broken in a way
+  # nothing here would have caught: it did not compile (no @types/node), its
+  # language client was a devDependency so the packaged .vsix left it out and
+  # activation threw, and its formatter called a flag the CLI did not have.
+  # This job builds it the way a publisher would and runs it against a real
+  # binary.
+  vscode-extension:
+    runs-on: ubuntu-latest
+    name: VS Code extension
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build a clarity binary for the extension to talk to
+        run: |
+          python native/transpile.py --bundle
+          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install the extension's dependencies
+        working-directory: editors/vscode
+        run: npm install
+
+      - name: Compile it
+        working-directory: editors/vscode
+        run: npm run compile
+
+      - name: Activate it and format a file through it
+        working-directory: editors/vscode
+        run: CLARITY_BIN="$GITHUB_WORKSPACE/native/dist/clarity" npm test
+
+      - name: Package it, and require the language client to be inside
+        working-directory: editors/vscode
+        run: |
+          npx vsce package --out clarity-lang.vsix
+          unzip -l clarity-lang.vsix > contents.txt
+          cat contents.txt
+          grep -q 'extension/out/extension.js' contents.txt \
+            || { echo "FAIL: the compiled extension is not in the package"; exit 1; }
+          grep -q 'node_modules/vscode-languageclient/' contents.txt \
+            || { echo "FAIL: vscode-languageclient is missing; activation would throw"; exit 1; }

@@ -216,6 +216,38 @@ fn run_smoke_tests() {
     check_cmd("fmt check", clarity + " fmt " + tmp_fmt + " --check", "file(s)")
     exec("rm -f " + _quote(tmp_fmt))
 
+    -- --stdout is what an editor calls, and it must print the formatted
+    -- source whether or not formatting changed anything. The default mode
+    -- prints nothing for a file that is already formatted, so an editor
+    -- replacing the buffer with what it read emptied the file.
+    let done_fmt = "/tmp/smoke_fmtdone_" + str(time()) + ".clarity"
+    write(done_fmt, "fn add(a, b) {\n    return a + b\n}\n")
+    let fmt_stdout = exec_full(clarity + " fmt " + _quote(done_fmt) + " --stdout")
+    if trim(fmt_stdout.stdout) == trim(read(done_fmt)) {
+        PASSED += 1
+        show "  " + _green("PASS") + "  fmt --stdout prints an already-formatted file back"
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  fmt --stdout prints an already-formatted file back"
+        show "    " + _dim("Got: " + substring(fmt_stdout.stdout, 0, min([200, len(fmt_stdout.stdout)])))
+    }
+    exec("rm -f " + _quote(done_fmt))
+
+    -- And it must write nothing at all when it cannot format, so an editor
+    -- has nothing to put in the file.
+    let bad_stdout = "/tmp/smoke_fmtbad_" + str(time()) + ".clarity"
+    write(bad_stdout, "fn f( {\n")
+    let bad_fmt_out = exec_full(clarity + " fmt " + _quote(bad_stdout) + " --stdout")
+    if bad_fmt_out.exit_code != 0 and trim(bad_fmt_out.stdout) == "" {
+        PASSED += 1
+        show "  " + _green("PASS") + "  fmt --stdout writes nothing when it cannot format"
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  fmt --stdout writes nothing when it cannot format"
+        show "    " + _dim("exit " + str(bad_fmt_out.exit_code) + ", stdout: " + substring(bad_fmt_out.stdout, 0, min([200, len(bad_fmt_out.stdout)])))
+    }
+    exec("rm -f " + _quote(bad_stdout))
+
     show "  " + _bold("-- doc --")
     let tmp_doc = "/tmp/smoke_doc_" + str(time()) + ".clarity"
     write(tmp_doc, "-- Adds two numbers together\nfn add(a, b) {\n    return a + b\n}")

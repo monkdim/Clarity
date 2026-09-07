@@ -12,8 +12,19 @@
   "engines": {
     "vscode": "^1.75.0"
   },
-  "categories": ["Programming Languages", "Snippets", "Linters", "Formatters"],
-  "keywords": ["clarity", "clarity-lang", "programming language", "syntax highlighting", "lsp"],
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "clarity",
+    "clarity-lang",
+    "programming language",
+    "syntax highlighting",
+    "lsp"
+  ],
   "activationEvents": [
     "onLanguage:clarity"
   ],
@@ -22,13 +33,14 @@
     "languages": [
       {
         "id": "clarity",
-        "aliases": ["Clarity", "clarity"],
-        "extensions": [".clarity"],
-        "configuration": "./language-configuration.json",
-        "icon": {
-          "light": "./icons/clarity-light.png",
-          "dark": "./icons/clarity-dark.png"
-        }
+        "aliases": [
+          "Clarity",
+          "clarity"
+        ],
+        "extensions": [
+          ".clarity"
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
@@ -97,12 +109,16 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "test": "node test/extension.test.js"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "@types/vscode": "^1.75.0",
     "@vscode/vsce": "^3.0.0",
-    "typescript": "^5.0.0",
-    "vscode-languageclient": "^9.0.0"
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }

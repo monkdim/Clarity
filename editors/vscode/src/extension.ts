@@ -2,6 +2,7 @@
 // Provides syntax highlighting, LSP integration, and code commands.
 
 import * as vscode from 'vscode';
+import { exec, execFileSync } from 'child_process';
 import {
     LanguageClient,
     LanguageClientOptions,
@@ -36,13 +37,24 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.languages.registerDocumentFormattingEditProvider('clarity', {
             async provideDocumentFormattingEdits(document) {
-                const { execSync } = require('child_process');
                 const lspPath = config.get<string>('lsp.path', 'clarity');
                 try {
-                    const formatted = execSync(
-                        `${lspPath} fmt "${document.uri.fsPath}" --stdout`,
+                    // `fmt --stdout` writes the formatted source and nothing
+                    // else. Arguments go through execFileSync rather than a
+                    // shell string, so a path with a space or a quote in it
+                    // reaches the formatter intact.
+                    const formatted = execFileSync(
+                        lspPath,
+                        ['fmt', document.uri.fsPath, '--stdout'],
                         { encoding: 'utf8', timeout: 10000 }
                     );
+                    // Never replace the buffer with nothing. A formatter that
+                    // returns an empty document is always a bug on this side
+                    // of the pipe, and the cost of believing it is the user's
+                    // file.
+                    if (!formatted.trim()) {
+                        return [];
+                    }
                     const fullRange = new vscode.Range(
                         document.positionAt(0),
                         document.positionAt(document.getText().length)
@@ -111,18 +123,19 @@ function startLSP(context: vscode.ExtensionContext, config: vscode.WorkspaceConf
         clientOptions
     );
 
-    client.start().catch((err) => {
+    client.start().catch((err: Error) => {
         // LSP is optional — fall back to terminal-based commands
-        console.log('Clarity LSP not available:', err.message);
+        vscode.window.setStatusBarMessage(
+            `Clarity language server not available: ${err.message}`, 5000
+        );
         client = undefined;
     });
 }
 
 async function lintDocument(document: vscode.TextDocument, config: vscode.WorkspaceConfiguration) {
-    const { exec } = require('child_process');
     const lspPath = config.get<string>('lsp.path', 'clarity');
 
-    exec(`${lspPath} lint "${document.uri.fsPath}"`, (err: any, stdout: string) => {
+    exec(`${lspPath} lint "${document.uri.fsPath}"`, (_err: unknown, stdout: string) => {
         const diags: vscode.Diagnostic[] = [];
 
         if (stdout) {

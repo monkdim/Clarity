@@ -59,7 +59,7 @@ fn _help() {
     show "  debug <file.clarity>  Interactive step-through debugger"
     show "  profile <file>        Profile execution (time, calls, hotspots)"
     show "  doc <file|dir>        Generate documentation (--md, --json, -o)"
-    show "  fmt <file|dir>        Format Clarity code (--check, --write)"
+    show "  fmt <file|dir>        Format Clarity code (--check, --write, --stdout)"
     show "  test [dir]            Run test files (test_*.clarity)"
     show "  tokens <file>         Show lexer output (debug)"
     show "  ast <file>            Show parser output (debug)"
@@ -1420,9 +1420,63 @@ fn do_lint(cli_args) {
 
 -- ── Format command (full AST formatter) ─────────────────
 
+-- One file in, its formatted source out, nothing else on stdout. An editor
+-- reads this and replaces the buffer with it, so anything else printed here
+-- would end up in the user's file, and a file that could not be formatted
+-- must produce no output at all and a non-zero exit, leaving the buffer
+-- alone.
+-- Complain on stderr. `show` writes to stdout, which in --stdout mode is the
+-- file the editor is about to write back, so a message printed there would
+-- be pasted into the user's source.
+fn _eprint(msg) {
+    exec("printf '%s\\n' " + _quote(msg) + " 1>&2")
+}
+
+fn _fmt_to_stdout(paths) {
+    -- Nothing here may reach stdout but the formatted source itself.
+    if len(paths) != 1 {
+        _eprint("clarity fmt --stdout takes exactly one file")
+        exit(1)
+    }
+    let filepath = paths[0]
+    if not exists(filepath) {
+        _eprint("clarity fmt --stdout: no such file: " + filepath)
+        exit(1)
+    }
+    if not ends(filepath, ".clarity") {
+        _eprint("clarity fmt --stdout: not a Clarity file: " + filepath)
+        exit(1)
+    }
+    mut formatted = null
+    try {
+        formatted = format_source(read(filepath), filepath)
+    } catch e {
+        -- The editor asks for this on a file the user is still typing, so a
+        -- file that does not parse is the common case, not an exceptional
+        -- one: say why on stderr, write nothing, and exit non-zero, which
+        -- leaves the buffer untouched.
+        _eprint("clarity fmt --stdout: " + filepath + ": " + str(e))
+        exit(1)
+    }
+    -- show adds a newline of its own and the formatted source already ends
+    -- with one, so the last one is dropped: an editor that wrote back what
+    -- it read would otherwise grow a blank line at every format.
+    if ends(formatted, "\n") {
+        show substring(formatted, 0, len(formatted) - 1)
+    } else {
+        show formatted
+    }
+}
+
 fn do_fmt(cli_args) {
     let check_only = contains(cli_args, "--check")
     let write_mode = contains(cli_args, "--write")
+    -- --stdout writes the formatted source and nothing else, which is what
+    -- an editor needs: it replaces the buffer with what it reads back. The
+    -- default mode prints the source only when formatting changed it, so an
+    -- editor asking for a file that was already formatted read an empty
+    -- string and emptied the file.
+    let to_stdout = contains(cli_args, "--stdout")
 
     mut paths = []
     mut i = 1
@@ -1433,8 +1487,13 @@ fn do_fmt(cli_args) {
     }
 
     if len(paths) == 0 {
-        show "Usage: clarity fmt <file|dir> [--check] [--write]"
+        show "Usage: clarity fmt <file|dir> [--check] [--write] [--stdout]"
         exit(1)
+    }
+
+    if to_stdout {
+        _fmt_to_stdout(paths)
+        return null
     }
 
     let files = _collect_clarity_files(paths)

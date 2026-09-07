@@ -1,7 +1,16 @@
+# What NOT to ship in the .vsix. The old list had `node_modules/**`, which
+# excluded the language client the extension imports at activation, so the
+# packaged extension could never start; only the dev-only trees belong here.
 .vscode/**
+.vscode-test/**
 src/**
-tsconfig.json
+test/**
+out/**/*.map
+node_modules/.bin/**
+node_modules/typescript/**
+node_modules/@types/**
+node_modules/@vscode/**
 **/*.ts
-**/*.map
-.gitignore
-node_modules/**
+**/.gitignore
+**/tsconfig.json
+**/*.vsix

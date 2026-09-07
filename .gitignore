@@ -33,3 +33,9 @@ web/_atlas_*.cjs
 .zig-cache/
 zig-out/
 runtime/freestanding/clarity-entry.js
+
+# VS Code extension build output
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix
+editors/vscode/package-lock.json
