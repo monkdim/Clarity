@@ -277,8 +277,12 @@ class Parser {
             }
             this.skip_newlines()
         }
-        this.expect(TokenType.RBRACE, null)
-        return Block(statements, tok.line, tok.column)
+        let close = this.expect(TokenType.RBRACE, null)
+        let block = Block(statements, tok.line, tok.column)
+        -- Where the block ends, so the formatter can keep a comment that
+        -- sits after the last statement inside the braces it was in.
+        block.end_line = close.line
+        return block
     }
 
     fn parse_if() {
@@ -921,7 +925,7 @@ class Parser {
 
         if tok.type == TokenType.NUMBER {
             this.advance()
-            return NumberLiteral(tok.value, tok.line, tok.column)
+            return NumberLiteral(tok.value, tok.line, tok.column, tok.raw)
         }
 
         if tok.type == TokenType.STRING {
@@ -1191,7 +1195,7 @@ class Parser {
 
         if key_tok.type == TokenType.NUMBER {
             this.advance()
-            return NumberLiteral(key_tok.value, key_tok.line, key_tok.column)
+            return NumberLiteral(key_tok.value, key_tok.line, key_tok.column, key_tok.raw)
         }
 
         -- A keyword used as a bare map key (`show:`, `type:`, `fn:`, ...).
