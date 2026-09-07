@@ -268,14 +268,19 @@ What is left, in rough order:
 - **A session.** The shell reads, parses and runs commands, and that is all
   it is: nothing holds a terminal, a process table or a working directory,
   and `exit` ends the boot's last program rather than returning to anything.
-  The two calls it is most obviously missing have their own entries below.
-- **`getdents`, so the shell can have `ls`.** tmpfs and the VFS already
-  implement `readdir`, and `fstest.zig` calls it directly — nothing exposes it
-  as a system call, so the shell has `cat` and no way to find out what to
-  `cat`. The smallest missing piece between here and a usable session.
+  The call it is most obviously missing has its own entry below.
+- **`readdir` is a system call now, and the shell has `ls`.** ✅ The VFS packs
+  a directory into a caller's buffer — inode, record length, type, name
+  length, the name, a NUL, padded to eight — and `readdir(fd, buf, len)` is
+  wired on both architectures, checking the destination for writing before it
+  consumes anything so a bad pointer cannot cost the caller entries it never
+  saw. `ls [PATH]` walks it, marks directories with a trailing slash, and says
+  "not a directory" rather than printing nothing. Driven over the serial line
+  by `tools/serial_check.py` on every PR: `ls /`, `ls /bin`, and `ls` on a
+  file.
 - **`exec`, so the shell can start a program.** Every program on this machine
   is loaded by the boot path from an ELF embedded in the kernel image and run
-  to completion in a fixed order. The shell can run its own four commands and
+  to completion in a fixed order. The shell can run its own built-in commands and
   nothing else. This needs a process table before it needs anything else.
 - **Preemption stops at the kernel's door.** System calls run with interrupts
   on, so devices are serviced during one, but a time slice that expires inside

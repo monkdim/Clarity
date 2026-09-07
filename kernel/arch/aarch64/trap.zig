@@ -64,11 +64,14 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_BRK: u64 = 9;
 const SYS_EXIT: u64 = 12;
+const SYS_READDIR: u64 = 34;
 
 /// Negative errno, the way the x86_64 dispatcher returns them.
 const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
 const ENOENT: i64 = -2;
+const ENOTDIR: i64 = -20;
+const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 
 /// A ceiling on one process's heap.
@@ -264,6 +267,9 @@ fn dispatch(frame: *Frame) void {
         SYS_CLOSE => {
             frame.x[0] = @bitCast(sys_close(frame.x[0]));
         },
+        SYS_READDIR => {
+            frame.x[0] = @bitCast(sys_readdir(frame.x[0], frame.x[1], frame.x[2]));
+        },
         SYS_WRITE => {
             if (calls == 1) ticks_entering = timer.ticks();
             // The result goes back the way the arguments came: into the saved
@@ -347,6 +353,67 @@ fn sys_close(fd: u64) i64 {
 
 /// Counted so the boot log can say the path was used rather than present.
 pub var files_opened: u64 = 0;
+
+/// How much of one readdir the kernel stages at a time. A directory can hold
+/// more entries than this; the call returns what fits and the next one picks
+/// up where it left off, which is why the shell's `ls` loops.
+const DIRENT_CHUNK: usize = 512;
+
+/// readdir(fd, buf, len) — directory entries, packed by the VFS.
+///
+/// The shell had no `ls` for want of this: `cat` needed open and read, and a
+/// listing needs a call that returns names rather than bytes. The layout is
+/// vfs.Dirent — inode, record length, type, name length, the name, a NUL —
+/// and the caller walks it by record length.
+///
+/// Zero means the directory is finished. A buffer too small for even one
+/// entry is EINVAL rather than zero, so a caller cannot mistake "your buffer
+/// is too small" for "there is nothing more".
+fn sys_readdir(fd: u64, buf: u64, len: u64) i64 {
+    if (len == 0) return EINVAL;
+    if (fd <= 2) return EBADF;
+
+    var staging: [DIRENT_CHUNK]u8 = undefined;
+    const want = @min(len, staging.len);
+
+    // The destination is checked *before* the directory is read, not after.
+    // Reading it advances the descriptor past the entries it returned, and
+    // there is no way to put them back: a bad pointer discovered halfway
+    // through the copy would cost the caller entries it never saw. Nothing
+    // is consumed until the whole buffer is known to be writable.
+    var checked: usize = 0;
+    while (checked < want) {
+        const va = buf + checked;
+        if (mmu.translate_user_write(va) == null) return EFAULT;
+        const page_left = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        checked += @min(want - checked, page_left);
+    }
+
+    const n = vfs.readdir(@intCast(fd), staging[0..want]) catch |e| return switch (e) {
+        error.NotADirectory => ENOTDIR,
+        error.BufferTooSmall => EINVAL,
+        else => EBADF,
+    };
+    if (n == 0) return 0;
+
+    // Page by page, the same as sys_read: the process's buffer is its pages,
+    // not the kernel's, and two consecutive pages of it are unrelated frames.
+    var done: usize = 0;
+    while (done < n) {
+        const va = buf + done;
+        const phys = mmu.translate_user_write(va) orelse return EFAULT;
+        const page_left = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+        const m = @min(n - done, page_left);
+        const dst: [*]u8 = @ptrFromInt(vm.phys_to_virt(phys));
+        @memcpy(dst[0..m], staging[done..][0..m]);
+        done += m;
+    }
+    dirents_read += 1;
+    return @intCast(done);
+}
+
+/// Counted like the others, so the boot log can say a listing happened.
+pub var dirents_read: u64 = 0;
 
 /// Read a line from the console into the process's memory.
 ///

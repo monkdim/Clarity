@@ -52,6 +52,13 @@ SHELL_SESSION = [
     ("echo typed over serial", "typed over serial"),
     ("count abcde", "5"),
     ("cat /bin/hello.txt", "clarity"),
+    # ls, over the same line, through readdir(2): the root holds one
+    # directory, /bin holds the file cat just read, and asking a file to be
+    # listed says so rather than printing nothing. A directory is marked with
+    # a trailing slash, which is why the first answer is "bin/" and not "bin".
+    ("ls /", "bin/"),
+    ("ls /bin", "hello.txt"),
+    ("ls /bin/hello.txt", "clarity-sh: ls: not a directory: /bin/hello.txt"),
     ("frobnicate", "clarity-sh: unknown command: frobnicate"),
 ]
 SHELL_EXIT_STATUS = 5
