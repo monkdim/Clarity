@@ -243,6 +243,7 @@ jobs:
             -kernel kernel/zig-out/bin/clarity-kernel-aarch64.img \
             -device ramfb \
             -device virtio-keyboard-device \
+            -append "clarity.idle=3" \
             -serial stdio \
             -display none \
             -no-reboot \
@@ -366,6 +367,7 @@ jobs:
              && grep -q "\[ok\] console: 95 glyphs drawn, screen scrolled" serial-arm.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm.log \
              && grep -q "\[ok\] keyboard: interrupt .* routed to this core" serial-arm.log \
+             && grep -q "\[ok\] command line: read 3 seconds idle (asked for)" serial-arm.log \
              && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm.log \
              && grep -q "\[ok\] console input:" serial-arm.log \
              && grep -q "init: nothing typed, end of input" serial-arm.log \
@@ -403,6 +405,7 @@ jobs:
             -kernel kernel/zig-out/bin/clarity-kernel-aarch64.img \
             -device ramfb \
             -device virtio-keyboard-device \
+            -append "clarity.idle=3" \
             -serial stdio \
             -display none \
             -no-reboot \
@@ -413,6 +416,7 @@ jobs:
           if grep -q "hello from EL0 on aarch64" serial-arm-pan.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-pan.log \
              && grep -q "\[ok\] keyboard: interrupt .* routed to this core" serial-arm-pan.log \
+             && grep -q "\[ok\] command line: read 3 seconds idle (asked for)" serial-arm-pan.log \
              && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm-pan.log \
              && grep -q "\[ok\] console input:" serial-arm-pan.log \
              && grep -q "init: nothing typed, end of input" serial-arm-pan.log \
@@ -447,6 +451,7 @@ jobs:
             -kernel kernel/zig-out/bin/clarity-kernel-aarch64.img \
             -device ramfb \
             -device virtio-keyboard-device \
+            -append "clarity.idle=3" \
             -serial stdio \
             -display none \
             -no-reboot \
@@ -457,6 +462,7 @@ jobs:
           if grep -q "\[ok\] direct map covers all of RAM (3 GiB added" serial-arm-4g.log \
              && grep -q "\[ok\] keyboard: virtio-input" serial-arm-4g.log \
              && grep -q "\[ok\] keyboard: interrupt .* routed to this core" serial-arm-4g.log \
+             && grep -q "\[ok\] command line: read 3 seconds idle (asked for)" serial-arm-4g.log \
              && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm-4g.log \
              && grep -q "\[ok\] console input:" serial-arm-4g.log \
              && grep -q "init: nothing typed, end of input" serial-arm-4g.log \

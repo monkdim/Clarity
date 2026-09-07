@@ -162,8 +162,10 @@ Not written:
   terminal, a process table or a working directory, and `exit` ends the boot's
   last program rather than returning to anything. Reading does not really
   block either: there is no scheduler to block a thread on, so a read spins
-  and reports end of input after three seconds — a stand-in for blocking, not
-  blocking.
+  and gives up after a while — a stand-in for blocking, not blocking. How
+  long it waits comes from the kernel command line (`clarity.idle=<seconds>`,
+  two minutes by default); it was a fixed three seconds until a Mac ran this
+  by hand and the shell had exited before a key could reach it.
 - The keycode table covers the main block only — no function keys, keypad,
   arrows or modifiers past shift, because nothing reads them yet and a table
   of untested entries is a table of guesses. The line editor has backspace and

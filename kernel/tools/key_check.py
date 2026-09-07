@@ -299,6 +299,15 @@ def main():
         "-kernel", kernel,
         "-device", "ramfb",
         "-device", "virtio-keyboard-device",
+        # The short idle timeout, asked for by name.
+        #
+        # The default is two minutes, because that is what suits a person who
+        # has to find the window and click it before typing. This test types
+        # through the monitor socket the instant a prompt appears and never
+        # needs to be waited for, so it says so — and the kernel's default
+        # stays the one that makes the machine usable by hand rather than the
+        # one that makes this file finish sooner.
+        "-append", "clarity.idle=3",
         "-serial", "file:" + log,
         "-display", "none",
         "-monitor", "unix:%s,server,nowait" % sock,
