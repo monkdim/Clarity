@@ -3,11 +3,11 @@ name: OS boot smoke test
 # Builds the ClarityOS kernel and boots it headlessly under QEMU, asserting
 # the kernel reaches its "ClarityOS ready." serial marker.
 #
-# Scope is deliberately the KERNEL, not the whole userspace: the kernel
-# prints the marker before it spawns the (still-in-progress freestanding)
-# runtime, so a minimal GRUB rescue ISO carrying just the kernel is the
-# right, self-contained way to verify boot. GitHub runners have no
-# /dev/kvm, so QEMU runs under TCG — hence the generous timeout.
+# The image is the kernel alone: both kernels carry their userspace (a Zig
+# init and a compiled Clarity program) inside the image, so a GRUB rescue
+# ISO holding just the kernel is the whole x86_64 boot, and the ARM64 Image
+# is the whole aarch64 one. GitHub runners have no /dev/kvm, so QEMU runs
+# under TCG, hence the generous timeouts.
 
 on:
   push:
@@ -197,6 +197,37 @@ jobs:
             exit 1
           fi
           echo "PASS: all 3 boots ran two processes, the second a compiled Clarity program"
+
+      # ── The developer command produces the same boot ───────────────────
+      #
+      # Everything above is what this workflow does by hand. `clarity os
+      # build` and `clarity os run` are what a person is told to run, so the
+      # gate proves those give the same boot: the same kernel build, the same
+      # image recipe, the same QEMU flags, the same serial marker. Before this
+      # step existed `clarity os build` tried to build a QuickJS runtime that
+      # nothing vendors and stopped there, and the image it would have written
+      # was not bootable; the docs called it the developer workflow anyway.
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build the clarity binary
+        run: |
+          rm -rf native/dist
+          python native/transpile.py --bundle
+          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
+
+      - name: clarity os build writes the image and clarity os run boots it (x86_64)
+        run: |
+          rm -rf dist
+          ./native/dist/clarity os build --arch x86_64
+          test -f dist/claritos.iso
+          ./native/dist/clarity os run --arch x86_64 --no-rebuild --boot-test --timeout 60
 
   os-boot-aarch64:
     runs-on: ubuntu-latest
@@ -553,3 +584,34 @@ jobs:
       # line ever being read.
       - name: Type down the serial line with no keyboard attached
         run: python3 kernel/tools/serial_check.py kernel/zig-out/bin/clarity-kernel-aarch64.img
+
+      # ── The developer command produces the same boot ───────────────────
+      #
+      # Everything above is what this workflow does by hand. `clarity os
+      # build` and `clarity os run` are what a person is told to run, so the
+      # gate proves those give the same boot: the same kernel build, the same
+      # image recipe, the same QEMU flags, the same serial marker. Before this
+      # step existed `clarity os build` tried to build a QuickJS runtime that
+      # nothing vendors and stopped there, and the image it would have written
+      # was not bootable; the docs called it the developer workflow anyway.
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build the clarity binary
+        run: |
+          rm -rf native/dist
+          python native/transpile.py --bundle
+          (cd native/dist && bun build --compile clarity-entry.js --outfile clarity)
+
+      - name: clarity os build writes the image and clarity os run boots it (aarch64)
+        run: |
+          rm -rf dist
+          ./native/dist/clarity os build --arch aarch64
+          test -f dist/claritos-aarch64.img
+          ./native/dist/clarity os run --arch aarch64 --no-rebuild --boot-test --timeout 150

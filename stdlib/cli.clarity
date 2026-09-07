@@ -67,9 +67,9 @@ fn _help() {
     show "  app list              List installed ClarityOS apps"
     show "  app install <name>    Install a ClarityOS app"
     show "  app remove <name>     Uninstall a ClarityOS app"
-    show "  os build              Build the ClarityOS kernel + runtime + ISO"
-    show "  os run                Boot ClarityOS in QEMU (HVF on macOS, KVM on Linux)"
-    show "  os iso                Build the ISO only (alias for `os build`)"
+    show "  os build              Build the KyanOS kernel and its boot image (--arch x86_64|aarch64)"
+    show "  os run                Boot it under QEMU, serial console here (--boot-test, --window)"
+    show "  os iso                Alias for `os build`"
     show "  desktop               Launch the KyanOS desktop in a window (SDL2)"
     show "  transpile <file>      Transpile to JavaScript (-o, --bundle)"
     show "  cc <file.clarity>     Compile straight to a native binary via C (-o)"
@@ -767,29 +767,52 @@ fn do_app(cli_args) {
 }
 
 -- ── OS subcommands ──────────────────────────────────────
+--
+-- `clarity os build` produces the image the boot gate boots, and `clarity
+-- os run` boots it with the gate's QEMU flags. Two architectures:
+--
+--   x86_64   zig build          kernel/zig-out/bin/clarity-kernel
+--            grub-mkrescue      dist/claritos.iso          (GRUB + xorriso)
+--   aarch64  zig build aarch64  kernel/zig-out/bin/clarity-kernel-aarch64.img
+--            copy               dist/claritos-aarch64.img  (nothing else)
+--
+-- The default is the host's own architecture, so an Apple Silicon Mac
+-- builds and boots the aarch64 image, which needs no GRUB at all. Both
+-- kernels carry their userspace inside the image; there is no separate
+-- runtime to build.
 
 let _OS_KERNEL_DIR = "kernel"
-let _OS_RUNTIME_DIR = "runtime/freestanding"
-let _OS_KERNEL_BIN = "kernel/zig-out/bin/clarity-kernel"
-let _OS_RUNTIME_BIN = "runtime/freestanding/zig-out/bin/clarity-runtime"
-let _OS_DIST_DIR = "dist"
+let _OS_X86_KERNEL = "kernel/zig-out/bin/clarity-kernel"
+let _OS_ARM_IMAGE = "kernel/zig-out/bin/clarity-kernel-aarch64.img"
 let _OS_ISO_PATH = "dist/claritos.iso"
+let _OS_ARM_PATH = "dist/claritos-aarch64.img"
+-- The markers the boot gate asserts last: on x86_64 the kernel printing
+-- that both user processes ran and it outlived them; on aarch64 that a
+-- compiled Clarity program ran at EL0, which is the point of the exercise.
+let _OS_X86_MARKER = "ClarityOS: userspace complete."
+let _OS_ARM_MARKER = "[ok] demo: a Clarity program ran on aarch64"
 
 fn _print_os_usage() {
-    show "Usage: clarity os <subcommand> [args]"
+    show "Usage: clarity os <subcommand> [--arch x86_64|aarch64] [args]"
     show ""
     show "Subcommands:"
-    show "  build              Build kernel + runtime, assemble " + _OS_ISO_PATH
+    show "  build              Build the kernel and its boot image:"
+    show "                       x86_64  " + _OS_ISO_PATH + " (GRUB rescue ISO)"
+    show "                       aarch64 " + _OS_ARM_PATH + " (ARM64 Image)"
     show "  iso                Alias for `build`"
-    show "  run                Boot the ISO under QEMU (rebuilds if missing)"
-    show "                       --headless         no graphical window"
-    show "                       --no-rebuild       fail if ISO missing instead of rebuilding"
-    show "                       --boot-test <s>    expect <s> on serial, else exit 1"
-    show "                       --timeout <n>      boot-test timeout in seconds (default 60)"
-    show "  install            Write the ISO to a USB stick (not yet implemented — see ROADMAP_OS.md)"
+    show "  run                Boot the image under QEMU, serial console in this terminal"
+    show "                       --window           show the framebuffer too (aarch64: ramfb + keyboard)"
+    show "                       --idle <seconds>   aarch64: kernel command line clarity.idle"
+    show "                       --boot-test [<s>]  headless; expect <s> on serial, else exit 1"
+    show "                                          (default: the marker the CI gate asserts)"
+    show "                       --timeout <n>      boot-test timeout in seconds (default 120)"
+    show "                       --no-rebuild       fail if the image is missing instead of building"
+    show "  install            Write the ISO to a USB stick (not yet implemented)"
     show "  help               Show this message"
     show ""
-    show "Requires zig (kernel + runtime build) and qemu-system-x86_64 (for `run`)."
+    show "--arch defaults to this machine's architecture. Needs zig 0.13 and"
+    show "qemu-system-x86_64 or qemu-system-aarch64; the x86_64 ISO also needs"
+    show "grub-mkrescue and xorriso."
 }
 
 fn _has_arg(cli_args, flag) {
@@ -801,129 +824,220 @@ fn _has_arg(cli_args, flag) {
     return false
 }
 
-fn _zig_installed() {
-    let r = exec_full("command -v zig >/dev/null 2>&1 && echo yes || echo no")
+fn _tool_installed(name) {
+    let r = exec_full("command -v " + name + " >/dev/null 2>&1 && echo yes || echo no")
     return trim(r.stdout) == "yes"
 }
 
-fn _zig_build(dir, label) {
-    show "  " + dim("zig build") + " in " + dir + " ..."
-    let r = exec_full("cd " + dir + " && zig build 2>&1")
+fn _zig_installed() { return _tool_installed("zig") }
+
+fn _os_arch(cli_args) {
+    let given = _arg_value(cli_args, "--arch")
+    if given != null {
+        if given == "x86_64" or given == "x86-64" or given == "amd64" { return "x86_64" }
+        if given == "aarch64" or given == "arm64" { return "aarch64" }
+        show red("  unknown --arch " + given + "; use x86_64 or aarch64")
+        exit(1)
+    }
+    let m = trim(exec_full("uname -m").stdout)
+    if m == "arm64" or m == "aarch64" { return "aarch64" }
+    return "x86_64"
+}
+
+fn _os_image_path(arch) {
+    if arch == "aarch64" { return _OS_ARM_PATH }
+    return _OS_ISO_PATH
+}
+
+fn _zig_build(step) {
+    let cmd = if len(step) > 0 { "zig build " + step } else { "zig build" }
+    show "  " + dim(cmd) + " in " + _OS_KERNEL_DIR + " ..."
+    let r = exec_full("cd " + _OS_KERNEL_DIR + " && " + cmd + " 2>&1")
     if r.exit_code != 0 {
-        show red("  " + label + " build failed (exit " + str(r.exit_code) + "):")
+        show red("  kernel build failed (exit " + str(r.exit_code) + "):")
         show r.stdout
         exit(1)
     }
 }
 
-fn _ensure_dir(path) {
-    if not exists(path) {
-        exec_full("mkdir -p " + path)
+fn os_cmd_build(cli_args) {
+    from "os_build.clarity" import os_image_builder, aarch64_image, iso_packer, iso_packer_hint
+
+    let arch = _os_arch(cli_args)
+    if not _zig_installed() {
+        show red("  zig not on PATH. Install Zig 0.13 (https://ziglang.org/download/) and retry.")
+        exit(1)
     }
+    if arch == "x86_64" and iso_packer() == null {
+        show red("  grub-mkrescue and xorriso are needed to write the x86_64 ISO.")
+        show "  " + iso_packer_hint()
+        exit(1)
+    }
+
+    show ""
+    show bold("  Building ClarityOS (" + arch + ")")
+    show ""
+
+    mut out = ""
+    if arch == "aarch64" {
+        _zig_build("aarch64")
+        out = aarch64_image(_OS_ARM_IMAGE, _OS_ARM_PATH)
+    } else {
+        _zig_build("")
+        show "  " + dim("grub-mkrescue") + " ..."
+        let b = os_image_builder({"output": _OS_ISO_PATH, "volume_id": "CLARITYOS"})
+        b.set_kernel(_OS_X86_KERNEL)
+        out = b.build()
+    }
+
+    show ""
+    show "  " + green("Built ") + out
+    show "  " + dim("boot it: clarity os run --arch " + arch)
+    show ""
 }
 
-fn os_cmd_build(cli_args) {
-    from "os_build.clarity" import os_image_builder
-
-    if not _zig_installed() {
-        show red("  zig not on PATH — install Zig 0.13+ (https://ziglang.org/download/) and retry.")
-        exit(1)
-    }
-
-    show ""
-    show bold("  Building ClarityOS")
-    show ""
-    _zig_build(_OS_KERNEL_DIR, "kernel")
-
-    -- The freestanding runtime embeds the transpiled JS entry bundle via
-    -- @embedFile, which can only reach files inside its own module tree.
-    -- Stage the dist bundle into runtime/freestanding/ before building.
-    let _bundle_src = "native/dist/clarity-entry.js"
-    let _bundle_dst = _OS_RUNTIME_DIR + "/clarity-entry.js"
-    if exists(_bundle_src) {
-        exec_full("cp " + _quote(_bundle_src) + " " + _quote(_bundle_dst))
+-- The QEMU command line, token by token. These are the gate's flags
+-- (.github/workflows/os-boot.yml) and kernel/RUNNING.md's, on purpose.
+fn _os_qemu_argv(arch, image, window, idle) {
+    mut argv = []
+    if arch == "aarch64" {
+        push(argv, "qemu-system-aarch64")
+        push(argv, "-M"); push(argv, "virt,gic-version=2")
+        push(argv, "-cpu"); push(argv, "cortex-a72")
+        push(argv, "-m"); push(argv, "512")
+        push(argv, "-kernel"); push(argv, image)
+        if idle != null {
+            push(argv, "-append"); push(argv, "clarity.idle=" + str(idle))
+        }
+        if window {
+            push(argv, "-device"); push(argv, "ramfb")
+            push(argv, "-device"); push(argv, "virtio-keyboard-device")
+            push(argv, "-display"); push(argv, "default")
+        } else {
+            push(argv, "-display"); push(argv, "none")
+        }
     } else {
-        show yellow("  warning: " + _bundle_src + " missing — run `clarity transpile --bundle` first")
+        push(argv, "qemu-system-x86_64")
+        push(argv, "-cpu"); push(argv, "qemu64,+sse,+sse2")
+        push(argv, "-m"); push(argv, "512")
+        push(argv, "-cdrom"); push(argv, image)
+        push(argv, "-boot"); push(argv, "d")
+        if not window {
+            push(argv, "-display"); push(argv, "none")
+        }
     }
+    push(argv, "-serial"); push(argv, "stdio")
+    push(argv, "-no-reboot")
+    return argv
+}
 
-    _zig_build(_OS_RUNTIME_DIR, "runtime")
+fn _os_shell_command(argv) {
+    mut parts = []
+    for tok in argv { push(parts, _quote(tok)) }
+    return join(parts, " ")
+}
 
-    if not exists(_OS_KERNEL_BIN) {
-        show red("  expected kernel artifact missing at " + _OS_KERNEL_BIN)
-        exit(1)
-    }
-    if not exists(_OS_RUNTIME_BIN) {
-        show red("  expected runtime artifact missing at " + _OS_RUNTIME_BIN)
-        exit(1)
-    }
-
-    show "  " + dim("packing ISO") + " ..."
-    _ensure_dir(_OS_DIST_DIR)
-    let b = os_image_builder({"output": _OS_ISO_PATH, "volume_id": "CLARITYOS"})
-    b.set_kernel(read_bytes(_OS_KERNEL_BIN))
-    b.set_runtime(read_bytes(_OS_RUNTIME_BIN))
-    b.build_to_file(_OS_ISO_PATH)
-
-    show ""
-    show "  " + green("Built ") + _OS_ISO_PATH
-    show ""
+-- A boot test runs QEMU in the background, watches its serial log, and
+-- stops QEMU the moment the marker appears or the time runs out. Waiting
+-- for QEMU to exit would mean waiting the whole timeout every time: the
+-- kernel halts in a wfi loop when it is done and QEMU stays up. The loop
+-- is plain sh so it needs no `timeout`, which macOS does not ship.
+fn _os_boot_test_script(cmd, log, marker, timeout_s) {
+    mut lines = []
+    push(lines, "#!/bin/sh")
+    push(lines, "rm -f " + _quote(log))
+    push(lines, cmd + " > " + _quote(log) + " 2>&1 &")
+    push(lines, "w=$!")
+    push(lines, "n=0")
+    push(lines, "while kill -0 $w 2>/dev/null; do")
+    push(lines, "  if grep -qF -- " + _quote(marker) + " " + _quote(log) + " 2>/dev/null; then kill $w; wait $w 2>/dev/null; exit 0; fi")
+    push(lines, "  n=$((n + 1))")
+    push(lines, "  if [ $n -ge " + str(timeout_s) + " ]; then kill $w; wait $w 2>/dev/null; exit 124; fi")
+    push(lines, "  sleep 1")
+    push(lines, "done")
+    push(lines, "wait $w")
+    return join(lines, "\n") + "\n"
 }
 
 fn os_cmd_run(cli_args) {
-    from "qemu.clarity" import qemu
-
+    let arch = _os_arch(cli_args)
+    let image = _os_image_path(arch)
     let no_rebuild = _has_arg(cli_args, "--no-rebuild")
-    let headless = _has_arg(cli_args, "--headless")
-    let boot_test = _arg_value(cli_args, "--boot-test")
+    let window = _has_arg(cli_args, "--window")
+    let idle_given = _arg_value(cli_args, "--idle")
+    let timeout_s = _arg_value(cli_args, "--timeout") ?? "120"
 
-    if not exists(_OS_ISO_PATH) {
+    -- --boot-test alone means the gate's marker for this architecture.
+    mut marker = null
+    if _has_arg(cli_args, "--boot-test") {
+        let given = _arg_value(cli_args, "--boot-test")
+        if given != null and not starts(given, "--") {
+            marker = given
+        } else {
+            marker = if arch == "aarch64" { _OS_ARM_MARKER } else { _OS_X86_MARKER }
+        }
+    }
+
+    if not exists(image) {
         if no_rebuild {
-            show red("  ISO not found at " + _OS_ISO_PATH + " (--no-rebuild set; refusing to build).")
+            show red("  no image at " + image + " (--no-rebuild set; not building).")
             exit(1)
         }
-        show "  " + dim("ISO not found, building first") + " ..."
+        show "  " + dim("no image at " + image + ", building first") + " ..."
         os_cmd_build(cli_args)
     }
 
-    mut opts = {"iso": _OS_ISO_PATH, "headless": headless, "serial": "stdio"}
-    if boot_test != null {
-        opts["boot_test_marker"] = boot_test
-        let tv = _arg_value(cli_args, "--timeout")
-        if tv != null { opts["timeout_seconds"] = int(tv) }
+    let qemu_bin = if arch == "aarch64" { "qemu-system-aarch64" } else { "qemu-system-x86_64" }
+    if not _tool_installed(qemu_bin) {
+        show red("  " + qemu_bin + " not on PATH. macOS: brew install qemu. Debian/Ubuntu: apt install " + (if arch == "aarch64" { "qemu-system-arm" } else { "qemu-system-x86" }))
+        exit(1)
     }
-    let r = qemu(opts)
 
-    -- Boot-test mode (CI smoke test): run headlessly, capture the serial
-    -- log, and gate on the marker line. Exit non-zero when it never
-    -- appears so a pipeline actually fails on a broken boot.
-    if boot_test != null {
+    -- A boot test wants the kernel to give up waiting for input quickly;
+    -- a person at the console gets the kernel's own default.
+    mut idle = idle_given
+    if idle == null and marker != null and arch == "aarch64" { idle = "3" }
+    let argv = _os_qemu_argv(arch, image, window and marker == null, idle)
+    let cmd = _os_shell_command(argv)
+
+    if marker != null {
+        let log = "dist/boot-test.log"
+        let script = "dist/boot-test.sh"
         show ""
-        show bold("  Boot test: ") + "expecting " + cyan(boot_test) + " on serial ..."
+        show bold("  Boot test (" + arch + "): ") + "expecting " + cyan(marker) + " on serial within " + timeout_s + " s"
+        show "  " + dim(cmd)
         show ""
-        let res = r.run()
-        show res["stdout"]
+        write(script, _os_boot_test_script(cmd, log, marker, int(timeout_s)))
+        let r = exec_full("sh " + _quote(script) + " 2>&1")
+        let serial = if exists(log) { read(log) } else { "" }
+        show serial
+        if len(trim(r.stdout)) > 0 { show r.stdout }
         show ""
-        if res["saw_marker"] {
-            show "  " + green("PASS ") + "saw marker: " + boot_test
+        if contains(serial, marker) {
+            show "  " + green("PASS ") + "saw " + marker
         } else {
-            show "  " + red("FAIL ") + "marker never appeared within the timeout: " + boot_test
+            show "  " + red("FAIL ") + "never saw " + marker + " within " + timeout_s + " s (log: " + log + ")"
             exit(1)
         }
         return null
     }
 
     show ""
-    show bold("  Booting ClarityOS") + dim(" — Ctrl+A then X to quit")
+    show bold("  Booting ClarityOS (" + arch + ")") + dim("   serial console below; Ctrl-A then X quits QEMU")
+    show "  " + dim(cmd)
     show ""
-    r.run()
+    let code = exec_tty(cmd)
+    if code != 0 {
+        show yellow("  qemu exited with status " + str(code))
+        exit(code)
+    }
 }
 
 fn os_cmd_install(cli_args) {
     show ""
     show yellow("  `clarity os install` is not yet implemented.")
     show ""
-    show "  ClarityOS USB-stick installation is tracked under \"Distribution & polish\""
-    show "  in ROADMAP_OS.md. For now, write the ISO manually:"
+    show "  Write the x86_64 ISO to a USB stick by hand:"
     show ""
     show "    " + cyan("dd if=" + _OS_ISO_PATH + " of=/dev/sdX bs=4M status=progress")
     show ""

@@ -6,7 +6,7 @@
 
 let NODE_IMPORTS = [
     {module: "fs", names: ["readFileSync", "writeFileSync", "appendFileSync", "existsSync", "readdirSync", "mkdirSync", "unlinkSync", "renameSync", "statSync"]},
-    {module: "child_process", names: ["execSync"]},
+    {module: "child_process", names: ["execSync", "spawnSync"]},
     {module: "readline", names: ["createInterface"]},
     {module: "http", names: ["createServer"]},
     {module: "path", names: ["resolve", "dirname", "basename", "extname"], aliases: {"join": "pathJoin", "sep": "sep"}},
@@ -224,6 +224,7 @@ let REGEX_SECTION = {
         {name: "regex_find", params: "pattern, str", body: "return [...str.matchAll(new RegExp(pattern, 'g'))].map(m => m[0]);"},
         {name: "regex_replace", params: "pattern, str, repl", body: "return str.replace(new RegExp(pattern, 'g'), repl);"},
         {name: "regex_split", params: "pattern, str", body: "return str.split(new RegExp(pattern));"},
+        {name: "exec_tty", params: "cmd", body: "const r = spawnSync(cmd, { shell: true, stdio: 'inherit' });\n  return r.status === null ? 1 : r.status;"},
         {name: "exec_full_regex", params: "pattern, str", body: "const re = new RegExp(pattern);\n  const m = re.exec(str);\n  if (!m) return null;\n  return { match: m[0], groups: m.slice(1), index: m.index };"}
     ]
 }

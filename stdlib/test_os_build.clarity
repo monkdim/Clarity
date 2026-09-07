@@ -3,13 +3,14 @@
 -- splash).
 --
 -- The ISO9660 packer is exercised by building a minimal image
--- (kernel stub + runtime stub + grub.cfg) and verifying the
--- magic numbers + LBA placements line up with the spec. We don't
--- pipe it through QEMU since this test runs on the host runtime.
+-- (kernel stub + grub.cfg) and verifying the magic numbers + LBA
+-- placements line up with the spec. It is a library, not what
+-- `clarity os build` writes: the image the gate boots comes from
+-- grub-mkrescue, and the OS image builder tests below check that plan.
 
 from "iso9660.clarity" import iso_builder, iso_root
 from "qemu_macos.clarity" import qemu_macos
-from "os_build.clarity" import os_image_builder
+from "os_build.clarity" import os_image_builder, aarch64_image, iso_packer, iso_packer_hint
 from "theme_aurora.clarity" import aurora, aurora_light, aurora_hc, aurora_gradient, warm_gradient, AURORA_TEAL, AURORA_VIOLET, AURORA_MAGENTA
 from "wallpapers.clarity" import wallpaper_presets, paint_preset, paint_aurora_gradient, paint_grid, paint_solid
 from "animations.clarity" import animation, tween_group, ease, EASE_OUT_CUBIC, EASE_OUT_BACK, EASE_OUT_BOUNCE, LINEAR, window_open_animation, window_close_animation
@@ -118,40 +119,73 @@ assert_eq(image[cat_off + 33], 0x00, "no emulation")
 
 -- ── OS image builder ─────────────────────────
 
-show "-- Phase 74: OS image builder --"
+show "-- OS image builder: the GRUB rescue ISO the gate boots --"
 
-let b = os_image_builder({"output": "/tmp/_clarity_test_build.iso"})
-let kbytes = []
-mut kk = 0
-while kk < 64 { push(kbytes, 0x90); kk = kk + 1 }
-b.set_kernel(kbytes)
-let rbytes = []
-mut rr = 0
-while rr < 32 { push(rbytes, 0xCC); rr = rr + 1 }
-b.set_runtime(rbytes)
-b.set_config("[init]\nhostname = \"claritos\"\n")
-b.add_app("calc", _bytes("show \"calc\""))
+-- Everything below inspects plan() and grub_cfg(); nothing here needs a
+-- kernel, GRUB or xorriso, so it runs on every CI target.
+let stage = "/tmp/_clarity_test_build"
+exec_full("rm -rf " + stage + " && mkdir -p " + stage)
+write(stage + "/kernel.elf", "not really a kernel")
 
-assert_eq(len(b.validate()), 0, "complete builder validates")
+let b = os_image_builder({"output": stage + "/claritos.iso"})
+b.set_kernel(stage + "/kernel.elf")
+b.set_runtime(stage + "/init")
+b.add_extra(stage + "/os.toml", "/etc/clarity-os.toml")
+assert_eq(len(b.validate()), 0, "builder with a kernel validates")
+assert_eq(b.staging, stage + "/iso", "staging directory sits beside the output")
 
 let plan = b.plan()
 mut found_kernel = false
 mut found_runtime = false
-mut found_config = false
+mut found_extra = false
 mut found_grub = false
-mut found_app = false
-for op in plan {
-    if op["kind"] == "file" and op["path"] == "/boot/clarity-kernel" { found_kernel = true }
-    if op["kind"] == "file" and op["path"] == "/bin/clarity-init" { found_runtime = true }
-    if op["kind"] == "file" and op["path"] == "/etc/clarity-os.toml" { found_config = true }
-    if op["kind"] == "file" and op["path"] == "/lib/clarity/apps/calc/main.clarity" { found_app = true }
-    if op["kind"] == "grub_config" { found_grub = true }
+mut pack_last = false
+mut grub_before_pack = false
+mut i = 0
+while i < len(plan) {
+    let op = plan[i]
+    if op["kind"] == "copy" and op["dst"] == stage + "/iso/boot/clarity-kernel" and op["src"] == stage + "/kernel.elf" { found_kernel = true }
+    if op["kind"] == "copy" and op["dst"] == stage + "/iso/bin/clarity-init" { found_runtime = true }
+    if op["kind"] == "copy" and op["dst"] == stage + "/iso/etc/clarity-os.toml" { found_extra = true }
+    if op["kind"] == "write" and op["path"] == stage + "/iso/boot/grub/grub.cfg" {
+        found_grub = true
+        if i < len(plan) - 1 and plan[len(plan) - 1]["kind"] == "pack" { grub_before_pack = true }
+    }
+    if i == len(plan) - 1 and op["kind"] == "pack" and op["image"] == stage + "/claritos.iso" and op["from"] == stage + "/iso" { pack_last = true }
+    i = i + 1
 }
-assert(found_kernel, "plan includes kernel")
-assert(found_runtime, "plan includes runtime")
-assert(found_config, "plan includes config")
-assert(found_grub, "plan includes grub.cfg")
-assert(found_app, "plan includes calc app")
+assert(found_kernel, "plan copies the kernel to /boot/clarity-kernel")
+assert(found_runtime, "plan copies an init binary to /bin/clarity-init when one is set")
+assert(found_extra, "plan copies extra files to their path in the image")
+assert(found_grub, "plan writes /boot/grub/grub.cfg")
+assert(grub_before_pack, "grub.cfg is written before the image is packed")
+assert(pack_last, "the last step packs the staging directory into the output")
+
+-- The pack step is grub-mkrescue with xorriso's -V for the volume id. The
+-- first run of this builder passed --volid=, which grub-mkrescue does not
+-- know and xorriso refuses; the image was never written.
+let pack_op = plan[len(plan) - 1]
+let pack_cmd = b.pack_command(pack_op)
+assert(starts(pack_cmd, "grub-mkrescue -o "), "pack runs grub-mkrescue")
+assert(contains(pack_cmd, " -V 'CLARITYOS' "), "the volume id goes to xorriso as -V")
+assert(not contains(pack_cmd, "--volid"), "no --volid, which xorriso rejects")
+assert(ends(pack_cmd, "'" + stage + "/iso'"), "the staging directory is the source")
+
+-- The GRUB config is the gate's: one entry, no wait, multiboot2.
+let cfg = b.grub_cfg()
+assert(contains(cfg, "set timeout=0"), "grub.cfg boots without waiting")
+assert(contains(cfg, "multiboot2 /boot/clarity-kernel\n"), "grub.cfg loads the kernel as multiboot2")
+assert(not contains(cfg, "installer"), "grub.cfg offers nothing that does not exist")
+let bc = os_image_builder({"output": stage + "/c.iso", "cmdline": "clarity.idle=3"})
+assert(contains(bc.grub_cfg(), "multiboot2 /boot/clarity-kernel clarity.idle=3"), "a command line rides on the multiboot2 line")
+
+-- The kernel carries its userspace: a builder with only a kernel is complete.
+let solo = os_image_builder({"output": stage + "/solo.iso"})
+solo.set_kernel(stage + "/kernel.elf")
+assert_eq(len(solo.validate()), 0, "a kernel alone validates; no separate runtime is required")
+mut solo_runtime = false
+for op in solo.plan() { if op["kind"] == "copy" and contains(op["dst"], "clarity-init") { solo_runtime = true } }
+assert(not solo_runtime, "no init binary is planned when none is set")
 
 -- Validation catches missing pieces
 let bad = os_image_builder({"output": "x"})
@@ -164,6 +198,28 @@ for e in bad_errs {
 }
 assert(saw_kernel_err, "missing kernel reported")
 assert(saw_iso_err, "non-.iso output reported")
+
+-- build() refuses before touching the disk when the kernel file is absent.
+let ghost = os_image_builder({"output": stage + "/ghost.iso"})
+ghost.set_kernel(stage + "/no-such-kernel")
+mut ghost_msg = ""
+try { ghost.build() } catch e { ghost_msg = str(e) }
+assert(contains(ghost_msg, "no kernel at"), "build() names the missing kernel")
+assert(not exists(stage + "/ghost.iso"), "build() wrote nothing for a missing kernel")
+
+-- The aarch64 side is a copy of the ARM64 Image, and says so when it is missing.
+mut arm_msg = ""
+try { aarch64_image(stage + "/missing.img", stage + "/out/claritos-aarch64.img") } catch e { arm_msg = str(e) }
+assert(contains(arm_msg, "zig build aarch64"), "aarch64_image tells you how to produce the image")
+write(stage + "/kernel.img", "ARM64 image bytes")
+let arm_out = aarch64_image(stage + "/kernel.img", stage + "/out/claritos-aarch64.img")
+assert_eq(arm_out, stage + "/out/claritos-aarch64.img", "aarch64_image returns the output path")
+assert_eq(read(stage + "/out/claritos-aarch64.img"), "ARM64 image bytes", "aarch64_image copies the image")
+
+-- iso_packer reports what this host can do and never throws.
+let packer = iso_packer()
+assert(packer == null or packer == "grub-mkrescue", "iso_packer is null or grub-mkrescue")
+assert(contains(iso_packer_hint(), "apt install"), "the hint says how to get the tools")
 
 -- ── macOS QEMU launcher ──────────────────────
 

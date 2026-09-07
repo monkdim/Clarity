@@ -5,7 +5,7 @@
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, renameSync, statSync } from 'fs';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { createInterface } from 'readline';
 import { createServer } from 'http';
 import { resolve, dirname, basename, extname, join as pathJoin, sep } from 'path';
@@ -578,6 +578,17 @@ export function regex_search(pattern, str) { return new RegExp(pattern).test(str
 export function regex_find(pattern, str) { return [...str.matchAll(new RegExp(pattern, 'g'))].map(m => m[0]); }
 export function regex_replace(pattern, str, repl) { return str.replace(new RegExp(pattern, 'g'), repl); }
 export function regex_split(pattern, str) { return str.split(new RegExp(pattern)); }
+// Run a command with this process's terminal as its stdin, stdout and
+// stderr, and return its exit status. exec and exec_full capture output
+// and feed no input, which is right for `ls` and wrong for QEMU with a
+// serial console on stdio: `clarity os run` went through exec_full and
+// showed nothing until QEMU exited. This is the one builtin for programs
+// a person interacts with.
+export function exec_tty(cmd) {
+  const r = spawnSync(cmd, { shell: true, stdio: 'inherit' });
+  return r.status === null ? 1 : r.status;
+}
+
 export function exec_full_regex(pattern, str) {
   const re = new RegExp(pattern);
   const m = re.exec(str);

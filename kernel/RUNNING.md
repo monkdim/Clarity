@@ -26,6 +26,16 @@ zig build run            # x86-64: builds a GRUB ISO, boots it, serial on stdout
 zig build run-aarch64    # aarch64: boots the image, opens a window with the screen
 ```
 
+Or from the repository root with a `clarity` binary, which does the same
+thing for whichever architecture the machine is (`--arch` overrides):
+
+```sh
+clarity os build                 # dist/claritos.iso or dist/claritos-aarch64.img
+clarity os run                   # serial console in this terminal; Ctrl-A then X quits
+clarity os run --window          # the framebuffer and keyboard as well
+clarity os run --boot-test       # headless; passes when the CI gate's marker appears
+```
+
 The x86 one goes through `tools/run_x86.sh` because QEMU's `-kernel` cannot
 load a multiboot2 image; the script builds the same rescue ISO the boot gate
 builds, so `zig build run` and CI boot the kernel identically. It needs
