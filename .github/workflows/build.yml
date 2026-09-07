@@ -172,7 +172,8 @@ jobs:
             echo "Or with Homebrew:" >> $GITHUB_OUTPUT
             echo "" >> $GITHUB_OUTPUT
             echo '```bash' >> $GITHUB_OUTPUT
-            echo "brew install monkdim/tap/clarity" >> $GITHUB_OUTPUT
+            echo "brew tap monkdim/clarity https://github.com/monkdim/Clarity" >> $GITHUB_OUTPUT
+            echo "brew install monkdim/clarity/clarity" >> $GITHUB_OUTPUT
             echo '```' >> $GITHUB_OUTPUT
             echo "$EOF" >> $GITHUB_OUTPUT
           fi

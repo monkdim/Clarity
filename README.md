@@ -18,9 +18,9 @@ Clarity is what Python wishes it could be. It reads like English, runs like Java
 
 - **Readable by default.** Immutable variables, named arguments, pattern matching, `|>` pipes that make data flow visible at a glance, `show "Hello {name}"` interpolation, `--` line comments. No semicolons, no type-juggling ceremony, no clever-but-cryptic operators.
 - **Powerful where it counts.** Classes with inheritance and interfaces, async / await, generators, decorators, comprehensions, destructuring, null coalescing, optional chaining, pattern matching.
-- **Self-hosted.** The lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, language server, transpiler and shell are all written in Clarity. **64 test files, about 3,500 assertions, all in Clarity**, run in CI on macOS ARM64, Linux x64 and Linux ARM64. One honest caveat: rebuilding the toolchain with the self-hosted compiler alone still depends on the Python bootstrap for twelve modules, because the two bundlers keep separate hard-coded module lists. That is tracked in [GAPS.md](GAPS.md).
+- **Self-hosted.** The lexer, parser, interpreter, bytecode VM, type checker, linter, formatter, debugger, profiler, doc generator, package manager, language server, transpiler and shell are all written in Clarity. **64 test files, about 3,500 assertions, all in Clarity**, run in CI on macOS ARM64, Linux x64 and Linux ARM64. The self-hosted compiler rebuilds the toolchain alone: CI bundles it with the Python bootstrap, rebuilds it with the result, rebuilds it again with that, and checks the third build matches the second.
 - **Compiles to native.** `clarity cc program.clarity` compiles Clarity to C and then to a real native binary with no Bun and no VM. It covers the scalar core, collections, classes, closures, a GC, strings, files, processes, math, JSON, bytes and bitwise operations, native FFI, live-process memory, hooking, a binary-format DSL and disassembly through libcapstone. It compiles one file at a time today; imports are not yet resolved natively.
-- **Ships as a single binary.** Clarity transpiles to JavaScript and Bun compiles the bundle to a native executable for macOS and Linux, x64 and ARM64. The toolchain needs nothing installed on the target machine. Programs that import standard-library modules still need the `stdlib/` sources on disk beside them; embedding the library in the binary is on the list.
+- **Ships as a single binary.** Clarity transpiles to JavaScript and Bun compiles the bundle to a native executable for macOS and Linux, x64 and ARM64, and for Windows x64. The binary carries the standard library as source, so a program can import it from any directory. Nothing else is needed on the target machine.
 - **Batteries included.** `clarity debug`, `clarity profile`, `clarity fmt`, `clarity lint`, `clarity test`, `clarity doc`, `clarity lsp`, `clarity cc`, `clarity install <pkg>`.
 
 ### KyanOS, the operating system
@@ -49,7 +49,7 @@ That is the bet: **a programming language good enough to write its own operating
 
 | | Clarity | KyanOS |
 |---|---|---|
-| **Status** | v1.0.0. Builds and runs from source. Release binaries are not yet attached to a release, so `install.sh` and Homebrew do not work until they are. | Experimental. Two kernels boot and run programs under QEMU on every commit. The desktop runs hosted and in the browser; boot-to-desktop on the kernels is not yet built. |
+| **Status** | v1.0.1. Binaries for macOS (ARM64, x64), Linux (x64, ARM64) and Windows (x64) are attached to the release, built by CI and smoke-tested on macOS ARM64, Linux x64 and Linux ARM64; `install.sh` and the Homebrew formula install them. | Experimental. Two kernels boot and run programs under QEMU on every commit. The desktop runs hosted and in the browser; boot-to-desktop on the kernels is not yet built. |
 | **Lines of code** | 68,004 lines of Clarity in `stdlib/` (52,489 outside tests), plus a 3,127-line Python bootstrap transpiler | about 13,500 lines of Zig and assembly across two architectures |
 | **Tests** | 64 test files, about 3,500 assertions, `clarity test stdlib/` on three targets | 16 boot markers on x86_64 (three boots), 32 on aarch64 (three machine sizes), plus screenshot, keyboard and serial checks |
 | **Boot time** | | 24 s to the end of an untouched aarch64 boot under TCG on a workstation; targets are goals, not measurements |
@@ -61,7 +61,22 @@ Every module and kernel file, with who imports it and which bundler ships it, is
 
 ## Try Clarity
 
-Until a release with binaries is published, build from source. You need [Bun](https://bun.sh) and Python 3 for the bootstrap.
+One line on macOS or Linux, x64 or ARM64:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash
+```
+
+Or with Homebrew, from the formula in this repository:
+
+```bash
+brew tap monkdim/clarity https://github.com/monkdim/Clarity
+brew install monkdim/clarity/clarity
+```
+
+Or download a binary from the [latest release](https://github.com/monkdim/Clarity/releases/latest). Then `clarity version` prints the version, `clarity smoke` runs 28 checks against the installed binary from any directory, and `clarity run hello.clarity` runs a program.
+
+To build from source instead, you need [Bun](https://bun.sh) and Python 3 for the bootstrap.
 
 ```bash
 git clone https://github.com/monkdim/Clarity.git
@@ -73,7 +88,6 @@ python3 native/transpile.py --bundle
 
 From here, `clarity shell` drops you into the interactive shell, `clarity help` lists every command, and `examples/` has seventeen programs covering classes, async, patterns, file I/O, FFI and the reverse-engineering toolkit. Run the suite with `./native/dist/clarity test stdlib/`.
 
-Once a release carries binaries, `curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash` is the one-line install.
 
 ## Try KyanOS (experimental)
 

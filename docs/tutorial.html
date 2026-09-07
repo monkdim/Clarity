@@ -87,12 +87,13 @@ pre code { background: none; padding: 0; }
 curl -fsSL https://raw.githubusercontent.com/monkdim/Clarity/main/install.sh | bash
 
 # Or with Homebrew
-brew install monkdim/tap/clarity
+brew tap monkdim/clarity https://github.com/monkdim/Clarity
+brew install monkdim/clarity/clarity
 
 # Verify it works
 clarity version
 </code></pre>
-<p>You should see <code>1.0.0</code>. You're ready to go.</p>
+<p>You should see <code>Clarity v1.0.1</code>. You're ready to go.</p>
 
 <h2 id="hello">2. Hello World</h2>
 <p>Create a file called <code>hello.clarity</code>:</p>
