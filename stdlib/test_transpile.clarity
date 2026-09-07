@@ -84,6 +84,47 @@ assert_contains("backslash is not double-escaped by the control-char pass",
 show ""
 show "═══════════════════════════════════════"
 show "Results: {passed}/{total} passed, {failed} failed"
+-- ── A node the emitter has no case for ────────────────────
+--
+-- The fallback used to write `/* TODO: <node> */` into the output: a
+-- statement the emitter did not know silently vanished from the generated
+-- JavaScript, leaving a comment as the only trace. Nothing in the standard
+-- library hits it (measured over all 158 modules), so it is a hole that
+-- only ever appears when a new syntax node lands, which is exactly when a
+-- silent drop is most expensive.
+from "transpile.clarity" import JSEmitter
+
+total += 1
+mut stmt_msg = "no throw"
+try {
+    let e = JSEmitter("<test>", null)
+    e.emit_stmt({"node_type": "MadeUpStatement", "line": 7})
+} catch err { stmt_msg = str(err) }
+if contains(stmt_msg, "MadeUpStatement") and contains(stmt_msg, "line 7") {
+    show "  [pass] an unknown statement node throws and names itself"
+    passed += 1
+} else {
+    show "  [FAIL] unknown statement node: {stmt_msg}"
+    failed += 1
+}
+
+total += 1
+mut expr_msg = "no throw"
+try {
+    let e2 = JSEmitter("<test>", null)
+    e2.emit_expr({"node_type": "MadeUpExpression", "line": 9})
+} catch err2 { expr_msg = str(err2) }
+if contains(expr_msg, "MadeUpExpression") and contains(expr_msg, "line 9") {
+    show "  [pass] an unknown expression node throws and names itself"
+    passed += 1
+} else {
+    show "  [FAIL] unknown expression node: {expr_msg}"
+    failed += 1
+}
+
+-- And a comment is never what comes out instead.
+assert_absent("no TODO comment for a real program", "let x = 1\nshow x", "TODO")
+
 if failed == 0 {
     show "All transpiler tests passed!"
 } else {

@@ -206,6 +206,13 @@ fn run_smoke_tests() {
     show "  " + _bold("-- fmt --")
     let tmp_fmt = "/tmp/smoke_fmt_" + str(time()) + ".clarity"
     write(tmp_fmt, "let x = 42\nshow x")
+    -- A file fmt cannot format is a failure. It used to be printed and then
+    -- forgotten: `fmt --check` over a directory holding a broken file said
+    -- "all files formatted correctly" and exited 0, so CI passed.
+    let bad_fmt = "/tmp/smoke_badfmt_" + str(time()) + ".clarity"
+    write(bad_fmt, "let x = \n")
+    check_exit("fmt fails on a file it cannot format", clarity + " fmt " + _quote(bad_fmt) + " --check", 1)
+    exec("rm -f " + _quote(bad_fmt))
     check_cmd("fmt check", clarity + " fmt " + tmp_fmt + " --check", "file(s)")
     exec("rm -f " + _quote(tmp_fmt))
 

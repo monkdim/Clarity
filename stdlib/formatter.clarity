@@ -142,7 +142,9 @@ class Formatter {
         if nt == "ExpressionStatement" { return this.indent() + this.fmt_expr(node.expression) }
         if nt == "Block" { return this.fmt_block(node) }
 
-        return this.indent() + "-- TODO: " + nt
+        -- Worse here than in the transpiler: `fmt --write` would replace the
+        -- statement with this comment in the user's own source file.
+        throw "FormatError: no case for node " + nt + " (line " + str(node.line ?? 0) + "). The formatter needs one; a comment in its place would replace this code."
     }
 
     fn fmt_let(node) {

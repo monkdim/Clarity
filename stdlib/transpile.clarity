@@ -238,7 +238,11 @@ class JSEmitter {
         elif nt == "EnumStatement" { result = this.stmt_EnumStatement(node) }
         elif nt == "DecoratedStatement" { result = this.stmt_DecoratedStatement(node) }
         elif nt == "Block" { result = this._emit_block_body(node) }
-        else { result = this._indent() + "/* TODO: " + nt + " */" }
+        -- A node this emitter has no case for is a hole in the emitter, not
+        -- something to paper over: writing a comment in its place produced
+        -- JavaScript that was missing the statement and said so only in a
+        -- comment nobody reads. The bytecode compiler has always thrown here.
+        else { throw "TranspileError: no case for statement node " + nt + " (line " + str(node.line ?? 0) + "). The emitter needs one; a comment in its place would silently drop this code." }
 
         -- Emit source location comment for debuggable stack traces
         let line = node.line
@@ -530,7 +534,7 @@ class JSEmitter {
         elif nt == "MapComprehensionExpression" { return this.expr_MapComprehensionExpression(node) }
         elif nt == "AwaitExpression" { return "(await " + this.emit_expr(node.value) + ")" }
         elif nt == "YieldExpression" { return this.expr_YieldExpression(node) }
-        else { return "/* TODO expr: " + nt + " */" }
+        else { throw "TranspileError: no case for expression node " + nt + " (line " + str(node.line ?? 0) + "). The emitter needs one; a comment in its place would silently drop this code." }
     }
 
     -- ── Expression handlers ─────────────────────────────

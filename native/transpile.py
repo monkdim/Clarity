@@ -22,6 +22,12 @@ from parser import parse
 import ast_nodes as ast
 
 
+class TranspileError(Exception):
+    """A node the emitter has no case for. Raised rather than emitted as a
+    comment: generated JavaScript that quietly omits a statement is worse
+    than a build that stops and names the node."""
+
+
 class JSEmitter:
     """Transpiles a Clarity AST to JavaScript source code."""
 
@@ -153,7 +159,12 @@ class JSEmitter:
         name = node.__class__.__name__
         method = getattr(self, f'emit_{name}', None)
         if method is None:
-            return f'{self._indent()}/* TODO: {name} */'
+            # See stdlib/transpile.clarity: a missing case is a hole in the
+            # emitter, and a comment in its place silently drops the code.
+            line = getattr(node, 'line', 0) or 0
+            raise TranspileError(
+                f'no case for statement node {name} (line {line}). The emitter '
+                f'needs one; a comment in its place would silently drop this code.')
         result = method(node)
         # Emit source location comment for debuggable stack traces
         line = getattr(node, 'line', None)
@@ -377,7 +388,10 @@ class JSEmitter:
         name = node.__class__.__name__
         method = getattr(self, f'expr_{name}', None)
         if method is None:
-            return f'/* TODO expr: {name} */'
+            line = getattr(node, 'line', 0) or 0
+            raise TranspileError(
+                f'no case for expression node {name} (line {line}). The emitter '
+                f'needs one; a comment in its place would silently drop this code.')
         return method(node)
 
     def expr_NumberLiteral(self, node):
