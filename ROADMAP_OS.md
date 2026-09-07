@@ -234,23 +234,20 @@ a bigger surface than the one measured here and pins the ABI to Linux's.
   allocates from a thread today (every spawn happens on the boot path, where
   preemption is a no-op), so it is not reachable — but it is the next lock
   that has to exist, before anything that allocates runs as a thread.
-- **User pointers are not validated — on x86_64.** `sys_write` in
-  `syscall/dispatch.zig` takes an address from userspace and reads it in
-  kernel mode without checking that it is mapped, user-owned, or canonical.
-  A bad pointer faults inside the kernel. This is fine for a program the
-  kernel wrote itself and unacceptable for anything else.
-
-  **aarch64 already does this correctly, and is the model to copy.** A user
-  pointer there is translated through the process's own page tables (`at
-  s1e0r` / `at s1e0w`) and read or written through the kernel's direct map,
-  page by page; a page the process cannot reach is an `EFAULT` the hardware
-  reported, not a fault the kernel took. `read(2)` translates *for writing*,
-  so a buffer in the program's own read-only text is refused — checked by the
-  init program passing one deliberately. And Privileged Access Never is
-  enabled where the CPU has it, so the rule is enforced by hardware rather
-  than followed by convention; the boot gate runs a PAN-capable CPU as well
-  as one without, because on the one without, doing it the wrong way also
-  works.
+- **User pointers are validated on both architectures now.** x86_64 had
+  none of it: `sys_read`, `sys_write` and `sys_open` cast the argument to a
+  pointer and used it, so a bad one was a page fault in ring 0. x86 has no
+  `at s1e0r`, so `mm/uaccess.zig` walks the page tables the MMU would walk,
+  from the loaded CR3, with the CPU's own rule (present and user at every
+  level, writable at every level for a write, a huge page ending the walk),
+  and every copy goes through the direct map of the frame, page by page.
+  `read(2)` checks its whole destination for writing before it reads the
+  file, so the program's own text as a target is refused and the file is not
+  consumed. SMEP and SMAP are turned on where the CPU has them and the boot
+  gate runs `-cpu max` as well as `qemu64`, for the same reason the aarch64
+  job runs PAN: on the CPU without it, doing it the wrong way also works.
+  What is still open is what happens to a process that faults on its own:
+  the page-fault handler halts the machine on both architectures.
 - **AHCI and virtio-net are skeletons.** Both scan PCI correctly, but
   `attach`/`send_frame`/`recv_frame` are `NotImplemented`. PCI enumeration
   itself is real.
