@@ -162,7 +162,12 @@ class CodeObject {
 class Compiler {
     fn init() {
         this.code = CodeObject(null)
-        this.loop_stack = []   -- [{start: int, break_patches: [int]}]
+        this.loop_stack = []   -- [{start, break_patches, try_base}]
+        -- The try regions this point is inside, innermost last, each with
+        -- its finally body or null. Leaving one early — by return, break or
+        -- continue — has to run its finally and drop its handler, which is
+        -- what the interpreter does as the signal unwinds through it.
+        this.open_tries = []
     }
 
     fn compile(program) {
@@ -372,6 +377,16 @@ class Compiler {
     }
 
     fn _compile_function(name, params, body) {
+        -- A function compiled inside a try must not inherit it: a return in
+        -- there leaves the inner function, not the try around its text.
+        let saved_tries = this.open_tries
+        this.open_tries = []
+        let result = this._compile_function_body(name, params, body)
+        this.open_tries = saved_tries
+        return result
+    }
+
+    fn _compile_function_body(name, params, body) {
         let fn_compiler = Compiler()
         fn_compiler.code = CodeObject(name ?? "<lambda>")
         mut i = 0
@@ -387,12 +402,29 @@ class Compiler {
         this.code.emit(OP_MAKE_FN, fn_code_idx, line)
     }
 
+    -- Leave every open try region down to `base`, innermost first: drop its
+    -- handler, then run its finally. A jump out of a try that skipped the
+    -- handler left it registered on a frame that had moved on, and the next
+    -- error in that frame jumped to a catch block in code that was no longer
+    -- running.
+    fn _unwind_tries(base) {
+        mut ti = len(this.open_tries) - 1
+        while ti >= base {
+            this.code.emit(OP_POP_TRY, 0, 0)
+            let fin = this.open_tries[ti]["finally"]
+            if fin != null { this.compile_block(fin) }
+            ti -= 1
+        }
+    }
+
     fn compile_ReturnStatement(node) {
         if node.value != null {
             this.compile_node(node.value)
         } else {
             this.code.emit(OP_NULL)
         }
+        -- The value stays on the stack across the finally bodies.
+        this._unwind_tries(0)
         let line = node.line ?? 0
         this.code.emit(OP_RETURN, 0, line)
     }
@@ -451,7 +483,7 @@ class Compiler {
     fn compile_WhileStatement(node) {
         let line = node.line ?? 0
         let loop_start = len(this.code.instructions)
-        push(this.loop_stack, {"start": loop_start, "break_patches": []})
+        push(this.loop_stack, {"start": loop_start, "break_patches": [], "try_base": len(this.open_tries)})
 
         this.compile_node(node.condition)
         let jump_false = this.code.emit(OP_JUMP_FALSE, 0, line)
@@ -472,7 +504,7 @@ class Compiler {
         this.compile_node(node.iterable)
         this.code.emit(OP_ITER_INIT, 0, line)
         let loop_start = len(this.code.instructions)
-        push(this.loop_stack, {"start": loop_start, "break_patches": []})
+        push(this.loop_stack, {"start": loop_start, "break_patches": [], "try_base": len(this.open_tries)})
 
         -- ITER_NEXT peeks the iterator (it does not pop it), so the iterator
         -- must stay on the stack across iterations WITHOUT an extra DUP — a
@@ -484,20 +516,26 @@ class Compiler {
         this.compile_block(node.body)
         this.code.emit(OP_JUMP, loop_start)
         this.code.patch_jump(jump_end)
-        this.code.emit(OP_POP)   -- pop iterator
 
+        -- Both ways out of the loop land on the POP that removes the
+        -- iterator. The break jumps used to be patched *after* it was
+        -- emitted, so a break left its iterator on the stack; in a nested
+        -- loop the leaked inner iterator then stood where the outer loop's
+        -- was, and the outer loop repeated its last value forever.
         let loop_ctx = pop(this.loop_stack)
         mut bi = 0
         while bi < len(loop_ctx["break_patches"]) {
             this.code.patch_jump(loop_ctx["break_patches"][bi])
             bi += 1
         }
+        this.code.emit(OP_POP)   -- pop iterator
     }
 
     fn compile_BreakStatement(node) {
         let line = node.line ?? 0
         if len(this.loop_stack) > 0 {
             let loop_ctx = this.loop_stack[len(this.loop_stack) - 1]
+            this._unwind_tries(loop_ctx["try_base"])
             let patch_idx = this.code.emit(OP_JUMP, 0, line)
             push(loop_ctx["break_patches"], patch_idx)
         }
@@ -507,15 +545,27 @@ class Compiler {
         let line = node.line ?? 0
         if len(this.loop_stack) > 0 {
             let loop_ctx = this.loop_stack[len(this.loop_stack) - 1]
+            this._unwind_tries(loop_ctx["try_base"])
             this.code.emit(OP_JUMP, loop_ctx["start"], line)
         }
     }
 
+    -- A `finally` block runs whichever way the try is left. The VM did not
+    -- compile node.finally_body at all, so `try { show "a" } catch e {}
+    -- finally { show "b" }` printed both lines under the interpreter and
+    -- only "a" under `run --fast`. It is emitted on every way out: the
+    -- normal path, the catch path, a catch that throws (through a guard
+    -- handler that runs it and rethrows), and a return, break or continue
+    -- that leaves the region early (see _unwind_tries). The parser requires
+    -- a catch, so there is no try/finally an error passes straight through.
     fn compile_TryCatch(node) {
         let line = node.line ?? 0
         let try_start = this.code.emit(OP_SETUP_TRY, 0, line)
+        push(this.open_tries, {"finally": node.finally_body})
         this.compile_block(node.try_body)
+        pop(this.open_tries)
         this.code.emit(OP_POP_TRY, 0, line)
+        if node.finally_body != null { this.compile_block(node.finally_body) }
         let jump_end = this.code.emit(OP_JUMP, 0)
         -- Patch try handler to point here (catch block)
         this.code.patch_jump(try_start)
@@ -526,8 +576,29 @@ class Compiler {
         } else {
             this.code.emit(OP_POP, 0, line)
         }
+        -- A catch block that throws must still run the finally on its way
+        -- out, so the catch body gets a handler of its own whose only job is
+        -- to run the finally and rethrow. Without it `try { throw "a" }
+        -- catch e { throw "b" } finally { show "fin" }` skipped the finally
+        -- under the VM and ran it under the interpreter.
+        if node.finally_body == null {
+            this.compile_block(node.catch_body)
+            this.code.patch_jump(jump_end)
+            return null
+        }
+
+        let catch_guard = this.code.emit(OP_SETUP_TRY, 0, line)
+        push(this.open_tries, {"finally": node.finally_body})
         this.compile_block(node.catch_body)
+        pop(this.open_tries)
+        this.code.emit(OP_POP_TRY, 0, line)
+        this.compile_block(node.finally_body)
+        let jump_end2 = this.code.emit(OP_JUMP, 0)
+        this.code.patch_jump(catch_guard)
+        this.compile_block(node.finally_body)
+        this.code.emit(OP_THROW, 0, line)
         this.code.patch_jump(jump_end)
+        this.code.patch_jump(jump_end2)
     }
 
     fn compile_ThrowStatement(node) {
@@ -721,10 +792,82 @@ class Compiler {
         this.code.emit(OP_CONST, idx, line)
     }
 
+    -- A string with {expr} in it is compiled into the pieces and the
+    -- expressions, joined with ADD (which converts through the same display
+    -- rules the interpreter uses). The VM used to push the text as one
+    -- constant, so every interpolation in the language's headline feature
+    -- printed its own braces under `run --fast`: `show "n is {n}"` gave
+    -- `n is {n}`.
+    --
+    -- `{` begins an interpolation only when what follows starts with a
+    -- letter or underscore, which is the heuristic the interpreter and the
+    -- transpiler both use, so `"if x { 1 }"` stays literal in all three.
     fn compile_StringLiteral(node) {
-        let idx = this.code.add_const(node.value)
         let line = node.line ?? 0
-        this.code.emit(OP_CONST, idx, line)
+        mut raw = false
+        try { raw = node.raw ?? false } catch e { raw = false }
+        if raw or not _has_interpolation(node.value) {
+            this.code.emit(OP_CONST, this.code.add_const(node.value), line)
+            return null
+        }
+
+        let text = node.value
+        let text_len = len(text)
+        mut literal = ""
+        mut emitted = false
+        mut i = 0
+        while i < text_len {
+            let ch = char_at(text, i)
+            if ch == "{" and i + 1 < text_len and (is_alpha(char_at(text, i + 1)) or char_at(text, i + 1) == "_") {
+                mut j = i + 1
+                mut depth = 1
+                while j < text_len and depth > 0 {
+                    if char_at(text, j) == "{" { depth += 1 }
+                    if char_at(text, j) == "}" { depth -= 1 }
+                    if depth > 0 { j += 1 }
+                }
+                if depth != 0 {
+                    literal = literal + ch
+                    i += 1
+                    continue
+                }
+                let expr_str = substring(text, i + 1, j)
+                mut expr_node = null
+                mut parsed = false
+                -- An expression that does not parse stays literal, which is
+                -- what the interpreter does with it. One that parses to
+                -- nothing at all contributes nothing, also as there.
+                try {
+                    let tree = parse(tokenize(expr_str, "<interp>"), expr_str)
+                    parsed = true
+                    if len(tree.body) > 0 { expr_node = tree.body[0].expression }
+                } catch e_parse { parsed = false }
+                if not parsed {
+                    literal = literal + "{" + expr_str + "}"
+                    i = j + 1
+                    continue
+                }
+                if expr_node == null {
+                    i = j + 1
+                    continue
+                }
+                this.code.emit(OP_CONST, this.code.add_const(literal), line)
+                if emitted { this.code.emit(OP_ADD, 0, line) }
+                literal = ""
+                emitted = true
+                this.compile_node(expr_node)
+                this.code.emit(OP_ADD, 0, line)
+                i = j + 1
+            } else {
+                literal = literal + ch
+                i += 1
+            }
+        }
+        if len(literal) > 0 or not emitted {
+            this.code.emit(OP_CONST, this.code.add_const(literal), line)
+            if emitted { this.code.emit(OP_ADD, 0, line) }
+        }
+        return null
     }
 
     fn compile_BoolLiteral(node) {
@@ -1449,13 +1592,16 @@ class VM {
         let frame = VMFrame(method.code, len(this.stack))
         frame.locals["this"] = instance
         this._bind_params(frame, method.params, call_args)
+        let try_depth = len(this.try_stack)
         push(this.frames, frame)
         try {
             let result = this._execute_frame()
             pop(this.frames)
+            this._drop_handlers(try_depth)
             return result
         } catch err {
             pop(this.frames)
+            this._drop_handlers(try_depth)
             throw err
         }
     }
@@ -1464,13 +1610,16 @@ class VM {
         let frame = VMFrame(f.code, len(this.stack))
         frame.closure = f.closure
         this._bind_params(frame, f.params, call_args)
+        let try_depth = len(this.try_stack)
         push(this.frames, frame)
         try {
             let result = this._execute_frame()
             pop(this.frames)
+            this._drop_handlers(try_depth)
             return result
         } catch err {
             pop(this.frames)
+            this._drop_handlers(try_depth)
             throw err
         }
     }
@@ -1484,14 +1633,27 @@ class VM {
             frame.locals[k] = this.globals[k]
             i += 1
         }
+        let try_depth = len(this.try_stack)
         push(this.frames, frame)
         try {
             let result = this._execute_frame()
             pop(this.frames)
+            this._drop_handlers(try_depth)
             return result
         } catch err {
             pop(this.frames)
+            this._drop_handlers(try_depth)
             throw err
+        }
+    }
+
+    -- A handler cannot outlive the call that registered it. Handlers are
+    -- matched by frame index, so one left behind by a returning frame was
+    -- picked up by the next call at the same depth, which then jumped to a
+    -- catch block belonging to a different function.
+    fn _drop_handlers(depth) {
+        while len(this.try_stack) > depth {
+            pop(this.try_stack)
         }
     }
 
@@ -1783,8 +1945,19 @@ class VM {
                 let obj = pop(this.stack)
                 let t = type(obj)
                 if t == "VMInstance" {
-                    let val = obj.get_prop(prop)
-                    push(this.stack, val)
+                    -- A property explicitly set to null is still present and
+                    -- must read back as null; a name that is neither a
+                    -- property nor a method is an error, as in the
+                    -- interpreter, which names the class and the property.
+                    if has(obj.properties, prop) {
+                        push(this.stack, obj.properties[prop])
+                    } else {
+                        let val = obj.get_prop(prop)
+                        if val == null {
+                            throw "RuntimeError: {obj.klass.name} has no property '{prop}'"
+                        }
+                        push(this.stack, val)
+                    }
                 } elif t == "map" {
                     if has(obj, prop) { push(this.stack, obj[prop]) }
                     else { push(this.stack, null) }
@@ -2245,6 +2418,20 @@ fn _bc_repr(value) {
 }
 
 -- ── Public API ───────────────────────────────────────────
+
+-- True when a string carries at least one {expr} the language would
+-- interpolate. Same heuristic as the interpreter and the transpiler.
+fn _has_interpolation(text) {
+    let n = len(text)
+    mut i = 0
+    while i < n - 1 {
+        if char_at(text, i) == "{" and (is_alpha(char_at(text, i + 1)) or char_at(text, i + 1) == "_") {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
 
 fn _bc_basename(path) {
     mut i = len(path) - 1
