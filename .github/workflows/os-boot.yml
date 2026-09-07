@@ -187,6 +187,7 @@ jobs:
             grep -q "\[ok\] preemption" "serial-$attempt.log" || missing="$missing preemption"
             grep -q "\[ok\] fpu switch" "serial-$attempt.log" || missing="$missing fpu-switch"
             grep -q "\[ok\] vfs" "serial-$attempt.log" || missing="$missing vfs"
+            grep -q "\[ok\] vfs: readdir packed" "serial-$attempt.log" || missing="$missing vfs-readdir"
             grep -q "hello from /bin/clarity-init" "serial-$attempt.log" || missing="$missing init-process"
             grep -q "\[ok\] user .bss zeroed" "serial-$attempt.log" || missing="$missing user-bss"
             grep -q "\[ok\] user heap" "serial-$attempt.log" || missing="$missing user-heap"
@@ -444,6 +445,7 @@ jobs:
              && grep -q "\[ok\] keyboard: interrupt .* routed to this core" serial-arm.log \
              && grep -q "\[ok\] command line: read 3 seconds idle (asked for)" serial-arm.log \
              && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm.log \
+             && grep -q "\[ok\] vfs: readdir packed" serial-arm.log \
              && grep -q "\[ok\] console input:" serial-arm.log \
              && grep -q "init: nothing typed, end of input" serial-arm.log \
              && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm.log \
@@ -493,6 +495,7 @@ jobs:
              && grep -q "\[ok\] keyboard: interrupt .* routed to this core" serial-arm-pan.log \
              && grep -q "\[ok\] command line: read 3 seconds idle (asked for)" serial-arm-pan.log \
              && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm-pan.log \
+             && grep -q "\[ok\] vfs: readdir packed" serial-arm-pan.log \
              && grep -q "\[ok\] console input:" serial-arm-pan.log \
              && grep -q "init: nothing typed, end of input" serial-arm-pan.log \
              && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm-pan.log \
@@ -539,6 +542,7 @@ jobs:
              && grep -q "\[ok\] keyboard: interrupt .* routed to this core" serial-arm-4g.log \
              && grep -q "\[ok\] command line: read 3 seconds idle (asked for)" serial-arm-4g.log \
              && grep -q "\[ok\] vfs: path resolve, create, write, read back" serial-arm-4g.log \
+             && grep -q "\[ok\] vfs: readdir packed" serial-arm-4g.log \
              && grep -q "\[ok\] console input:" serial-arm-4g.log \
              && grep -q "init: nothing typed, end of input" serial-arm-4g.log \
              && grep -q "\[--\] shell: no keyboard\|\[ok\] shell: ran at EL0" serial-arm-4g.log \

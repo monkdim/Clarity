@@ -43,6 +43,7 @@ const NR_WRITE: u64 = 1;
 const NR_OPEN: u64 = 2;
 const NR_CLOSE: u64 = 3;
 const NR_EXIT: u64 = 12;
+const NR_READDIR: u64 = 34;
 
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
     return asm volatile ("svc #0"
@@ -88,6 +89,10 @@ fn close(fd: u64) void {
 
 fn read_fd(fd: u64, buf: []u8) i64 {
     return syscall3(NR_READ, fd, @intFromPtr(buf.ptr), buf.len);
+}
+
+fn readdir_fd(fd: u64, buf: []u8) i64 {
+    return syscall3(NR_READDIR, fd, @intFromPtr(buf.ptr), buf.len);
 }
 
 fn exit(code: u64) noreturn {
@@ -140,12 +145,11 @@ fn help() void {
         \\  echo TEXT     write TEXT back
         \\  count TEXT    how many characters TEXT is
         \\  cat PATH      write out a file
+        \\  ls [PATH]     list a directory, / if none is named
         \\  exit [N]      leave, with status N
         \\
-        \\There is no ls yet: listing a directory needs a system call that
-        \\does not exist, and cat only needed open and read. There is no way
-        \\to run a program either: nothing can exec. Both are why this list
-        \\is short rather than an oversight.
+        \\There is still no way to run a program: nothing can exec. That is
+        \\why this list is short rather than an oversight.
         \\
     );
 }
@@ -196,6 +200,94 @@ fn cat(path_text: []const u8) void {
     if (total > 0 and last != '\n') write("\n");
 }
 
+/// The record readdir(2) writes, from kernel/fs/vfs.zig. Read field by field
+/// rather than as a struct: the buffer is a byte array a syscall filled, and
+/// nothing guarantees the compiler's idea of the layout matches the kernel's.
+/// The record length is what the walk steps by, so a record this shell does
+/// not understand is skipped rather than fatal.
+const DIRENT_HEADER: usize = 12;
+const FILE_TYPE_DIRECTORY: u8 = 2;
+
+fn read_u16(buf: []const u8, off: usize) u16 {
+    return @as(u16, buf[off]) | (@as(u16, buf[off + 1]) << 8);
+}
+
+/// ls, now that there is a call that returns names.
+///
+/// One `readdir` returns as many whole entries as fit in the buffer and no
+/// partial one, so the loop is the same shape `cat`'s is: ask again until it
+/// answers zero. A directory bigger than one bufferful is the ordinary case
+/// this handles, not an edge one.
+fn ls(path_text: []const u8) void {
+    var path: [96:0]u8 = undefined;
+    const wanted = if (path_text.len == 0) "/" else path_text;
+    if (wanted.len >= path.len) {
+        write("clarity-sh: ls: path too long\n");
+        return;
+    }
+    for (wanted, 0..) |c, i| path[i] = c;
+    path[wanted.len] = 0;
+
+    const fd = open(&path);
+    if (fd < 0) {
+        write("clarity-sh: ls: cannot open ");
+        write(wanted);
+        write("\n");
+        return;
+    }
+
+    var buf: [256]u8 = undefined;
+    var listed: u64 = 0;
+    var failed = false;
+    while (true) {
+        const n = readdir_fd(@intCast(fd), &buf);
+        if (n == 0) break;
+        if (n < 0) {
+            failed = true;
+            // ENOTDIR is the one worth naming: `ls` on a file is a mistake
+            // someone makes, and "not a directory" tells them what to do.
+            if (n == -20) {
+                write("clarity-sh: ls: not a directory: ");
+                write(wanted);
+                write("\n");
+            } else {
+                write("clarity-sh: ls: cannot read the directory\n");
+            }
+            break;
+        }
+
+        const got: usize = @intCast(n);
+        var off: usize = 0;
+        while (off + DIRENT_HEADER <= got) {
+            const reclen: usize = read_u16(&buf, off + 8);
+            if (reclen == 0 or off + reclen > got) break;
+            const file_type = buf[off + 10];
+            const name_len: usize = buf[off + 11];
+            const name = buf[off + DIRENT_HEADER ..][0..name_len];
+            write(name);
+            // A trailing slash rather than a column of types: it is the one
+            // distinction that changes what you type next.
+            if (file_type == FILE_TYPE_DIRECTORY) write("/");
+            write("\n");
+            listed += 1;
+            off += reclen;
+        }
+    }
+    close(@intCast(fd));
+
+    // An empty directory says so. Printing nothing at all is what a broken
+    // listing looks like too, and the two should not be the same output —
+    // but a failure has already said what went wrong, and following it with
+    // "is empty" would describe the directory rather than the error. That
+    // was measured with the system call stubbed out: the listing reported
+    // both at once.
+    if (listed == 0 and !failed) {
+        write("clarity-sh: ls: ");
+        write(wanted);
+        write(" is empty\n");
+    }
+}
+
 export fn _start() callconv(.C) noreturn {
     write("clarity-sh: type help\n");
 
@@ -236,6 +328,8 @@ export fn _start() callconv(.C) noreturn {
             write("\n");
         } else if (eql(parts.word, "cat")) {
             cat(split(parts.rest).word);
+        } else if (eql(parts.word, "ls")) {
+            ls(split(parts.rest).word);
         } else if (eql(parts.word, "count")) {
             write_dec(parts.rest.len);
             write("\n");

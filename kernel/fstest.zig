@@ -59,4 +59,68 @@ pub fn run() !void {
     console.println(" entries");
 
     console.println("  [ok] vfs: path resolve, create, write, read back");
+
+    try readdir_round_trip();
+}
+
+/// The packed form a process reads, checked here rather than only through a
+/// system call.
+///
+/// A filesystem's readdir hands back names that point into kernel memory;
+/// vfs.readdir packs them into a caller's buffer as fixed headers plus the
+/// name, so a process can walk them. The walk is what is checked: step by
+/// each record's own length, and the names have to come out whole and in
+/// order, ending with a call that returns zero rather than repeating the
+/// last entry forever.
+///
+/// It also checks the two ways a caller can be misled: a buffer too small
+/// for even one entry must be an error and not "no more entries", and a
+/// second call must continue rather than start again.
+fn readdir_round_trip() !void {
+    const fd = try vfs.open("/bin", 0, 0);
+    defer vfs.close(@intCast(fd)) catch {};
+
+    var buf: [256]u8 = undefined;
+    var names: usize = 0;
+    var found_hello = false;
+    while (true) {
+        const n = try vfs.readdir(@intCast(fd), &buf);
+        if (n == 0) break;
+        var off: usize = 0;
+        while (off + @sizeOf(vfs.Dirent) <= n) {
+            const header = std.mem.bytesToValue(vfs.Dirent, buf[off..][0..@sizeOf(vfs.Dirent)]);
+            if (header.reclen == 0 or off + header.reclen > n) return error.MalformedDirent;
+            const name = buf[off + @sizeOf(vfs.Dirent) ..][0..header.name_len];
+            if (buf[off + @sizeOf(vfs.Dirent) + header.name_len] != 0) return error.NameNotTerminated;
+            if (std.mem.eql(u8, name, "hello.txt")) found_hello = true;
+            names += 1;
+            off += header.reclen;
+        }
+    }
+    if (!found_hello) return error.EntryMissing;
+
+    // Too small for one entry: an error, never zero. A caller that read zero
+    // here would report an empty directory.
+    const small_fd = try vfs.open("/bin", 0, 0);
+    defer vfs.close(@intCast(small_fd)) catch {};
+    var tiny: [4]u8 = undefined;
+    if (vfs.readdir(@intCast(small_fd), &tiny)) |_| {
+        return error.TinyBufferAccepted;
+    } else |e| {
+        if (e != error.BufferTooSmall) return e;
+    }
+
+    // A file is not a directory, and saying so is the difference between a
+    // useful error and an empty listing.
+    const file_fd = try vfs.open(PATH, 0, 0);
+    defer vfs.close(@intCast(file_fd)) catch {};
+    if (vfs.readdir(@intCast(file_fd), &buf)) |_| {
+        return error.FileListedAsDirectory;
+    } else |e| {
+        if (e != error.NotADirectory) return e;
+    }
+
+    console.print("  [ok] vfs: readdir packed ");
+    console.print_dec(@as(u64, @intCast(names)));
+    console.println(" entries, walked by record length");
 }

@@ -128,6 +128,7 @@ pub fn dispatch(nr: u64, args: Args) i64 {
         .nanosleep => return sys_nanosleep(args),
         .clock_gettime => return sys_clock_gettime(args),
         .ioctl => return sys_ioctl(args),
+        .readdir => return sys_readdir(args),
         else => return -@as(i64, @intFromEnum(Errno.enosys)),
     }
 }
@@ -179,6 +180,36 @@ fn sys_read(args: Args) i64 {
         if (n < want) break;
     }
     return @intCast(done);
+}
+
+/// readdir(fd, buf, len) — directory entries in the layout vfs.Dirent
+/// describes: inode, record length, type, name length, the name and a NUL,
+/// padded to eight. A caller walks the buffer by record length.
+///
+/// Zero means the directory is finished. A buffer too small to hold even
+/// one entry is EINVAL, never zero, so "your buffer is too small" cannot be
+/// mistaken for "there is nothing more".
+///
+/// The destination is checked for writing before the directory is read: the
+/// read advances the descriptor past the entries it returns, and a fault
+/// discovered afterwards would cost the caller entries it never saw.
+fn sys_readdir(args: Args) i64 {
+    const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
+    const buf = args.a1;
+    const len: usize = @intCast(args.a2);
+    if (len == 0) return errno(.einval);
+    if (!uaccess.user_range_writable(buf, len)) return errno(.efault);
+
+    var staging: [CHUNK]u8 = undefined;
+    const want = @min(len, staging.len);
+    const n = vfs.readdir(fd, staging[0..want]) catch |e| return switch (e) {
+        error.NotADirectory => errno(.enotdir),
+        error.BufferTooSmall => errno(.einval),
+        else => errno(.ebadf),
+    };
+    if (n == 0) return 0;
+    if (!uaccess.copy_to_user(buf, staging[0..n])) return errno(.efault);
+    return @intCast(n);
 }
 
 /// write(2). The source is checked for reading up front and copied in

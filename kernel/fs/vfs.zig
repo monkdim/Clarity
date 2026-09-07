@@ -178,6 +178,76 @@ pub fn write(fd: i32, buf: []const u8) !usize {
     return n;
 }
 
+/// One entry as a process reads it.
+///
+/// A filesystem's own `readdir` hands back a slice of `DirEntry`, whose
+/// `name` is a pointer into kernel memory — useless to a process. So the
+/// entries are packed into a byte buffer the caller owns: a fixed header,
+/// the name, a NUL, then padding to the next multiple of eight so the next
+/// header is aligned however the reader walks it. `reclen` is the distance
+/// to the next record, which is what makes the buffer self-describing: a
+/// reader steps by it and never needs to know how the padding was computed.
+pub const Dirent = extern struct {
+    inode_num: u64,
+    reclen: u16,
+    file_type: u8,
+    name_len: u8,
+};
+
+pub const DIRENT_ALIGN: usize = 8;
+
+fn dirent_reclen(name_len: usize) usize {
+    const raw = @sizeOf(Dirent) + name_len + 1; // + the NUL
+    return (raw + (DIRENT_ALIGN - 1)) & ~(DIRENT_ALIGN - 1);
+}
+
+/// Read directory entries from `fd` into `out`, continuing where the last
+/// call left off.
+///
+/// Returns the number of bytes written: zero means the directory is
+/// finished, which is how a caller knows to stop. `file.pos` counts entries
+/// rather than bytes for a directory, so a partial read resumes at the next
+/// entry and never re-reports one.
+///
+/// A buffer too small to hold even the first entry is an error rather than
+/// zero bytes: zero means "no more entries", and a reader that could not
+/// tell the two apart would stop early and report a short directory as a
+/// complete one.
+pub fn readdir(fd: i32, out: []u8) !usize {
+    const slot_ptr = try current_table().slot(fd);
+    const file = slot_ptr.* orelse return error.BadFd;
+    if (file.inode.file_type != .directory) return error.NotADirectory;
+
+    const entries = try file.inode.fs.ops.readdir(file.inode.fs, file.inode);
+    var written: usize = 0;
+    var index: usize = @intCast(file.pos);
+    while (index < entries.len) : (index += 1) {
+        const entry = entries[index];
+        const name_len = @min(entry.name.len, 255);
+        const reclen = dirent_reclen(name_len);
+        if (written + reclen > out.len) {
+            if (written == 0) return error.BufferTooSmall;
+            break;
+        }
+        const header = Dirent{
+            .inode_num = entry.inode_num,
+            .reclen = @intCast(reclen),
+            .file_type = @intFromEnum(entry.file_type),
+            .name_len = @intCast(name_len),
+        };
+        @memcpy(out[written..][0..@sizeOf(Dirent)], std.mem.asBytes(&header));
+        @memcpy(out[written + @sizeOf(Dirent) ..][0..name_len], entry.name[0..name_len]);
+        // The NUL and the padding are written rather than left as whatever
+        // the buffer held: a process reading its own stale stack through a
+        // name that was not terminated is the kind of leak that only shows
+        // up on someone else's machine.
+        @memset(out[written + @sizeOf(Dirent) + name_len ..][0 .. reclen - @sizeOf(Dirent) - name_len], 0);
+        written += reclen;
+    }
+    file.pos = index;
+    return written;
+}
+
 fn alloc_fd(inode: *Inode, flags: u32) !i64 {
     return current_table().alloc(inode, flags);
 }
