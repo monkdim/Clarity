@@ -713,6 +713,20 @@ export function formatClarityError(err, source) {
 /**
  * Wrap the entry point to catch errors and display Clarity-formatted traces.
  */
+// ── Embedded standard library ────────────────────────────
+// The bundle carries the source of every standard-library module, so a
+// program can `from "collections.clarity" import Set` from a directory that
+// holds no such file. Until this existed the single binary could run the
+// toolchain and nothing else: every library import needed the repository
+// checked out beside the program. The entry point registers the map before
+// the CLI loads; a bare `bun` run of the sources leaves it empty, and imports
+// resolve from disk as they always did.
+let _embedded_stdlib = {};
+export function _register_embedded_stdlib(map) { _embedded_stdlib = map || {}; }
+export function _embedded_source(name) {
+  return Object.prototype.hasOwnProperty.call(_embedded_stdlib, name) ? _embedded_stdlib[name] : null;
+}
+
 export function clarityMain(fn) {
   try {
     fn();

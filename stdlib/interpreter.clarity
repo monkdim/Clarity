@@ -1015,19 +1015,36 @@ class Interpreter {
             return null
         }
 
-        if not exists(path) {
-            throw "RuntimeError: Cannot find module: {path} (line {node.line})"
+        -- Not on disk: the bundle may carry it. Disk wins when both exist,
+        -- so a developer's edited stdlib is what runs; the bundle is what
+        -- makes the same import work from a directory with no sources at
+        -- all, which is every directory an installed binary is used in.
+        mut source = null
+        if exists(path) {
+            source = read(path)
+        } else {
+            let base = _basename(path)
+            let embedded = _embedded_source(base)
+            if embedded == null {
+                throw "RuntimeError: Cannot find module: {path} (line {node.line})"
+            }
+            source = embedded
+            path = "<bundle>/" + base
+            if has(this._imported, path) {
+                return this._bind_import(node, env, this._imported[path].vars)
+            }
         }
 
-        let source = read(path)
         let tokens = tokenize(source, path)
         let tree = parse(tokens, source)
 
         let module_env = Environment(this.global_env)
         this.exec_block_body(tree.body, module_env)
         this._imported[path] = module_env
+        return this._bind_import(node, env, module_env.vars)
+    }
 
-        let module_dict = module_env.vars
+    fn _bind_import(node, env, module_dict) {
         if node.names != null and len(node.names) > 0 {
             each(node.names, fn(name) {
                 if not has(module_dict, name) {
@@ -1761,6 +1778,15 @@ fn _list_copy(lst) {
 }
 
 -- ── Convenience function ────────────────────────────────
+
+fn _basename(path) {
+    mut i = len(path) - 1
+    while i >= 0 {
+        if char_at(path, i) == "/" { return substring(path, i + 1, len(path)) }
+        i -= 1
+    }
+    return path
+}
 
 fn interpret(source, source_dir) {
     let tokens = tokenize(source, "<main>")

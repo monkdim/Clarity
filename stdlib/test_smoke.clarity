@@ -101,6 +101,11 @@ fn run_smoke_tests() {
     check("variables", "let x = 42\nshow x", "42")
     check("string ops", "show upper(\"hello\")", "HELLO")
     check("list ops", "show len([1, 2, 3])", "3")
+    -- The program is written to /tmp, where no stdlib source exists, so this
+    -- import can only be satisfied by the copy embedded in the binary. Before
+    -- that copy existed, this printed "Cannot find module: collections.clarity"
+    -- and an installed binary could run the toolchain and nothing else.
+    check("import from the embedded stdlib", "from \"collections.clarity\" import Set\nlet s = Set()\ns.add(1)\ns.add(1)\nshow s.size()", "1")
 
     -- ── Functions ───────────────────────────────────────
     show "  " + _bold("-- functions --")
