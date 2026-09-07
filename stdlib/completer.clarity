@@ -27,7 +27,7 @@ let BUILTINS = [
     "index_of", "substring", "is_digit", "is_alpha", "is_alnum", "is_space",
     "abs", "round", "floor", "ceil", "min", "max", "sum", "random", "pow",
     "pi", "e", "sqrt", "sin", "cos", "tan", "log",
-    "exec", "exec_full", "exit", "sleep", "time", "env", "args", "cwd",
+    "exec", "exec_full", "exec_tty", "exit", "sleep", "time", "env", "args", "cwd",
     "json_parse", "json_string", "hash", "encode64", "decode64",
     "fetch", "serve", "compose", "tap", "set", "error",
     "display", "repr", "truthy"

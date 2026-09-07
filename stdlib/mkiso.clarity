@@ -183,7 +183,9 @@ class IsoBuilder {
         let r = exec_full(cmd)
         let tool = trim(r.stdout)
         if tool == "grub" {
-            exec_full("grub-mkrescue -o '" + op["image"] + "' --volid='" + op["label"] + "' '" + op["from"] + "'")
+            -- The volume id is xorriso's -V; grub-mkrescue has no --volid
+            -- option, and xorriso aborts on it without writing the image.
+            exec_full("grub-mkrescue -o '" + op["image"] + "' -V '" + op["label"] + "' '" + op["from"] + "'")
         } elif tool == "xorriso" {
             exec_full("xorriso -as mkisofs -o '" + op["image"] + "' -V '" + op["label"] + "' -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin -c boot/boot.cat -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -eltorito-alt-boot -e EFI/BOOT/BOOTX64.EFI -no-emul-boot -isohybrid-gpt-basdat '" + op["from"] + "'")
         } else {

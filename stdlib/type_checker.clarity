@@ -40,7 +40,7 @@ let BUILTIN_TYPES = {
 }
 
 let BUILTIN_NAMES = [
-    "show", "ask", "exec", "exec_full", "exit", "env", "args", "cwd",
+    "show", "ask", "exec", "exec_full", "exec_tty", "exit", "env", "args", "cwd",
     "fetch", "serve", "compose", "tap", "set", "error",
     "print", "read_bytes", "write_bytes", "read_mem", "write_mem"
 ]

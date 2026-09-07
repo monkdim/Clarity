@@ -91,12 +91,19 @@ From here, `clarity shell` drops you into the interactive shell, `clarity help` 
 
 ## Try KyanOS (experimental)
 
-> **Heads up:** KyanOS is experimental. What boots is a kernel with a shell, not a desktop. `clarity os build` targets a runtime that does not build today; use the commands below and in [kernel/RUNNING.md](kernel/RUNNING.md).
+> **Heads up:** KyanOS is experimental. What boots is a kernel with a shell, not a desktop.
 
 You need Zig 0.13 exactly, and QEMU. On a Mac use the native Homebrew (`/opt/homebrew`); an Intel Homebrew under Rosetta builds an x86-64 QEMU that cannot use hardware acceleration.
 
 ```bash
 brew install qemu            # macOS; on Linux: apt install qemu-system-arm
+clarity os build             # the kernel and its boot image for this machine's architecture
+clarity os run               # boots it under QEMU with the serial console in this terminal
+```
+
+`clarity os build` runs `zig build` in `kernel/` and writes `dist/claritos-aarch64.img` on an ARM machine or `dist/claritos.iso` (a GRUB rescue ISO, needs `grub-mkrescue` and `xorriso`) on x86_64; `--arch` picks the other one. `clarity os run --window` adds the framebuffer and keyboard, and `clarity os run --boot-test` boots headlessly and checks the same serial marker CI asserts. The commands underneath are these:
+
+```bash
 cd kernel && zig build aarch64
 
 qemu-system-aarch64 \

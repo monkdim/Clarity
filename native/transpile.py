@@ -693,7 +693,7 @@ def transpile_with_runtime(path):
         '  is_digit, is_alpha, is_alnum, is_space,\n'
         '  abs, round, floor, ceil, $min, $max, sum, random, pow,\n'
         '  pi, e, sqrt, sin, cos, tan, log,\n'
-        '  exec, exec_full, exit, sleep, time, env, args, cwd,\n'
+        '  exec, exec_full, exec_tty, exit, sleep, time, env, args, cwd,\n'
         '  json_parse, json_string, hash, encode64, decode64,\n'
         '  fetch, serve, compose, tap, $set, error as $error,\n'
         '  display, repr, truthy as $truthy, ClarityEnum as $ClarityEnum,\n'

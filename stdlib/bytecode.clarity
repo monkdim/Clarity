@@ -1265,6 +1265,7 @@ class VM {
         -- System
         this.globals["exec"] = fn(cmd) { return exec(cmd) }
         this.globals["exec_full"] = fn(cmd) { return exec_full(cmd) }
+        this.globals["exec_tty"] = fn(cmd) { return exec_tty(cmd) }
         this.globals["exit"] = fn(code) { exit(code ?? 0) }
         this.globals["sleep"] = fn(s) { sleep(s) }
         this.globals["time"] = fn() { return time() }
