@@ -58,6 +58,13 @@ claim with no marker behind it is in "What does not run yet".
   out of a screenshot — replaying the console's own wrapping and scrolling
   over the serial log to work out what each cell should hold, then comparing
   every pixel against a glyph it renders itself from `tools/font8x8.txt`
+- **a serial console that can be typed into**: the PL011 was write-only, so
+  the only way into this machine was the graphical window — which has to be
+  found, focused and allowed to capture the pointer before a text prompt will
+  listen. Reported from an M5 Mac as being unusable by hand, and every test
+  passed straight through it. `-display none -serial stdio` now works, which
+  is how a kernel is normally driven; `tools/serial_check.py` boots with no
+  keyboard and no display and fails if either turns up
 - **a keyboard, on its own interrupt**: virtio-input over the virtio-mmio bus,
   found by walking the thirty-two slots the device tree names rather than by
   knowing where QEMU puts them, and delivered through the GIC on the SPI that

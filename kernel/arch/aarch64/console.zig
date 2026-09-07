@@ -38,6 +38,7 @@ const UART0_PHYS: usize = 0x0900_0000;
 const UART0_BASE: usize = UART0_PHYS + vm.KERNEL_VA_BASE;
 const UARTDR: usize = 0x00; // data register
 const UARTFR: usize = 0x18; // flag register
+const FR_RXFE: u32 = 1 << 4; // receive FIFO empty
 const FR_TXFF: u32 = 1 << 5; // transmit FIFO full
 
 inline fn mmio_write(offset: usize, value: u32) void {
@@ -52,6 +53,28 @@ pub fn init() void {
     // QEMU's PL011 comes up transmit-ready; nothing to program for output.
     // Real hardware bring-up (baud divisors, line control, FIFO enable)
     // lands with the aarch64 driver phase.
+}
+
+/// One byte from the serial line, or null.
+///
+/// This port was write-only until now, and that was not a small gap. The only
+/// way to type into this machine was the graphical window — which means
+/// finding it, clicking it, and letting it capture the pointer before a text
+/// prompt would listen. On a Mac that turned out to be the difference between
+/// an operating system somebody could use and one they could only watch.
+///
+/// A serial console needs no window, no display backend and no focus. It is
+/// how every other kernel is driven headlessly, and with `-serial stdio` it
+/// means typing into the same terminal that started QEMU.
+///
+/// Polled, like the keyboard, and for now that is enough: the PL011's receive
+/// interrupt is a separate INTID in the device tree and wiring it is the same
+/// job that was just done for virtio-input. Unlike the keyboard, nothing here
+/// is lost while a program is busy — the UART holds sixteen bytes in its own
+/// FIFO and a person types slower than that.
+pub fn poll_in() ?u8 {
+    if (mmio_read(UARTFR) & FR_RXFE != 0) return null;
+    return @truncate(mmio_read(UARTDR) & 0xFF);
 }
 
 pub fn print(s: []const u8) void {

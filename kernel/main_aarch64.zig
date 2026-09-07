@@ -599,7 +599,7 @@ fn init_program() void {
 fn shell_program() void {
     if (pmm.stats().total_pages == 0) return;
     if (!stdin.present()) {
-        console.println("  [--] shell: no keyboard, so nothing could be typed at it");
+        console.println("  [--] shell: nothing to read from, so nothing could be typed at it");
         return;
     }
 
@@ -884,19 +884,47 @@ fn filesystem_selftest() void {
     };
 }
 
-/// Find the keyboard and read what is typed on it, a line at a time.
+/// The next character from anything that can produce one.
 ///
-/// The bus slots come from the device tree — thirty-two of them on `virt`,
-/// identical, with whatever is in each discoverable only by reading its
-/// registers. Hardcoding 0x0a000000 and a stride of 0x200 would work on this
-/// machine and nowhere else.
+/// Two sources now: the keyboard, and the serial line. The keyboard is asked
+/// first, and not arbitrarily — it is the one with a queue that fills. The
+/// UART holds its own bytes in a sixteen-deep FIFO and a person types slower
+/// than that, so a byte waiting there will still be waiting next time.
 ///
-/// Reading is checked by making QEMU type: tools/key_check.py sends keys
-/// through the monitor and requires the kernel to report exactly the lines
-/// they spell, and the screen to show them. A driver that came up and
-/// delivered nothing would otherwise look identical to one that came up and
-/// nobody pressed anything.
+/// Either may be absent and neither says so: `keyboard.poll` answers null on
+/// a machine with no keyboard, and a serial port with nothing typed at it is
+/// indistinguishable from one nobody is connected to. That is the point —
+/// whoever is reading does not care which of them a character came from.
+fn poll_input() ?u8 {
+    if (keyboard.poll()) |c| return c;
+    return console.poll_in();
+}
+
+/// Bring up what can be typed on, and read a few lines of it.
+///
+/// The keyboard's bus slots come from the device tree — thirty-two of them on
+/// `virt`, identical, with whatever is in each discoverable only by reading
+/// its registers. Hardcoding 0x0a000000 and a stride of 0x200 would work on
+/// this machine and nowhere else.
+///
+/// The serial line needs no finding: the console has been writing to it since
+/// the first line of the boot, and reading from it is the same registers in
+/// the other direction. It is also the reason none of the keyboard failures
+/// below return early any more. They used to, and the effect was that a
+/// machine with no keyboard had no input at all — which on a Mac, where the
+/// graphical window is awkward to type into and the terminal is not, meant an
+/// operating system that could be watched and not used.
+///
+/// Reading is checked two ways, because there are two paths: tools/key_check.py
+/// sends keys through QEMU's monitor to the virtio keyboard, and
+/// tools/serial_check.py types down the serial socket. Either alone would
+/// leave the other able to break silently.
 fn input_selftest(tree: ?fdt.Fdt) void {
+    keyboard_setup(tree);
+    read_some_lines();
+}
+
+fn keyboard_setup(tree: ?fdt.Fdt) void {
     const t = tree orelse {
         console.println("  [--] no device tree; no virtio bus to look on");
         return;
@@ -961,12 +989,20 @@ fn input_selftest(tree: ?fdt.Fdt) void {
         }
     }
 
+}
+
+/// Open the console for reading, then read what turns up.
+fn read_some_lines() void {
     // Everything that reads the console reads it through drivers/stdin.zig,
     // this selftest and read(2) alike. One editor, not one each: two editors
     // polling the same keyboard would each see half of what was typed, and
     // the half each got would depend on which happened to ask first.
+    //
+    // Unconditional now. It used to happen only where a keyboard had been
+    // found, which quietly made the serial line unreadable on exactly the
+    // machines that most needed it.
     stdin.init(.{
-        .poll = keyboard.poll,
+        .poll = poll_input,
         .echo = console.putc,
         // The physical counter, not the interrupt count: read(2) runs with
         // interrupts masked, where the interrupt count does not move and a
