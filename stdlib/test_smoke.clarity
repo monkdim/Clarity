@@ -248,6 +248,32 @@ fn run_smoke_tests() {
     }
     exec("rm -f " + _quote(bad_stdout))
 
+    -- An uncaught `throw` must report what was thrown. The interpreter used
+    -- to print its own control signal instead, so `throw "boom"` told the
+    -- user `{__signal__: "throw", value: "boom"}` while the same program
+    -- under --fast said `boom`.
+    let thrower = "/tmp/smoke_throw_" + str(time()) + ".clarity"
+    write(thrower, "show \"before\"\nthrow \"boom\"\n")
+    let thrown_run = exec_full(clarity + " run " + _quote(thrower) + " 2>&1")
+    if contains(thrown_run.stdout, "boom") and not contains(thrown_run.stdout, "__signal__") {
+        PASSED += 1
+        show "  " + _green("PASS") + "  an uncaught throw reports the thrown value"
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  an uncaught throw reports the thrown value"
+        show "    " + _dim("Got: " + substring(thrown_run.stdout, 0, min([200, len(thrown_run.stdout)])))
+    }
+    let thrown_fast = exec_full(clarity + " run " + _quote(thrower) + " --fast 2>&1")
+    if contains(thrown_fast.stdout, "boom") and not contains(thrown_fast.stdout, "__signal__") {
+        PASSED += 1
+        show "  " + _green("PASS") + "  and so does the bytecode VM"
+    } else {
+        FAILED += 1
+        show "  " + _red("FAIL") + "  and so does the bytecode VM"
+        show "    " + _dim("Got: " + substring(thrown_fast.stdout, 0, min([200, len(thrown_fast.stdout)])))
+    }
+    exec("rm -f " + _quote(thrower))
+
     show "  " + _bold("-- doc --")
     let tmp_doc = "/tmp/smoke_doc_" + str(time()) + ".clarity"
     write(tmp_doc, "-- Adds two numbers together\nfn add(a, b) {\n    return a + b\n}")
