@@ -181,8 +181,11 @@ fn make_continue_signal() {
     return {"__signal__": "continue"}
 }
 
-fn make_throw_signal(value) {
-    return {"__signal__": "throw", "value": value}
+-- The line is carried so an uncaught throw can point at the `throw` that
+-- raised it, the way a runtime error names its line. `catch e` still binds
+-- e to the value alone.
+fn make_throw_signal(value, line) {
+    return {"__signal__": "throw", "value": value, "line": line ?? 0}
 }
 
 fn is_signal(val) {
@@ -857,7 +860,7 @@ class Interpreter {
 
     fn exec_ThrowStatement(node, env) {
         let value = this.evaluate(node.value, env)
-        throw make_throw_signal(value)
+        throw make_throw_signal(value, node.line)
     }
 
     fn exec_BreakStatement(node, env) {

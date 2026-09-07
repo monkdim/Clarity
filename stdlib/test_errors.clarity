@@ -54,6 +54,27 @@ assert(not contains(out4, "99 |"), "an out-of-range line is skipped, not crashed
 let out5 = format_error("boom (line 3)", null, null)
 assert(contains(out5, "boom"), "tolerates null source and path")
 
+show "-- errors: an uncaught throw --"
+-- The interpreter raises a `throw` as its own control signal. Printing that
+-- as it stands showed the user the engine's plumbing: a program ending in
+-- `throw "boom"` reported {__signal__: "throw", value: "boom"}.
+let thrown = {"__signal__": "throw", "value": "boom", "line": 2}
+let out6 = format_error(thrown, "show 1\nthrow \"boom\"", "t.clarity")
+assert(contains(out6, "boom"), "shows the thrown value")
+assert(not contains(out6, "__signal__"), "does not show the signal itself")
+assert(contains(out6, "2 | throw"), "points at the line the throw left from")
+
+-- A thrown value that is not a string is displayed as a value, not as a
+-- signal wrapper.
+let thrown_map = {"__signal__": "throw", "value": {"code": 5}, "line": 0}
+let out7 = format_error(thrown_map, null, null)
+assert(contains(out7, "code"), "shows a thrown map's contents")
+assert(not contains(out7, "__signal__"), "still hides the signal")
+
+-- Anything that is merely a map keeps being shown as a map.
+let plain_map = format_error({"a": 1}, null, null)
+assert(contains(plain_map, "a"), "a thrown-looking map that is not a signal is unchanged")
+
 show ""
 show "errors: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
 if FAILED > 0 { throw str(FAILED) + " error-rendering test(s) failed" }

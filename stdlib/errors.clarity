@@ -30,11 +30,28 @@ fn error_position(msg) {
 -- `path` may be null (falls back to just the message). Returns a plain
 -- multi-line string; the caller decides on colour.
 fn format_error(err, source, path) {
-    let msg = str(err)
+    -- A `throw` that nobody caught arrives as the interpreter's own control
+    -- signal, a map holding the thrown value and the line it left from. It
+    -- used to be printed as it stands, so a program ending in `throw "boom"`
+    -- told the user `{__signal__: "throw", value: "boom"}` while the same
+    -- program under `run --fast` said `boom`. The value is what was thrown
+    -- and the value is what is shown, in both.
+    mut thrown = err
+    mut thrown_line = null
+    if type(err) == "map" and has(err, "__signal__") and err["__signal__"] == "throw" {
+        thrown = err["value"]
+        if has(err, "line") and err["line"] != null and err["line"] > 0 {
+            thrown_line = err["line"]
+        }
+    }
+    let msg = str(thrown)
     let where = if path != null { " in " + path } else { "" }
     mut out = "Clarity Error" + where + ":\n\n  " + msg + "\n"
 
-    let pos = error_position(msg)
+    mut pos = error_position(msg)
+    -- A thrown value carries no position of its own; the signal knows where
+    -- the `throw` was.
+    if thrown_line != null { pos = {"line": thrown_line, "column": null} }
     if pos["line"] != null and source != null {
         let lines = split(source, "\n")
         let li = pos["line"] - 1
