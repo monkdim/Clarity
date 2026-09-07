@@ -7,6 +7,12 @@ from "interpreter.clarity" import Interpreter, interpret
 from "terminal.clarity" import bold, green, cyan, red, yellow, dim
 from "linter.clarity" import Linter, lint_source
 from "formatter.clarity" import Formatter, format_source
+-- At module level on purpose. The CI test jobs transpile this file with the
+-- previous release's binary, whose transpiler learns that an imported name
+-- is a class only from a top-level import; imported inside run_file_fast,
+-- VM was constructed without `new` by that transpiler and every `run
+-- --fast` in a release-bootstrapped build died before running anything.
+from "bytecode.clarity" import compile_to_bytecode, VM, optimize
 from "type_checker.clarity" import TypeChecker, check_types_source
 from "docgen.clarity" import generate_docs
 from "debugger.clarity" import debug_file
@@ -198,7 +204,6 @@ fn run_file_fast(path) {
     let source = read(path)
 
     try {
-        from "bytecode.clarity" import compile_to_bytecode, VM, optimize
         let tokens = tokenize(source, path)
         let tree = parse(tokens, source)
         let code = compile_to_bytecode(tree)
