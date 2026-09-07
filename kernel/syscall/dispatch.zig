@@ -14,6 +14,7 @@ const console = @import("../arch/x86_64/console.zig");
 const arch_syscall = @import("../arch/x86_64/syscall.zig");
 const pmm = @import("../mm/pmm.zig");
 const vmm = @import("../mm/vmm.zig");
+const uaccess = @import("../mm/uaccess.zig");
 
 /// Canonical syscall numbers — must match stdlib/kernel_abi.clarity.
 pub const Nr = enum(u32) {
@@ -140,42 +141,82 @@ pub const Args = struct {
     a5: u64,
 };
 
-fn sys_read(args: Args) i64 {
-    const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
-    const buf: [*]u8 = @ptrFromInt(args.a1);
-    const len: usize = @intCast(args.a2);
-    const n = vfs.read(fd, buf[0..len]) catch return -@as(i64, @intFromEnum(Errno.eio));
-    return @intCast(n);
+fn errno(e: Errno) i64 {
+    return -@as(i64, @intFromEnum(e));
 }
 
+/// Every user buffer crosses in pieces this big through a kernel buffer:
+/// the kernel never touches a user address itself (see mm/uaccess.zig).
+const CHUNK: usize = 512;
+
+/// The longest path a process may name. Longer is refused, not truncated,
+/// because a silently shortened path names a different file.
+const PATH_MAX: usize = 256;
+
+/// read(2). The whole destination is checked for writing before anything is
+/// read from the file, so a bad pointer costs the program nothing but the
+/// EFAULT, and a buffer in its own read-only text is refused, as aarch64
+/// refuses it: translating for reading instead (the call write makes, and
+/// the easy mistake) would find the page readable and scribble into the
+/// program's instructions.
+fn sys_read(args: Args) i64 {
+    const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
+    const buf = args.a1;
+    const len: usize = @intCast(args.a2);
+    if (!uaccess.user_range_writable(buf, len)) return errno(.efault);
+
+    var staging: [CHUNK]u8 = undefined;
+    var done: usize = 0;
+    while (done < len) {
+        const want = @min(len - done, staging.len);
+        const n = vfs.read(fd, staging[0..want]) catch {
+            if (done == 0) return errno(.eio);
+            break;
+        };
+        if (n == 0) break;
+        if (!uaccess.copy_to_user(buf + done, staging[0..n])) return errno(.efault);
+        done += n;
+        if (n < want) break;
+    }
+    return @intCast(done);
+}
+
+/// write(2). The source is checked for reading up front and copied in
+/// through the direct map; a pointer into the kernel's half, or into
+/// nothing, is EFAULT rather than a page fault taken in ring 0.
 fn sys_write(args: Args) i64 {
     const fd: i32 = @intCast(@as(i64, @bitCast(args.a0)));
-    // Note: the buffer is a raw user pointer and is not validated. Nothing
-    // here checks that the range is mapped, user-owned, or even canonical, so
-    // a bad pointer faults in the kernel. Validation belongs with the rest of
-    // the user-memory access layer, which does not exist yet.
-    const buf: [*]const u8 = @ptrFromInt(args.a1);
+    const buf = args.a1;
     const len: usize = @intCast(args.a2);
-    if (vfs.write(fd, buf[0..len])) |n| {
-        return @intCast(n);
-    } else |_| {
-        // Before anything has opened descriptors of its own, stdout and
-        // stderr go to the kernel console rather than failing. A program that
-        // cannot report why it is unhappy is much harder to debug than one
-        // whose first write lands somewhere visible.
-        if (fd == 1 or fd == 2) {
-            console.print(buf[0..len]);
-            return @intCast(len);
+    if (!uaccess.user_range_readable(buf, len)) return errno(.efault);
+
+    var staging: [CHUNK]u8 = undefined;
+    var done: usize = 0;
+    while (done < len) {
+        const n = @min(len - done, staging.len);
+        if (!uaccess.copy_from_user(staging[0..n], buf + done)) return errno(.efault);
+        if (vfs.write(fd, staging[0..n])) |w| {
+            done += w;
+            if (w < n) break;
+        } else |_| {
+            // Before anything has opened descriptors of its own, stdout and
+            // stderr go to the kernel console rather than failing. A program
+            // that cannot report why it is unhappy is much harder to debug
+            // than one whose first write lands somewhere visible.
+            if (fd != 1 and fd != 2) return errno(.ebadf);
+            console.print(staging[0..n]);
+            done += n;
         }
-        return -@as(i64, @intFromEnum(Errno.ebadf));
     }
+    return @intCast(done);
 }
 
 fn sys_open(args: Args) i64 {
-    const path: [*:0]const u8 = @ptrFromInt(args.a0);
+    var pbuf: [PATH_MAX]u8 = undefined;
+    const path = uaccess.copy_user_string(args.a0, &pbuf) orelse return errno(.efault);
     const flags: u32 = @truncate(args.a1);
     const mode: u32 = @truncate(args.a2);
-    return vfs.open(std.mem.span(path), flags, mode) catch -@as(i64, @intFromEnum(Errno.enoent));
+    return vfs.open(path, flags, mode) catch errno(.enoent);
 }
 
 fn sys_close(args: Args) i64 {
@@ -293,8 +334,7 @@ fn sys_ioctl(args: Args) i64 {
     if (fd == MMAP_FB_FD and op == IOCTL_FB_GET_INFO) {
         const fb = @import("../drivers/framebuffer.zig");
         const info_user = fb.user_info() orelse return -@as(i64, @intFromEnum(Errno.enodev));
-        const dst: *fb.FbInfoForUser = @ptrFromInt(args.a2);
-        dst.* = info_user;
+        if (!uaccess.put_user(fb.FbInfoForUser, args.a2, info_user)) return errno(.efault);
         return 0;
     }
     return -@as(i64, @intFromEnum(Errno.enotty));
@@ -344,8 +384,9 @@ fn sys_fork() i64 {
 }
 
 fn sys_exec(args: Args) i64 {
-    const path: [*:0]const u8 = @ptrFromInt(args.a0);
-    sched.exec(std.mem.span(path)) catch |err| switch (err) {
+    var pbuf: [PATH_MAX]u8 = undefined;
+    const path = uaccess.copy_user_string(args.a0, &pbuf) orelse return errno(.efault);
+    sched.exec(path) catch |err| switch (err) {
         error.NotFound => return -@as(i64, @intFromEnum(Errno.enoent)),
         error.OutOfMemory => return -@as(i64, @intFromEnum(Errno.enomem)),
         else => return -@as(i64, @intFromEnum(Errno.enoexec)),
@@ -355,10 +396,13 @@ fn sys_exec(args: Args) i64 {
 }
 
 fn sys_wait(args: Args) i64 {
-    const wstatus_ptr: ?*i32 = if (args.a0 == 0) null else @ptrFromInt(args.a0);
+    const wstatus = args.a0;
+    // Checked before the wait: a child reaped and then unreported because
+    // the status pointer was bad would be lost for good.
+    if (wstatus != 0 and !uaccess.user_range_writable(wstatus, @sizeOf(i32))) return errno(.efault);
     const pid_arg: i32 = @bitCast(@as(i32, @intCast(args.a1)));
     const result = sched.waitpid(pid_arg) orelse return -@as(i64, @intFromEnum(Errno.echild));
-    if (wstatus_ptr) |p| p.* = result.exit_code;
+    if (wstatus != 0 and !uaccess.put_user(i32, wstatus, result.exit_code)) return errno(.efault);
     return result.pid;
 }
 

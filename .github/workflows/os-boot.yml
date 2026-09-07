@@ -120,6 +120,17 @@ jobs:
           #                                 the pages it mapped are really
           #                                 there: the program writes through
           #                                 the new break and reads it back
+          #   "[ok] user pointers"       -- the kernel refused three buffers a
+          #                                 process handed it: one nothing
+          #                                 maps, one in the kernel's half,
+          #                                 and one in the program's own
+          #                                 read-only text as a read(2)
+          #                                 target. Each was a page fault in
+          #                                 ring 0 before user addresses were
+          #                                 translated through the process's
+          #                                 tables; now each is EFAULT, and
+          #                                 the same read into a real buffer
+          #                                 then gets the file
           #   "hello from /bin/..."      -- an ELF was read out of the
           #                                 filesystem, parsed, mapped into a
           #                                 fresh address space, and run at
@@ -180,6 +191,7 @@ jobs:
             grep -q "\[ok\] user .bss zeroed" "serial-$attempt.log" || missing="$missing user-bss"
             grep -q "\[ok\] user heap" "serial-$attempt.log" || missing="$missing user-heap"
             grep -q "\[ok\] user sse" "serial-$attempt.log" || missing="$missing user-sse"
+            grep -q "\[ok\] user pointers" "serial-$attempt.log" || missing="$missing user-pointers"
             grep -q "\[exit\] status=0" "serial-$attempt.log" || missing="$missing sysret-return"
             grep -q "demo: wrote" "serial-$attempt.log" || missing="$missing second-process"
             grep -q "clarity-demo: all checks passed" "serial-$attempt.log" || missing="$missing clarity-program"
@@ -197,6 +209,38 @@ jobs:
             exit 1
           fi
           echo "PASS: all 3 boots ran two processes, the second a compiled Clarity program"
+
+      # The same image on a CPU that enforces the rule the kernel follows.
+      #
+      # Every access to a process's memory goes through mm/uaccess.zig and
+      # the direct map; the kernel never touches a user address itself. On
+      # qemu64, the default above, nothing checks that: a syscall that still
+      # dereferenced a user pointer would work. `-cpu max` has SMEP and SMAP,
+      # the kernel turns them on and says so, and from then on any such path
+      # is a page fault in ring 0, which the boot log shows and this step
+      # fails on. The aarch64 job does the same with PAN and `-cpu max`.
+      - name: Boot on a CPU with SMEP and SMAP and assert the same markers
+        run: |
+          timeout 45 qemu-system-x86_64 \
+            -cpu max \
+            -cdrom clarity-kernel.iso \
+            -boot d \
+            -m 512 \
+            -serial stdio \
+            -display none \
+            -no-reboot \
+            > serial-smap.log 2>&1 || true
+          cat serial-smap.log
+          missing=""
+          grep -q "\[ok\] smep+smap" serial-smap.log || missing="$missing smep-smap-enabled"
+          grep -q "\[ok\] user pointers" serial-smap.log || missing="$missing user-pointers"
+          grep -q "clarity-demo: all checks passed" serial-smap.log || missing="$missing clarity-program"
+          grep -q "ClarityOS: userspace complete." serial-smap.log || missing="$missing kernel-outlived"
+          if [ -n "$missing" ]; then
+            echo "FAIL: with SMEP and SMAP enforced, missing:$missing"
+            exit 1
+          fi
+          echo "PASS: two processes ran with SMEP and SMAP enforced; the kernel touched no user page directly"
 
       # ── The developer command produces the same boot ───────────────────
       #

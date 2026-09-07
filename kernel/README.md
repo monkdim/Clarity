@@ -38,6 +38,17 @@ claim with no marker behind it is in "What does not run yet".
 - in userspace: `.bss` zeroed, `brk` grows a heap that holds, SSE
   registers survive, `exit` returns through `sysret`, and the kernel
   outlives both processes
+- the kernel never dereferences an address userspace gave it, on this
+  architecture too: x86 has no `at s1e0r`, so `mm/uaccess.zig` walks the
+  page tables the MMU would walk, from the loaded CR3, with the CPU's own
+  rule (present and user at every level, writable at every level for a
+  write), and every copy goes through the direct map of the frame, page by
+  page. The init program hands the kernel three buffers it must refuse
+  (unmapped, in the kernel's half, and its own read-only text as a `read(2)`
+  target) and gets EFAULT for each, then reads the file for real. SMEP and
+  SMAP are enabled where the CPU has them, and the gate boots `-cpu max` as
+  well as `qemu64`: on the CPU without them, a kernel that still touched a
+  user address directly would work, and on the one with them it faults
 
 **aarch64**, on QEMU `virt`:
 

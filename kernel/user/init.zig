@@ -13,9 +13,14 @@
 
 const std = @import("std");
 
+const NR_READ: u64 = 0;
 const NR_WRITE: u64 = 1;
+const NR_OPEN: u64 = 2;
 const NR_BRK: u64 = 9;
 const NR_EXIT: u64 = 12;
+
+/// What the kernel answers for a pointer it will not follow.
+const EFAULT: i64 = -14;
 
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) i64 {
     return asm volatile ("syscall"
@@ -134,6 +139,65 @@ export fn _start() callconv(.C) noreturn {
     } else {
         _ = write(1, "  [FAIL] user sse: wrong quotient ");
         write_hex(bits);
+    }
+
+    // Pointers the kernel must refuse. Each of these was a page fault taken
+    // in ring 0, which halts the machine, until the kernel started
+    // translating user addresses through the process's own tables instead
+    // of following them. The answer for all three is EFAULT, and the
+    // program is still running afterwards to say so.
+    var bad: u32 = 0;
+
+    // An address in the user half that nothing maps.
+    const unmapped: u64 = 0x0000_7FFF_F000_0000;
+    const r_unmapped = syscall3(NR_WRITE, 1, unmapped, 8);
+    if (r_unmapped != EFAULT) {
+        bad += 1;
+        _ = write(1, "  [FAIL] user pointers: an unmapped buffer was not refused: ");
+        write_hex(@bitCast(r_unmapped));
+    }
+
+    // The kernel's own half. A kernel that follows this pointer prints its
+    // own memory on the program's behalf.
+    const kernel_half: u64 = 0xFFFF_8000_0000_1000;
+    const r_kernel = syscall3(NR_WRITE, 1, kernel_half, 8);
+    if (r_kernel != EFAULT) {
+        bad += 1;
+        _ = write(1, "  [FAIL] user pointers: a kernel address was not refused: ");
+        write_hex(@bitCast(r_kernel));
+    }
+
+    // This program's own text, as a buffer for read(2). The page is
+    // readable, so a kernel that translated it for reading (what write does,
+    // and the easy mistake) would find nothing wrong and copy the file over
+    // these instructions. It has to be translated for writing and refused.
+    // The file is the one the kernel's filesystem self-test left behind.
+    const fd = syscall3(NR_OPEN, @intFromPtr("/bin/hello.txt"), 0, 0);
+    if (fd < 0) {
+        bad += 1;
+        _ = write(1, "  [FAIL] user pointers: could not open /bin/hello.txt: ");
+        write_hex(@bitCast(fd));
+    } else {
+        const text: u64 = @intFromPtr(&_start);
+        const r_text = syscall3(NR_READ, @intCast(fd), text, 7);
+        if (r_text != EFAULT) {
+            bad += 1;
+            _ = write(1, "  [FAIL] user pointers: read into read-only text was not refused: ");
+            write_hex(@bitCast(r_text));
+        }
+        // And a refused read must not have consumed the file: the same read
+        // into a real buffer gets the whole contents.
+        var got: [16]u8 = undefined;
+        const r_real = syscall3(NR_READ, @intCast(fd), @intFromPtr(&got), got.len);
+        if (r_real != 7 or !std.mem.eql(u8, got[0..7], "clarity")) {
+            bad += 1;
+            _ = write(1, "  [FAIL] user pointers: the real read got ");
+            write_hex(@bitCast(r_real));
+        }
+    }
+
+    if (bad == 0) {
+        _ = write(1, "  [ok] user pointers: unmapped, kernel-half and read-only buffers refused with EFAULT; a real one read the file\n");
     }
 
     exit(0);

@@ -19,6 +19,7 @@ const heap = @import("mm/heap.zig");
 const sched = @import("sched/scheduler.zig");
 const syscall = @import("syscall/dispatch.zig");
 const vfs = @import("fs/vfs.zig");
+const smap = @import("arch/x86_64/smap.zig");
 const tmpfs = @import("fs/tmpfs.zig");
 const drivers = @import("drivers/init.zig");
 const multiboot = @import("boot/multiboot2.zig");
@@ -59,6 +60,21 @@ pub export fn kernel_main(mb_info_phys: u64) callconv(.C) noreturn {
     // that program's first division raises #UD.
     fpu.enable();
     console.println("  [ok] GDT + IDT + FPU");
+    // SMEP and SMAP, where the CPU has them. Every access to a process's
+    // memory goes through mm/uaccess.zig and the direct map, so the kernel
+    // never needs to touch a user address; with SMAP on, a path that still
+    // did would fault instead of quietly working. The default QEMU CPU has
+    // neither, and the log says so rather than claiming a protection the
+    // hardware did not provide; the boot gate also runs `-cpu max`, which has
+    // both.
+    const guard = smap.enable();
+    if (guard.smep and guard.smap) {
+        console.println("  [ok] smep+smap: ring 0 cannot run or touch user pages by accident");
+    } else if (guard.smep) {
+        console.println("  [--] smep on; smap not on this CPU");
+    } else {
+        console.println("  [--] smep+smap: not on this CPU (qemu64 has neither; -cpu max does)");
+    }
 
     // Parse the multiboot2 info blob into a BootInfo. Allocator-free, so
     // the memory map aliases the firmware-supplied table — it must be
