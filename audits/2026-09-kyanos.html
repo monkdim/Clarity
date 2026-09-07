@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KyanOS Audit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;650&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F4F6FB;--surface:#FFFFFF;--raised:#FFFFFF;--hair:#E2E7F2;--text:#0C1018;--muted:#5B6478;
+  --accent:#0891B2;--violet:#7C3AED;--sig:linear-gradient(90deg,#7C3AED,#4F46E5,#22D3EE);
+  --ok:#0F9F6E;--warn:#B45309;--danger:#BE123C;--code-bg:#EEF1F8;
+  --sans:"Geist",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#05060A;--surface:#0D111A;--raised:#151B29;--hair:#242D42;--text:#E9EDF6;--muted:#8C96AC;
+  --accent:#2AD8F0;--violet:#8B5CF6;--ok:#34D399;--warn:#FBBF24;--danger:#FB7185;--code-bg:#0A0E17;}}
+:root[data-theme="dark"]{
+  --bg:#05060A;--surface:#0D111A;--raised:#151B29;--hair:#242D42;--text:#E9EDF6;--muted:#8C96AC;
+  --accent:#2AD8F0;--violet:#8B5CF6;--ok:#34D399;--warn:#FBBF24;--danger:#FB7185;--code-bg:#0A0E17;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+.wrap{display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;max-width:1180px;margin:0 auto;padding:40px 28px 96px}
+@media (max-width:860px){.wrap{grid-template-columns:1fr;gap:24px}nav.toc{position:static}}
+nav.toc{position:sticky;top:24px;align-self:start;font-size:13px}
+nav.toc .eyebrow{margin-bottom:10px}
+nav.toc a{display:block;color:var(--muted);text-decoration:none;padding:4px 0;border-left:2px solid var(--hair);padding-left:12px}
+nav.toc a:hover,nav.toc a:focus-visible{color:var(--text);border-left-color:var(--accent);outline:none}
+main{max-width:72ch}
+main>section{margin-top:56px}
+.eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}
+h1{font-size:40px;line-height:1.05;letter-spacing:-.02em;font-weight:650;margin:8px 0 12px;text-wrap:balance}
+h1::after{content:"";display:block;height:3px;width:120px;margin-top:18px;background:var(--sig);border-radius:2px}
+h2{font-size:24px;letter-spacing:-.015em;font-weight:650;margin:0 0 6px;text-wrap:balance}
+h3{font-size:16px;font-weight:650;margin:28px 0 8px}
+p{margin:0 0 14px}
+.lede{font-size:17px;color:var(--muted);max-width:60ch}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px 24px;margin:26px 0 0;padding:18px 0;border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);font-size:13px}
+.meta b{display:block;font-weight:500;color:var(--muted);font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:2px}
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--hair);border:1px solid var(--hair);border-radius:8px;overflow:hidden;margin:18px 0 22px}
+.figs div{background:var(--surface);padding:14px 16px}
+.figs .n{font:500 26px/1 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.figs .l{font-size:12px;color:var(--muted);margin-top:6px}
+code{font:13px var(--mono);background:var(--code-bg);padding:1px 5px;border-radius:4px}
+pre{font:12.5px/1.55 var(--mono);background:var(--code-bg);border:1px solid var(--hair);border-radius:6px;padding:12px 14px;overflow-x:auto;margin:10px 0 14px}
+pre code{background:none;padding:0}
+.tier{border-left:3px solid var(--hair);padding-left:18px;margin:22px 0}
+.tier.immediate{border-left-color:var(--danger)}.tier.huge{border-left-color:var(--warn)}.tier.medium{border-left-color:var(--accent)}.tier.low{border-left-color:var(--muted)}
+.tier h3{margin-top:0}
+.item{margin:0 0 18px}
+.item .t{font-weight:650;margin-bottom:4px}
+.item .fix{color:var(--muted);font-size:14px}
+.item .fix b{color:var(--text);font-weight:500}
+.pill{display:inline-block;font:500 11px/1 var(--mono);letter-spacing:.04em;padding:4px 7px;border-radius:999px;border:1px solid var(--hair);color:var(--muted);vertical-align:middle;margin-left:6px}
+.pill.ok{color:var(--ok);border-color:var(--ok)}.pill.bad{color:var(--danger);border-color:var(--danger)}.pill.part{color:var(--warn);border-color:var(--warn)}
+.tbl{overflow-x:auto;border:1px solid var(--hair);border-radius:6px;margin:10px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--hair)}
+th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:500;background:var(--surface)}
+tr:last-child td{border-bottom:none}
+td.mono,th.mono{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+ul{padding-left:20px;margin:0 0 14px}li{margin:4px 0}
+ol{padding-left:22px}ol li{margin:8px 0}
+.strong li b{font-weight:650}
+.note{border:1px solid var(--hair);background:var(--surface);border-radius:8px;padding:14px 16px;margin:14px 0}
+@media (prefers-reduced-motion:no-preference){nav.toc a{transition:color .15s,border-color .15s}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <div class="eyebrow">Contents</div>
+  <a href="#floor">The floor, verified</a>
+  <a href="#gaps">Gaps by tier</a>
+  <a href="#strong">What is strong</a>
+  <a href="#holding">What is holding us back</a>
+  <a href="#dead">Dead code</a>
+  <a href="#challenge">Code challenged</a>
+  <a href="#readme">README against the tree</a>
+  <a href="#assets">Not gaps, but assets</a>
+  <a href="#todo">What needs doing, in order</a>
+</nav>
+
+<main>
+<header>
+  <div class="eyebrow">Audit, September 2026</div>
+  <h1>KyanOS Audit</h1>
+  <p class="lede">The kernel, the boot gates, and the operating-system userspace written in Clarity. Every claim below was checked against the tree at the commit named, by building and booting rather than by reading.</p>
+  <div class="meta">
+    <div><b>Commit</b>main at <code>9f535dd</code>, branch <code>claude/clarityos-audit-o85aim</code></div>
+    <div><b>Scope</b><code>kernel/</code>, <code>runtime/</code>, <code>web/</code>, and the 51 stdlib modules that exist only to be part of the OS</div>
+    <div><b>Method</b>both kernels built with Zig 0.13; the x86 gate three times; the aarch64 gate on cortex-a72, -cpu max and 4 GiB; fb_check, key_check, serial_check; <code>clarity os build</code> run end to end; import and reference graphs computed over every file</div>
+    <div><b>Companion</b><code>REPO_INDEX.md</code> in the repo, generated by <code>tools/repo_index.py</code>, lists every module and kernel file with who imports it</div>
+  </div>
+</header>
+
+<section id="floor">
+  <div class="eyebrow">Section 1</div>
+  <h2>The floor, verified</h2>
+  <p>These are the things that ran on this machine today. Anything not in this list is either in the gaps below or was not checked.</p>
+  <div class="figs">
+    <div><div class="n">13,502</div><div class="l">lines of Zig and assembly in the kernel, 67 .zig files, all reachable from a build root</div></div>
+    <div><div class="n">16 / 32</div><div class="l">boot markers required on x86_64 (three boots) and on the aarch64 512 MiB boot</div></div>
+    <div><div class="n">16 / 6</div><div class="l">system calls wired on x86_64 and on aarch64, of 41 numbered</div></div>
+    <div><div class="n">24 s</div><div class="l">for an untouched aarch64 boot to reach the end under TCG here</div></div>
+  </div>
+  <ul>
+    <li><b>x86_64</b>: multiboot2 into long mode, higher half, GDT, IDT, FPU, page allocator, four-level tables, slab heap, preemptive scheduling with FPU state across switches, VFS over tmpfs, two processes loaded from ELFs in the filesystem (<code>/bin/clarity-init</code> in Zig and <code>/bin/clarity-demo</code>, a Clarity program through <code>clarity cc --freestanding</code>), <code>brk</code>, SSE in userspace, <code>sysret</code>. All 16 markers, three consecutive boots, green.</li>
+    <li><b>aarch64</b>: Linux Image header and device tree, higher half on TTBR1 with the identity map dropped and checked through <code>at s1e1w</code>, per-process TTBR0 spaces checked through <code>at s1e0r/w</code>, GICv2 timer, preemption, ELF loading, <code>brk</code>, a ramfb console whose pixels CI reads back, a virtio keyboard on its own interrupt, a serial line that can be typed into, tmpfs and the VFS unchanged from x86, six syscalls, a shell. 32 markers plus three driven tests, green.</li>
+    <li><b>Same program, both architectures</b>: <code>clarity-demo</code> prints <code>float 3.1415929203539825 1.4142135623730951 6.25</code> byte for byte on x86_64, on aarch64 under QEMU, and on an Apple M5 driven by hand.</li>
+    <li><b>Apple hardware</b>: booted on an M5 with <code>-display none -serial stdio</code>, typed at through the shell to <code>exit 3</code>. Transcript in <code>kernel/RUNNING.md</code>. The Mac is running QEMU; the kernel is not running on the Mac.</li>
+  </ul>
+</section>
+
+<section id="gaps">
+  <div class="eyebrow">Section 2</div>
+  <h2>Gaps by tier</h2>
+  <p>Immediate means a person following the README hits it today. Huge means it blocks the goal (a Mac-style OS on Apple hardware that can run PC games). Medium is real and bounded. Low is hygiene.</p>
+
+  <div class="tier immediate"><h3>Immediate</h3>
+    <div class="item"><div class="t"><code>clarity os build</code> fails on a clean tree.</div>
+      <pre><code>  zig build in kernel ...
+  zig build in runtime/freestanding ...
+  expected runtime artifact missing at runtime/freestanding/zig-out/bin/clarity-runtime
+os build exit=1</code></pre>
+      <div class="fix">The freestanding runtime is QuickJS-based and QuickJS is never vendored; <code>runtime/freestanding/build.zig</code> prints a warning and installs nothing. The kernel the gates boot does not use this runtime at all; it embeds <code>clarity-init</code> (Zig) and <code>clarity-demo</code> (C from <code>clarity cc</code>). <b>Fix:</b> make <code>os build</code> produce the ISO the gate boots, with GRUB via <code>mkiso</code>'s <code>grub-mkrescue</code> path, and drop the QuickJS runtime from the pipeline. It is a separate, non-working pipeline being advertised as the developer workflow.</div></div>
+    <div class="item"><div class="t">The README's boot path does not match the gate.</div>
+      <div class="fix">README: "Multiboot2 → ELF loader → ring switch → SYSCALL → page faults → fork/exec/wait/kill → framebuffer → init → tmpfs/devfs/procfs → desktop session → login." What the gate proves ends at two processes and <code>ClarityOS: userspace complete.</code> Page faults are reported and the machine halts (<code>vmm.handle_page_fault</code> has no caller). <code>devfs</code> and <code>procfs</code> are compile-only. No desktop session or login runs on the kernel. <b>Fix:</b> state the gate's markers as the boot path.</div></div>
+    <div class="item"><div class="t">"The userspace is written in Clarity" is not true on the kernel.</div>
+      <div class="fix">On both kernels <code>init</code> is Zig (<code>kernel/user/init.zig</code>, <code>init_aarch64.zig</code>). The Clarity <code>init</code>, <code>init_app</code>, <code>vfs</code>, <code>scheduler</code>, <code>process_model</code>, <code>procfs</code>, <code>compositor</code>, <code>desktop_session</code> and every app are imported only by tests; none has ever run on the kernel. <code>syscall.clarity</code>'s claritos backend throws "not yet wired"; <code>display_server.framebuffer_from_mmap</code> throws "not implemented yet". <b>Fix:</b> say "a userspace written in Clarity exists and runs hosted; on the kernel, one Clarity program runs".</div></div>
+    <div class="item"><div class="t">HVF cannot run either kernel on Apple Silicon.</div>
+      <pre><code>qemu-system-aarch64: HVF does not support GICv2 emulation</code></pre>
+      <div class="fix">The aarch64 kernel speaks GICv2 only, and HVF refuses it. The launcher (<code>qemu_macos.clarity</code>) only ever starts <code>qemu-system-x86_64</code>, which HVF cannot accelerate on an ARM host. The README's "targets QEMU first on macOS (HVF)" is not achievable on the hardware the project is for. <b>Fix:</b> GICv3 driver (roadmap item, already recorded), and a launcher that picks the aarch64 kernel on arm64 hosts.</div></div>
+    <div class="item"><div class="t">x86_64 system calls dereference raw user pointers.</div>
+      <pre><code>// Note: the buffer is a raw user pointer and is not validated. Nothing
+// here checks that the range is mapped, user-owned, or even canonical, so
+// a bad pointer faults in the kernel.        (syscall/dispatch.zig, sys_write)</code></pre>
+      <div class="fix"><code>sys_read</code>, <code>sys_write</code> and <code>sys_open</code> all do this. The aarch64 side translates every user pointer through the process's own tables and enables PAN; the x86 side has none of it. A bad pointer from a program is a kernel fault, not an <code>EFAULT</code>. <b>Fix:</b> port the aarch64 translate-for-read / translate-for-write layer and enable SMAP.</div></div>
+  </div>
+
+  <div class="tier huge"><h3>Huge</h3>
+    <div class="item"><div class="t">No scheduler or process table on aarch64.</div><div class="fix">Threads switch, programs run one after another from a fixed boot order. There is no <code>exec</code>, so nothing can start a program; <code>read(2)</code> cannot block, so it spins and gives up (now two minutes by default, from the kernel command line). Every session feature waits on this.</div></div>
+    <div class="item"><div class="t">GICv3, then AIC.</div><div class="fix">Native speed on Apple hardware needs GICv3 under HVF; real hardware needs m1n1 and Apple's AIC, not a GIC at all. Both are known and neither is started.</div></div>
+    <div class="item"><div class="t">Preemption stops at the kernel's door.</div><div class="fix">System calls run with interrupts on (so devices are serviced), but a time slice that expires inside one is ignored: <code>trap.zig</code> counts <code>syscall_depth</code> and <code>aarch64_irq</code> skips the scheduling decision. A program in a long call cannot be preempted. This is honest and documented, and it is still a gap.</div></div>
+    <div class="item"><div class="t">The Clarity OS userspace is five parallel drafts.</div>
+      <div class="tbl"><table><tr><th>Family</th><th>Modules</th><th class="mono">Lines</th><th>Imported by non-test code</th></tr>
+      <tr><td>Boot splash</td><td>boot_splash, _modern, _kyan</td><td class="mono">498</td><td>none</td></tr>
+      <tr><td>Branding</td><td>branding, _modern, _kyan</td><td class="mono">888</td><td>website_gen; each other</td></tr>
+      <tr><td>Wallpapers</td><td>wallpaper, wallpapers, wallpapers_spring</td><td class="mono">434</td><td>the splashes</td></tr>
+      <tr><td>Themes</td><td>theme, _aurora, _registry, _picker, _kyan, _meadow</td><td class="mono">981</td><td>apps, dock, cli (kyan only)</td></tr>
+      <tr><td>Init</td><td>init, init_app</td><td class="mono">492</td><td>none</td></tr>
+      <tr><td>Kernel simulations</td><td>vfs, scheduler, process_model, procfs</td><td class="mono">1,167</td><td>none</td></tr>
+      </table></div>
+      <div class="fix">REBRAND.md decided one identity and one window model in July. The tree still carries the spring identity and the Kyan identity side by side, two init systems, and four pure-state models of kernel subsystems that the real kernel now implements in Zig. <b>Fix:</b> archive or delete the non-Kyan families and the simulations; keep their tests only where they pin a contract the Zig side must honor.</div></div>
+    <div class="item"><div class="t">The browser desktop is two months behind its source.</div><div class="fix"><code>web/kyanos.bundle.js</code> was last built 2026-07-12; <code>kyan_desktop.clarity</code> and <code>kyan_apps.clarity</code> changed 2026-09-05. <code>pages.yml</code> copies the committed bundle without rebuilding, so the live site at <code>/os/</code> runs July's desktop. <b>Fix:</b> build the bundle in the Pages workflow and stop tracking it.</div></div>
+  </div>
+
+  <div class="tier medium"><h3>Medium</h3>
+    <div class="item"><div class="t">Every process shares one descriptor table.</div><div class="fix"><code>vfs.install_current_table_resolver</code> is never called, so <code>current_table()</code> always returns <code>fallback_table</code>. Two processes opening files would see each other's descriptors. <code>File</code> records are freed only on <code>close</code>; nothing closes them on exit.</div></div>
+    <div class="item"><div class="t">The kernel heap is written to once and freed almost never.</div><div class="fix"><code>heap.free</code> has two callers in the whole kernel (tmpfs growth and <code>vfs.close</code>). Everything else leaks by design. Fine for a boot that ends, not for a session.</div></div>
+    <div class="item"><div class="t">Stubs that look like drivers.</div><div class="fix"><code>drivers/ahci.zig</code> and <code>drivers/virtio_net.zig</code> enumerate PCI and then return <code>NotImplemented</code> for every operation. <code>boot/uefi.zig</code> has an <code>efi_main</code> nothing calls. The VGA console has no scroll. <code>clock_gettime</code> returns a placeholder (TSC TODO).</div></div>
+    <div class="item"><div class="t">The PL011 is polled while the keyboard is interrupt-driven.</div><div class="fix">Its receive INTID is in the device tree and nothing reads it. Has not bitten (16-byte FIFO, humans type slower), which is the kind of true statement that stops being true without warning.</div></div>
+    <div class="item"><div class="t">The kernel calls itself ClarityOS in every marker.</div><div class="fix">REBRAND.md renamed the OS to KyanOS. Both gates and all three Python tools grep the old name, so the rename has reach. Owner's decision; recorded, not acted on.</div></div>
+    <div class="item"><div class="t"><code>clarity desktop</code> crashes instead of explaining.</div>
+      <pre><code>Launching KyanOS — close the window to exit.
+error: Failed to open library "libSDL2-2.0.so.0" ... ERR_DLOPEN_FAILED</code></pre>
+      <div class="fix"><code>host_supported()</code> checks the platform, not whether SDL2 is present, so on a machine without it the friendly message never prints and a Bun stack trace does. Small fix, high first-impression cost.</div></div>
+  </div>
+
+  <div class="tier low"><h3>Low</h3>
+    <ul>
+      <li>26 public kernel functions have no reference anywhere (list under Dead code). Some are API surface (<code>port.in16</code>), some are dead by design (<code>tty.set_mode</code>), one is a hazard: <code>vmm.handle_page_fault</code> exists and is never wired.</li>
+      <li><code>kernel/README.md</code> and <code>RUNNING.md</code> carry 34 and 46 em dashes; <code>ROADMAP_OS.md</code> 72. House style avoids them.</li>
+      <li>ITARGETSR in <code>gic.zig</code> is written and, on QEMU's uniprocessor GIC, has no observable effect; the comment now says so. It will matter on a multi-core GIC.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="strong" class="strong">
+  <div class="eyebrow">Section 3</div>
+  <h2>What is strong</h2>
+  <ul>
+    <li><b>The aarch64 kernel is verified the way kernels should be.</b> Address spaces are checked by asking the MMU, not by reading a bit back. PAN is enabled and the gate runs a CPU without PAN too, because on that one doing it wrong also works. User pointers are translated for the access being made; the init program passes a pointer into its own text to prove <code>read</code> refuses it.</li>
+    <li><b>Negative testing is a habit, not a slogan.</b> Every increment this month broke the thing on purpose and required a distinct failure: the keyboard interrupt (11 of 46 characters without it), the syscall unmask (same), the serial receive (0 key presses without it). A negative test that passed was treated as a broken test, found the cause, and was written up.</li>
+    <li><b>The gate reads pixels and types.</b> <code>fb_check</code> replays the console's own wrapping over the serial log and compares every cell to a glyph it renders itself. <code>key_check</code> sends over two hundred virtqueue events through a queue of sixty-four to prove buffers recycle. <code>serial_check</code> attaches no keyboard and fails if it finds one.</li>
+    <li><b>One C program runs on both architectures with identical bytes.</b> <code>kernel/user/libc</code> (strtod, dtoa, printf, malloc, setjmp, math) is small, shared, and pinned by a literal float line the gate requires on both.</li>
+    <li><b>Failures are diagnosed, not retried.</b> A three-second timeout that made the OS unusable by hand became a kernel command line rather than a bigger number. A write-only UART became a serial console rather than a workaround.</li>
+    <li><b>The browser desktop is real.</b> <code>web/</code> compiles the Clarity compositor, window manager and apps to JavaScript and paints them on a canvas with mouse routing. It is the one demoable OS surface today, and it is live (if stale).</li>
+  </ul>
+</section>
+
+<section id="holding">
+  <div class="eyebrow">Section 4</div>
+  <h2>What is holding us back</h2>
+  <ol>
+    <li><b>Two OS stories in one tree.</b> The kernel gate proves a Zig init and a compiled Clarity program. The README, <code>os_build</code>, <code>init_app</code>, <code>display_server</code> and the QuickJS runtime describe a different OS whose init spawns <code>/bin/clarity-compositor</code> and friends, binaries nothing builds. Until one story is chosen, every doc drifts and every reader is misled somewhere.</li>
+    <li><b>No process table.</b> Everything a person expects from a shell (start a program, list a directory, wait, come back) is downstream of this one piece.</li>
+    <li><b>The x86 side has no user-memory layer.</b> The aarch64 port did it properly; the x86 kernel still trusts every pointer. Every new syscall on x86 inherits the hole.</li>
+    <li><b>The OS userspace has never had a real boundary to meet.</b> Its tests pass against stubs. As the kernel grows syscalls, the simulations should become contract tests against the real thing, or go.</li>
+    <li><b>Apple hardware is the goal and GICv2 is the ceiling.</b> No native speed on a Mac until GICv3, and no bare metal until AIC and m1n1.</li>
+  </ol>
+</section>
+
+<section id="dead">
+  <div class="eyebrow">Section 5</div>
+  <h2>Dead code</h2>
+  <h3>Removed in this pass <span class="pill ok">committed</span></h3>
+  <ul>
+    <li><code>runtime/native_vm/</code>: 5 files, 484 lines. A Zig bytecode VM with 20 of 54 opcodes and a <code>load_bundle</code> that returned <code>NotImplemented</code>. ROADMAP_OS.md and GAPS.md both record it as superseded by the <code>clarity cc</code> C path. Its only reference was a <code>zig build vm</code> step in <code>runtime/freestanding/build.zig</code>, removed with it; the three documents that named it now say it was removed.</li>
+  </ul>
+  <h3>Dead, and left for a decision</h3>
+  <div class="tbl"><table>
+    <tr><th>What</th><th>Evidence</th><th>Why not removed here</th></tr>
+    <tr><td><code>runtime/freestanding/</code> (QuickJS runtime)</td><td>cannot build: QuickJS never vendored; the gate does not use it</td><td><code>cli.clarity</code>'s <code>os build</code> depends on it; removal means rewriting that command</td></tr>
+    <tr><td>Spring identity: <code>boot_splash</code>, <code>boot_splash_modern</code>, <code>branding</code>, <code>branding_modern</code>, <code>wallpapers</code>, <code>wallpapers_spring</code>, <code>theme_meadow</code>, <code>theme_aurora</code></td><td>REBRAND retired it; only tests and each other import them</td><td>REBRAND says archive, not delete; owner's call</td></tr>
+    <tr><td>Kernel simulations: <code>vfs</code>, <code>scheduler</code>, <code>process_model</code>, <code>procfs</code> (Clarity)</td><td>imported only by their own tests; the Zig kernel implements each</td><td>their tests may be the contract the Zig side should meet</td></tr>
+    <tr><td><code>init.clarity</code>, <code>init_app.clarity</code>, <code>desktop_session</code>, <code>chrome</code>, <code>display_server</code></td><td>imported only by tests; spawn binaries that are never built</td><td>tied to the two-stories decision above</td></tr>
+    <tr><td><code>kernel/boot/uefi.zig</code></td><td><code>efi_main</code> has no caller; compile-only via <code>checkonly.zig</code></td><td>UEFI is a stated future path</td></tr>
+    <tr><td><code>drivers/tty.zig</code>, <code>devfs.zig</code>, <code>procfs.zig</code> (Zig)</td><td>compile-only via <code>checkonly.zig</code>; nothing wires them</td><td>small; they are the obvious next things to wire</td></tr>
+  </table></div>
+  <h3>Public kernel functions nothing references</h3>
+  <pre><code>arch/aarch64/fwcfg.zig: current_base        arch/aarch64/virtio_mmio.zig: read_config, write_config
+arch/x86_64/console.zig: enable_vga         arch/x86_64/paging.zig: switch_address_space
+arch/x86_64/port.zig: in16, out16           arch/x86_64/timer.zig: uptime_ms
+boot/uefi.zig: efi_main                     drivers/ahci.zig: read_sectors, write_sectors
+drivers/framebuffer.zig: put_pixel          drivers/ps2.zig: read_kbd, read_mouse
+drivers/tty.zig: input_available, input_pending, keyboard_byte, set_mode
+drivers/virtio_net.zig: recv_frame, send_frame
+fs/vfs.zig: install_current_table_resolver  loader/elf.zig: highest_address
+mm/vmm.zig: handle_page_fault               sched/process.zig: remove_child, reparent_children
+sched/scheduler.zig: queue_len</code></pre>
+  <p>Three of these are not dead code but unwired features: <code>handle_page_fault</code>, <code>install_current_table_resolver</code>, and <code>reparent_children</code>. Each exists, each is what the README implies works, and none is called.</p>
+</section>
+
+<section id="challenge">
+  <div class="eyebrow">Section 6</div>
+  <h2>Code challenged</h2>
+  <p>Places where the code is doing something worth arguing with, mine included.</p>
+  <ul>
+    <li><b><code>sys_write</code> falls back to the console on <code>EBADF</code> for fd 1 and 2.</b> It makes early bring-up easier and it means a program can never learn that stdout is not open. The fallback should go when a process table gives every process real descriptors.</li>
+    <li><b>The page-fault handler halts the machine.</b> Correct for a kernel with no demand paging, but it means a user program's bad pointer takes down everything, on x86 today and on aarch64 only because pointers are translated first. A fault in user mode should kill the process, not the kernel.</li>
+    <li><b><code>syscall_depth</code> as a preemption guard.</b> It is 0 or 1 and correct, but it encodes "we do not know how to suspend a syscall" as policy. It should be replaced, not extended, when the scheduler lands.</li>
+    <li><b>One line editor for every reader.</b> <code>drivers/stdin.zig</code> keeps a single editor so the boot selftest and <code>read(2)</code> do not split keystrokes. That is right today and wrong the moment two processes read.</li>
+    <li><b>Timeouts standing in for blocking.</b> <code>clarity.idle=</code> made it configurable; it is still a spin. The kernel command line was the right fix for the person; the scheduler is the fix for the design.</li>
+    <li><b><code>gic.init</code> cycles the distributor.</b> Adding a second interrupt needed <code>gic.enable</code> precisely because <code>init</code> turns everything off and on. Fine now; on hardware where the timer is already running that pattern is a missed tick.</li>
+    <li><b>Markers are the contract, and they are prose.</b> The gate greps sentences like <code>"[ok] keyboard: interrupt .* routed to this core"</code>. Every wording change is a CI change. A short stable tag per marker (<code>[ok:kbd-irq]</code>) would let the prose improve without touching the gate.</li>
+    <li><b>The line-count claims in the README are off by 4x for the kernel.</b> "~3,600-line Zig micro-kernel" was true in July; the tree has 13,502 lines of Zig and assembly. Numbers in prose rot; the index generator now computes them.</li>
+  </ul>
+</section>
+
+<section id="readme">
+  <div class="eyebrow">Section 7</div>
+  <h2>README against the tree</h2>
+  <p>Only the OS claims; the language claims are in the ClarityCode report. No edits were made to README.md; each row is the fix.</p>
+  <div class="tbl"><table>
+    <tr><th>Claim</th><th>Status</th><th>What is true, and the fix</th></tr>
+    <tr><td>"above the syscall boundary, the userspace is written in Clarity: init, the filesystem layer ... all Clarity"</td><td><span class="pill bad">not true</span></td><td>init is Zig on both kernels; the Clarity modules run hosted and in tests. Say so.</td></tr>
+    <tr><td>"A real boot path, end to end ... → init → tmpfs / devfs / procfs → desktop session → login"</td><td><span class="pill part">partly</span></td><td>Gate ends at two processes and "userspace complete". devfs/procfs compile-only. No session, no login. Quote the gate.</td></tr>
+    <tr><td>"Targets QEMU first on macOS (HVF) and Linux (KVM)"</td><td><span class="pill bad">not true on Apple Silicon</span></td><td>HVF refuses GICv2; the launcher only starts qemu-system-x86_64. Say "emulated on macOS until GICv3".</td></tr>
+    <tr><td>"<code>clarity os build && clarity os run</code> is the developer workflow"</td><td><span class="pill bad">fails</span></td><td>Runtime artifact missing. The workflow that works is <code>zig build</code> plus the QEMU lines in <code>kernel/RUNNING.md</code>. Point there.</td></tr>
+    <tr><td>"~3,600-line Zig micro-kernel"</td><td><span class="pill bad">stale</span></td><td>13,502 lines. Use the index.</td></tr>
+    <tr><td>"a freestanding QuickJS-based userspace runtime"</td><td><span class="pill bad">not built</span></td><td>Never buildable; superseded by <code>clarity cc --freestanding</code> and <code>kernel/user/libc</code>. Remove the claim.</td></tr>
+    <tr><td>"Real-hardware boot is a goal, not a verified claim"</td><td><span class="pill ok">true</span></td><td>Keep. Add: the emulated path has now been run on an M5.</td></tr>
+    <tr><td>"the eleven default apps ... written and in the tree"</td><td><span class="pill part">partly</span></td><td>Eleven modules exist; they run hosted and in the browser build; none runs on the kernel. Say which.</td></tr>
+    <tr><td>Boot splash and desktop renders "not mockups"</td><td><span class="pill part">unverified</span></td><td>Plausible (the renderer is real); the PNGs' provenance was not checked here. Regenerate them in CI or drop the claim.</td></tr>
+    <tr><td>Style: 39 em dashes in README.md</td><td><span class="pill part">style</span></td><td>House style avoids them; the index counts them per document.</td></tr>
+  </table></div>
+  <p><code>kernel/README.md</code> and <code>kernel/RUNNING.md</code> were checked line by line this month and match the tree. <code>ROADMAP_OS.md</code> carries no shipped or bare-metal claim stated as fact; its marker counts were corrected this week.</p>
+</section>
+
+<section id="assets">
+  <div class="eyebrow">Section 8</div>
+  <h2>Not gaps, but assets for the goal</h2>
+  <ul>
+    <li><b>The shared C runtime path.</b> A Clarity program compiles to C, links against a 1,000-line libc, and runs on both kernels with identical output. This is the userspace strategy that works; the roadmap should say it is the only one.</li>
+    <li><b>The device-tree parser.</b> Written for QEMU's <code>virt</code>, but m1n1 hands Apple hardware the same format. It is the first piece of the bare-metal path that already exists.</li>
+    <li><b>The renderer and compositor are real and tested.</b> Per-window framebuffers, dirty rects, z-order, hit testing, drag and snap, and now the Kyan identity. They are ready for a real display target; what they lack is one.</li>
+    <li><b>The test tooling is reusable.</b> <code>key_check</code>, <code>serial_check</code> and <code>fb_check</code> are the harness a future <code>ls</code>, <code>exec</code> or GICv3 lands into. New features arrive with a way to fail.</li>
+    <li><b>Both architectures share the filesystem unchanged.</b> <code>fs/vfs.zig</code> and <code>fs/tmpfs.zig</code> crossed over with zero edits, which says the shared layer is actually shared.</li>
+  </ul>
+</section>
+
+<section id="todo">
+  <div class="eyebrow">Section 9</div>
+  <h2>What needs doing, in order</h2>
+  <ol>
+    <li>Choose the one OS story and make the README, <code>os_build</code> and <code>init_app</code> tell it. Retire the QuickJS runtime from the pipeline; make <code>clarity os build</code> produce the ISO the gate boots.</li>
+    <li>User-memory layer on x86_64: translate-for-read and translate-for-write, SMAP, and <code>EFAULT</code> instead of a kernel fault. Port the aarch64 tests.</li>
+    <li>A process table and scheduler on aarch64, then <code>exec</code>, <code>getdents</code>, and blocking <code>read</code>. This unlocks <code>ls</code>, running programs from the shell, and preemption inside system calls.</li>
+    <li>Wire what exists and is not called: per-process descriptor tables, orphan reparenting, a page-fault handler that kills a process instead of the machine.</li>
+    <li>GICv3 driver, then <code>-accel hvf</code> on the M5. Then the launcher picks the aarch64 kernel on arm64 hosts.</li>
+    <li>Rebuild the browser desktop in the Pages workflow and stop tracking the bundle. Decide the fate of the spring identity and the kernel simulations.</li>
+    <li>Rename the markers to KyanOS once, with stable tags, and update both gates and the three tools in the same change.</li>
+    <li>m1n1 and AIC: the bare-metal track, after everything above.</li>
+  </ol>
+</section>
+</main>
+</div>
+</body>
+</html>

@@ -224,7 +224,9 @@ def workflow_index():
 def docs_index():
     rows = []
     for f in sorted(tracked("*.md")):
-        if "/node_modules/" in f:
+        # The index must not count itself, or every generation grows by a line
+        # and --check can never pass.
+        if "/node_modules/" in f or f == "REPO_INDEX.md":
             continue
         text = read(f)
         rows.append({
@@ -240,6 +242,8 @@ def dir_index():
     rows = []
     counts = {}
     for f in tracked():
+        if f == "REPO_INDEX.md":
+            continue
         top = f.split("/")[0] if "/" in f else "(root files)"
         counts.setdefault(top, [0, 0])
         counts[top][0] += 1
