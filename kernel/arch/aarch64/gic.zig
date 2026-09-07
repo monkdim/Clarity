@@ -13,9 +13,12 @@
 //! gigabyte, which the boot stub already maps Device-nGnRnE, so there is no
 //! mapping work here — that was checked rather than assumed.
 //!
-//! Only what a timer needs is set up. A private peripheral interrupt (PPI)
-//! is per-core and needs no routing, which is why there is no GICD_ITARGETSR
-//! write below: SGIs and PPIs (INTIDs 0..31) ignore it.
+//! A private peripheral interrupt (PPI) is per-core and needs no routing;
+//! a shared one (SPI) does, and gets it. What is deliberately *not* set is
+//! GICD_ICFGR, which says whether an interrupt is edge- or level-triggered:
+//! the reset configuration is left alone, and the keyboard test is what says
+//! whether events keep arriving past the first one. Writing a guess there
+//! would make that test pass or fail for a reason nothing had checked.
 
 const vm = @import("vm.zig");
 
@@ -29,6 +32,7 @@ const CPU: u64 = 0x0801_0000 + vm.KERNEL_VA_BASE;
 const GICD_CTLR: u64 = DIST + 0x000;
 const GICD_ISENABLER: u64 = DIST + 0x100; // one bit per INTID
 const GICD_IPRIORITYR: u64 = DIST + 0x400; // one byte per INTID
+const GICD_ITARGETSR: u64 = DIST + 0x800; // one byte per INTID: which cores
 
 // CPU interface
 const GICC_CTLR: u64 = CPU + 0x000;
@@ -58,20 +62,56 @@ fn mmio_read32(addr: u64) u32 {
 pub fn init(intid: u32) void {
     // Distributor off while it is configured, then on.
     mmio_write32(GICD_CTLR, 0);
-
-    // Priority 0 (highest) for our interrupt. One byte per INTID.
-    const id: u64 = intid;
-    const prio: *volatile u8 = @ptrFromInt(GICD_IPRIORITYR + id);
-    prio.* = 0x00;
-
-    // Enable it: one bit per INTID, 32 to a register.
-    const reg = GICD_ISENABLER + (id / 32) * 4;
-    mmio_write32(reg, @as(u32, 1) << @intCast(intid % 32));
-
+    configure(intid);
     mmio_write32(GICD_CTLR, 1);
 
     mmio_write32(GICC_PMR, 0xF0);
     mmio_write32(GICC_CTLR, 1);
+}
+
+/// Let one more interrupt through, after `init` has run.
+///
+/// Separate from `init` rather than a second call to it, because init turns
+/// the distributor off and on again: doing that to add a second source would
+/// briefly stop delivering the first, and a timer that misses a tick during
+/// device probing is a hang waiting to happen.
+pub fn enable(intid: u32) void {
+    configure(intid);
+}
+
+/// Everything that is per-interrupt rather than per-controller.
+fn configure(intid: u32) void {
+    const id: u64 = intid;
+
+    // Priority 0 (highest). One byte per INTID.
+    const prio: *volatile u8 = @ptrFromInt(GICD_IPRIORITYR + id);
+    prio.* = 0x00;
+
+    // Routing. SGIs and PPIs (0..31) are per-core and ignore this register —
+    // writes to those bytes are architecturally reserved, so they are not
+    // made. An SPI is routed by the distributor, and on a GIC with more than
+    // one CPU interface it reaches nobody until this says which.
+    //
+    // Nothing here proves that. It was tested by removing this write and
+    // running the keyboard gate, which passed: QEMU's `virt` with one vCPU
+    // builds a uniprocessor GICv2, where GICD_ITARGETSR is RAZ/WI and the
+    // only CPU interface gets the interrupt either way. So this is written
+    // because the architecture requires it of a multi-core GIC and this
+    // kernel will meet one, not because anything on this machine noticed —
+    // and it is said plainly rather than left to look verified.
+    if (intid >= 32) {
+        const target: *volatile u8 = @ptrFromInt(GICD_ITARGETSR + id);
+        target.* = 0x01; // CPU interface 0, the only core that is running
+    }
+
+    // Enable it: one bit per INTID, 32 to a register.
+    //
+    // GICD_ISENABLER is write-1-to-set: the bits written as zero are left
+    // alone, so this adds an interrupt rather than replacing the set. A
+    // read-modify-write would be wrong as well as unnecessary — it would
+    // re-write bits the hardware may have changed underneath.
+    const reg = GICD_ISENABLER + (id / 32) * 4;
+    mmio_write32(reg, @as(u32, 1) << @intCast(intid % 32));
 }
 
 /// Which interrupt fired. Every acknowledge must be paired with `end`, or the

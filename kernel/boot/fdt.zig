@@ -255,7 +255,20 @@ fn decode_reg(fdt: *const Fdt, reg: []const u8, out: []Region) usize {
     return written;
 }
 
-/// Every node whose name starts with `prefix`, by its first `reg` region.
+/// A device on a bus: where its registers are, and which interrupt it raises.
+pub const Slot = struct {
+    base: u64,
+    len: u64,
+    /// The GIC INTID, or null when the node has no usable `interrupts`.
+    ///
+    /// Optional rather than zero-means-none, because INTID 0 is a real
+    /// interrupt (SGI 0) and a driver that enabled it because a property was
+    /// missing would be enabling something else entirely.
+    intid: ?u32,
+};
+
+/// Every node whose name starts with `prefix`, with both its registers and
+/// its interrupt.
 ///
 /// Written for the virtio-mmio bus, where QEMU's `virt` puts thirty-two
 /// identical slots and the device in each is only discoverable by reading its
@@ -263,42 +276,80 @@ fn decode_reg(fdt: *const Fdt, reg: []const u8, out: []Region) usize {
 /// the kind of thing a driver should not know: a machine that laid them out
 /// differently would still describe them here.
 ///
+/// The two properties are accumulated per node and written out when the node
+/// ends, rather than read one after the other, because they arrive in
+/// whatever order the tree lists them — QEMU writes `interrupts` before
+/// `reg`.
+///
 /// Returns how many were written, which may be fewer than there are if `out`
 /// is short — the caller gets the first `out.len` rather than an error,
 /// because a bus with more slots than the caller can hold is not a failure.
-pub fn node_regs(fdt: *const Fdt, prefix: []const u8, out: []Region) usize {
+///
+/// The interrupt encoding is the GIC's three-cell form (Linux's
+/// `arm,gic-400` binding, and what QEMU's `virt` emits): type, number,
+/// flags. Type 0 is an SPI, whose INTID is its number plus 32; type 1 is a
+/// PPI, plus 16. Anything else is left as null rather than guessed at.
+pub fn node_slots(fdt: *const Fdt, prefix: []const u8, out: []Slot) usize {
     var w = Walker.init(fdt);
     var depth: u32 = 0;
     var matched_depth: ?u32 = null;
     var written: usize = 0;
+    var reg: ?Region = null;
+    var intid: ?u32 = null;
 
     while (w.next()) |ev| {
         switch (ev) {
             .node_start => {
                 depth += 1;
-                if (matched_depth == null and starts_with(ev.node_start, prefix)) matched_depth = depth;
+                if (matched_depth == null and starts_with(ev.node_start, prefix)) {
+                    matched_depth = depth;
+                    reg = null;
+                    intid = null;
+                }
             },
             .node_end => {
                 if (matched_depth) |d| if (depth == d) {
                     matched_depth = null;
+                    if (reg) |r| {
+                        if (written >= out.len) return written;
+                        out[written] = .{ .base = r.base, .len = r.len, .intid = intid };
+                        written += 1;
+                    }
                 };
                 if (depth > 0) depth -= 1;
             },
             .prop => |pr| {
                 if (matched_depth) |d| {
-                    if (depth == d and str_eq(pr.name, "reg")) {
-                        if (written >= out.len) return written;
+                    if (depth != d) continue;
+                    if (str_eq(pr.name, "reg")) {
                         var one: [1]Region = undefined;
-                        if (decode_reg(fdt, pr.value, &one) == 1) {
-                            out[written] = one[0];
-                            written += 1;
-                        }
+                        if (decode_reg(fdt, pr.value, &one) == 1) reg = one[0];
+                    } else if (str_eq(pr.name, "interrupts")) {
+                        intid = decode_gic_interrupt(pr.value);
                     }
                 }
             },
         }
     }
     return written;
+}
+
+/// The first interrupt in a GIC three-cell `interrupts` property.
+///
+/// Only the first is read. A node listing several would need somewhere to
+/// put them, and every device this kernel drives has one.
+fn decode_gic_interrupt(value: []const u8) ?u32 {
+    if (value.len < 12) return null;
+    const p: [*]const u8 = value.ptr;
+    const kind = be32(p, 0);
+    const number = be32(p, 4);
+    return switch (kind) {
+        // SPI — shared, routed by the distributor. INTIDs 32 and up.
+        0 => if (number <= 987) number + 32 else null,
+        // PPI — per-core. INTIDs 16..31.
+        1 => if (number <= 15) number + 16 else null,
+        else => null,
+    };
 }
 
 /// The first `reg` region of the first node whose name starts with `prefix`.

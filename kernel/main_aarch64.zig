@@ -14,6 +14,7 @@
 const std = @import("std");
 const console = @import("arch/aarch64/console.zig");
 const timer = @import("arch/aarch64/timer.zig");
+const gic = @import("arch/aarch64/gic.zig");
 const mmu = @import("arch/aarch64/mmu.zig");
 const ramfb = @import("arch/aarch64/ramfb.zig");
 const fwcfg = @import("arch/aarch64/fwcfg.zig");
@@ -136,6 +137,13 @@ export fn kernel_main_aarch64(dtb_phys: u64) callconv(.C) noreturn {
     // because it is the thing a person would still be sitting in front of;
     // the boot has nothing left to say by then.
     shell_program();
+
+    // How the keyboard was actually serviced, once nothing else is going to
+    // touch it. Printed here rather than after the input selftest because
+    // most of the typing happens after that — at the init program's prompt
+    // and at the shell — and a count taken before it would say nothing about
+    // the case this is here for.
+    keyboard_report();
 
     console.println("ClarityOS aarch64: EL1 boot ok");
 
@@ -888,8 +896,8 @@ fn input_selftest(tree: ?fdt.Fdt) void {
         return;
     };
 
-    var slots: [40]fdt.Region = undefined;
-    const n = fdt.node_regs(&t, "virtio_mmio@", &slots);
+    var slots: [40]fdt.Slot = undefined;
+    const n = fdt.node_slots(&t, "virtio_mmio@", &slots);
     if (n == 0) {
         console.println("  [--] no virtio-mmio slots in the device tree");
         return;
@@ -929,6 +937,23 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     console.print("  [ok] keyboard: virtio-input on a bus of ");
     console.print_dec(n);
     console.println(" slots");
+
+    // And its interrupt, so the queue is emptied while something else is
+    // running rather than only when a read asks. Which slot answered is the
+    // driver's to say; which interrupt that slot raises is the device
+    // tree's. A slot whose node has no usable `interrupts` leaves the
+    // keyboard polled, which is what it was before and still works — so this
+    // is reported rather than treated as a failure to boot.
+    if (virtio_input.found_in()) |i| {
+        if (slots[i].intid) |id| {
+            virtio_input.route(id);
+            console.print("  [ok] keyboard: interrupt ");
+            console.print_dec(id);
+            console.println(" routed to this core");
+        } else {
+            console.println("  [--] keyboard: no interrupt in the device tree; polled only");
+        }
+    }
 
     // Everything that reads the console reads it through drivers/stdin.zig,
     // this selftest and read(2) alike. One editor, not one each: two editors
@@ -1010,6 +1035,23 @@ fn input_selftest(tree: ?fdt.Fdt) void {
     console.print(" ignored, ");
     console.print_dec(stdin.dropped());
     console.println(" dropped)");
+}
+
+/// Where the key events came from, and whether any were lost.
+///
+/// The distinction that matters is `interrupts`. Reads poll the device queue
+/// as well, so a keyboard whose interrupt was never routed still works — it
+/// works exactly as badly as it did before the interrupt existed, and the
+/// only difference visible from outside is that this number stays at zero.
+/// Without it, "the GIC routing is wrong" and "the GIC routing is right"
+/// produce the same boot log.
+fn keyboard_report() void {
+    if (!stdin.present()) return;
+    console.print("  [ok] keyboard: ");
+    console.print_dec(virtio_input.interrupts);
+    console.print(if (virtio_input.interrupts == 1) " interrupt serviced, " else " interrupts serviced, ");
+    console.print_dec(virtio_input.overruns);
+    console.println(" events overrun");
 }
 
 /// The console's screen half, once there is a screen.
@@ -1144,8 +1186,27 @@ export fn aarch64_irq() callconv(.C) void {
     //
     // And only on a real tick. A time slice expiring and an interrupt
     // arriving are the same event only on a machine whose only device is the
-    // timer, which this one is and the next one will not be.
-    if (timer.handle_irq()) threadtest.on_tick();
+    // timer, which this one no longer is.
+    const which = gic.acknowledge();
+    if (which == gic.SPURIOUS) return;
+
+    const tick = timer.handle_irq(which);
+    if (!tick) {
+        // Not the timer. The keyboard is the only other source, and an
+        // interrupt that belongs to nothing is still ended below: leaving it
+        // active would keep its priority on this core and stop everything
+        // quieter than it, the timer included.
+        _ = virtio_input.handle_irq(which);
+    }
+
+    gic.end(which);
+
+    // A time slice may only end where the kernel can be left. Since system
+    // calls run with interrupts on, a tick can now arrive in the middle of
+    // one, and switching threads there would suspend a half-finished call on
+    // a stack frame nothing comes back to until that thread runs again —
+    // with no way yet to say what the call should do when it does.
+    if (tick and !trap.in_syscall()) threadtest.on_tick();
 }
 
 fn install_vectors() void {

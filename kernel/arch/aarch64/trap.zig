@@ -149,7 +149,12 @@ pub fn reset() void {
 /// currently in TTBR0 — installing it is the caller's business, because the
 /// caller is the one that knows which process this is.
 pub fn enter_user(entry: u64, user_sp: u64) u64 {
-    return aarch64_enter_user(entry, user_sp);
+    const status = aarch64_enter_user(entry, user_sp);
+    // Whatever the process was doing, it is not doing it any more. A call it
+    // left through — `exit`, or a fault — never ran the code that undoes the
+    // depth, so this is where it is undone.
+    syscall_depth = 0;
+    return status;
 }
 
 extern fn aarch64_enter_user(entry: u64, user_sp: u64) callconv(.C) u64;
@@ -167,15 +172,72 @@ fn read_far() u64 {
     );
 }
 
+/// How deep the kernel is inside a system call.
+///
+/// Not a lock and not a count of anything reentrant — a system call cannot
+/// nest, so this is 0 or 1. It exists so the interrupt handler can tell "the
+/// CPU was in the kernel on this thread's behalf" from "the CPU was in
+/// userspace", which is the difference between a time slice it may end and
+/// one it may not: switching threads out of a half-finished system call
+/// would leave its frame on a stack nobody returns to until that thread is
+/// picked again, and the kernel has no way yet to say what a system call
+/// interrupted halfway through should do.
+var syscall_depth: u32 = 0;
+
+/// Whether a system call is in flight on this core.
+pub fn in_syscall() bool {
+    return @as(*const volatile u32, &syscall_depth).* != 0;
+}
+
+/// Let interrupts in. Returns the previous DAIF so it can be put back.
+fn irq_unmask() u64 {
+    const daif = asm volatile ("mrs %[out], daif"
+        : [out] "=r" (-> u64),
+    );
+    asm volatile ("msr daifclr, #2" ::: "memory");
+    return daif;
+}
+
+fn irq_restore(daif: u64) void {
+    asm volatile ("msr daif, %[v]"
+        :
+        : [v] "r" (daif),
+        : "memory"
+    );
+}
+
 /// Called from vector entry 8 with the process's registers on the kernel
 /// stack. Returning from here resumes the process; calling
 /// `aarch64_leave_user` does not.
+///
+/// Interrupts are unmasked for the length of the call. Exception entry from
+/// EL0 sets PSTATE.I, and nothing used to clear it, so every system call ran
+/// with the machine deaf — which was invisible while the timer was the only
+/// source and fatal once the keyboard was one too: a program writing its
+/// output was a program with nothing draining its keyboard, and everything
+/// typed in that window past sixteen characters was gone. That was measured
+/// at the shell before this line existed.
+///
+/// The syndrome registers are read *first*. ESR_EL1 and FAR_EL1 are one pair
+/// for the whole core, and reading them after opening the door to another
+/// exception would be reading whatever that one left behind.
 export fn aarch64_sync_lower(frame: *Frame) callconv(.C) void {
     const esr = read_esr();
+    const far = read_far();
     const ec = esr >> 26;
 
     if (ec == EC_SVC64) {
+        syscall_depth += 1;
+        const daif = irq_unmask();
         dispatch(frame);
+        // Not reached when `dispatch` leaves through `aarch64_leave_user` —
+        // `exit` does. That path does not return here at all, it returns
+        // into `enter_user`'s caller, so the depth is cleared there instead.
+        // Getting that wrong would not fail visibly: the count would stay at
+        // one for the rest of the boot and preemption would quietly never
+        // happen again.
+        irq_restore(daif);
+        syscall_depth -= 1;
         return;
     }
 
@@ -184,7 +246,7 @@ export fn aarch64_sync_lower(frame: *Frame) callconv(.C) void {
     // so resuming would re-execute it and fault again, forever. The kernel
     // takes the CPU back instead, which is what killing a process is before
     // there is a process table to remove it from.
-    last_fault = .{ .ec = ec, .esr = esr, .far = read_far(), .elr = frame.elr };
+    last_fault = .{ .ec = ec, .esr = esr, .far = far, .elr = frame.elr };
     aarch64_leave_user(EXIT_FAULT);
 }
 

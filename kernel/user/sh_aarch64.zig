@@ -16,19 +16,25 @@
 //! watching still finish — and it is also just what a shell does when its
 //! input closes.
 //!
-//! **Typing while this shell is busy loses characters, and that is measured
-//! rather than suspected.** The keyboard is polled, and the only code that
-//! polls it is a read — so while a command is running or its output is being
-//! written, nothing drains the device's queue, which is sixty-four events
-//! deep, or sixteen key presses. Forty characters typed at a prompt the shell
-//! is reading all arrive; the same forty sent while it prints `help` arrive
-//! as ten, with the newline lost too, so the next command joins the line.
+//! **Typing while this shell is busy used to lose characters, and both the
+//! loss and the fix are measured rather than suspected.** The keyboard was
+//! polled, and the only code that polled it was a read — so while a command
+//! ran or its output was written, nothing drained the device's queue, which
+//! is sixty-four events deep, or sixteen key presses. Forty characters typed
+//! at a prompt the shell was reading all arrived; the same forty sent while
+//! it printed `help` arrived as nine, with the Enter lost too, so the shell
+//! was left holding half a command and then gave up on end of input.
 //!
-//! Nobody types faster than a shell can echo, so this does not bite a person.
-//! It bites a test that types faster than a person, and it is the reason
-//! tools/key_check.py waits for the prompt before each line. The real fix is
-//! interrupt-driven input, which needs the GIC routing that is in the device
-//! tree and that nothing reads yet.
+//! Two things were wrong and both had to be fixed. The keyboard now has its
+//! own interrupt, routed through the GIC from the SPI the device tree names,
+//! which empties the queue into a ring in the driver. And system calls now
+//! run with interrupts unmasked — exception entry from EL0 sets PSTATE.I,
+//! and nothing used to clear it, so the interrupt would have been useless
+//! for exactly the window that loses characters: the one where this shell is
+//! inside `write`. The same forty now arrive as forty.
+//!
+//! `tools/key_check.py` types them, without waiting for a prompt, and fails
+//! if fewer come back.
 
 const std = @import("std");
 

@@ -98,22 +98,18 @@ pub fn frequency() u64 {
     return read_cntfrq();
 }
 
-/// Called from the IRQ vector. Re-arms the comparator, because it is one-shot.
+/// Called from the IRQ dispatcher with the INTID that fired. Returns true
+/// when it was this timer, having re-armed the comparator — which is
+/// one-shot, and forgetting to re-arm it would give exactly one tick.
 ///
-/// Returns true when this really was a timer tick. The caller uses that to
-/// decide whether to make a scheduling decision, which should be driven by
-/// the passage of time rather than by any interrupt that happens to arrive —
-/// on a machine with more devices, "an interrupt came in" and "a time slice
-/// expired" stop being the same event.
-pub fn handle_irq() bool {
-    const which = gic.acknowledge();
-    if (which == gic.SPURIOUS) return false;
-    var was_tick = false;
-    if (which == TIMER_INTID) {
-        set_tval(interval);
-        count_tick();
-        was_tick = true;
-    }
-    gic.end(which);
-    return was_tick;
+/// Acknowledging the interrupt at the GIC and ending it are the dispatcher's
+/// job rather than this function's. They were here while the timer was the
+/// only source, and the moment a second one existed that meant a device
+/// interrupt was acknowledged by the timer, handed to nobody, and ended —
+/// which is not a missing feature but a device that goes quiet.
+pub fn handle_irq(which: u32) bool {
+    if (which != TIMER_INTID) return false;
+    set_tval(interval);
+    count_tick();
+    return true;
 }
