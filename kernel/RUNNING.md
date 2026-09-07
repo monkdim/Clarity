@@ -142,9 +142,10 @@ hangs on, waiting for a timer interrupt it never sees. Native speed on Apple
 hardware needs a GICv3 driver, and that is now the next piece of the ARM track
 rather than a footnote.
 
-Until then, the emulated path works on a Mac and is the one to use. On a Mac
-in particular, prefer the headless form — the graphical window is awkward to
-type into and the terminal is not:
+Until then, the emulated path is the one to use, and it has now been run:
+booted on an Apple M5, typed at by hand, all the way through the shell to
+`exit 3`. On a Mac in particular, prefer the headless form — the graphical
+window is awkward to type into and the terminal is not:
 
 ```sh
 brew install qemu
@@ -160,6 +161,48 @@ qemu-system-aarch64 \
 
 Add `-device ramfb -device virtio-keyboard-device -display default` when the
 point is to see the framebuffer console rather than to use the machine.
+
+That session, on an M5, abbreviated to the part a person drives — this is what
+"it works on Apple hardware" currently means, and it is worth writing down as
+a transcript rather than as an adjective:
+
+```
+  type at it; 120 seconds of quiet ends the read
+  > help
+  line 1: "help"
+...
+  init: type a line: yolo
+  [ok] user read: a bad buffer was refused and kept the line
+  init: read "yolo"
+...
+clarity-sh: type help
+$ echo hello from my mac
+hello from my mac
+$ count abcde
+5
+$ cat /bin/hello.txt
+clarity
+$ cat /nope
+clarity-sh: cat: cannot open /nope
+$ frobnicate
+clarity-sh: unknown command: frobnicate
+$ exit 3
+clarity-sh: exit
+  [ok] shell: ran at EL0, read its own input, wrote 596 bytes and exited 3
+ClarityOS aarch64: EL1 boot ok
+```
+
+Two things in there are worth pointing at. `[ok] user read: a bad buffer was
+refused` is the `EFAULT` check firing on real Apple silicon — the program
+deliberately passes a pointer into its own read-only text, and the kernel
+translates a read buffer *for writing* and refuses it. And the demo's float
+line comes out as `3.1415929203539825 1.4142135623730951 6.25`, the same
+digits the x86_64 gate requires, from `strtod`, the library's own arithmetic,
+a hardware square root and `dtoa` all agreeing on a machine none of them were
+tested on.
+
+What that session does **not** show is HVF. Everything above is emulated: the
+M-series CPU is running QEMU, not this kernel. That is the gap GICv3 closes.
 
 **Use the native Homebrew.** A Mac can have two: `/opt/homebrew` (arm64) and
 `/usr/local` (Intel, under Rosetta). If `/usr/local/bin` comes first in

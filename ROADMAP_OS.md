@@ -29,10 +29,14 @@ every pull request; anything not gated is called out as unverified.
   rescue ISO, and boots it under QEMU **three times, requiring all three** to
   reach the marker — reliability is part of the gate, not a re-run away.
 - **The AArch64 (Apple-Silicon-class) kernel runs programs, draws a screen,
-  and reads a keyboard.** The `OS boot (aarch64, TCG)` gate boots it three
-  ways — 512 MiB with 28 required markers, then 4 GiB and a PAN-capable CPU
-  with the ten and nine that those configurations exist to prove — and then
-  screenshots the display and types at it. What is behind those markers:
+  reads a keyboard, and can be typed at over a serial line.** The
+  `OS boot (aarch64, TCG)` gate boots it three ways — 512 MiB with 32 required
+  markers, then a PAN-capable CPU and 4 GiB with the thirteen and fourteen
+  that those configurations exist to prove — then screenshots the display,
+  types at the keyboard, and types at it again with no keyboard and no
+  display at all. It has also been booted on an **Apple M5** and driven by
+  hand through the shell; the transcript is in `kernel/RUNNING.md`. What is
+  behind those markers:
 
   - higher-half kernel on TTBR1 at `0xFFFF_FF80_0000_0000` with the identity
     map **dropped**, checked by asking the MMU (`at s1e1w`) rather than by
@@ -274,15 +278,18 @@ What is left, in rough order:
   kernel command line's business — `clarity.idle=<seconds>`, two minutes by
   default — but a timeout is still a stand-in for blocking, and it is
   documented as one in `drivers/stdin.zig`.
-- **GICv3, so Apple hardware can run this at native speed.** Measured on an
-  M5 Mac: `qemu-system-aarch64 -accel hvf` answers
-  `HVF does not support GICv2 emulation` and refuses to start.
+- **GICv3, so Apple hardware can run this at native speed.** The emulated
+  path has been run on an Apple M5 and driven by hand through the shell to
+  `exit 3` — see the transcript in `kernel/RUNNING.md`. The accelerated one
+  has not, and cannot. Measured on the same M5: `qemu-system-aarch64 -accel
+  hvf` answers `HVF does not support GICv2 emulation` and refuses to start.
   `arch/aarch64/gic.zig` speaks GICv2 and nothing else, and Apple Silicon has
   no GIC at all — the real controller is Apple's AIC — so QEMU emulates one,
   and under HVF it emulates only a GICv3. There is no flag that avoids this.
   The emulated `cortex-a72` path works on a Mac and is what to use meanwhile.
-- **Bare metal.** Everything above is QEMU `virt`. Apple hardware needs m1n1,
-  and then AIC rather than any GIC at all.
+- **Bare metal.** Everything above is QEMU `virt` — including the Apple M5
+  session, where the Mac is running QEMU rather than running this kernel.
+  Apple hardware proper needs m1n1, and then AIC rather than any GIC at all.
 
 The shared subsystems (pmm, heap, VFS, scheduler) are mostly
 architecture-neutral Zig already, but they reach into port I/O, GDT/IDT and
