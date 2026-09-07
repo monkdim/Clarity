@@ -271,8 +271,27 @@ What is left, in rough order:
 - **A session.** The shell reads, parses and runs commands, and that is all
   it is: nothing holds a terminal, a process table or a working directory,
   and `exit` ends the boot's last program rather than returning to anything.
-  There is no `exec`, so the shell cannot start a program, and no `getdents`,
-  so it has `cat` and no `ls`.
+  The two calls it is most obviously missing have their own entries below.
+- **`getdents`, so the shell can have `ls`.** tmpfs and the VFS already
+  implement `readdir`, and `fstest.zig` calls it directly — nothing exposes it
+  as a system call, so the shell has `cat` and no way to find out what to
+  `cat`. The smallest missing piece between here and a usable session.
+- **`exec`, so the shell can start a program.** Every program on this machine
+  is loaded by the boot path from an ELF embedded in the kernel image and run
+  to completion in a fixed order. The shell can run its own four commands and
+  nothing else. This needs a process table before it needs anything else.
+- **Preemption stops at the kernel's door.** System calls run with interrupts
+  on, so devices are serviced during one, but a time slice that expires inside
+  a system call is ignored rather than taken: suspending a half-finished call
+  would leave its frame on a stack nothing returns to until that thread runs
+  again, and there is no scheduler that could say what happens when it does.
+  A program in a long system call cannot be preempted.
+- **The PL011 is polled, not interrupt-driven.** The keyboard got its
+  interrupt; the serial line did not. Its receive INTID is in the device tree
+  and nothing reads it. It has not bitten yet — the UART holds sixteen bytes
+  in its own FIFO and a person types slower than that — so this is a known
+  asymmetry rather than a known bug, which is exactly the kind of thing that
+  stops being true without warning.
 - **Real blocking.** `read(2)` cannot block: there is no scheduler to block a
   thread on, so it spins and gives up after a while. How long is now the
   kernel command line's business — `clarity.idle=<seconds>`, two minutes by
