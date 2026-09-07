@@ -1439,6 +1439,10 @@ fn do_fmt(cli_args) {
 
     let files = _collect_clarity_files(paths)
     mut changed_count = 0
+    -- A file the formatter refuses is a failure, and used to be printed and
+    -- then forgotten: `fmt --check` said "all files formatted correctly"
+    -- with an ERROR line above it, and exited 0.
+    mut error_count = 0
 
     for filepath in files {
         try {
@@ -1462,8 +1466,15 @@ fn do_fmt(cli_args) {
                 }
             }
         } catch e {
+            error_count += 1
             show red("  ERROR") + "        " + filepath + ": " + str(e)
         }
+    }
+
+    if error_count > 0 {
+        show ""
+        show red("  " + str(error_count) + " file(s) could not be formatted")
+        exit(1)
     }
 
     if check_only {

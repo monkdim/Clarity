@@ -96,6 +96,19 @@ for name in ["formatter.clarity", "test_formatter.clarity", "collections.clarity
     }
 }
 
+show "-- Formatter: an unknown node stops it --"
+
+-- The fallback used to return `-- TODO: <node>`, which under `fmt --write`
+-- replaces the statement in the user's own file with a comment. Failing is
+-- the only safe answer: do_fmt writes nothing when format_source throws,
+-- and now counts the file and exits non-zero.
+from "formatter.clarity" import format_tree
+mut unknown_msg = "no throw"
+try { format_tree({"body": [{"node_type": "MadeUpStatement", "line": 7}]}) } catch e { unknown_msg = str(e) }
+assert(contains(unknown_msg, "MadeUpStatement"), "an unknown node throws and names itself")
+assert(contains(unknown_msg, "line 7"), "the message carries the line")
+assert(not contains(unknown_msg, "TODO"), "no TODO comment is produced")
+
 show ""
 show "Formatter: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
 if FAILED > 0 { throw str(FAILED) + " formatter test(s) failed" }
