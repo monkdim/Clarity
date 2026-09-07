@@ -1,0 +1,203 @@
+-- Interpreter versus bytecode VM: one language, two engines, one semantics.
+--
+-- `clarity run` walks the tree; `clarity run --fast` compiles to bytecode and
+-- runs that. A program must not care which it got. The native compiler has
+-- had a harness that runs every program both ways and diffs the output since
+-- it existed (test_c_codegen.clarity); the VM had nothing equivalent, and the
+-- audit asked for this suite by name. It is modelled on that one: `same(tag,
+-- src)` runs a program through both engines and asserts the output is
+-- identical, so matching the interpreter *is* the specification.
+--
+-- What it found on its first run is recorded at the bottom.
+
+from "lexer.clarity" import tokenize
+from "parser.clarity" import parse
+from "interpreter.clarity" import Interpreter
+from "bytecode.clarity" import compile_to_bytecode, VM, optimize
+
+mut PASSED = 0
+mut FAILED = 0
+
+fn interp_run(src) {
+    let i = Interpreter(null, null)
+    i.run(parse(tokenize(src, "<parity>"), src))
+    return join(i.output, "\n")
+}
+
+fn vm_run(src) {
+    let code = compile_to_bytecode(parse(tokenize(src, "<parity>"), src))
+    optimize(code)
+    let vm = VM()
+    vm.run(code)
+    return join(vm.output, "\n")
+}
+
+-- Both engines run the program; the outputs must be identical. An engine
+-- that throws where the other does not is a divergence too, so the throw is
+-- caught and compared as text.
+fn same(tag, src) {
+    mut a = ""
+    mut b = ""
+    try { a = interp_run(src) } catch e { a = "THREW: " + str(e) }
+    try { b = vm_run(src) } catch e { b = "THREW: " + str(e) }
+    -- A case that fails in both engines, or prints nothing in either,
+    -- compares equal while testing nothing at all: the first version of this
+    -- suite had four such cases, written in syntax the parser does not read
+    -- (`match` arms with `=>`, `try` without `catch`), and they passed. A
+    -- program meant to be refused belongs in both_fail_naming, so here a
+    -- throw or an empty run is a broken case, reported as a failure of the
+    -- suite itself rather than a parity result.
+    if starts(a, "THREW: ") {
+        FAILED += 1
+        show "  BROKEN CASE: " + tag + " does not run: " + a
+        return null
+    }
+    if a == "" {
+        FAILED += 1
+        show "  BROKEN CASE: " + tag + " prints nothing"
+        return null
+    }
+    if a == b {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + tag
+        show "    interpreter: " + a
+        show "    vm:          " + b
+    }
+}
+
+-- Where the engines legitimately differ in wording, the shared part is what
+-- matters: both must fail, and both must name the same thing.
+fn both_fail_naming(tag, src, needle) {
+    mut a = ""
+    mut b = ""
+    try { interp_run(src); a = "no throw" } catch e { a = str(e) }
+    try { vm_run(src); b = "no throw" } catch e { b = str(e) }
+    if contains(a, needle) and contains(b, needle) {
+        PASSED += 1
+    } else {
+        FAILED += 1
+        show "  FAIL: " + tag + " (both should fail naming '" + needle + "')"
+        show "    interpreter: " + a
+        show "    vm:          " + b
+    }
+}
+
+show "-- Parity: values and operators --"
+same("integers", "show 1\nshow 0\nshow -3")
+same("floats", "show 1.5\nshow 0.1 + 0.2\nshow 3.0")
+same("integer division and modulo", "show 7 / 2\nshow 7 % 2\nshow -7 % 2")
+same("exponent", "show 2 ** 10\nshow 2 ** 0.5")
+same("comparison", "show 1 < 2\nshow 2 <= 2\nshow 3 > 4\nshow \"a\" < \"b\"")
+same("equality across types", "show 1 == 1.0\nshow \"1\" == 1\nshow null == null\nshow [1] == [1]")
+same("boolean operators", "show true and false\nshow true or false\nshow not true")
+same("truthiness", "show 0 or \"fallback\"\nshow \"\" or \"fallback\"\nshow [] or \"fallback\"")
+same("null coalescing", "let a = null\nshow a ?? 5\nshow 0 ?? 5")
+same("bitwise", "show 6 & 3\nshow 6 | 3\nshow 6 ^ 3\nshow 1 << 4\nshow 256 >> 4")
+same("string concatenation and repeat", "show \"a\" + \"b\"\nshow repeat(\"ab\", 3)")
+same("string interpolation", "let n = 3\nshow \"n is {n} and twice is {n * 2}\"")
+same("escapes", "show \"a\\nb\"\nshow \"tab\\there\"\nshow \"quote\\\"inside\"")
+same("interpolation of collections", "let xs = [1, 2]\nlet m = {\"a\": 1}\nshow \"xs {xs} m {m}\"")
+same("interpolation of other types", "let b = true\nlet n = null\nlet f = 1.5\nshow \"{b} {n} {f}\"")
+same("interpolation of a call and a property", "class C {\n    fn init() { this.v = 7 }\n}\nfn f() { return 2 }\nlet c = C()\nshow \"{c.v} and {f()}\"")
+same("interpolation of an instance", "class C {\n    fn init() { this.v = 1 }\n}\nshow \"{C()}\"")
+same("braces that are not interpolation", "show \"if x { 1 } else { 2 }\"\nshow \"{1}\"\nshow \"{ n }\"")
+same("an unclosed brace stays literal", "let n = 1\nshow \"open {n and {n}\"")
+
+show "-- Parity: collections --"
+same("list literal and index", "let xs = [1, 2, 3]\nshow xs\nshow xs[0]\nshow xs[-1]")
+same("list slicing", "let xs = [1, 2, 3, 4, 5]\nshow xs[1..3]\nshow xs[..2]\nshow xs[2..]")
+same("list builtins", "let xs = [3, 1, 2]\nshow len(xs)\nshow sort(xs)\nshow reverse(xs)\nshow sum([1, 2, 3])")
+same("map literal and access", "let m = {\"a\": 1, \"b\": 2}\nshow m[\"a\"]\nshow len(keys(m))\nshow has(m, \"b\")")
+same("map iteration order", "let m = {\"z\": 1, \"a\": 2, \"m\": 3}\nfor k in keys(m) { show k }")
+same("nested structures", "let d = {\"xs\": [1, [2, 3]], \"m\": {\"k\": \"v\"}}\nshow d[\"xs\"][1][0]\nshow d[\"m\"][\"k\"]")
+same("map and filter", "show map([1, 2, 3], fn(x) { return x * 2 })\nshow filter([1, 2, 3, 4], fn(x) { return x % 2 == 0 })")
+same("reduce", "show reduce([1, 2, 3, 4], fn(acc, x) { return acc + x }, 0)")
+same("list comprehension", "show [x * x for x in [1, 2, 3]]")
+same("comprehension with a condition", "show [x for x in [1, 2, 3, 4, 5] if x % 2 == 1]")
+
+show "-- Parity: control flow --"
+same("if / elif / else", "let x = 5\nif x > 10 { show \"big\" } elif x > 3 { show \"mid\" } else { show \"small\" }")
+same("while with break and continue", "mut i = 0\nwhile i < 10 {\n    i += 1\n    if i % 2 == 0 { continue }\n    if i > 7 { break }\n    show i\n}")
+same("for over a range", "for i in range(3) { show i }")
+same("for over a list", "for c in [\"a\", \"b\"] { show c }")
+same("nested loops with break", "for i in range(3) {\n    for j in range(3) {\n        if j == 1 { break }\n        show \"{i}{j}\"\n    }\n}")
+same("break leaves the enclosing loop running", "for i in range(3) {\n    for j in range(5) {\n        if j == 2 { break }\n    }\n    show i\n}")
+same("continue in a for", "for i in range(5) {\n    if i % 2 == 0 { continue }\n    show i\n}")
+same("break out of a while inside a for", "for i in range(2) {\n    mut j = 0\n    while true {\n        j += 1\n        if j > 1 { break }\n    }\n    show \"{i} {j}\"\n}")
+same("if expression", "let x = 5\nshow if x > 3 { \"yes\" } else { \"no\" }")
+same("match", "let v = 2\nmatch v {\n    when 1 { show \"one\" }\n    when 2 { show \"two\" }\n    else { show \"other\" }\n}")
+same("match falls through to else", "match \"z\" {\n    when \"a\" { show \"a\" }\n    else { show \"other\" }\n}")
+same("match on a computed value", "fn f(x) {\n    match x {\n        when 0 { return \"zero\" }\n        when 1 { return \"one\" }\n        else { return \"many\" }\n    }\n}\nshow f(0)\nshow f(1)\nshow f(9)")
+
+show "-- Parity: functions --"
+same("call and return", "fn add(a, b) { return a + b }\nshow add(2, 3)")
+same("recursion", "fn fib(n) {\n    if n <= 1 { return n }\n    return fib(n - 1) + fib(n - 2)\n}\nshow fib(12)")
+same("default-ish missing argument", "fn f(a, b) { return b }\nshow f(1)")
+same("rest parameters", "fn count(...xs) { return len(xs) }\nshow count()\nshow count(1, 2, 3)")
+same("rest after fixed", "fn tail(first, ...rest) { return rest }\nshow tail(1, 2, 3)")
+same("closures capture", "fn make(n) { return fn(x) { return x + n } }\nlet add5 = make(5)\nshow add5(3)")
+same("closure over a mutable variable", "mut total = 0\nlet bump = fn() { total += 1 }\nbump()\nbump()\nshow total")
+same("lambda shorthand", "show map([1, 2, 3], x => x * 3)")
+same("function as a value", "fn f() { return 1 }\nlet g = f\nshow g()\nshow f")
+same("higher order", "fn apply(f, v) { return f(v) }\nshow apply(x => x + 1, 10)")
+same("pipe operator", "fn double(x) { return x * 2 }\nshow 5 |> double")
+
+show "-- Parity: classes --"
+same("class with a method", "class C {\n    fn init() { this.x = 1 }\n    fn get() { return this.x }\n}\nshow C().get()")
+same("mutation through a method", "class Counter {\n    fn init() { this.n = 0 }\n    fn bump() { this.n += 1; return this.n }\n}\nlet c = Counter()\nc.bump()\nshow c.bump()")
+same("constructor arguments", "class P {\n    fn init(a, b) { this.a = a; this.b = b }\n    fn sum() { return this.a + this.b }\n}\nshow P(2, 3).sum()")
+same("inheritance", "class A {\n    fn init() { this.v = 1 }\n    fn who() { return \"A\" }\n}\nclass B < A {\n    fn who() { return \"B\" }\n}\nlet b = B()\nshow b.who()\nshow b.v")
+same("field access and assignment", "class Box {\n    fn init() { this.v = 0 }\n}\nlet b = Box()\nb.v = 7\nshow b.v")
+same("a property set to null still reads back as null", "class C {\n    fn init() { this.x = null }\n}\nshow C().x")
+same("a missing map key is null, and stays null", "let m = {\"a\": 1}\nshow m[\"b\"]\nshow m.b")
+
+show "-- Parity: errors --"
+same("try / catch", "try { throw \"boom\" } catch e { show \"caught \" + str(e) }")
+same("catch does not swallow the rest", "try { throw \"x\" } catch e { show \"a\" }\nshow \"b\"")
+same("throw from a function", "fn f() { throw \"inner\" }\ntry { f() } catch e { show str(e) }")
+same("try with finally", "try { show \"body\" } catch e { show \"catch\" } finally { show \"finally\" }")
+same("finally runs after a throw", "try { throw \"x\" } catch e { show \"caught\" } finally { show \"cleanup\" }")
+same("nested try", "try {\n    try { throw \"inner\" } catch e { throw \"rethrown\" }\n} catch e2 { show str(e2) }")
+same("finally runs when the catch body throws", "try {\n    try { throw \"a\" } catch e { throw \"b\" } finally { show \"fin\" }\n} catch e2 { show \"outer \" + str(e2) }")
+same("finally runs on return", "fn f() {\n    try { return \"r\" } catch e { show \"c\" } finally { show \"fin\" }\n}\nshow f()")
+same("finally on a return from inside a loop", "fn f() {\n    try {\n        for i in range(3) { if i == 1 { return i } }\n    } catch e { show \"c\" } finally { show \"fin\" }\n    return -1\n}\nshow f()")
+same("nested finally on a return", "fn f() {\n    try {\n        try { return \"r\" } catch e { show \"ci\" } finally { show \"inner\" }\n    } catch e2 { show \"co\" } finally { show \"outer\" }\n}\nshow f()")
+same("break out of a try runs its finally", "for i in range(2) {\n    try { break } catch e { show \"c\" } finally { show \"fin\" }\n}\nshow \"after\"")
+same("continue out of a try runs its finally", "for i in range(2) {\n    try { continue } catch e { show \"c\" } finally { show \"fin {i}\" }\n}\nshow \"after\"")
+same("a try left by break stops catching", "for i in range(1) {\n    try { break } catch e { show \"WRONG\" }\n}\ntry { throw \"boom\" } catch e { show \"right \" + str(e) }")
+same("a try left by return stops catching", "fn f() {\n    try { return 1 } catch e { show \"WRONG\" }\n}\nshow f()\ntry { throw \"boom\" } catch e { show \"right \" + str(e) }")
+
+-- Both engines must refuse the same broken programs. The wording is not
+-- required to match (the interpreter names the property, the VM says the
+-- value is not callable), but both must fail, and both must name the thing
+-- the program got wrong.
+show "-- Parity: both engines refuse the same programs --"
+both_fail_naming("undefined variable", "show nope", "nope")
+both_fail_naming("calling a missing method", "class C {\n    fn init() { this.x = 1 }\n}\nC().nope()", "nope")
+both_fail_naming("reading a property that does not exist", "class C {\n    fn init() { this.x = 1 }\n}\nshow C().missing", "missing")
+both_fail_naming("calling a non-function", "let x = 5\nx()", "callable")
+both_fail_naming("index out of a map that has no such key", "let m = {}\nshow m[\"a\"].b", "a")
+both_fail_naming("an error after a try was left by break", "for i in range(1) {\n    try { break } catch e { show \"WRONG\" }\n}\nshow nope", "nope")
+both_fail_naming("an error after a try was left by return", "fn f() {\n    try { return 1 } catch e { show \"WRONG\" }\n}\nfn g() { throw \"boom\" }\nshow f()\ng()", "boom")
+
+show ""
+show "Parity: " + str(PASSED) + " passed, " + str(FAILED) + " failed"
+if FAILED > 0 { throw str(FAILED) + " parity test(s) failed" }
+
+-- What the first run found, all of it in the VM, all of it reproducible on
+-- the v1.0.1 release binary with `clarity run <file> --fast`:
+--
+-- 1. String interpolation was not implemented. `show "n is {n}"` printed
+--    `n is {n}` verbatim, so the language's headline string feature was
+--    wrong under --fast.
+-- 2. `break` left its iterator on the stack, which corrupted the enclosing
+--    loop: two nested loops where the inner one breaks printed 0 and then
+--    3 forever instead of 0 1 2.
+-- 3. `finally` was never compiled: the block simply did not run, on the
+--    normal path, after a catch, or when the catch rethrew.
+-- 4. `return` from inside a `try` did not return; the return signal escaped
+--    as an uncaught value and the program died with `{}`.
+-- 5. Reading a property an instance does not have returned null, where the
+--    interpreter names the class and the property and stops.
