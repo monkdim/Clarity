@@ -174,7 +174,15 @@ fn _collect_clarity_files(paths) {
 
 -- ── File runner ─────────────────────────────────────────
 
-fn run_file(path) {
+-- `program_args` is what the program's args() answers: the arguments
+-- after the file, without the flag that picks the engine. An installed
+-- binary already saw exactly that; a program under `clarity run` shared
+-- the CLI's argv and got "run", the file and the flag in front of its own,
+-- so args()[0] differed between the two. The override lives in each
+-- engine's globals rather than in the runtime: the CI test jobs are built
+-- by the previous release's transpiler, whose runtime import header knows
+-- nothing added since, so a new runtime export is a ReferenceError there.
+fn run_file(path, program_args) {
     if not exists(path) {
         show red("  >> File not found: {path}")
         exit(1)
@@ -187,6 +195,7 @@ fn run_file(path) {
         let tree = parse(tokens, source)
         let source_dir = _dirname(_abspath(path))
         let interp = Interpreter(null, source_dir)
+        interp.global_env.set("args", fn() { return program_args ?? [] }, true)
         interp.run(tree)
     } catch e {
         show red("\n" + format_error(e, source, path))
@@ -194,7 +203,7 @@ fn run_file(path) {
     }
 }
 
-fn run_file_fast(path) {
+fn run_file_fast(path, program_args) {
     -- Run through bytecode VM instead of tree-walking interpreter
     if not exists(path) {
         show red("  >> File not found: {path}")
@@ -210,6 +219,7 @@ fn run_file_fast(path) {
         optimize(code)
         let vm = VM()
         vm.source_dir = _dirname(_abspath(path))
+        vm.globals["args"] = fn() { return program_args ?? [] }
         vm.run(code)
     } catch e {
         show red("\n" + format_error(e, source, path))
@@ -1124,10 +1134,16 @@ fn main() {
         }
         let fast_mode = contains(cli_args, "--fast")
         let file_arg = cli_args[1]
+        mut program_args = []
+        mut ai = 2
+        while ai < len(cli_args) {
+            if cli_args[ai] != "--fast" { push(program_args, cli_args[ai]) }
+            ai += 1
+        }
         if fast_mode {
-            run_file_fast(file_arg)
+            run_file_fast(file_arg, program_args)
         } else {
-            run_file(file_arg)
+            run_file(file_arg, program_args)
         }
         return null
     }
@@ -1331,7 +1347,7 @@ fn main() {
         let stdlib_dir = _find_stdlib_dir()
         let bench_path = if stdlib_dir == null { null } else { stdlib_dir + "/benchmark.clarity" }
         if bench_path != null and exists(bench_path) {
-            run_file(bench_path)
+            run_file(bench_path, [])
         } else {
             show red("  >> cannot find benchmark.clarity (looked next to the working directory, ./stdlib and ../stdlib)")
             exit(1)
@@ -1341,7 +1357,7 @@ fn main() {
 
     -- If the argument looks like a .clarity file, run it directly
     if exists(command) and ends(command, ".clarity") {
-        run_file(command)
+        run_file(command, [])
         return null
     }
 
