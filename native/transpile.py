@@ -671,7 +671,7 @@ def transpile_source(source, filename="<input>"):
 
 def transpile_file(path):
     """Transpile a .clarity file to .js."""
-    with open(path) as f:
+    with open(path, encoding='utf-8') as f:
         source = f.read()
     js_code, imports = transpile_source(source, os.path.basename(path))
     return js_code, imports
@@ -732,7 +732,7 @@ def main():
     if args.file:
         js = transpile_with_runtime(args.file)
         out = args.out or args.file.replace('.clarity', '.js')
-        with open(out, 'w') as f:
+        with open(out, 'w', encoding='utf-8') as f:
             f.write(js)
         print(f'  Transpiled: {args.file} → {out}')
 
@@ -816,7 +816,7 @@ def bundle(compile_native=False):
         except Exception as e:
             raise SystemExit(f'transpile --bundle: {fname} failed to transpile: {e}')
         out = os.path.join(dist_dir, fname.replace('.clarity', '.js'))
-        with open(out, 'w') as f:
+        with open(out, 'w', encoding='utf-8') as f:
             f.write(js)
         print(f'    {fname} -> {os.path.basename(out)}')
 
@@ -845,7 +845,7 @@ def bundle(compile_native=False):
 
     # Create entry point
     entry = os.path.join(dist_dir, 'clarity-entry.js')
-    with open(entry, 'w') as f:
+    with open(entry, 'w', encoding='utf-8') as f:
         f.write('#!/usr/bin/env bun\n')
         f.write('// Clarity native entry point\n')
         f.write('import { clarityMain, _register_embedded_stdlib } from "./runtime.js";\n')
@@ -858,7 +858,7 @@ def bundle(compile_native=False):
 
     # Create package.json for the bundle
     pkg_json = os.path.join(dist_dir, 'package.json')
-    with open(pkg_json, 'w') as f:
+    with open(pkg_json, 'w', encoding='utf-8') as f:
         f.write('{"type": "module"}\n')
 
     if compile_native:
