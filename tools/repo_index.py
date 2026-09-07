@@ -17,8 +17,10 @@ What it records, and why each column exists:
                    which of the four build roots reaches it.
   tests            what each test file exercises.
   workflows        what each CI job gates, read out of the YAML.
-  docs             size, last change, and how many em dashes each carries,
-                   because the house style avoids them.
+  docs             size and how many em dashes each carries, because the
+                   house style avoids them. No dates: an index committed
+                   beside the change it describes cannot know that commit's
+                   date, so a date column made --check fail on every merge.
 
 Only the standard library is used, so it runs anywhere Python 3 does.
 """
@@ -66,11 +68,6 @@ def first_comment(text, marker):
         elif s:
             return ""
     return ""
-
-
-def last_commit(path):
-    out = sh(["git", "log", "-1", "--format=%ad", "--date=short", "--", path])
-    return out or "-"
 
 
 IMPORT = re.compile(r'from\s+"([^"]+)"\s+import')
@@ -232,7 +229,6 @@ def docs_index():
         rows.append({
             "file": f,
             "lines": text.count("\n"),
-            "changed": last_commit(f),
             "emdash": text.count("—"),
         })
     return rows
@@ -317,8 +313,8 @@ def build():
 
     parts.append("\n## Documents\n")
     parts.append("`em dashes` is counted because the house style avoids them.\n")
-    parts.append(md_table(["file", "lines", "last change", "em dashes"],
-                          [[r["file"], r["lines"], r["changed"], r["emdash"]] for r in docs]))
+    parts.append(md_table(["file", "lines", "em dashes"],
+                          [[r["file"], r["lines"], r["emdash"]] for r in docs]))
 
     parts.append("\n## Other trees\n")
     other = []
