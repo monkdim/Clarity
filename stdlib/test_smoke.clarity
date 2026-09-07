@@ -169,6 +169,14 @@ fn run_smoke_tests() {
     show "  " + _bold("-- help --")
     check_cmd("help output", clarity + " help", "Usage: clarity")
     check_cmd("version", clarity + " version", "Clarity v")
+    -- args() under `clarity run` used to answer ["run", "<file>", ...]; an
+    -- installed program's answered its own arguments only. Both engines
+    -- must give the program's own arguments and nothing else.
+    let args_prog = "/tmp/smoke_args_" + str(time()) + ".clarity"
+    write(args_prog, "show args()")
+    check_cmd("args() is the program's own arguments", clarity + " run " + _quote(args_prog) + " one two", "[\"one\", \"two\"]")
+    check_cmd("args() under --fast is the same", clarity + " run " + _quote(args_prog) + " one --fast two", "[\"one\", \"two\"]")
+    exec("rm -f " + _quote(args_prog))
 
     show "  " + _bold("-- check --")
     let tmp_check = "/tmp/smoke_check_" + str(time()) + ".clarity"
